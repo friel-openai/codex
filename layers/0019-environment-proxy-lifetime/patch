@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index b9b26bef27bc0d02af3fc72ca27b48d4ace2a30a..475a866e2c21b832fdfffc5bed13e2140fcdcefc 100644
+index 8d7c0fd7e23d8304b3e206a9a87bc53f27d7b616..973fd92151c72d30051460e9debe07e1b9166b67 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2500,6 +2500,7 @@ dependencies = [
+@@ -2346,6 +2346,7 @@ dependencies = [
   "codex-windows-sandbox",
   "dotenvy",
   "pathdiff",
@@ -439,7 +439,7 @@ index 354e9324d9c7e584f203d32abac18f4ea33b6543..f2d523d31e77bb5c6cdfa4b7ee909270
      }
  }
 diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
-index 1849e8c2d23afda9efca7175e78c25f6917ba384..c358cf9cc080202d7b2fd1c1fe45efce1fda4b8f 100644
+index f0aaf9d5f4e5e5c247ae1cfe9be706c4c9c81b91..0b7795ad1857f05748706269f1db8e265849b248 100644
 --- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
 +++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
 @@ -16,6 +16,7 @@ use codex_execpolicy::Evaluation;
@@ -539,7 +539,7 @@ index 4faff91b9f3c9c18c19349dc79d11dde2edbd5d7..556279c79b092487580ff3db79db9bda
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 105783518d33132887ee9ab3eb88b1487a52b53f..48f6297ec24feb620f35e641269fc9fed8a5dff3 100644
+index a21dec6485076395be14abdbbfb0a7e666908f50..7fd58a79093c243ee1ccbda70ce0f09c811eac2a 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -73,6 +73,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
@@ -566,7 +566,7 @@ index 105783518d33132887ee9ab3eb88b1487a52b53f..48f6297ec24feb620f35e641269fc9fe
                  Arc::clone(&transcript),
                  Arc::clone(&initial_exec_command_active),
              )
-@@ -1204,6 +1207,7 @@ impl UnifiedExecProcessManager {
+@@ -1200,6 +1203,7 @@ impl UnifiedExecProcessManager {
          network_approval: Option<DeferredNetworkApproval>,
          network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
          metrics_sidecar: Option<PluginMetricsSidecar>,
@@ -574,7 +574,7 @@ index 105783518d33132887ee9ab3eb88b1487a52b53f..48f6297ec24feb620f35e641269fc9fe
          transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
          initial_exec_command_active: Arc<AtomicBool>,
      ) {
-@@ -1230,13 +1234,8 @@ impl UnifiedExecProcessManager {
+@@ -1226,13 +1230,8 @@ impl UnifiedExecProcessManager {
              store.processes.insert(process_id, entry);
              pruned_entry
          };
@@ -590,7 +590,7 @@ index 105783518d33132887ee9ab3eb88b1487a52b53f..48f6297ec24feb620f35e641269fc9fe
          spawn_exit_watcher(
              Arc::clone(&process),
              context,
-@@ -1248,7 +1247,15 @@ impl UnifiedExecProcessManager {
+@@ -1244,7 +1243,15 @@ impl UnifiedExecProcessManager {
              started_at,
              network_denial_monitor,
              plugin_metrics_sidecar,
@@ -739,10 +739,10 @@ index 09c4606b629f0cab7c3952c01b73468700d99d54..7ba1faacbd3e977c4c454e8ab986e010
  }
 
 diff --git a/codex-rs/network-proxy/src/lib.rs b/codex-rs/network-proxy/src/lib.rs
-index bd4307f34b25b31e092e1c4d070f7031370b081d..83aff88bf22fb89de5e8ee13f62287687767292b 100644
+index df310c58c2e0cdcc7277937a0ac74e7db2975f73..682064a940472b12fc21f96d6ff64efe4acbefd1 100644
 --- a/codex-rs/network-proxy/src/lib.rs
 +++ b/codex-rs/network-proxy/src/lib.rs
-@@ -86,6 +86,7 @@ pub use proxy::Args;
+@@ -87,6 +87,7 @@ pub use proxy::Args;
  #[cfg(target_os = "macos")]
  pub use proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
  pub use proxy::DEFAULT_NO_PROXY_VALUE;
@@ -751,7 +751,7 @@ index bd4307f34b25b31e092e1c4d070f7031370b081d..83aff88bf22fb89de5e8ee13f6228768
  pub use proxy::ManagedProxyRouting;
  pub use proxy::NO_PROXY_ENV_KEYS;
 diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
-index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84340f42c8 100644
+index 3a4ac0b056033f55db44ddaf86c534a4d6e79321..7f92efd4777746586f5f5c96560db9a6cafd0f35 100644
 --- a/codex-rs/network-proxy/src/proxy.rs
 +++ b/codex-rs/network-proxy/src/proxy.rs
 @@ -39,6 +39,12 @@ use std::ops::RangeInclusive;
@@ -817,7 +817,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
              execution_scope: None,
              #[cfg(target_os = "windows")]
              windows_runtime,
-@@ -499,11 +520,147 @@ pub struct PreparedManagedNetwork {
+@@ -505,11 +526,147 @@ pub struct PreparedManagedNetwork {
      pub env: HashMap<String, String>,
      /// Matching portable sandbox inputs for the command environment.
      pub sandbox_context: ManagedNetworkSandboxContext,
@@ -965,7 +965,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
  }
 
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -570,6 +727,7 @@ pub struct NetworkProxy {
+@@ -576,6 +733,7 @@ pub struct NetworkProxy {
      managed_proxy_routing: ManagedProxyRouting,
      policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
      environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
@@ -973,7 +973,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
      execution_scope: Option<Arc<ExecutionScope>>,
      #[cfg(target_os = "windows")]
      windows_runtime: Option<Arc<WindowsSharedProxyRuntime>>,
-@@ -1100,6 +1258,7 @@ impl NetworkProxy {
+@@ -1106,6 +1264,7 @@ impl NetworkProxy {
          &self,
          mut env: HashMap<String, String>,
          addrs: EnvironmentProxyAddrs,
@@ -981,7 +981,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
          client: EnvironmentProxyClient,
          environment_id: Option<&str>,
-@@ -1179,6 +1338,7 @@ impl NetworkProxy {
+@@ -1185,6 +1344,7 @@ impl NetworkProxy {
                  dangerously_allow_all_unix_sockets: runtime_settings
                      .dangerously_allow_all_unix_sockets,
              },
@@ -989,7 +989,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          }
      }
 
-@@ -1191,6 +1351,7 @@ impl NetworkProxy {
+@@ -1197,6 +1357,7 @@ impl NetworkProxy {
          let prepared = self.prepare_for_addrs(
              std::mem::take(env),
              addrs,
@@ -997,7 +997,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
              EnvironmentProxyClient::SandboxedProcess,
              environment_id,
          );
-@@ -1316,23 +1477,25 @@ impl NetworkProxy {
+@@ -1322,23 +1483,25 @@ impl NetworkProxy {
          &self,
          env: &mut HashMap<String, String>,
          environment_id: &str,
@@ -1029,7 +1029,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
              }
          }
      }
-@@ -1344,19 +1507,26 @@ impl NetworkProxy {
+@@ -1350,19 +1513,26 @@ impl NetworkProxy {
          env: HashMap<String, String>,
          environment_id: Option<&str>,
      ) -> Result<PreparedManagedNetwork> {
@@ -1065,7 +1065,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
              EnvironmentProxyClient::SandboxedProcess,
              environment_id,
          ))
-@@ -1369,11 +1539,12 @@ impl NetworkProxy {
+@@ -1375,11 +1545,12 @@ impl NetworkProxy {
          env: HashMap<String, String>,
          environment_id: &str,
      ) -> Result<PreparedManagedNetwork> {
@@ -1079,7 +1079,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
              EnvironmentProxyClient::TrustedBridge,
              Some(environment_id),
          ))
-@@ -1384,7 +1555,7 @@ impl NetworkProxy {
+@@ -1390,7 +1561,7 @@ impl NetworkProxy {
          environment_id: &str,
          #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
          client: EnvironmentProxyClient,
@@ -1088,7 +1088,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          if let Some(execution_scope) = self.execution_scope.as_ref() {
              anyhow::ensure!(
                  execution_scope.environment_id == environment_id,
-@@ -1410,9 +1581,13 @@ impl NetworkProxy {
+@@ -1416,9 +1587,13 @@ impl NetworkProxy {
                  ),
                  "network proxy for environment `{environment_id}` was prepared for a different client type"
              );
@@ -1103,7 +1103,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          #[cfg(target_os = "windows")]
          if client == EnvironmentProxyClient::SandboxedProcess
              && let Some(windows_runtime) = self.windows_runtime.as_ref()
-@@ -1444,19 +1619,27 @@ impl NetworkProxy {
+@@ -1450,19 +1625,27 @@ impl NetworkProxy {
                  http_addr: self.http_addr,
                  socks_addr: self.socks_addr,
              };
@@ -1135,7 +1135,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          let listeners =
              reserve_loopback_ephemeral_listeners(self.socks_enabled).with_context(|| {
                  format!("failed to reserve network proxy for environment `{environment_id}`")
-@@ -1478,6 +1661,16 @@ impl NetworkProxy {
+@@ -1484,6 +1667,16 @@ impl NetworkProxy {
 
          let mut listeners = ProxyListeners::new();
          let environment_id = environment_id.to_string();
@@ -1152,7 +1152,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
          let http_state = self.state.clone();
          let http_decider = self.policy_decider.clone();
          let http_environment_id = Some(environment_id.clone());
-@@ -1517,9 +1710,10 @@ impl NetworkProxy {
+@@ -1523,9 +1716,10 @@ impl NetworkProxy {
              EnvironmentProxy {
                  addrs,
                  runtime: ProxyRuntime::Listeners(listeners),
@@ -1164,7 +1164,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84
      }
 
      pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
-@@ -2343,6 +2537,237 @@ mod tests {
+@@ -2349,6 +2543,237 @@ mod tests {
          Ok(())
      }
 

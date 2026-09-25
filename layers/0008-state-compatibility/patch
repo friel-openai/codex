@@ -1,16 +1,22 @@
 diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
-index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912655d53cb 100644
+index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bcb0e43dbc 100644
 --- a/codex-rs/state/src/migrations.rs
 +++ b/codex-rs/state/src/migrations.rs
-@@ -2,12 +2,22 @@ use std::borrow::Cow;
+@@ -2,11 +2,9 @@ use std::borrow::Cow;
 
  use anyhow::Context;
  use anyhow::bail;
 -use sqlx::Connection;
  use sqlx::Row;
- use sqlx::SqliteConnection;
--use sqlx::SqlitePool;
  use sqlx::migrate::Migrator;
+ use sqlx_sqlite::SqliteConnection;
+-use sqlx_sqlite::SqlitePool;
+
+ pub(crate) static STATE_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
+ pub(crate) static LOGS_MIGRATOR: Migrator = sqlx_macros::migrate!("./logs_migrations");
+@@ -16,6 +14,18 @@ pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx_macros::migrate!("./queue_migr
+ pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator =
+     sqlx_macros::migrate!("./thread_history_migrations");
 
 +const LEGACY_FRODEX_AGENT_PATH_MIGRATION_VERSION: i64 = 48;
 +const LEGACY_FRODEX_AGENT_PATH_MIGRATION_DESCRIPTION: &str = "threads agent path index";
@@ -27,7 +33,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
  const FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION: &str = "thread goal supervisor state";
  const FRODEX_GOAL_SUPERVISOR_MIGRATION_CHECKSUM: [u8; 48] = [
      0xa3, 0x76, 0x8f, 0x53, 0x74, 0x09, 0x87, 0xd9, 0xb5, 0xf6, 0xa6, 0xdc, 0xee, 0x57, 0xab, 0x73,
-@@ -77,12 +87,12 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
+@@ -78,12 +88,12 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
  /// migrator can apply those versions. The legacy table remains until its rows are durably copied
  /// to the goals database.
  pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
@@ -42,7 +48,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      .await?
          != 0;
      if !migrations_table_exists {
-@@ -92,26 +102,13 @@ pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
+@@ -93,26 +103,13 @@ pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
          "SELECT COUNT(*) FROM _sqlx_migrations WHERE version IN (33, 34) AND description = ?",
      )
      .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION)
@@ -70,7 +76,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      let candidate_rows = sqlx::query(
          r#"
  SELECT version, description, success, checksum
-@@ -122,10 +119,9 @@ ORDER BY version
+@@ -123,10 +120,9 @@ ORDER BY version
          "#,
      )
      .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION)
@@ -82,7 +88,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
          return Ok(());
      }
      if candidate_rows.len() != 1 {
-@@ -142,8 +138,8 @@ ORDER BY version
+@@ -143,8 +139,8 @@ ORDER BY version
          );
      }
 
@@ -93,7 +99,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
 
      let result = sqlx::query(
          r#"
-@@ -157,13 +153,232 @@ WHERE version = ?
+@@ -158,13 +154,232 @@ WHERE version = ?
      .bind(version)
      .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION)
      .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_CHECKSUM.as_slice())
@@ -328,7 +334,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      Ok(())
  }
 
-@@ -318,7 +533,7 @@ WHERE tbl_name = 'thread_goal_supervisor_state'
+@@ -319,7 +534,7 @@ WHERE tbl_name = 'thread_goal_supervisor_state'
  }
 
  pub(crate) async fn repair_legacy_recency_migration_version(
@@ -337,7 +343,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      migrator: &Migrator,
  ) -> anyhow::Result<()> {
      let Some(recency_migration) = migrator
-@@ -331,7 +546,7 @@ pub(crate) async fn repair_legacy_recency_migration_version(
+@@ -332,7 +547,7 @@ pub(crate) async fn repair_legacy_recency_migration_version(
      let migrations_table_exists = sqlx::query_scalar::<_, i64>(
          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
      )
@@ -346,7 +352,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      .await?
      .is_some();
      if !migrations_table_exists {
-@@ -352,7 +567,7 @@ WHERE version = ?
+@@ -353,7 +568,7 @@ WHERE version = ?
      .bind(38_i64)
      .bind(recency_migration.checksum.as_ref())
      .bind(recency_migration.version)
@@ -355,7 +361,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      .await?
      .is_some();
      if !legacy_recency_needs_repair {
-@@ -375,7 +590,7 @@ WHERE version = ?
+@@ -376,7 +591,7 @@ WHERE version = ?
      .bind(38_i64)
      .bind(recency_migration.checksum.as_ref())
      .bind(recency_migration.version)
@@ -365,7 +371,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      Ok(())
  }
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f322db4fe6 100644
+index 63fb4a5e8e7e3e8e34aa7416e7194ea5294eb6c4..ea81f36a4961129698742135b618c3a149a47459 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
 @@ -2,7 +2,10 @@ use codex_utils_absolute_path::test_support::PathExt;
@@ -781,7 +787,7 @@ index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f3
          sqlx::query("DROP TABLE thread_goal_supervisor_state")
              .execute(&pool)
              .await
-@@ -326,114 +628,839 @@ STRICT
+@@ -326,114 +628,903 @@ STRICT
              .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION)
              .fetch_one(&pool)
              .await
@@ -1111,7 +1117,7 @@ index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f3
 +        StateMigrationStep::RecencyCompatibility,
 +        StateMigrationStep::OfficialMigrations,
 +    ] {
-+        let (sqlite_home, _sqlite, pool) = new_migration_test_pool().await;
++        let (sqlite_home, sqlite, pool) = new_migration_test_pool().await;
 +        match fault {
 +            StateMigrationStep::GoalSupervisorCompatibility => {
 +                migrator_with_frodex_goal_supervisor_collision(
@@ -1132,17 +1138,81 @@ index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f3
 +                    .expect("released Frodex migrations should apply");
 +            }
 +        }
++        let guardian_metadata_query = "SELECT title, name, preview, first_user_message FROM threads WHERE id = 'guardian-migration-rollback'";
++        let guardian_metadata_before = if fault == StateMigrationStep::OfficialMigrations {
++            sqlx::query(
++                r#"
++INSERT INTO threads (
++    id, rollout_path, created_at, updated_at, source, model_provider, cwd,
++    title, name, preview, first_user_message, sandbox_policy, approval_mode
++) VALUES (?, ?, 1, 1, ?, 'openai', '/tmp', ?, NULL, ?, ?, 'read-only', 'on-request')
++                "#,
++            )
++            .bind("guardian-migration-rollback")
++            .bind("/tmp/guardian-migration-rollback.jsonl")
++            .bind(r#"{"subagent":{"other":"guardian"}}"#)
++            .bind("Legacy approval prompt")
++            .bind("Legacy approval preview")
++            .bind("Legacy approval prompt")
++            .execute(&pool)
++            .await
++            .expect("legacy Guardian metadata should be inserted before migration 57");
++            Some(
++                sqlx::query_as::<_, (String, Option<String>, String, String)>(
++                    guardian_metadata_query,
++                )
++                .fetch_one(&pool)
++                .await
++                .expect("legacy Guardian metadata should load"),
++            )
++        } else {
++            None
++        };
 +        let before = state_database_signature(&pool).await;
 +
-+        migrate_state_database_with_fault(&pool, &runtime_state_migrator(), fault)
++        let error = migrate_state_database_with_fault(&pool, &runtime_state_migrator(), fault)
 +            .await
 +            .expect_err("injected state migration failure should abort startup");
++        assert_eq!(
++            error.to_string(),
++            format!("injected state migration failure after {fault:?}")
++        );
 +
 +        assert_eq!(
 +            state_database_signature(&pool).await,
 +            before,
 +            "failure after {fault:?} must roll back every state migration change"
 +        );
++        if let Some(expected) = guardian_metadata_before {
++            let actual = sqlx::query_as::<_, (String, Option<String>, String, String)>(
++                guardian_metadata_query,
++            )
++            .fetch_one(&pool)
++            .await
++            .expect("Guardian metadata should remain readable after rollback");
++            assert_eq!(actual, expected, "migration 57 data changes must roll back");
++
++            let repaired_pool = sqlite
++                .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
++                .await
++                .expect("state migration should succeed when retried after rollback");
++            let migrated = sqlx::query_as::<_, (String, Option<String>, String, String)>(
++                guardian_metadata_query,
++            )
++            .fetch_one(&repaired_pool)
++            .await
++            .expect("successfully migrated Guardian metadata should load");
++            assert_eq!(
++                migrated,
++                (
++                    "Guardian review".to_string(),
++                    Some("Guardian review".to_string()),
++                    "Approval review".to_string(),
++                    String::new(),
++                )
++            );
++            repaired_pool.close().await;
++        }
 +        pool.close().await;
 +        std::fs::remove_dir_all(sqlite_home).expect("sqlite home should be removed");
 +    }
@@ -1701,7 +1771,7 @@ index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f3
  }
 
  #[tokio::test]
-@@ -1191,34 +2218,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
+@@ -1315,34 +2406,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
          .open_read_write_pool(&state_path)
          .await
          .expect("sqlite database should open");

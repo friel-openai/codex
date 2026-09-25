@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4ece5b79fe 100644
+index 3b477b60c67a911ce8c6ed846fa6bfd8cd6334f6..78dc5a73c68997607850cf6f3248a1c443851671 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -43,7 +43,9 @@ use std::sync::LazyLock;
@@ -127,7 +127,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
      pub(crate) async fn thread_shell_command(
          &self,
          request_id: &ConnectionRequestId,
-@@ -4484,7 +4565,7 @@ impl ThreadRequestProcessor {
+@@ -4494,7 +4575,7 @@ impl ThreadRequestProcessor {
      ) -> std::io::Result<LegacyHistoryWindow> {
          if matches!(sort_direction, SortDirection::Asc) && cursor.is_none() {
              return Ok(LegacyHistoryWindow {
@@ -136,7 +136,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
                      self.config.codex_home.as_path(),
                      rollout_path,
                  )
-@@ -4502,6 +4583,7 @@ impl ThreadRequestProcessor {
+@@ -4512,6 +4593,7 @@ impl ThreadRequestProcessor {
          } else {
              None
          };
@@ -144,7 +144,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
          let mut ordinary_reference_limit = match (&generation, cursor) {
              (Some(generation), Some(cursor)) if !cursor.include_anchor => self
                  .legacy_page_depth_hints
-@@ -4516,7 +4598,8 @@ impl ThreadRequestProcessor {
+@@ -4526,7 +4608,8 @@ impl ThreadRequestProcessor {
                  .lookup(generation, None, page_size)
                  .unwrap_or(DEFAULT_ROLLOUT_REFERENCE_DEPTH),
              _ => DEFAULT_ROLLOUT_REFERENCE_DEPTH,
@@ -154,7 +154,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
          let mut materializer = codex_rollout::BoundedRolloutMaterializer::new(
              self.config.codex_home.as_path(),
              rollout_path,
-@@ -4536,7 +4619,9 @@ impl ThreadRequestProcessor {
+@@ -4546,7 +4629,9 @@ impl ThreadRequestProcessor {
                  sort_direction,
                  materialized.has_older_reference,
              ) {
@@ -165,7 +165,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
                      && !items.iter().any(|item| {
                          matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)))
                      })
-@@ -4569,11 +4654,12 @@ impl ThreadRequestProcessor {
+@@ -4579,11 +4664,12 @@ impl ThreadRequestProcessor {
                  }
                  return Ok(LegacyHistoryWindow {
                      items,
@@ -180,7 +180,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
                  return Ok(LegacyHistoryWindow {
                      items,
                      has_older_reference: false,
-@@ -4583,7 +4669,7 @@ impl ThreadRequestProcessor {
+@@ -4593,7 +4679,7 @@ impl ThreadRequestProcessor {
              let next_limit = ordinary_reference_limit.checked_mul(2).ok_or_else(|| {
                  std::io::Error::other("rollout reference depth exceeds addressable memory")
              })?;
@@ -189,7 +189,7 @@ index ca287f1a21136904cef41a9fe56368f48554615b..bae22794351a92d35844548ff3339d4e
          }
      }
 
-@@ -5334,6 +5420,15 @@ impl ThreadRequestProcessor {
+@@ -5344,6 +5430,15 @@ impl ThreadRequestProcessor {
                          restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
                      })
                      .filter(|turn_id| !turn_id.is_empty());
@@ -887,10 +887,10 @@ index 0000000000000000000000000000000000000000..1dc38feb7df0d92594259f676efbab64
 +        .expect("write rollout");
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index b704b9921f5044ee92f7dc42b57511e3d63a14db..15aabcd1e7d7bb42b630a3cb0b87bd39463d82e7 100644
+index 9c773d73a6a85d90f1662a073e76908fcad177be..25010c5fb8ac51dd561d5182ff5ff4ddf2c8efaf 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -147,6 +147,7 @@ mod thread_settings_update;
+@@ -150,6 +150,7 @@ mod thread_settings_update;
  mod thread_shell_command;
  mod thread_start;
  mod thread_status;
@@ -899,10 +899,10 @@ index b704b9921f5044ee92f7dc42b57511e3d63a14db..15aabcd1e7d7bb42b630a3cb0b87bd39
  mod thread_unarchive;
  mod thread_unsubscribe;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073b24683a4 100644
+index 07abdc9b4d33285c888824a853cd91ce52fa28c7..d17c46ea4fc011416713607e7abb338599257e42 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-@@ -1133,7 +1133,7 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
+@@ -1140,7 +1140,7 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
  }
 
  #[tokio::test]
@@ -911,7 +911,7 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
      let server = create_mock_responses_server_repeating_assistant("Done").await;
      let codex_home = TempDir::new()?;
      MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
-@@ -1264,7 +1264,9 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
+@@ -1273,7 +1273,9 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
              .collect::<Vec<_>>(),
          vec!["turn-7", "turn-6", "turn-5", "turn-4", "turn-3"]
      );
@@ -922,7 +922,7 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
 
      let resume_id = mcp
          .send_thread_resume_request(ThreadResumeParams {
-@@ -1293,7 +1295,7 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
+@@ -1302,7 +1304,7 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
  }
 
  #[tokio::test]
@@ -931,7 +931,7 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
      assert_thread_turns_list_same_thread_segment_limit(
          codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH + 2,
          None,
-@@ -1302,28 +1304,28 @@ async fn thread_turns_list_loads_258_same_thread_rollout_segments() -> Result<()
+@@ -1311,28 +1313,28 @@ async fn thread_turns_list_loads_258_same_thread_rollout_segments() -> Result<()
  }
 
  #[tokio::test]
@@ -965,7 +965,7 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
      assert_thread_turns_list_same_thread_segment_limit(10001, None).await
  }
 
-@@ -1393,23 +1395,23 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
+@@ -1402,23 +1404,23 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
                  nth_user_message: None,
                  compacted_replacement_history_filter_texts: None,
              }));
@@ -1005,7 +1005,7 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
 
          let base_ordinal = u64::try_from(index)? * 8;
          let records = items
-@@ -1459,12 +1461,187 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
+@@ -1468,12 +1470,187 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
 
      let ThreadTurnsListResponse { data, .. } =
          timeout(read_timeout, mcp.read_response(request_id)).await??;
@@ -1198,10 +1198,10 @@ index 216422013b30f397ebec3fdad2b1f07619c95d70..de7665fd77c01ea8bfe2e793810c2073
 
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs b/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..536c55a272d7d2302de5e6e519fa7c18b4f99bf5
+index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef8a3f57d2
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,473 @@
 +use anyhow::Result;
 +use app_test_support::MockResponsesConfig;
 +use app_test_support::TestAppServer;
@@ -1341,6 +1341,8 @@ index 0000000000000000000000000000000000000000..536c55a272d7d2302de5e6e519fa7c18
 +        );
 +        store
 +            .create_thread(CreateThreadParams {
++                creator_user_id: None,
++                creator_account_id: None,
 +                session_id: thread_id.into(),
 +                thread_id,
 +                extra_config: None,
@@ -1674,10 +1676,10 @@ index 0000000000000000000000000000000000000000..536c55a272d7d2302de5e6e519fa7c18
 +    }))
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
-index b52cbf13a7e0ca4d972e59fbde832821cba15d4a..78e0d8d48438fc5b929d0143846d1be40d1817ce 100644
+index af45e4978ead93d990ed2627927e95a550585c9c..c2c31a831dc662fed1382ccd9b23a554217b41ac 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
-@@ -73,9 +73,9 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
+@@ -75,9 +75,9 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
              multi_agent_version: None,
              history_mode: ThreadHistoryMode::Paginated,
              history_base: None,
@@ -1689,10 +1691,10 @@ index b52cbf13a7e0ca4d972e59fbde832821cba15d4a..78e0d8d48438fc5b929d0143846d1be4
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 962a18cd71fad3387ab26605f8ae82c7d9c9d6f7..8ab01b4405f7ccef1fc14d707cbbd7fce8e00aa7 100644
+index b508b2cd8b7995797c3ff4b02dd70e9fe5fabf42..f587eded8f9a841770c819126c42f3cbc57b5fbb 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
-@@ -155,6 +155,7 @@ pub use recorder::RolloutRecorderParams;
+@@ -158,6 +158,7 @@ pub use recorder::RolloutRecorderParams;
  pub use recorder::append_rollout_item_to_path;
  pub use reference::BoundedRolloutLines;
  pub use reference::BoundedRolloutMaterializer;
@@ -1897,10 +1899,10 @@ index 20059cae9bba080e56f1e7f078913be5a35c5f84..f201ffe41f9c9563d5e33fe7e954a6fe
          ],
      )?;
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index e84e381d0f9b6d31189f3bdfa5b6f0278617eb25..b3bf4912f1fe337b452ef952ab8f48e182f3186b 100644
+index 47d84e2a8e84a08b4971e7ce28b1cd102049c4d3..a1b8305c0a7659cd290b845d885c159ab8929e4d 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-@@ -1415,10 +1415,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
+@@ -1417,10 +1417,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
              selected_capability_roots: Vec::new(),
              multi_agent_version: None,
              history_mode: ThreadHistoryMode::Legacy,
@@ -1914,10 +1916,10 @@ index e84e381d0f9b6d31189f3bdfa5b6f0278617eb25..b3bf4912f1fe337b452ef952ab8f48e1
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index c1844dc491d08692f748ac715c416e50b99e3d3c..6e168bd831dc57b5fd86b3759a91c7800e8db6ec 100644
+index a95d71fd474307b757da3d4cab1d58143a8574b6..0eeb27278b5863680821fe7cfa78169921ca3123 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-@@ -651,6 +651,50 @@ fn create_history_rollout(
+@@ -652,6 +652,50 @@ fn create_history_rollout(
          /*git_info*/ None,
      )
      .map_err(|err| color_eyre::eyre::eyre!("failed to create history rollout: {err}"))?;
@@ -1968,7 +1970,7 @@ index c1844dc491d08692f748ac715c416e50b99e3d3c..6e168bd831dc57b5fd86b3759a91c780
      Ok(ThreadId::from_string(&thread_id)?)
  }
 
-@@ -2845,7 +2889,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
+@@ -2846,7 +2890,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
          .iter()
          .map(|params| params["includeTurns"].as_bool().unwrap_or(false))
          .collect::<Vec<_>>();
@@ -1977,7 +1979,7 @@ index c1844dc491d08692f748ac715c416e50b99e3d3c..6e168bd831dc57b5fd86b3759a91c780
 
      app_server.shutdown().await?;
      proxy.await??;
-@@ -2868,8 +2912,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
+@@ -2869,8 +2913,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
                  ThreadHistoryMode::Legacy,
                  "legacy background task",
              )?,

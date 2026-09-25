@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index d339e24467aa0d96c5c31dd8f366c076b1b30162..b9b26bef27bc0d02af3fc72ca27b48d4ace2a30a 100644
+index 838a063e4c9070960c4beb55e10dc91daaf4171c..8d7c0fd7e23d8304b3e206a9a87bc53f27d7b616 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -3931,6 +3931,7 @@ dependencies = [
+@@ -3791,6 +3791,7 @@ dependencies = [
   "codex-utils-path-uri",
   "codex-utils-plugins",
   "futures",
@@ -24,17 +24,21 @@ index 00f4f86c49cce86e699fbd9c2dc689d07e65d76f..13378cf50d4b2474a07b17d08265eaae
                          codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
                          tool_catalog_cache: mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/codex-mcp/Cargo.toml b/codex-rs/codex-mcp/Cargo.toml
-index d989cf8b9c3ccff324aa86d829427bf6f5252e8b..2d7cfa55bd97bdb4856112facd56a55d59901259 100644
+index d989cf8b9c3ccff324aa86d829427bf6f5252e8b..c526bf535f37b42e9515a073adbe21d732d52a50 100644
 --- a/codex-rs/codex-mcp/Cargo.toml
 +++ b/codex-rs/codex-mcp/Cargo.toml
-@@ -47,6 +47,7 @@ assert_matches = { workspace = true }
+@@ -47,6 +47,11 @@ assert_matches = { workspace = true }
  codex-exec-server-test-support = { workspace = true }
  codex-plugin = { workspace = true }
  insta = { workspace = true }
 +http = { workspace = true }
++opentelemetry = { workspace = true }
++opentelemetry_sdk = { workspace = true }
  pretty_assertions = { workspace = true }
  rmcp = { workspace = true, default-features = false, features = ["base64", "macros", "schemars", "server"] }
  tempfile = { workspace = true }
++tracing-opentelemetry = { workspace = true }
++tracing-subscriber = { workspace = true }
 diff --git a/codex-rs/codex-mcp/src/binding.rs b/codex-rs/codex-mcp/src/binding.rs
 index 4f9435f317d1e88fb0021aac610bbf059cb480c0..fd7432cf409e6845b7c18db97880c6bb8b82e0eb 100644
 --- a/codex-rs/codex-mcp/src/binding.rs
@@ -4007,10 +4011,10 @@ index 3d8875caf38c40905b934cb698e4005fdf707317..66a9f43ccabf9323c77a653a84a1e9da
  }
 diff --git a/codex-rs/codex-mcp/src/connection_pool.rs b/codex-rs/codex-mcp/src/connection_pool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..77defc4d63c2f6b13bd1e694f123f96d2bbb9afd
+index 0000000000000000000000000000000000000000..5b9f1e07bd6e1b27e959d1ffeaf91aeefa720605
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/connection_pool.rs
-@@ -0,0 +1,1368 @@
+@@ -0,0 +1,1376 @@
 +//! Agent-tree-scoped ownership for reusable MCP connections.
 +
 +use std::future::Future;
@@ -4038,6 +4042,7 @@ index 0000000000000000000000000000000000000000..77defc4d63c2f6b13bd1e694f123f96d
 +use anyhow::anyhow;
 +use codex_diagnostics::Gauge;
 +use codex_diagnostics::GaugeGuard;
++use tracing::Instrument;
 +
 +/// Whether manager construction may reuse or replace the compatible tree connection.
 +#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4834,26 +4839,33 @@ index 0000000000000000000000000000000000000000..77defc4d63c2f6b13bd1e694f123f96d
 +            let task_client = pooled_client.clone();
 +            let connection_cancelled = task_client.connection.client.cancel_token.clone();
 +            let connection_superseded = task_client.connection.superseded.clone();
-+            let operation_task = tokio::spawn(async move {
-+                let _active_route = active_route;
-+                let superseded = async move {
-+                    match superseded_operation_action {
-+                        SupersededOperationAction::Drain => std::future::pending().await,
-+                        SupersededOperationAction::Retry => connection_superseded.cancelled().await,
-+                    }
-+                };
-+                tokio::select! {
-+                    value = operation(task_client.clone()) => Ok(value),
-+                    () = superseded => Err(anyhow!("shared MCP connection superseded")),
-+                    () = connection_cancelled.cancelled() => {
-+                        Err(anyhow!("shared MCP connection closed"))
-+                    }
-+                    () = route_for_task.closed() => {
-+                        task_client.retire_after_route_close_in_background();
-+                        Err(anyhow!("MCP session route closed"))
++            // RmcpClient reads the current span when constructing request metadata.
++            // Each operation must carry its caller's span, not the pooled connection's owner.
++            let operation_task = tokio::spawn(
++                async move {
++                    let _active_route = active_route;
++                    let superseded = async move {
++                        match superseded_operation_action {
++                            SupersededOperationAction::Drain => std::future::pending().await,
++                            SupersededOperationAction::Retry => {
++                                connection_superseded.cancelled().await
++                            }
++                        }
++                    };
++                    tokio::select! {
++                        value = operation(task_client.clone()) => Ok(value),
++                        () = superseded => Err(anyhow!("shared MCP connection superseded")),
++                        () = connection_cancelled.cancelled() => {
++                            Err(anyhow!("shared MCP connection closed"))
++                        }
++                        () = route_for_task.closed() => {
++                            task_client.retire_after_route_close_in_background();
++                            Err(anyhow!("MCP session route closed"))
++                        }
 +                    }
 +                }
-+            });
++                .in_current_span(),
++            );
 +            let mut retire_on_drop =
 +                RetireConnectionOnDrop::new(pooled_client, abandoned_operation_action);
 +            let result = operation_task
@@ -5381,10 +5393,10 @@ index 0000000000000000000000000000000000000000..77defc4d63c2f6b13bd1e694f123f96d
 +mod tests;
 diff --git a/codex-rs/codex-mcp/src/connection_pool_tests.rs b/codex-rs/codex-mcp/src/connection_pool_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..663f8cdfdedb51a6e6d1b65f2bb97ba24d379f4f
+index 0000000000000000000000000000000000000000..9a16e8d3643039a82905e55e61dd7ca4e11a37e0
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/connection_pool_tests.rs
-@@ -0,0 +1,2159 @@
+@@ -0,0 +1,2229 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::io;
@@ -5436,6 +5448,8 @@ index 0000000000000000000000000000000000000000..663f8cdfdedb51a6e6d1b65f2bb97ba2
 +use codex_rmcp_client::McpOAuthRefreshMode;
 +use codex_rmcp_client::RmcpClient;
 +use futures::FutureExt;
++use opentelemetry::trace::TracerProvider;
++use opentelemetry_sdk::trace::SdkTracerProvider;
 +use pretty_assertions::assert_eq;
 +use rmcp::model::ElicitationAction;
 +use rmcp::model::ElicitationCapability;
@@ -5444,6 +5458,8 @@ index 0000000000000000000000000000000000000000..663f8cdfdedb51a6e6d1b65f2bb97ba2
 +use tokio::io::DuplexStream;
 +use tokio::sync::Notify;
 +use tokio_util::sync::CancellationToken;
++use tracing::Instrument;
++use tracing_subscriber::prelude::*;
 +
 +fn config(command: &str) -> McpServerConfig {
 +    McpServerConfig {
@@ -7041,6 +7057,72 @@ index 0000000000000000000000000000000000000000..663f8cdfdedb51a6e6d1b65f2bb97ba2
 +            .iter()
 +            .all(|refresh| refresh.connection_id() == current)
 +    );
++}
++
++#[tokio::test(flavor = "current_thread")]
++async fn pooled_operations_preserve_each_callers_w3c_trace_context() -> anyhow::Result<()> {
++    let provider = SdkTracerProvider::builder().build();
++    let subscriber = tracing_subscriber::registry()
++        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pooled-mcp-trace-test")));
++    // This current-thread runtime keeps spawned operations on the subscriber's thread.
++    let _subscriber = subscriber.set_default();
++    let pool = McpConnectionPool::default();
++    let root_route = route();
++    let child_route = route();
++    let root = pool.acquire(
++        identity("server", "/one"),
++        McpConnectionPoolMode::Reuse,
++        &root_route,
++        client,
++    );
++    let child = pool.acquire(
++        identity("server", "/one"),
++        McpConnectionPoolMode::Reuse,
++        &child_route,
++        client,
++    );
++    let connection_id = root.connection_id();
++    assert_eq!(child.connection_id(), connection_id);
++
++    let root_trace = async {
++        let expected = codex_otel::current_span_w3c_trace_context().expect("root caller trace");
++        let (actual_connection, actual_trace) = root
++            .run(root_route, |client| async move {
++                tokio::task::yield_now().await;
++                (
++                    client.connection_id(),
++                    codex_otel::current_span_w3c_trace_context(),
++                )
++            })
++            .await?;
++        assert_eq!(actual_connection, connection_id);
++        assert_eq!(actual_trace, Some(expected.clone()));
++        Ok::<_, anyhow::Error>(expected)
++    }
++    .instrument(tracing::info_span!("root_mcp_caller"))
++    .await?;
++    let child_trace = async {
++        let expected = codex_otel::current_span_w3c_trace_context().expect("child caller trace");
++        let (actual_connection, actual_trace) = child
++            .run_mcp_request(child_route, |client| async move {
++                tokio::task::yield_now().await;
++                Ok((
++                    client.connection_id(),
++                    codex_otel::current_span_w3c_trace_context(),
++                ))
++            })
++            .await?;
++        assert_eq!(actual_connection, connection_id);
++        assert_eq!(actual_trace, Some(expected.clone()));
++        Ok::<_, anyhow::Error>(expected)
++    }
++    .instrument(tracing::info_span!("child_mcp_caller"))
++    .await?;
++    assert!(root_trace.traceparent.is_some());
++    assert!(child_trace.traceparent.is_some());
++    assert_ne!(root_trace.traceparent, child_trace.traceparent);
++    assert!(codex_otel::current_span_w3c_trace_context().is_none());
++    Ok(())
 +}
 +
 +#[tokio::test]
@@ -10308,10 +10390,10 @@ index 9c9334aa70662eb3d07f10601e5a1381e9d1944e..6ed3f8376462eee6922c18e04fe4fdb1
          .await
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 98795b5d71dd5621e324547ec1505f8695711363..3986bdeb665e09921adbf231ed08b2a096e62a21 100644
+index 43a2aae54b915de232cff37da33bd339e7965c88..a77688f720c37c24b43fa7387609dd87ecf26395 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -28,6 +28,7 @@ use codex_extension_api::ThreadInstructionsProvider;
+@@ -25,6 +25,7 @@ use codex_extension_api::ThreadInstructionsProvider;
  use codex_history::InitialHistory;
  use codex_history::ResumedHistory;
  use codex_history::RolloutItem;
@@ -10319,34 +10401,46 @@ index 98795b5d71dd5621e324547ec1505f8695711363..3986bdeb665e09921adbf231ed08b2a0
  use codex_protocol::AgentPath;
  use codex_protocol::SessionId;
  use codex_protocol::ThreadId;
-@@ -161,6 +162,8 @@ pub(crate) struct LocalAgentControl {
-     pub(super) state: Arc<AgentRegistry>,
-     agent_residency: Arc<AgentResidency>,
-     agent_execution_limiter: Arc<AgentExecutionLimiter>,
-+    /// MCP processes shared by the root agent and descendants with compatible startup inputs.
-+    mcp_connection_pool: McpConnectionPool,
+@@ -252,6 +253,10 @@ impl LocalAgentControl {
+         provider
+     }
+
++    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
++        &self.runtime.mcp_connection_pool
++    }
++
+     /// Send rich user input items to an existing agent thread.
+     pub(crate) async fn send_input(
+         &self,
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index 482885522a5945efb68b0be307fc2540b172367e..2e59a2413c0a835c05190238123dfe4c0c42dff4 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -11,6 +11,7 @@ use crate::thread_manager::ThreadIdGenerator;
+ use crate::thread_manager::ThreadManagerState;
+ use arc_swap::ArcSwapOption;
+ use codex_extension_api::ThreadInstructionsProvider;
++use codex_mcp::McpConnectionPool;
+ use codex_protocol::SessionId;
+ use std::sync::Arc;
+ use std::sync::OnceLock;
+@@ -26,6 +27,8 @@ pub(crate) struct LocalAgentRuntime {
+     /// Captured at construction so delegates retain their manager's allocation policy.
+     pub(super) thread_id_generator: ThreadIdGenerator,
+     pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
++    /// MCP processes shared across controller rebinding and compatible descendant startup.
++    pub(super) mcp_connection_pool: McpConnectionPool,
      /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
-     rollout_budget: Arc<RolloutBudget>,
+     pub(super) rollout_budget: Arc<RolloutBudget>,
      /// The user-selected root routing tier, shared by the entire agent tree.
-@@ -232,6 +235,7 @@ impl LocalAgentControl {
-             state: Arc::default(),
+@@ -50,6 +53,7 @@ impl LocalAgentRuntime {
+             registry: Arc::default(),
              agent_residency: Arc::default(),
              agent_execution_limiter: Arc::default(),
 +            mcp_connection_pool: McpConnectionPool::default(),
              rollout_budget: Arc::default(),
              root_service_tier: Arc::new(ArcSwapOption::from(None)),
              shared_thread_instructions_provider: Arc::default(),
-@@ -276,6 +280,10 @@ impl LocalAgentControl {
-         provider
-     }
-
-+    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
-+        &self.mcp_connection_pool
-+    }
-+
-     /// Send rich user input items to an existing agent thread.
-     pub(crate) async fn send_input(
-         &self,
 diff --git a/codex-rs/core/src/connectors.rs b/codex-rs/core/src/connectors.rs
 index 4156fcfc39c90b37423f6fbf836da8df34ae8bba..39156b058fa1228dfe94f7b07d4d8ab8af1bd13f 100644
 --- a/codex-rs/core/src/connectors.rs
@@ -10361,7 +10455,7 @@ index 4156fcfc39c90b37423f6fbf836da8df34ae8bba..39156b058fa1228dfe94f7b07d4d8ab8
          // one exists, but do not reintroduce the old hidden-local fallback.
          runtime_context,
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index ec4c83e494b716ae5db710cfccaf949919b9ff90..7fb7c3c91b03f60d4ef7ba6d8324e997e7170dbc 100644
+index e66ffe80606f20178dc708723182458e558b3190..24a23263ce4dcd7a8afdae468b769948c7d80dbb 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
 @@ -240,9 +240,9 @@ impl Session {
@@ -10472,10 +10566,10 @@ index 2bbee2d5edb3730cf1e2efbb3fdd71791f394bf6..a16f889142eac4e801ebe58bf45d2339
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 17879038234c26331ce58786c5e1676d36c99a4a..2c33173b915c9fb69a0e68914180b1e93fcfe22e 100644
+index 1bca6787dcc7680a920fb556e7c26c246c65a045..54f97fdcdb6e85397e06a62eddbd6a9a4fc33d04 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -9890,6 +9890,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
+@@ -10196,6 +10196,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
      );
  }
 
@@ -10494,10 +10588,10 @@ index 17879038234c26331ce58786c5e1676d36c99a4a..2c33173b915c9fb69a0e68914180b1e9
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index eefcbba2faa8d79385afe8dde467e6064bb14dfa..3651734a8c1bcc9e64392f5d87a606654799bb99 100644
+index bc1d47de83104bf4cf343edef10b763ffe16909f..c4a24ab1eb1253076a7a8ccf98928c559cd3636a 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1180,6 +1180,7 @@ impl ThreadManager {
+@@ -1151,6 +1151,7 @@ impl ThreadManager {
          Box::pin(self.start_thread_inner(
              options,
              /*forked_from_thread_id*/ None,
@@ -10505,7 +10599,7 @@ index eefcbba2faa8d79385afe8dde467e6064bb14dfa..3651734a8c1bcc9e64392f5d87a60665
              /*startup*/ None,
              ForkStartupItems::default(),
          ))
-@@ -1253,12 +1254,19 @@ impl ThreadManager {
+@@ -1228,12 +1229,19 @@ impl ThreadManager {
          &self,
          mut options: StartThreadOptions,
          forked_from_thread_id: Option<ThreadId>,
@@ -10528,7 +10622,7 @@ index eefcbba2faa8d79385afe8dde467e6064bb14dfa..3651734a8c1bcc9e64392f5d87a60665
          let (resumed_session_source, resumed_thread_source) = options
              .initial_history
              .get_resumed_session_sources()
-@@ -1309,6 +1317,7 @@ impl ThreadManager {
+@@ -1284,6 +1292,7 @@ impl ThreadManager {
          mut options: StartThreadOptions,
      ) -> CodexResult<NewThread> {
          let fork_source = self.get_thread(forked_from_thread_id).await?;
@@ -10536,7 +10630,7 @@ index eefcbba2faa8d79385afe8dde467e6064bb14dfa..3651734a8c1bcc9e64392f5d87a60665
          let inherited_multi_agent_version = fork_source
              .multi_agent_version()
              .unwrap_or(MultiAgentVersion::V1);
-@@ -1339,6 +1348,7 @@ impl ThreadManager {
+@@ -1314,6 +1323,7 @@ impl ThreadManager {
                  .start_thread_inner(
                      options,
                      Some(forked_from_thread_id),
@@ -10544,7 +10638,7 @@ index eefcbba2faa8d79385afe8dde467e6064bb14dfa..3651734a8c1bcc9e64392f5d87a60665
                      /*startup*/ None,
                      ForkStartupItems::default(),
                  )
-@@ -1365,6 +1375,7 @@ impl ThreadManager {
+@@ -1340,6 +1350,7 @@ impl ThreadManager {
              .start_thread_inner(
                  options,
                  Some(forked_from_thread_id),
@@ -10565,10 +10659,10 @@ index bc42d6c44f28fd1fa3b98b53208552c3898fb70a..268e5e26fdd4a6eb795dd19a80703af6
                      crate::session::ForkStartupItems::default(),
                  );
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 6ab0864b992a2f292d649a1a43981fc4dad88579..5c1f835b1b919f4b93706855f3e3a61e6c84c428 100644
+index f27242f3f6ceea33fd22d6c504f4170fa3086c5b..48d041e7748486d75c676aacef267d7827e3027d 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
-@@ -1927,22 +1927,19 @@ async fn selected_capability_roots_round_trip_through_fork() {
+@@ -1928,22 +1928,19 @@ async fn selected_capability_roots_round_trip_through_fork() {
              path: PathUri::parse("file:///plugins/demo").expect("plugin root URI"),
          },
      }];
@@ -12475,7 +12569,7 @@ index 846049c627daaf9a5c600dd3e35b5905150b310a..24354fcd2a501f74e2cd24f6fb933064
          &barrier_file,
          b"ready".to_vec(),
 diff --git a/codex-rs/core/tests/suite/mcp_turn_metadata.rs b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
-index 7e01e1381b25b86ba2b60cf0ef209b5f30cc3377..66b6591513d93face367a27079605e63d8aff9e1 100644
+index 75b3ba1dfce27289467dde71fb8990acbb383770..526d1b9bafb1bbfcee8d68d8977f3b91c6cc91dc 100644
 --- a/codex-rs/core/tests/suite/mcp_turn_metadata.rs
 +++ b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
 @@ -397,6 +397,11 @@ default_tools_approval_mode = "{approval_mode}"
@@ -12527,10 +12621,10 @@ index 7e01e1381b25b86ba2b60cf0ef209b5f30cc3377..66b6591513d93face367a27079605e63
          .expect("expected a Guardian request for the app MCP approval");
      assert!(guardian_request.body_contains_text("calendar_create_event"));
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 757e8cfdda494c6a51845cb25c61b0f123c30824..bda88e6c6be0de18895b9d1444899154bf830bbf 100644
+index 3e71afbbdda9b9f2984a6ed3c09afae97d8ec24b..a18cdf95b6f4ae89abad37dedd12044335032b27 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -112,6 +112,7 @@ mod json_result;
+@@ -114,6 +114,7 @@ mod json_result;
  mod live_cli;
  #[path = "managed_threads_tests.rs"]
  mod managed_threads;
@@ -12539,10 +12633,10 @@ index 757e8cfdda494c6a51845cb25c61b0f123c30824..bda88e6c6be0de18895b9d1444899154
  mod mcp_auth_refresh;
  mod mcp_ema_config;
 diff --git a/codex-rs/rmcp-client/Cargo.toml b/codex-rs/rmcp-client/Cargo.toml
-index c3c0f07db320b1ce683072b265a7e35c6dda9640..cdb38990e46a1ab8e2219bb39c18edda2e2781dc 100644
+index c661aa0ed8f38d7c37ed386c50b898f748524de4..491b39a7770f7601651041c4a7d49cfaee04675a 100644
 --- a/codex-rs/rmcp-client/Cargo.toml
 +++ b/codex-rs/rmcp-client/Cargo.toml
-@@ -36,6 +36,7 @@ rmcp = { workspace = true, default-features = false, features = [
+@@ -37,6 +37,7 @@ rmcp = { workspace = true, default-features = false, features = [
      "auth",
      "base64",
      "client",
@@ -12858,10 +12952,10 @@ index 79a2e1c066c849aa3fd1cd91090e6c1ef11730a5..c20090c6e8d3ae44159b05184d2fe6e2
                  format!("unknown tool: {other}"),
                  None,
 diff --git a/codex-rs/rmcp-client/src/lib.rs b/codex-rs/rmcp-client/src/lib.rs
-index 51105cf53538cfc9bd9dc85130180ede3b87a751..a0b35ead0bb96e532a61ebaad0064facc596839f 100644
+index ab270cc95f2e0b2af5027cd9843588e4591d4b29..72513c329d604b2a4b28495ecbba6b8fd834a8c8 100644
 --- a/codex-rs/rmcp-client/src/lib.rs
 +++ b/codex-rs/rmcp-client/src/lib.rs
-@@ -87,6 +87,7 @@ pub use rmcp_client::RmcpClient;
+@@ -88,6 +88,7 @@ pub use rmcp_client::RmcpClient;
  pub use rmcp_client::SendElicitation;
  pub use rmcp_client::StreamableHttpBearerToken;
  pub use rmcp_client::ToolWithConnectorId;
@@ -12870,10 +12964,10 @@ index 51105cf53538cfc9bd9dc85130180ede3b87a751..a0b35ead0bb96e532a61ebaad0064fac
  pub use startup_error::is_authentication_required_error;
  pub use stdio_server_launcher::ExecutorStdioServerLauncher;
 diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
-index 1bb4970bb41e5278eefb1347f757d83cc7a3b130..400f400933e642a5c15a94825750ee69b9b4dfb9 100644
+index 408d1b53ffd20037284fdd326260aefade07695b..9507d47d3657f1b18d331dd295ac04d33f5d39de 100644
 --- a/codex-rs/rmcp-client/src/rmcp_client.rs
 +++ b/codex-rs/rmcp-client/src/rmcp_client.rs
-@@ -286,6 +286,22 @@ pub(crate) enum ClientOperationError {
+@@ -285,6 +285,22 @@ pub(crate) enum ClientOperationError {
      Timeout { label: String, duration: Duration },
  }
 

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 5aa2fa7a162c47fabc329afee4161f920b4b1560..23e16173b66d28d0dce519e7ddfbe39f25e14771 100644
+index 577d2f426c548a341945cf4e2276f6c37208082e..07d465d3cab8bc994cda10a421b0a8db253bb333 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
@@ -11,7 +11,7 @@ index 5aa2fa7a162c47fabc329afee4161f920b4b1560..23e16173b66d28d0dce519e7ddfbe39f
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6491,6 +6491,28 @@ impl ThreadRequestProcessor {
+@@ -6501,6 +6501,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,10 +41,10 @@ index 5aa2fa7a162c47fabc329afee4161f920b4b1560..23e16173b66d28d0dce519e7ddfbe39f
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 8b1d9e21267a0f65881085e692dd51e2184f38a0..48d78d2ee9c8fed956ed953e9d46934df2e244c1 100644
+index 3cdfcc80c941e4812641a72945ca353de9597544..0908e128260c8b6e7791a2e594373849cc524f8e 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -122,6 +122,7 @@ mod session_end;
+@@ -125,6 +125,7 @@ mod session_end;
  mod skills_list;
  mod sleep;
  mod thread_archive;
@@ -334,7 +334,7 @@ index 2ccc07497996c0bca01c55145e953c2d8166433e..29eff3d6de6016edfc680c69ccb3a3c0
      Ok(())
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 914b2f99e6c49e405ccdeded4a7a006227458381..b59c44702fd074856e8f4ba7fb36fb738e2ad115 100644
+index cb43b44d6c1f36fd09088627fa589f588bf82cc3..08a7a741dd53b16fd6290a9db5fa48b4504470a3 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
 @@ -613,6 +613,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
@@ -372,7 +372,7 @@ index 914b2f99e6c49e405ccdeded4a7a006227458381..b59c44702fd074856e8f4ba7fb36fb73
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index fb9d2612692ed2cb564adbc6b4c6471b7e6d3bfd..490c5a76afad701ecaee2b1b286a7e1fbe5e4e9b 100644
+index c44b0b6416e5e1eccfbb075d59e1b1e5dbcfab6a..3a0179bcd9031fc5492e544dc8b3201283f9d068 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
 @@ -1099,12 +1099,12 @@ async fn select_thread_candidates(
@@ -876,10 +876,10 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index c5051a8a38813890d550cd84d38673e0bd5379dc..ed5338624a3f9982bb61c6af6709fd2406d4734e 100644
+index 48a48595782127fca7bf34d4c868c15eb832fbb8..b49204a0ca1cade78b48f8244c4d063fbf7cfa91 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
-@@ -664,6 +664,7 @@ impl LocalThreadStore {
+@@ -667,6 +667,7 @@ impl LocalThreadStore {
                  .map_err(migration_error)?
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -887,7 +887,7 @@ index c5051a8a38813890d550cd84d38673e0bd5379dc..ed5338624a3f9982bb61c6af6709fd24
          {
              // A stable thread can retain older physical rollouts after a revert. Migrating one of
              // those files would overwrite the selected thread's history mode and migration journal.
-@@ -941,6 +942,7 @@ impl LocalThreadStore {
+@@ -944,6 +945,7 @@ impl LocalThreadStore {
                  .map_err(migration_error)?
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -895,7 +895,7 @@ index c5051a8a38813890d550cd84d38673e0bd5379dc..ed5338624a3f9982bb61c6af6709fd24
          {
              return Ok(None);
          }
-@@ -1957,6 +1959,16 @@ async fn find_current_rollout_path(
+@@ -1961,6 +1963,16 @@ async fn find_current_rollout_path(
          }))
  }
 

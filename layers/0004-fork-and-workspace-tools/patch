@@ -134,10 +134,10 @@ index 7ee4c12d2f034fb3f097e846b20aced376bea495..14bdfbc07fe79e1f4ed026fe737638f9
      Ok(())
  }
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index a64a77a1709c06c4e9b9fab89705d4ad900372aa..616fe7ab5e36ddccd318c880e98047b690eceb1e 100644
+index a84555a7126c5389d9e85d00fcbeb9d447ad1e25..17139959642a25302dae18ed38d0894cf5bd3519 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -152,10 +152,10 @@ mod turn_settings_update;
+@@ -155,10 +155,10 @@ mod turn_settings_update;
  mod turn_start;
  mod turn_start_zsh_fork;
  mod turn_steer;
@@ -553,10 +553,10 @@ index 0000000000000000000000000000000000000000..0ad51bae3ad622b0cc31a18fbfc9702f
 +    }
 +}
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index ef6fbb0131cac9dcd1cfd01e0dac8c8a27fa230a..875ab220a20ba049f3f271ad8e57380440714b3f 100644
+index 34c56b0238dfc6e09a04ca33cdfd98747ebc83db..579e37fc9bb6c448acd9e0099fc3a00b73bd975f 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -1127,6 +1127,9 @@
+@@ -1149,6 +1149,9 @@
              "windows_sandbox_service": {
                "type": "boolean"
              },
@@ -566,7 +566,7 @@ index ef6fbb0131cac9dcd1cfd01e0dac8c8a27fa230a..875ab220a20ba049f3f271ad8e573804
              "workspace_dependencies": {
                "type": "boolean"
              },
-@@ -7076,6 +7079,9 @@
+@@ -7120,6 +7123,9 @@
          "windows_sandbox_service": {
            "type": "boolean"
          },
@@ -577,10 +577,10 @@ index ef6fbb0131cac9dcd1cfd01e0dac8c8a27fa230a..875ab220a20ba049f3f271ad8e573804
            "type": "boolean"
          },
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index c9872397fc496e5f821c960df001821e22b1d862..afa27ef3f54411b3bad9f59d863640348dba78bc 100644
+index 0a1aacb4c20853ae83b24863c4a4c5b000be5c87..a2c208d213d9efbba76263215cb9d0356927c371 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -556,6 +556,8 @@ impl LocalAgentControl {
+@@ -552,6 +552,8 @@ impl LocalAgentControl {
                      selection.config = EnvironmentConfigState::Ready(bounded_config);
                  }
              }
@@ -590,10 +590,10 @@ index c9872397fc496e5f821c960df001821e22b1d862..afa27ef3f54411b3bad9f59d86364034
                  Some(parent_environments.clone()),
                  Some(Arc::clone(&parent.session.services.exec_policy)),
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index b497904bb2ecf896ad2d3bff8a0af85004aaa79c..778928098c99f2c39c291df86065c8b1102d2bed 100644
+index fb92ef7e03d4f060cc8f019dbbc41284fd2cc63a..4a97c0625ad501effa004b7f551d226a1512890a 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -1183,6 +1183,18 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest()
+@@ -1293,6 +1293,18 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest()
          response_continuation.last_response.items_added,
          expected_latest_items
      );
@@ -625,7 +625,7 @@ index 06815b67333bfded9a6d9655b0aec88cdab44409..6b3be76556be19a5a7ab05b50f1a427e
  pub use codex_prompts::PermissionsInstructions;
  pub(crate) use compaction_summary::CompactionSummary;
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c7bab4968 100644
+index 28f339c12e566dd322ee94224d9c7c791104e3cc..d66eaaa4dd61883f08cc92338590c424e82c5530 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
 @@ -1,5 +1,7 @@
@@ -636,22 +636,21 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
  use codex_exec_server::LOCAL_ENVIRONMENT_ID;
  use codex_exec_server::MAX_SELECTED_CAPABILITY_ROOTS;
  use codex_exec_server::SelectedCapabilityRootsStatus;
-@@ -18,6 +20,8 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
+@@ -19,6 +21,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::session::session::Session;
  use crate::session::session::SessionConfiguration;
  use crate::session::session::SessionSettingsUpdate;
-+use crate::session::step_context::StepInputs;
 +use crate::session::turn_context::TurnContext;
 
- pub(super) fn validate_environment_selections(
-     selections: &[TurnEnvironmentSelection],
-@@ -169,6 +173,85 @@ impl Session {
+ /// Defaults for environments that inherit their configuration from the running turn.
+ pub(crate) struct ThreadEnvironmentDefaults {
+@@ -206,6 +209,84 @@ impl Session {
          snapshot.await
      }
 
 +    /// Applies an explicit workspace tool transition to the running task, unlike ordinary
 +    /// settings updates, which only select environments for the next task. Existing steps
-+    /// retain their captured environments while later steps use this published snapshot.
++    /// retain their captured environments while later steps read `ThreadEnvironments`.
 +    #[expect(
 +        clippy::await_holding_invalid_type,
 +        reason = "workspace selection and task validation must use the same state version"
@@ -661,7 +660,7 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
 +        turn: &Arc<TurnContext>,
 +        configuration: &SessionConfiguration,
 +    ) -> CodexResult<TurnEnvironmentSnapshot> {
-+        let (task_done, cancellation_token, snapshot) = {
++        let (task_done, cancellation_token, selections, snapshot) = {
 +            let active = self.active_turn.lock().await;
 +            let task = active
 +                .as_ref()
@@ -677,13 +676,16 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
 +                ));
 +            }
 +            self.mark_mcp_runtime_dirty();
-+            self.services.turn_environments.update_selections(
-+                &configuration.environments,
-+                &configuration.inferred_environment_config(),
-+            );
++            self.services
++                .turn_environments
++                .set_active_thread_defaults(configuration.inferred_environment_config());
++            self.services
++                .turn_environments
++                .update_selections(&configuration.environments);
 +            (
 +                Arc::clone(&task.done),
 +                task.cancellation_token.clone(),
++                self.services.turn_environments.selections(),
 +                self.services.turn_environments.snapshot(),
 +            )
 +        };
@@ -702,7 +704,7 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
 +        // A second shared snapshot could adopt a newer, unrelated workspace selection.
 +        let environments = environments.refresh_readiness();
 +        let active = self.active_turn.lock().await;
-+        let task = active
++        active
 +            .as_ref()
 +            .and_then(|active| active.task.as_ref())
 +            .filter(|task| {
@@ -712,19 +714,15 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
 +            })
 +            .ok_or(CodexErr::TurnAborted)?;
 +        let state = self.state.lock().await;
-+        if state.session_configuration.environments != configuration.environments {
++        if state.session_configuration.environments != configuration.environments
++            || self.services.turn_environments.selections() != selections
++        {
 +            return Err(CodexErr::InvalidRequest(
 +                "workspace settings changed while preparing the transition".to_string(),
 +            ));
 +        }
-+        // Model updates serialize on active_turn as well; retain the latest settings.
-+        let inputs = task.turn_context.next_step_input.load_full();
-+        task.turn_context
-+            .next_step_input
-+            .store(Arc::new(StepInputs {
-+                settings: Arc::clone(&inputs.settings),
-+                environments: environments.clone(),
-+            }));
++        // The manager already owns the selection and readiness. Publishing this captured snapshot
++        // back into the turn could overwrite a newer environment or sparse model-settings update.
 +        Ok(environments)
 +    }
 +
@@ -732,10 +730,10 @@ index d77d9df3dafd45f7dbfbaa47e6491b6193a4f6e3..84161e1862757998dff170ce6499a91c
          &self,
          selection: &TurnEnvironmentSelection,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 3bc28dbcdf9edae806ebd7abe9e9d6a7c0dc0068..c9e0fe08541c7da00ce0b770c4d55f3b51283b83 100644
+index f9bb0740c00c01f7a508b3b0eb745cbea37e2cdc..292cf27b11fa77f0c7e753273268604574830a6a 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -284,6 +284,7 @@ use self::turn::agent_message_text;
+@@ -289,6 +289,7 @@ use self::turn::agent_message_text;
  use self::turn::collect_explicit_app_ids_from_skill_items;
  use self::turn::realtime_text_for_event;
  use self::turn_context::TurnContext;
@@ -743,7 +741,7 @@ index 3bc28dbcdf9edae806ebd7abe9e9d6a7c0dc0068..c9e0fe08541c7da00ce0b770c4d55f3b
  #[cfg(test)]
  mod rollout_reconstruction_tests;
 
-@@ -4037,6 +4038,7 @@ impl Session {
+@@ -4106,6 +4107,7 @@ impl Session {
              required_mcp_servers: required_servers.to_vec(),
              tool_router,
              loaded_agents_md,
@@ -751,7 +749,7 @@ index 3bc28dbcdf9edae806ebd7abe9e9d6a7c0dc0068..c9e0fe08541c7da00ce0b770c4d55f3b
          }))
      }
 
-@@ -4755,8 +4757,9 @@ impl Session {
+@@ -4847,8 +4849,9 @@ impl Session {
          if only_world_state_changed {
              return Ok(world_state);
          }
@@ -764,7 +762,7 @@ index 3bc28dbcdf9edae806ebd7abe9e9d6a7c0dc0068..c9e0fe08541c7da00ce0b770c4d55f3b
              .await;
 
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 48052b44feb78341a7d676bbbc8e5641f8cb56ee..f958893c299c49b20f0cc0d209e9a2b94cd9df63 100644
+index 390d60350ff116450addcb3a91e9c69510974b44..580e353518c2c889e6a677b9d4b6caf58de57e75 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -52,6 +52,15 @@ use tokio::sync::Semaphore;
@@ -783,10 +781,10 @@ index 48052b44feb78341a7d676bbbc8e5641f8cb56ee..f958893c299c49b20f0cc0d209e9a2b9
  /// Context for an initialized model agent
  ///
  /// A session has at most 1 running task at a time, and can be interrupted by user input.
-@@ -983,8 +992,9 @@ impl Session {
-         // - initialize thread persistence with new or resumed session info
-         // - perform default shell discovery
+@@ -988,8 +997,9 @@ impl Session {
          // - load history metadata (skipped for subagents)
+         let persistence_auth = futures::FutureExt::shared(auth_manager.auth());
+         let mcp_auth = persistence_auth.clone();
 +        let materialize_ephemeral_rollout = materialize_ephemeral_rollouts_for_debug();
          let thread_persistence_fut = async {
 -            if config.ephemeral {
@@ -794,7 +792,7 @@ index 48052b44feb78341a7d676bbbc8e5641f8cb56ee..f958893c299c49b20f0cc0d209e9a2b9
                  Ok::<_, anyhow::Error>((None, LiveThreadInitGuard::new(/*live_thread*/ None)))
              } else {
                  let mut local_guard = LiveThreadInitGuard::default();
-@@ -1080,6 +1090,7 @@ impl Session {
+@@ -1091,6 +1101,7 @@ impl Session {
              "session_init.thread_persistence",
              otel.name = "session_init.thread_persistence",
              session_init.ephemeral = config.ephemeral,
@@ -803,19 +801,19 @@ index 48052b44feb78341a7d676bbbc8e5641f8cb56ee..f958893c299c49b20f0cc0d209e9a2b9
          let state_db_fut = async {
              if config.ephemeral {
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06834e0933 100644
+index 544351ca148aad54aecc5285fff76482ebc10afc..140cb087e890d121189e7193a45dbee020322a98 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -3,6 +3,8 @@ use crate::agents_md_manager::AgentsMdManager;
- use crate::agents_md_manager::SessionInstructions;
+@@ -4,6 +4,8 @@ use crate::agents_md_manager::SessionInstructions;
  use crate::environment_selection::TurnEnvironmentState;
+ use crate::session::Submission;
  use crate::session::handlers::submission_loop;
 +use crate::session::session::SessionSettingsCommit;
 +use crate::session::session::SessionSettingsUpdate;
  use crate::session::step_context::StepContext;
- use crate::session::step_context::StepInputs;
  use crate::session::step_settings::StepSettings;
-@@ -37,6 +39,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
+ use crate::session::tests::HeldStepTask;
+@@ -38,6 +40,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
  use codex_protocol::config_types::CollaborationModeMask;
  use codex_protocol::config_types::ReasoningSummary;
  use codex_protocol::config_types::ServiceTier;
@@ -823,9 +821,9 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
  use codex_protocol::openai_models::AutoReviewMessages;
  use codex_protocol::openai_models::GuardianV2ModelConfig;
  use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
-@@ -47,6 +50,9 @@ use codex_protocol::protocol::AskForApproval;
+@@ -47,6 +50,9 @@ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::AskForApproval;
  use codex_protocol::protocol::Op;
- use codex_protocol::protocol::Submission;
  use codex_protocol::protocol::TurnAbortReason;
 +use codex_protocol::protocol::TurnEnvironmentSelections;
 +use codex_utils_absolute_path::AbsolutePathBuf;
@@ -833,7 +831,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
  use pretty_assertions::assert_eq;
  use std::collections::BTreeSet;
  use std::collections::HashMap;
-@@ -672,6 +678,10 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -733,6 +739,10 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          finish,
          ..
      } = activation_fixture(activation_models()).await;
@@ -844,7 +842,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
      {
          let mut state = session.state.lock().await;
          let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
-@@ -680,6 +690,13 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -741,6 +751,13 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
                  .collaboration_mode
                  .with_updates(Some(MODEL_B.to_string()), None, None);
      }
@@ -858,8 +856,8 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
      let future = desired_step_settings(&session).await;
      let prepared = session
          .prepare_turn_context_replacement(&turn)
-@@ -693,6 +710,20 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
-         prepared.inputs.settings.selected()
+@@ -754,6 +771,20 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+         prepared.settings.selected()
      );
      assert_eq!(refreshed.model_info().slug, MODEL_A);
 +    assert_eq!(
@@ -879,7 +877,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
      assert!(
          session
              .try_replace_active_turn_context(&prepared, &refreshed)
-@@ -714,6 +745,187 @@ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
+@@ -775,6 +806,189 @@ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
      )
  }
 
@@ -914,7 +912,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +    } = activation_fixture(activation_models()).await;
 +    let directory = tempfile::tempdir().expect("workspace directory");
 +    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
-+    let captured = turn.next_step_input.load_full();
++    let captured = session.services.turn_environments.snapshot().await;
 +    let commit = commit_workspace_for_activation(&session, &turn, &cwd).await;
 +    assert_eq!(
 +        session
@@ -928,20 +926,22 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +            .await,
 +        TurnSettingsUpdateOutcome::Applied
 +    );
-+    let latest = turn.next_step_input.load_full();
++    let latest = turn.next_step_settings.load_full();
 +    let environments = session
 +        .activate_workspace_environments(&turn, &commit.configuration)
 +        .await
 +        .expect("activate workspace for original task");
-+    let published = turn.next_step_input.load_full();
-+    assert!(Arc::ptr_eq(&published.settings, &latest.settings));
++    let published = turn.next_step_settings.load_full();
++    assert!(Arc::ptr_eq(&published, &latest));
++    assert_eq!(published.reasoning_summary, ReasoningSummary::Detailed);
 +    assert_eq!(
-+        published.settings.reasoning_summary,
-+        ReasoningSummary::Detailed
-+    );
-+    assert_eq!(
-+        published.environments.to_selections(),
-+        environments.to_selections()
++        session
++            .services
++            .turn_environments
++            .snapshot()
++            .await
++            .all_selections(),
++        environments.all_selections()
 +    );
 +    assert_eq!(
 +        environments
@@ -952,7 +952,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +    );
 +    assert_eq!(
 +        turn.initial_environments.to_selections(),
-+        captured.environments.to_selections()
++        captured.to_selections()
 +    );
 +    finish.notify_one();
 +}
@@ -979,7 +979,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +    let directory = tempfile::tempdir().expect("workspace directory");
 +    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
 +    let commit = commit_workspace_for_activation(&session, &turn, &cwd).await;
-+    let original = turn.next_step_input.load_full();
++    let original = turn.next_step_settings.load_full();
 +    let (cancellation, done) = {
 +        let active = session.active_turn.lock().await;
 +        let task = active
@@ -1018,16 +1018,16 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +            replacement
 +        }
 +    };
-+    let current = current_turn.next_step_input.load_full();
++    let current = current_turn.next_step_settings.load_full();
 +    let selections = session.services.turn_environments.selections();
 +    let error = session
 +        .activate_workspace_environments(&turn, &commit.configuration)
 +        .await
 +        .expect_err("cancelled or replaced task must not activate workspace settings");
 +    assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
-+    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
++    assert!(Arc::ptr_eq(&turn.next_step_settings.load_full(), &original));
 +    assert!(Arc::ptr_eq(
-+        &current_turn.next_step_input.load_full(),
++        &current_turn.next_step_settings.load_full(),
 +        &current
 +    ));
 +    assert_eq!(session.services.turn_environments.selections(), selections);
@@ -1048,7 +1048,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +    let second = tempfile::tempdir().expect("second workspace directory");
 +    let second_cwd = AbsolutePathBuf::try_from(second.path()).expect("absolute workspace");
 +    commit_workspace_for_activation(&session, &turn, &second_cwd).await;
-+    let original = turn.next_step_input.load_full();
++    let original = turn.next_step_settings.load_full();
 +    let selections = session.services.turn_environments.selections();
 +    let error = session
 +        .activate_workspace_environments(&turn, &commit.configuration)
@@ -1059,7 +1059,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
 +        CodexErrorDetails::InvalidRequest(message)
 +            if message == "workspace settings changed while preparing the transition"
 +    ));
-+    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
++    assert!(Arc::ptr_eq(&turn.next_step_settings.load_full(), &original));
 +    assert_eq!(session.services.turn_environments.selections(), selections);
 +    finish.notify_one();
 +}
@@ -1068,7 +1068,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06
      id: &str,
      turn_id: &str,
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
-index 05fc21c4ce97cea11642cde99da996a9069f6da1..d122208cf23bde86e7c35570ee5b26978c3efe67 100644
+index 4722f4feb337da668b5f197c028dc0505198427c..0035a1077a5c3b1a0c8959742d234d835ed81280 100644
 --- a/codex-rs/core/src/session/step_context.rs
 +++ b/codex-rs/core/src/session/step_context.rs
 @@ -1,6 +1,8 @@
@@ -1080,7 +1080,7 @@ index 05fc21c4ce97cea11642cde99da996a9069f6da1..d122208cf23bde86e7c35570ee5b2697
 
  use crate::agents_md::LoadedAgentsMd;
  use crate::config::TokenBudgetConfig;
-@@ -48,6 +50,44 @@ pub(crate) struct StepContext {
+@@ -40,6 +42,44 @@ pub(crate) struct StepContext {
      pub(crate) tool_router: Arc<ToolRouter>,
      /// The canonical AGENTS.md value observed with this environment snapshot.
      pub(crate) loaded_agents_md: Option<Arc<LoadedAgentsMd>>,
@@ -1126,10 +1126,10 @@ index 05fc21c4ce97cea11642cde99da996a9069f6da1..d122208cf23bde86e7c35570ee5b2697
 
  impl StepContext {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index b0ab465f2f8ee50bd075f12e49069f62d94dbe34..228152a4341a02f5d8fd447772b24f3268c968b7 100644
+index d50b9d0ffe838054b37914f144aeb68780bf1876..4981ce42f094a62434988daf4d6516fff1847904 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -291,6 +291,7 @@ impl StepContext {
+@@ -292,6 +292,7 @@ impl StepContext {
                  &[],
              )),
              loaded_agents_md: None,
@@ -1137,7 +1137,7 @@ index b0ab465f2f8ee50bd075f12e49069f62d94dbe34..228152a4341a02f5d8fd447772b24f32
          })
      }
 
-@@ -11113,9 +11114,9 @@ impl SessionTask for ExtensionInterruptedTask {
+@@ -11450,9 +11451,9 @@ impl SessionTask for ExtensionInterruptedTask {
      }
  }
 
@@ -1151,10 +1151,10 @@ index b0ab465f2f8ee50bd075f12e49069f62d94dbe34..228152a4341a02f5d8fd447772b24f32
 
  impl SessionTask for HeldStepTask {
 diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
-index c0831ed4ba8db06a7af654a13243928203603565..399577a8138aa8ae37196da2c67adb89a7e3a635 100644
+index 36d6b86e9df04d3fb656726a6ed7029bc13d7860..237231367ca3d6d28c57a16f020e99b9e91bd549 100644
 --- a/codex-rs/core/src/session/thread_settings.rs
 +++ b/codex-rs/core/src/session/thread_settings.rs
-@@ -139,7 +139,7 @@ pub(super) async fn emit_applied(
+@@ -144,7 +144,7 @@ pub(super) async fn emit_applied(
  }
 
  /// Builds a current thread-owned snapshot for storage checkpoints.
@@ -1164,7 +1164,7 @@ index c0831ed4ba8db06a7af654a13243928203603565..399577a8138aa8ae37196da2c67adb89
          thread_id: Some(session.thread_id()),
          thread_settings: session.thread_settings_snapshot().await,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599b6534ffd 100644
+index a65502b5859761af26feaaa27968d99989521c02..8407970246707d94c2d005ec704786e98bba051f 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -61,6 +61,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
@@ -1175,16 +1175,16 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -677,7 +678,33 @@ pub(crate) async fn run_turn(
+@@ -673,7 +674,33 @@ pub(crate) async fn run_turn(
                  let SamplingRequestResult {
                      needs_follow_up: model_needs_follow_up,
                      last_agent_message: sampling_request_last_agent_message,
 +                    refresh_turn_context,
                  } = sampling_request_output;
 +                if refresh_turn_context {
-+                    let inputs = turn_context.next_step_input.load_full();
++                    let settings = turn_context.next_step_settings.load_full();
 +                    let refreshed_turn_context = sess
-+                        .refresh_active_turn_context(turn_context.as_ref(), &inputs)
++                        .refresh_active_turn_context(turn_context.as_ref(), &settings)
 +                        .await;
 +                    let refreshed_step_context = sess
 +                        .capture_step_context(
@@ -1209,7 +1209,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
                  if model_needs_follow_up {
                      sess.input_queue
                          .accept_mailbox_delivery_for_current_turn(
-@@ -2311,6 +2338,7 @@ pub(crate) async fn built_tools(
+@@ -2310,6 +2337,7 @@ pub(crate) async fn built_tools(
  struct SamplingRequestResult {
      needs_follow_up: bool,
      last_agent_message: Option<String>,
@@ -1217,7 +1217,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
  }
 
  /// Ephemeral per-response state for streaming a single proposed plan.
-@@ -3235,6 +3263,8 @@ async fn try_run_sampling_request(
+@@ -3256,6 +3284,8 @@ async fn try_run_sampling_request(
          .or_cancel(&cancellation_token)
          .await??;
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
@@ -1226,7 +1226,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
      let mut active_item: Option<TurnItem> = None;
-@@ -3419,6 +3449,10 @@ async fn try_run_sampling_request(
+@@ -3440,6 +3470,10 @@ async fn try_run_sampling_request(
                  if let Some(tool_future) = output_result.tool_future {
                      in_flight.push_back(tool_future);
                  }
@@ -1237,7 +1237,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
                  if let Some(agent_message) = output_result.last_agent_message {
                      last_agent_message = Some(agent_message);
                  }
-@@ -3428,6 +3462,7 @@ async fn try_run_sampling_request(
+@@ -3449,6 +3483,7 @@ async fn try_run_sampling_request(
                      break Ok(SamplingRequestResult {
                          needs_follow_up: true,
                          last_agent_message,
@@ -1245,7 +1245,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
                      });
                  }
              }
-@@ -3615,6 +3650,7 @@ async fn try_run_sampling_request(
+@@ -3636,6 +3671,7 @@ async fn try_run_sampling_request(
                  break Ok(SamplingRequestResult {
                      needs_follow_up,
                      last_agent_message,
@@ -1253,7 +1253,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
                  });
              }
              ResponseEvent::OutputTextDelta(delta) => {
-@@ -3899,6 +3935,9 @@ async fn try_run_sampling_request(
+@@ -3920,6 +3956,9 @@ async fn try_run_sampling_request(
      } else {
          Some(turn_context.turn_timing_state.begin_tool_blocking())
      };
@@ -1263,7 +1263,7 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
      if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), &step_context).await {
          reroute_safe.store(false, Ordering::Relaxed);
          return Err(err);
-@@ -3928,7 +3967,10 @@ async fn try_run_sampling_request(
+@@ -3949,7 +3988,10 @@ async fn try_run_sampling_request(
          }
      }
 
@@ -1276,16 +1276,14 @@ index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599
 
  pub(crate) fn get_last_assistant_message_from_turn<'a>(
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 86016e9adcd5fc9b95ecd882d0c8e31ad3b025ec..e9c37d5011bb0be6c8d46d8bda4d688cf6847cd2 100644
+index cc8c67d19724227696914dd5f04739153b9f187a..6eef6c4e2ec16076b6751521df45cf779994cacd 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -1606,7 +1606,8 @@ impl Session {
-         // Workspace changes rebuild environments, not the active turn's model preferences.
+@@ -1596,6 +1596,7 @@ impl Session {
          // Future thread settings may already differ from this request's settings.
-         session_configuration.step_settings = Arc::new(inputs.settings.selected().clone());
--        let environments = self.services.turn_environments.snapshot().await;
-+        session_configuration.environments = inputs.environments.all_selections();
-+        let environments = inputs.environments.clone();
+         session_configuration.step_settings = Arc::new(settings.selected().clone());
+         let environments = self.services.turn_environments.snapshot().await;
++        session_configuration.environments = environments.all_selections();
          let refreshed = self
              .new_turn_context_from_configuration(
                  current.sub_id.clone(),
@@ -1366,10 +1364,10 @@ index 38cc41c7482ec99e242d69d990552038afe6efab..0012213fa8073c59251cad6fa326f811
  where
 diff --git a/codex-rs/core/src/tools/handlers/workspace.rs b/codex-rs/core/src/tools/handlers/workspace.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..650734db9f676ff16caabb87d2f012994a775f24
+index 0000000000000000000000000000000000000000..b93ef1441e1fede707acf1ebd271aae59a32b4ff
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/workspace.rs
-@@ -0,0 +1,913 @@
+@@ -0,0 +1,915 @@
 +use std::collections::BTreeMap;
 +use std::path::PathBuf;
 +
@@ -2084,6 +2082,8 @@ index 0000000000000000000000000000000000000000..650734db9f676ff16caabb87d2f01299
 +        let live_thread = codex_thread_store::LiveThread::create(
 +            Arc::clone(&thread_store),
 +            CreateThreadParams {
++                creator_user_id: None,
++                creator_account_id: None,
 +                session_id: session.session_id(),
 +                thread_id: session.thread_id,
 +                extra_config: None,
@@ -2284,7 +2284,7 @@ index 0000000000000000000000000000000000000000..650734db9f676ff16caabb87d2f01299
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index f5c88e3b92726e8d10790bb7462769dae9960c5a..4cc32a4fd11ac16684e03e9d8b97391b6186a691 100644
+index 335ce59526c79c998417365ca20f9b4520052839..eea0db192d23c1881bb46a316fd8c1e68e113b6c 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -25,6 +25,7 @@ use crate::tools::handlers::RequestPluginInstallHandler;
@@ -2295,7 +2295,7 @@ index f5c88e3b92726e8d10790bb7462769dae9960c5a..4cc32a4fd11ac16684e03e9d8b97391b
  use crate::tools::handlers::SleepHandler;
  use crate::tools::handlers::TestSyncHandler;
  use crate::tools::handlers::ToolSearchHandlerCache;
-@@ -1159,6 +1160,12 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+@@ -1164,6 +1165,12 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
          registry.add(RequestPermissionsHandler);
      }
 
@@ -2557,7 +2557,7 @@ index f3403c28520905bf09b89b45cb77c5376137aa59..471d44c250bfaaab91015ee793bc20d4
  async fn responses_websocket_reuses_connection_after_session_drop() {
      skip_if_no_network!();
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
-index d443287687d6cbe45ce469ca2ef75de2f95a8499..b152ffa070505f488d23541cc3bc5edcfb204daa 100644
+index 67c77fb907b2f9185f0f67db8ff75986a365a0c8..ef4540a6610a046b767e9c3f95ef69d10f5452b1 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
 +++ b/codex-rs/core/tests/suite/code_mode.rs
 @@ -856,6 +856,8 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
@@ -2596,7 +2596,7 @@ index d443287687d6cbe45ce469ca2ef75de2f95a8499..b152ffa070505f488d23541cc3bc5edc
               omit_tools_from={omit_tools_from:?}, \
               supports_search_tool={supports_search_tool}, \
               direct_only_namespace={direct_only_namespace}, namespace={namespace}, tools={:?}",
-@@ -2815,6 +2828,8 @@ if (!tool) {
+@@ -2945,6 +2958,8 @@ if (!tool) {
              "exec".to_string(),
              "wait".to_string(),
              "request_user_input".to_string(),
@@ -2624,10 +2624,10 @@ index 037d671bd4b0b922cf9b1d434176bbf5c24c5d3c..a2b7b60d16251d4760f3c452f55aa64f
          timeout(Duration::from_millis(150), test.codex.next_event())
              .await
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 63ffd168507b5bd1ca76e9e5eceda71522c9e499..e64013984243499b0bb1343e04f02212148abc45 100644
+index f7b3688b75ead1bf242568f6ff7ae8f78964e2ff..c19ac1656a136dd3f96074812cd1eea1e0a8c4b8 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -224,6 +224,8 @@ mod websocket_fallback;
+@@ -229,6 +229,8 @@ mod websocket_fallback;
  mod window_headers;
  #[cfg(target_os = "windows")]
  mod windows_sandbox;
@@ -2649,10 +2649,10 @@ index 9bbd7e7ed6659f0ed249a75ad6d5ff2425bac1a9..ab97c087bce418f2b20b765409e998ac
          "view_image",
          "tool_search",
 diff --git a/codex-rs/core/tests/suite/remote_env.rs b/codex-rs/core/tests/suite/remote_env.rs
-index 1a81fa4b04fa4b09f395f26faf4f67745eed592e..3ac4087c9a0e09be7e4f324e0497f22d091ea29e 100644
+index a3ba5a2a11981aa7cc471dad0b204a9d305faddd..ce1782bb8f9cac12127c993412747c93de090285 100644
 --- a/codex-rs/core/tests/suite/remote_env.rs
 +++ b/codex-rs/core/tests/suite/remote_env.rs
-@@ -2486,6 +2486,121 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
+@@ -2723,6 +2723,121 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
      Ok(())
  }
 
@@ -2837,7 +2837,7 @@ index acf1a2bd8ca641b1036bd61967b7857161de5183..333e57442ef39619a9bc514923a5df82
      let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
 diff --git a/codex-rs/core/tests/suite/workspace_cwd.rs b/codex-rs/core/tests/suite/workspace_cwd.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a24ec764716a3e8e54dc8a9856e06ea31a29e9cf
+index 0000000000000000000000000000000000000000..69cf1cf0eb3a4a1f2ca4e90003124f941ab43d53
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/workspace_cwd.rs
 @@ -0,0 +1,459 @@
@@ -2887,7 +2887,7 @@ index 0000000000000000000000000000000000000000..a24ec764716a3e8e54dc8a9856e06ea3
 +        include_instructions: config.include_skill_instructions,
 +        max_context_tokens: config.skill_max_context_tokens,
 +        bundled_skills_enabled: config.bundled_skills_enabled(),
-+        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
++        cloud_skill_enabled: false,
 +        shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
 +    });
 +    std::sync::Arc::new(extensions.build())
@@ -3382,10 +3382,10 @@ index 1594b6db661e82b8b8c8d6bcddea1c0bf01187f1..94a9592844eebe4ab51aff828e16ce78
      assert_eq!(std::fs::read_to_string(&source_path)?, original_source);
 
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 1f24544ea14af7fca6dd97a29816d868b57228b0..45230c300c41cbe6062be8f54c3a090032844485 100644
+index 025f116a5daeedeee1c058a4198038866f137bf1..a2364d12ef37d066548b2c215c8d61c1ea188031 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -376,6 +376,8 @@ pub enum Feature {
+@@ -377,6 +377,8 @@ pub enum Feature {
      UseAgentIdentity,
      /// Enable workspace dependency support.
      WorkspaceDependencies,
@@ -3394,7 +3394,7 @@ index 1f24544ea14af7fca6dd97a29816d868b57228b0..45230c300c41cbe6062be8f54c3a0900
 
      // Removed
      /// Removed compatibility flag retained as a no-op so old configs can
-@@ -1851,6 +1853,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1856,6 +1858,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -3424,7 +3424,7 @@ index a21dbb63424ed1eb917ad76b86b0007be7ef454b..5584b6e974f8b1fc21373ff212cefa6f
      /// The owner will supply environment configuration later.
      Pending,
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 8c9a7dafd68ea3c5ab5684ac6e7b86bb9dc8570a..f772a8136fe6cd83477c3b688945ceb93b4120a9 100644
+index e216d284ed5cea3656c93f72ece32a8bd2f92e13..02c7098a6606911ecaeb4498f2c9047a3c862066 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -156,6 +156,8 @@ pub struct TurnEnvironmentSelection {
@@ -3436,7 +3436,7 @@ index 8c9a7dafd68ea3c5ab5684ac6e7b86bb9dc8570a..f772a8136fe6cd83477c3b688945ceb9
      pub config: EnvironmentConfigState,
  }
 
-@@ -4546,6 +4548,42 @@ mod tests {
+@@ -4553,6 +4555,42 @@ mod tests {
          assert_eq!(event.root_turn_id, None);
      }
 
@@ -3480,7 +3480,7 @@ index 8c9a7dafd68ea3c5ab5684ac6e7b86bb9dc8570a..f772a8136fe6cd83477c3b688945ceb9
      fn review_decision_denied_round_trip() -> Result<()> {
          let decision = ReviewDecision::Denied {
 diff --git a/codex-rs/thread-store/src/local/update_thread_metadata.rs b/codex-rs/thread-store/src/local/update_thread_metadata.rs
-index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174de8d0f2b 100644
+index 8cfb38bf2f2474643fb3592258bec436b9c66c8e..51d0264101ed4096ff8b7d01c2cb81d1d017811c 100644
 --- a/codex-rs/thread-store/src/local/update_thread_metadata.rs
 +++ b/codex-rs/thread-store/src/local/update_thread_metadata.rs
 @@ -72,6 +72,7 @@ pub(super) async fn update_thread_metadata(
@@ -3558,7 +3558,7 @@ index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174
      if pending_patch.is_some() {
          remove_pending_thread_metadata(store, thread_id, &mut pending_metadata).await;
      }
-@@ -705,12 +714,21 @@ async fn canonical_history_mode(
+@@ -707,12 +716,21 @@ async fn canonical_history_mode(
  }
 
  fn requires_rollout_compatibility_update(patch: &ThreadMetadataPatch) -> bool {
@@ -3580,7 +3580,7 @@ index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174
  fn sqlite_write_failure_should_block(patch: &ThreadMetadataPatch) -> bool {
      // Before live metadata sync moved above the rollout writer, SQLite sync failures for
      // transcript-derived metadata, thread names, and memory-mode indexing were log-only. Keep that
-@@ -728,6 +746,10 @@ fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
+@@ -730,6 +748,10 @@ fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
  }
 
  fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
@@ -3591,7 +3591,7 @@ index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174
      patch.rollout_path.is_some()
          || patch.preview.is_some()
          || patch.title.is_some()
-@@ -741,7 +763,6 @@ fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
+@@ -745,7 +767,6 @@ fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
          || patch.agent_nickname.is_some()
          || patch.agent_role.is_some()
          || patch.agent_path.is_some()
@@ -3599,7 +3599,7 @@ index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174
          || patch.cli_version.is_some()
          || patch.approval_mode.is_some()
          || patch.permission_profile.is_some()
-@@ -1562,6 +1583,129 @@ mod tests {
+@@ -1566,6 +1587,129 @@ mod tests {
          );
      }
 
@@ -3730,7 +3730,7 @@ index 6caf5b294dd5a190a302fdbc49548fe5ff1ef718..6b4841cd947c8b37cf75b86fbd34f174
      async fn update_thread_metadata_updates_permission_profile_and_reasoning_effort() {
          let home = TempDir::new().expect("temp dir");
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 48d9c5df6214cfb45cf09f8411c53916c82496e6..d3af83e9d886fb1ec921a54eafdc52744f352091 100644
+index 01073669c73f4fe9a3e7fc3333fa3703024a794d..e26d3f5a2c1d90adb86ef2a900f58a1e4ce83edc 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
 @@ -239,6 +239,7 @@ mod pending_interactive_replay;
@@ -3749,7 +3749,7 @@ index 48d9c5df6214cfb45cf09f8411c53916c82496e6..d3af83e9d886fb1ec921a54eafdc5274
  mod startup;
  mod startup_prompts;
  mod startup_warnings;
-@@ -652,6 +654,7 @@ pub(crate) struct App {
+@@ -655,6 +657,7 @@ pub(crate) struct App {
      agents_overview: agents_overview::AgentsOverviewState,
      side_threads: HashMap<ThreadId, SideThreadState>,
      abandoned_side_threads: HashSet<ThreadId>,
@@ -3758,7 +3758,7 @@ index 48d9c5df6214cfb45cf09f8411c53916c82496e6..d3af83e9d886fb1ec921a54eafdc5274
      active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
      primary_thread_id: Option<ThreadId>,
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba7c40c763 100644
+index 67cb401a86d3afb977e0b73405220bbd077eba22..96b1a054838b7efe265704b3099abd1e75137fb8 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -8,6 +8,7 @@ use super::rate_limit_refresh::RateLimitRefreshOutcome;
@@ -3814,7 +3814,7 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
 
  impl App {
      pub(crate) async fn handle_event(
-@@ -82,6 +113,7 @@ impl App {
+@@ -86,6 +117,7 @@ impl App {
                  AppEvent::OpenAgentPicker
                      | AppEvent::SelectAgentThread(_)
                      | AppEvent::StartSide { .. }
@@ -3822,18 +3822,18 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
                      | AppEvent::ForkCurrentSession { .. }
                      | AppEvent::StartManagedWorktree {
                          mode: crate::app_event::ManagedWorktreeMode::Fork,
-@@ -449,7 +481,7 @@ impl App {
+@@ -460,7 +492,7 @@ impl App {
              AppEvent::DeleteCurrentThread => {
                  return self.delete_current_thread(tui, app_server).await;
              }
 -            AppEvent::ForkCurrentSession { name } => {
 +            AppEvent::ForkCurrentSession { name, placement } => {
-                 self.session_telemetry.counter(
-                     "codex.thread.fork",
+                 let from_locked_thread = self.chat_widget.is_external_writer_view();
+                 let source = if from_locked_thread {
+                     "locked_thread_shortcut"
+@@ -472,8 +504,12 @@ impl App {
                      /*inc*/ 1,
-@@ -461,8 +493,12 @@ impl App {
-                     self.chat_widget.thread_name(),
-                     self.chat_widget.rollout_path().as_deref(),
+                     &[("source", source)],
                  );
 -                self.chat_widget
 -                    .add_plain_history_lines(vec!["/fork".magenta().into()]);
@@ -3846,7 +3846,20 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
                  if let Some(thread_id) = self.chat_widget.thread_id() {
                      if self.pending_server_profiles.contains_key(&thread_id) {
                          self.chat_widget.add_error_message(
-@@ -482,15 +518,97 @@ impl App {
+@@ -481,12 +517,6 @@ impl App {
+                         );
+                         return Ok(AppRunControl::Continue);
+                     }
+-                    self.chat_widget.fork_in_progress = true;
+-                    // This handler awaits the fork outside the draw loop. Paint before waiting.
+-                    let screen_size = tui.terminal.last_known_screen_size;
+-                    self.handle_draw_pre_render(tui, screen_size)?;
+-                    self.chat_widget.pre_draw_tick();
+-                    self.render_chat_widget_frame(tui, screen_size)?;
+                     self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
+                         .await;
+                     let mut fork_config = self.config.clone();
+@@ -499,15 +529,103 @@ impl App {
                      fork_config.model_reasoning_effort =
                          self.chat_widget.current_reasoning_effort();
                      let selected_profile = self.confirmed_server_profile(thread_id);
@@ -3938,6 +3951,12 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
 +                        tui.frame_requester().schedule_frame();
 +                        return Ok(AppRunControl::Continue);
 +                    }
++                    // Pane handoffs keep this thread; only an in-place fork owns its input guard.
++                    self.chat_widget.fork_in_progress = true;
++                    let screen_size = tui.terminal.last_known_screen_size;
++                    self.handle_draw_pre_render(tui, screen_size)?;
++                    self.chat_widget.pre_draw_tick();
++                    self.render_chat_widget_frame(tui, screen_size)?;
 +                    match app_server
 +                        .fork_thread_at(
 +                            &self.local_settings,
@@ -3951,9 +3970,9 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
 +                        .await
 +                    {
                          Ok(mut forked) => {
-                             let name_error = if let Some(name) = name {
-                                 match app_server
-@@ -2700,6 +2818,14 @@ impl App {
+                             let retained_input = from_locked_thread
+                                 .then(|| self.chat_widget.capture_thread_input_state())
+@@ -2759,6 +2877,14 @@ impl App {
                      .handle_start_side(tui, app_server, parent_thread_id, user_message)
                      .await;
              }
@@ -3968,6 +3987,23 @@ index 14262f09577f2b41910e6689472d6e0666082727..8baea55336eb426f4aa9a1402142efba
              AppEvent::OpenSkillsList => {
                  self.chat_widget.open_skills_list();
              }
+diff --git a/codex-rs/tui/src/app/input.rs b/codex-rs/tui/src/app/input.rs
+index 4648b3de6bfa81ee57bda6149806ba36fc87f138..c3b698727afce9d9c29e3fc2e6c75544bdf4d5f3 100644
+--- a/codex-rs/tui/src/app/input.rs
++++ b/codex-rs/tui/src/app/input.rs
+@@ -383,8 +383,10 @@ impl App {
+                 && (modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT)
+             {
+                 self.chat_widget.fork_in_progress = true;
+-                self.app_event_tx
+-                    .send(AppEvent::ForkCurrentSession { name: None });
++                self.app_event_tx.send(AppEvent::ForkCurrentSession {
++                    name: None,
++                    placement: None,
++                });
+                 return;
+             }
+             if matches!(key_event.code, KeyCode::Char('r' | 'R'))
 diff --git a/codex-rs/tui/src/app/placed_side.rs b/codex-rs/tui/src/app/placed_side.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..10bcf0944cb5648f50e324b129c010004d6c7783
@@ -4143,11 +4179,31 @@ index 0000000000000000000000000000000000000000..89ac668e41b2f89817b5bc8494e7f73f
 +        .join("\n")
 +    );
 +}
+diff --git a/codex-rs/tui/src/app/reconnect.rs b/codex-rs/tui/src/app/reconnect.rs
+index 01cc928474780821a9dc4c64b996cb197b3f4098..5650237481d8bf82f30a7d97d98c3ff495d35626 100644
+--- a/codex-rs/tui/src/app/reconnect.rs
++++ b/codex-rs/tui/src/app/reconnect.rs
+@@ -113,6 +113,15 @@ pub(super) async fn reconnect(
+         let result = tokio::time::timeout_at(deadline, attempt).await;
+         match result {
+             Ok(Ok(connected)) => return Ok(connected),
++            Ok(Err(error))
++                if error
++                    .downcast_ref::<crate::app_server_connection::LocalDaemonVersionMismatch>()
++                    .is_some() =>
++            {
++                // A different release cannot safely resume this session. Keep the TUI offline;
++                // only a fresh launch may choose an embedded server instead.
++                return Err(error);
++            }
+             Ok(Err(_)) => {}
+             Err(_) => break,
+         }
 diff --git a/codex-rs/tui/src/app/session_picker.rs b/codex-rs/tui/src/app/session_picker.rs
-index 018a3f5ad1a607314db91c9752b44e00a00da855..61b7260b3b969f4e2717486d154d7e2e8ade7a1d 100644
+index de09c62277a8b1796ac1b165180c64035d1b0d40..4a56fb623d938a113a35ce11e4b9fe09d8813d6a 100644
 --- a/codex-rs/tui/src/app/session_picker.rs
 +++ b/codex-rs/tui/src/app/session_picker.rs
-@@ -128,7 +128,7 @@ impl App {
+@@ -132,7 +132,7 @@ impl App {
                  self.refresh_in_memory_config_from_disk_best_effort("closing the session picker")
                      .await;
              }
@@ -4454,7 +4510,7 @@ index 0000000000000000000000000000000000000000..9cb912221be6fd58570a48202859b33e
 +    Ok(())
 +}
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index eca872a83096b4b0d64ad0e5bb9b6e5f1e95d0ff..79ef76871dbc92732ae43f8ccdb460fcd2aa0a3a 100644
+index e1fdffd2052c81a1c5220fd565f55bfc8232e46f..995a47eb1a067ca10c3d322cc3f8cd667d1a3bd7 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
 @@ -394,6 +394,7 @@ impl App {
@@ -4519,7 +4575,7 @@ index eca872a83096b4b0d64ad0e5bb9b6e5f1e95d0ff..79ef76871dbc92732ae43f8ccdb460fc
          };
          let startup_session_cancelled = initial_started_thread.is_none()
              && !pending_startup_thread_start
-@@ -813,6 +861,7 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -815,6 +863,7 @@ See the Codex keymap documentation for supported actions and examples."
              agents_overview: Default::default(),
              side_threads: HashMap::new(),
              abandoned_side_threads: HashSet::new(),
@@ -4527,7 +4583,7 @@ index eca872a83096b4b0d64ad0e5bb9b6e5f1e95d0ff..79ef76871dbc92732ae43f8ccdb460fc
              active_thread_id: None,
              active_thread_rx: None,
              primary_thread_id: None,
-@@ -861,6 +910,9 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -863,6 +912,9 @@ See the Codex keymap documentation for supported actions and examples."
          } else if !matches!(app.app_server_target, AppServerTarget::Embedded) {
              app.refresh_agents_overview_threads(&app_server);
          }
@@ -4538,10 +4594,10 @@ index eca872a83096b4b0d64ad0e5bb9b6e5f1e95d0ff..79ef76871dbc92732ae43f8ccdb460fc
              app.chat_widget.open_hooks_browser(entry);
          }
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index babb9572fefdc42d0cfbed378cfa8c8ba66bc1d0..9678935d4d3f7ea877c003586079f46799fa3cab 100644
+index 6664c5846b8bbd7c1c15ff75f29f6f811ccd27ae..c10ed87df8f427953f0296e1dcfe4b846167ea19 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -94,6 +94,7 @@ pub(crate) async fn make_test_app() -> App {
+@@ -96,6 +96,7 @@ pub(crate) async fn make_test_app() -> App {
          agents_overview: Default::default(),
          side_threads: HashMap::new(),
          abandoned_side_threads: HashSet::new(),
@@ -4550,10 +4606,10 @@ index babb9572fefdc42d0cfbed378cfa8c8ba66bc1d0..9678935d4d3f7ea877c003586079f467
          active_thread_rx: None,
          primary_thread_id: None,
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d2ce49e29 100644
+index bb644f7af937b5d918aa3254a70d057a3e31b379..e6304088e4d17dcc595bf57711e8f65fe78df5bc 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
-@@ -98,10 +98,16 @@ mod user_verification_routes;
+@@ -102,10 +102,16 @@ mod user_verification_routes;
  mod worktree_background_terminals_tests;
 
  use super::*;
@@ -4570,7 +4626,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
  use crate::app_event::HistoryBatchEntryResponse;
 
  async fn drain_managed_worktree_start(app: &mut App, server: &mut AppServerSession) {
-@@ -128,6 +134,7 @@ use crate::history_cell::UserHistoryCell;
+@@ -132,6 +138,7 @@ use crate::history_cell::UserHistoryCell;
  use crate::history_cell::new_session_info;
  use crate::multi_agents::AgentPickerThreadEntry;
  use crate::multi_agents::SubAgentActivityDisplay;
@@ -4578,7 +4634,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
  use assert_matches::assert_matches;
 
  use crate::app_command::AppCommand as Op;
-@@ -232,6 +239,49 @@ macro_rules! assert_app_snapshot {
+@@ -236,6 +243,49 @@ macro_rules! assert_app_snapshot {
      };
  }
 
@@ -4628,7 +4684,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
  fn test_absolute_path(path: &str) -> AbsolutePathBuf {
      AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
  }
-@@ -3049,7 +3099,10 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() ->
+@@ -3079,7 +3129,10 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() ->
      app.handle_event(
          &mut tui,
          &mut server,
@@ -4640,7 +4696,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
      )
      .await?;
      let _ = next_history_message(&mut events);
-@@ -4885,6 +4938,17 @@ async fn side_start_block_message_allows_replacing_open_side_conversation() {
+@@ -4915,6 +4968,17 @@ async fn side_start_block_message_allows_replacing_open_side_conversation() {
      assert_eq!(app.side_start_block_message(), None);
  }
 
@@ -4658,7 +4714,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
  #[tokio::test]
  async fn side_parent_status_tracks_parent_turn_lifecycle() -> Result<()> {
      let mut app = make_test_app().await;
-@@ -6025,6 +6089,7 @@ async fn make_test_app() -> App {
+@@ -6057,6 +6121,7 @@ async fn make_test_app() -> Box<App> {
          agents_overview: Default::default(),
          side_threads: HashMap::new(),
          abandoned_side_threads: HashSet::new(),
@@ -4666,7 +4722,7 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
          active_thread_id: None,
          active_thread_rx: None,
          primary_thread_id: None,
-@@ -6130,6 +6195,7 @@ pub(super) async fn make_test_app_with_channels() -> (
+@@ -6164,6 +6229,7 @@ pub(super) async fn make_test_app_with_channels() -> (
              agents_overview: Default::default(),
              side_threads: HashMap::new(),
              abandoned_side_threads: HashSet::new(),
@@ -4674,6 +4730,65 @@ index b076974b5b3fed106ae432d839bbbdddb08d458d..750e61545fa95fbe7e47dacaa213da4d
              active_thread_id: None,
              active_thread_rx: None,
              primary_thread_id: None,
+diff --git a/codex-rs/tui/src/app/tests/active_reconnect_tests.rs b/codex-rs/tui/src/app/tests/active_reconnect_tests.rs
+index 683e8fc461287ec6de7104b793bd3a00ff820fa7..278295ffb867ac6a924e49552963f71c775e4063 100644
+--- a/codex-rs/tui/src/app/tests/active_reconnect_tests.rs
++++ b/codex-rs/tui/src/app/tests/active_reconnect_tests.rs
+@@ -11,6 +11,54 @@ use tokio::net::TcpListener;
+
+ use super::disconnect::serve_reconnect_requests;
+
++#[tokio::test]
++async fn automatic_daemon_reconnect_rejects_changed_release_without_resuming() -> Result<()> {
++    let mut app = make_test_app().await;
++    let server = crate::daemon_identity_tests::InitializeServer::start(
++        vec![Some(format!("codex/{}+other", env!("CARGO_PKG_VERSION")))],
++        Vec::new(),
++    )
++    .await;
++    let thread_id = ThreadId::new();
++    app.app_server_target = AppServerTarget::LocalDaemon {
++        endpoint: server.endpoint.clone(),
++        allow_embedded_fallback: false,
++    };
++    app.active_thread_id = Some(thread_id);
++    app.primary_thread_id = Some(thread_id);
++    app.chat_widget
++        .restore_user_message_to_composer("keep this offline draft".into());
++    assert!(app.begin_reconnect());
++
++    let result = reconnect(
++        app.app_server_target.clone(),
++        app.config.clone(),
++        app.local_settings.clone(),
++        Some(thread_id),
++        /*remote_cwd*/ None,
++        crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
++        ReconnectPresentation::Conversation,
++    )
++    .await;
++
++    let error = result
++        .err()
++        .expect("different daemon release must not resume");
++    assert!(
++        error
++            .downcast_ref::<crate::app_server_connection::LocalDaemonVersionMismatch>()
++            .is_some()
++    );
++    assert!(app.is_offline());
++    assert_eq!(app.active_thread_id, Some(thread_id));
++    assert_eq!(
++        app.chat_widget.composer_text_with_pending(),
++        "keep this offline draft"
++    );
++    assert_eq!(server.finish().await, vec![vec!["initialize".to_string()]]);
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> Result<()> {
+     for (recovered_queue, edit_offline, resume_error_code, deferred_notice, notice_enabled) in [
 diff --git a/codex-rs/tui/src/app/tests/advanced_reasoning_tests.rs b/codex-rs/tui/src/app/tests/advanced_reasoning_tests.rs
 index 2e82c78975cc2167e94fa45e9f7592e01b8f4b96..19baea6b7a7dfb9a570af1c1a7d4fa16914da82c 100644
 --- a/codex-rs/tui/src/app/tests/advanced_reasoning_tests.rs
@@ -4690,6 +4805,57 @@ index 2e82c78975cc2167e94fa45e9f7592e01b8f4b96..19baea6b7a7dfb9a570af1c1a7d4fa16
      ))
      .await?;
 
+diff --git a/codex-rs/tui/src/app/tests/external_writer_fork_tests.rs b/codex-rs/tui/src/app/tests/external_writer_fork_tests.rs
+index a7e0ad810bbd4bb81c4c6c1bded39437627a43a6..dc9a179344f7a99401abb08b2a2c64d7ed6b9f04 100644
+--- a/codex-rs/tui/src/app/tests/external_writer_fork_tests.rs
++++ b/codex-rs/tui/src/app/tests/external_writer_fork_tests.rs
+@@ -63,7 +63,15 @@ async fn external_writer_fork_shortcut_respects_input_ownership() -> Result<()>
+         app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(key))
+             .await?;
+         let forks = std::iter::from_fn(|| events.try_recv().ok())
+-            .filter(|event| matches!(event, AppEvent::ForkCurrentSession { name: None }))
++            .filter(|event| {
++                matches!(
++                    event,
++                    AppEvent::ForkCurrentSession {
++                        name: None,
++                        placement: None
++                    }
++                )
++            })
+             .count();
+         assert_eq!(forks, usize::from(expected), "{key:?}");
+         assert_eq!(app.chat_widget.composer_text_with_pending(), "f");
+@@ -176,7 +184,13 @@ async fn external_writer_fork_opens_editable_thread_without_taking_source_lease(
+     )
+     .await?;
+     let event = events.try_recv()?;
+-    assert!(matches!(event, AppEvent::ForkCurrentSession { name: None }));
++    assert!(matches!(
++        event,
++        AppEvent::ForkCurrentSession {
++            name: None,
++            placement: None
++        }
++    ));
+     Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+
+     assert_eq!(app.chat_widget.capture_thread_input_state(), retained_input);
+@@ -247,7 +261,13 @@ async fn external_writer_fork_failure_keeps_the_locked_view_and_draft() -> Resul
+     )
+     .await?;
+     let event = events.try_recv()?;
+-    assert!(matches!(event, AppEvent::ForkCurrentSession { name: None }));
++    assert!(matches!(
++        event,
++        AppEvent::ForkCurrentSession {
++            name: None,
++            placement: None
++        }
++    ));
+     Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+     assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+     assert!(app.chat_widget.is_external_writer_view());
 diff --git a/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs b/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs
 index b18a99ebae7fd4a8c220f61534a2012379d43749..6d16d5376db57b7ef3a0ae454bbe3c048e2842f5 100644
 --- a/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs
@@ -4707,10 +4873,10 @@ index b18a99ebae7fd4a8c220f61534a2012379d43749..6d16d5376db57b7ef3a0ae454bbe3c04
      .await?;
 
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index 28344b49be41f4163ff95540a0ee37053550bbdf..a2992745341c352bf949977e12afc46d4e88ff81 100644
+index c183e79ecacaa50a8b2bf321b5288b9d668650e8..115f3864906c8b38bddf7057fa15cbbe2afab423 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-@@ -4078,7 +4078,12 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
+@@ -4079,7 +4079,12 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
      requests.lock().expect("request recorder lock").clear();
      app.change_working_directory(&mut tui, &mut server, untrusted.clone().abs())
          .await;
@@ -4724,7 +4890,7 @@ index 28344b49be41f4163ff95540a0ee37053550bbdf..a2992745341c352bf949977e12afc46d
      let approval = app.config.permissions.approval_policy.value();
      assert_eq!(approval, AskForApproval::UnlessTrusted.to_core());
      assert_eq!(rec(req, "thread/fork")[0]["approvalPolicy"], "untrusted");
-@@ -4239,6 +4244,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
+@@ -4240,6 +4245,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                      &mut app_server,
                      AppEvent::ForkCurrentSession {
                          name: Some("Add User Fork".to_string()),
@@ -4732,7 +4898,7 @@ index 28344b49be41f4163ff95540a0ee37053550bbdf..a2992745341c352bf949977e12afc46d
                      },
                  ))
                  .await?;
-@@ -4267,6 +4273,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
+@@ -4268,6 +4274,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                      &mut app_server,
                      AppEvent::ForkCurrentSession {
                          name: Some("Failed Fork".to_string()),
@@ -4858,10 +5024,10 @@ index eac4053b7b4a65cdab35994d1ad1b58aecd2d1cd..52488ac9183035a78cecbcbcd803c590
 
      assert!(!app.config.codex_home.join("worktrees").exists());
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index 26e842cfa8a70b473752c5b2c58ac861d92369fc..3d1ab500c8b2a051332e55e386c4e27987ff5be9 100644
+index bc0b2a05e1559de86d0b491e1c9df2b2a6f4b527..2ccd64c9c7d2ad0bed1baaeb47be5d5f49e1305a 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
-@@ -367,6 +367,12 @@ pub(crate) enum AppEvent {
+@@ -375,6 +375,12 @@ pub(crate) enum AppEvent {
          user_message: Option<UserMessage>,
      },
 
@@ -4874,7 +5040,7 @@ index 26e842cfa8a70b473752c5b2c58ac861d92369fc..3d1ab500c8b2a051332e55e386c4e279
      /// Submit an op to the specified thread, regardless of current focus.
      SubmitThreadOp {
          thread_id: ThreadId,
-@@ -585,6 +591,7 @@ pub(crate) enum AppEvent {
+@@ -593,6 +599,7 @@ pub(crate) enum AppEvent {
      /// Fork the current session into a new thread, optionally assigning it a name.
      ForkCurrentSession {
          name: Option<String>,
@@ -4882,7 +5048,7 @@ index 26e842cfa8a70b473752c5b2c58ac861d92369fc..3d1ab500c8b2a051332e55e386c4e279
      },
 
      /// Revert before a selected prompt, retaining its identity across queued history pages.
-@@ -1594,6 +1601,15 @@ pub(crate) struct PermissionProfileSelection {
+@@ -1612,6 +1619,15 @@ pub(crate) struct PermissionProfileSelection {
      pub display_label: String,
  }
 
@@ -4898,11 +5064,58 @@ index 26e842cfa8a70b473752c5b2c58ac861d92369fc..3d1ab500c8b2a051332e55e386c4e279
  /// The exit strategy requested by the UI layer.
  ///
  /// Most user-initiated exits should use `ShutdownFirst` so core cleanup runs and the UI exits only
+diff --git a/codex-rs/tui/src/app_server_connection.rs b/codex-rs/tui/src/app_server_connection.rs
+index ac3ab1cb2cd4980ce795b63204d2ab65616c93e9..e752a294c40f7e68ababfe7c704e914e43f8041c 100644
+--- a/codex-rs/tui/src/app_server_connection.rs
++++ b/codex-rs/tui/src/app_server_connection.rs
+@@ -14,8 +14,19 @@ use codex_app_server_client::RemoteAppServerEndpoint;
+ #[cfg(windows)]
+ use codex_utils_absolute_path::AbsolutePathBuf;
+
++/// An automatically selected daemon must implement this CLI's complete release,
++/// including Frodex build metadata; feature flags cannot establish that identity.
++#[derive(Debug, thiserror::Error)]
++#[error(
++    "shared background server version {actual_version:?} does not match this Codex version {expected_version}"
++)]
++pub(crate) struct LocalDaemonVersionMismatch {
++    expected_version: &'static str,
++    actual_version: String,
++}
++
+ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppServerClient> {
+-    match target {
++    let app_server = match target {
+         AppServerTarget::Embedded => {
+             color_eyre::eyre::bail!("embedded sessions have no remote connection")
+         }
+@@ -45,5 +56,21 @@ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppS
+         AppServerTarget::LocalDaemon { endpoint, .. } | AppServerTarget::Remote { endpoint } => {
+             connect_remote_app_server(endpoint.clone()).await
+         }
++    }?;
++    if matches!(target, AppServerTarget::LocalDaemon { .. }) {
++        let version = match &app_server {
++            AppServerClient::Remote(client) => client.server_version(),
++            AppServerClient::InProcess(_) => None,
++        };
++        if version != Some(env!("CARGO_PKG_VERSION")) {
++            let mismatch = LocalDaemonVersionMismatch {
++                expected_version: env!("CARGO_PKG_VERSION"),
++                actual_version: version.unwrap_or("unavailable").to_string(),
++            };
++            // Disconnect only this client. Other clients may still own active daemon threads.
++            let _ = app_server.shutdown().await;
++            return Err(mismatch.into());
++        }
+     }
++    Ok(app_server)
+ }
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index fd6f6484c24b84521d18a895d1f119f691b2858d..4b2150f51945c410b1567ee8be9f8b33aad080ae 100644
+index ad2c8a8d6561c103573fd1cfc8d4a87c55581a11..bb05071f0da1945f2fc20926ad53ccefdbf4eedb 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
-@@ -3937,6 +3937,9 @@ model = "gpt-5.1-codex"
+@@ -3874,6 +3874,9 @@ model = "gpt-5.1-codex"
      async fn side_fork_excludes_turns_without_clearing_regular_ephemeral_fork() -> Result<()> {
          let codex_home = tempfile::tempdir().expect("tempdir");
          let mut config = build_config(&codex_home).await;
@@ -4913,24 +5126,24 @@ index fd6f6484c24b84521d18a895d1f119f691b2858d..4b2150f51945c410b1567ee8be9f8b33
          let thread_id = ThreadId::from_string(
              &create_fake_rollout(
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index c1bb77cd86610fc567f97be6d126d9e05beecf91..d7b76d80ae8055d0f048323e645b25a32f738716 100644
+index ac84eaf15f1a2a08a97aeae96c5c94b9b31c6729..5b828306aacc9ccfc4b7172bdef5dd631d451f5c 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -777,6 +777,7 @@ pub(crate) struct ChatWidget {
-     blocks_direct_input: bool,
-     external_writer_view: bool,
+@@ -780,6 +780,7 @@ pub(crate) struct ChatWidget {
+     /// Covers both queued and executing forks so repeated shortcuts cannot queue another one.
+     pub(crate) fork_in_progress: bool,
      misalignment_policy_violation: Option<misalignment_policy::MisalignmentViolation>,
 +    standalone_side_conversation: bool,
      normal_placeholder_text: String,
      side_placeholder_text: String,
      forked_from: Option<ThreadId>,
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
-index 00d6329dbb83de25131aace52aaa5d8fdbc7c28b..6806afa5721294bae6438016908f60522981abb3 100644
+index 1c8c63ec783373866260faf0d0d90c75ff5d2dab..332c900f54377aefb1a111a63906f4b2f5dbe561 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
-@@ -227,6 +227,7 @@ impl ChatWidget {
-             blocks_direct_input: false,
+@@ -231,6 +231,7 @@ impl ChatWidget {
              external_writer_view: false,
+             fork_in_progress: false,
              misalignment_policy_violation: None,
 +            standalone_side_conversation: false,
              normal_placeholder_text: placeholder,
@@ -4958,7 +5171,7 @@ index 7e0726430d1e9493331d1e7ccccbf44d658f5a34..033dea55e3a468f80de4e7110944b123
          let placeholder = if active {
              self.side_placeholder_text.clone()
 diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
-index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30c82fc5d5 100644
+index 4fe2ed057b968d68d793fdf6bdfb97fbf6fa64e6..39a4d496557bd937ad3b31efc4f15182615a356a 100644
 --- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
 +++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
 @@ -7,6 +7,7 @@
@@ -5055,8 +5268,8 @@ index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30
              }
              SlashCommand::Worktree => {
                  self.show_managed_worktree_picker();
-@@ -362,7 +391,7 @@ impl ChatWidget {
-                 self.toggle_realtime_conversation();
+@@ -365,7 +394,7 @@ impl ChatWidget {
+                 });
              }
              SlashCommand::Side | SlashCommand::Btw => {
 -                self.request_empty_side_conversation(cmd);
@@ -5064,7 +5277,7 @@ index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30
              }
              SlashCommand::Agents => {
                  self.app_event_tx.send(AppEvent::OpenAgentsOverview);
-@@ -848,10 +877,35 @@ impl ChatWidget {
+@@ -857,10 +886,35 @@ impl ChatWidget {
                  });
              }
              SlashCommand::Fork if !trimmed.is_empty() => {
@@ -5104,7 +5317,7 @@ index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30
              }
              SlashCommand::Plan if !trimmed.is_empty() => {
                  let plan_available = self.apply_plan_slash_command();
-@@ -1005,6 +1059,31 @@ impl ChatWidget {
+@@ -1014,6 +1068,31 @@ impl ChatWidget {
                  }
              }
              SlashCommand::Side | SlashCommand::Btw if !trimmed.is_empty() => {
@@ -5136,7 +5349,7 @@ index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30
                  let Some(parent_thread_id) = self.thread_id else {
                      let command = cmd.command();
                      self.add_error_message(format!(
-@@ -1157,6 +1236,43 @@ impl ChatWidget {
+@@ -1166,6 +1245,43 @@ impl ChatWidget {
          self.queued_command_drain_result(cmd)
      }
 
@@ -5180,7 +5393,7 @@ index 50081a03fd26bfecfe483c44d0b35f9a0200d93e..fb8469c7a7111406ef678fdfe931fd30
      pub(super) fn builtin_command_flags(&self) -> BuiltinCommandFlags {
          #[cfg(target_os = "windows")]
          let allow_elevate_sandbox = {
-@@ -1299,17 +1415,28 @@ impl ChatWidget {
+@@ -1308,17 +1424,28 @@ impl ChatWidget {
      }
 
      fn ensure_slash_command_allowed_in_side_conversation(&mut self, cmd: SlashCommand) -> bool {
@@ -5821,6 +6034,401 @@ index 0000000000000000000000000000000000000000..0c668dc314997151a9d9f519a227fc3a
 +    let help = Cli::command().render_long_help().to_string();
 +    assert!(!help.contains("internal-side-session-id"));
 +}
+diff --git a/codex-rs/tui/src/daemon_identity_tests.rs b/codex-rs/tui/src/daemon_identity_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287a8d67420
+--- /dev/null
++++ b/codex-rs/tui/src/daemon_identity_tests.rs
+@@ -0,0 +1,328 @@
++//! A local daemon must match the TUI build before it can receive session requests.
++
++use super::*;
++use crate::app_server_connection::LocalDaemonVersionMismatch;
++use crate::legacy_core::config::ConfigBuilder;
++use codex_app_server_protocol::JSONRPCMessage;
++use futures::SinkExt;
++use futures::StreamExt;
++use pretty_assertions::assert_eq;
++use serde_json::Value;
++use serde_json::json;
++use tempfile::TempDir;
++use tokio::task::JoinHandle;
++use tokio_tungstenite::tungstenite::Message;
++
++/// Returns successive daemon identities on the same endpoint and records every RPC.
++pub(crate) struct InitializeServer {
++    pub(crate) endpoint: RemoteAppServerEndpoint,
++    requests: JoinHandle<Vec<Vec<String>>>,
++}
++
++impl InitializeServer {
++    pub(crate) async fn start(user_agents: Vec<Option<String>>, features: Vec<Value>) -> Self {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let endpoint = RemoteAppServerEndpoint::WebSocket {
++            websocket_url: format!("ws://{}", listener.local_addr().unwrap()),
++            auth_token: None,
++        };
++        let requests = tokio::spawn(async move {
++            let mut connections = Vec::new();
++            for user_agent in user_agents {
++                let (stream, _) = listener.accept().await.unwrap();
++                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
++                let mut methods = Vec::new();
++                while let Some(Ok(Message::Text(text))) = socket.next().await {
++                    let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap()
++                    else {
++                        continue;
++                    };
++                    methods.push(request.method.clone());
++                    let response = match request.method.as_str() {
++                        "initialize" => {
++                            let result = user_agent
++                                .as_ref()
++                                .map_or_else(|| json!({}), |value| json!({"userAgent": value}));
++                            json!({"id": request.id, "result": result})
++                        }
++                        "experimentalFeature/list" => {
++                            json!({"id": request.id, "result": {"data": features, "nextCursor": null}})
++                        }
++                        _ => json!({"id": request.id, "error": {
++                            "code": -32601, "message": "unexpected session request"
++                        }}),
++                    };
++                    socket
++                        .send(Message::Text(response.to_string().into()))
++                        .await
++                        .unwrap();
++                }
++                connections.push(methods);
++            }
++            connections
++        });
++        Self { endpoint, requests }
++    }
++
++    pub(crate) async fn finish(mut self) -> Vec<Vec<String>> {
++        match tokio::time::timeout(Duration::from_secs(10), &mut self.requests).await {
++            Ok(result) => result.unwrap(),
++            Err(error) => {
++                self.requests.abort();
++                panic!("daemon connection was not closed: {error}");
++            }
++        }
++    }
++}
++
++fn matching_user_agent() -> String {
++    format!("codex/{} (Test OS; x86_64) rust", env!("CARGO_PKG_VERSION"))
++}
++
++fn different_build_user_agent() -> String {
++    let numeric_version = env!("CARGO_PKG_VERSION").split('+').next().unwrap();
++    format!("codex/{numeric_version}+frodex.identity-test-other")
++}
++
++#[tokio::test]
++async fn local_daemon_accepts_exact_build_version() -> color_eyre::Result<()> {
++    for allow_embedded_fallback in [false, true] {
++        let home = TempDir::new()?;
++        let config = ConfigBuilder::default()
++            .codex_home(home.path().to_path_buf())
++            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++            .build()
++            .await?;
++        let server = InitializeServer::start(vec![Some(matching_user_agent())], Vec::new()).await;
++        let mut target = AppServerTarget::LocalDaemon {
++            endpoint: server.endpoint.clone(),
++            allow_embedded_fallback,
++        };
++        let expected_target = target.clone();
++        let mut state_db = None;
++        let client = start_app_server(
++            &mut target,
++            Arg0DispatchPaths::default(),
++            config,
++            Vec::new(),
++            LoaderOverrides::without_managed_config_for_tests(),
++            /*strict_config*/ false,
++            CloudConfigBundleLoader::default(),
++            codex_feedback::CodexFeedback::new(),
++            /*log_db*/ None,
++            &mut state_db,
++            Arc::new(EnvironmentManager::default_for_tests()),
++            Default::default(),
++        )
++        .await?;
++        assert_eq!(target, expected_target);
++        assert!(state_db.is_none());
++        let AppServerClient::Remote(remote) = &client else {
++            panic!("matching local daemon must remain a remote connection");
++        };
++        assert_eq!(remote.server_version(), Some(env!("CARGO_PKG_VERSION")));
++        client.shutdown().await?;
++        assert_eq!(server.finish().await, vec![vec!["initialize"]]);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn local_daemon_rejects_unknown_upstream_and_different_build_versions()
++-> color_eyre::Result<()> {
++    let mut identities = vec![
++        None,
++        Some("daemon-without-version".to_string()),
++        Some("codex/0.156.1".to_string()),
++        Some(different_build_user_agent()),
++    ];
++    if let Some((numeric_version, _)) = env!("CARGO_PKG_VERSION").split_once('+') {
++        identities.push(Some(format!("codex/{numeric_version}")));
++    }
++    for allow_embedded_fallback in [false, true] {
++        for identity in &identities {
++            let server = InitializeServer::start(vec![identity.clone()], Vec::new()).await;
++            let target = AppServerTarget::LocalDaemon {
++                endpoint: server.endpoint.clone(),
++                allow_embedded_fallback,
++            };
++            let error = app_server_connection::connect(&target)
++                .await
++                .err()
++                .expect("local daemon identity must match the complete client version");
++            assert!(
++                error.downcast_ref::<LocalDaemonVersionMismatch>().is_some(),
++                "identity {identity:?}: {error:#}"
++            );
++            assert_eq!(server.finish().await, vec![vec!["initialize"]]);
++        }
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn explicit_remote_does_not_require_local_build_identity() -> color_eyre::Result<()> {
++    for identity in [None, Some(different_build_user_agent())] {
++        let server = InitializeServer::start(vec![identity], Vec::new()).await;
++        let target = AppServerTarget::Remote {
++            endpoint: server.endpoint.clone(),
++        };
++        let client = app_server_connection::connect(&target).await?;
++        assert!(matches!(client, AppServerClient::Remote(_)));
++        client.shutdown().await?;
++        assert_eq!(server.finish().await, vec![vec!["initialize"]]);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn daemon_precheck_warns_for_missing_or_mismatched_identity() -> color_eyre::Result<()> {
++    let home = TempDir::new()?;
++    let config = ConfigBuilder::default()
++        .codex_home(home.path().to_path_buf())
++        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++        .build()
++        .await?;
++    for allow_embedded_fallback in [false, true] {
++        for identity in [None, Some(different_build_user_agent())] {
++            let actual_version = identity
++                .as_deref()
++                .and_then(|value| value.strip_prefix("codex/"))
++                .unwrap_or("unavailable")
++                .to_string();
++            let server = InitializeServer::start(vec![identity], Vec::new()).await;
++            let target = AppServerTarget::LocalDaemon {
++                endpoint: server.endpoint.clone(),
++                allow_embedded_fallback,
++            };
++            assert_eq!(
++                daemon_startup::compatibility_warning(&target, &config).await?,
++                Some(format!(
++                    "Running without the shared background server: shared background server version {actual_version:?} does not match this Codex version {}.",
++                    env!("CARGO_PKG_VERSION")
++                ))
++            );
++            assert_eq!(server.finish().await, vec![vec!["initialize"]]);
++        }
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn daemon_identity_mismatch_starts_embedded_server_and_state_db() -> color_eyre::Result<()> {
++    for allow_embedded_fallback in [false, true] {
++        let home = TempDir::new()?;
++        let config = ConfigBuilder::default()
++            .codex_home(home.path().to_path_buf())
++            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++            .build()
++            .await?;
++        let server =
++            InitializeServer::start(vec![Some(different_build_user_agent())], Vec::new()).await;
++        let mut target = AppServerTarget::LocalDaemon {
++            endpoint: server.endpoint.clone(),
++            allow_embedded_fallback,
++        };
++        let mut state_db = None;
++        let client = start_app_server(
++            &mut target,
++            Arg0DispatchPaths::default(),
++            config,
++            Vec::new(),
++            LoaderOverrides::without_managed_config_for_tests(),
++            /*strict_config*/ false,
++            CloudConfigBundleLoader::default(),
++            codex_feedback::CodexFeedback::new(),
++            /*log_db*/ None,
++            &mut state_db,
++            Arc::new(EnvironmentManager::default_for_tests()),
++            Default::default(),
++        )
++        .await?;
++        assert_eq!(target, AppServerTarget::Embedded);
++        assert!(
++            state_db.is_some(),
++            "embedded fallback must initialize SQLite"
++        );
++        assert!(matches!(client, AppServerClient::InProcess(_)));
++        client.shutdown().await?;
++        assert_eq!(server.finish().await, vec![vec!["initialize"]]);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn daemon_identity_is_rechecked_after_matching_feature_precheck() -> color_eyre::Result<()> {
++    let home = TempDir::new()?;
++    let mut config = ConfigBuilder::default()
++        .codex_home(home.path().to_path_buf())
++        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++        .build()
++        .await?;
++    let features = [
++        Feature::ApiKeyModelDiscovery,
++        Feature::CodeModeHost,
++        Feature::AuthElicitation,
++        Feature::McpOAuthRefreshCoordination,
++    ]
++    .map(|feature| {
++        json!({
++            "name": feature.key(), "stage": "beta",
++            "enabled": config.features.enabled(feature), "defaultEnabled": false
++        })
++    })
++    .to_vec();
++    let server = InitializeServer::start(
++        vec![
++            Some(matching_user_agent()),
++            Some(different_build_user_agent()),
++        ],
++        features,
++    )
++    .await;
++    let mut target = AppServerTarget::LocalDaemon {
++        endpoint: server.endpoint.clone(),
++        allow_embedded_fallback: false,
++    };
++    assert_eq!(
++        daemon_startup::compatibility_warning(&target, &config).await?,
++        None
++    );
++    let embedded_network_policy = codex_app_server_client::EmbeddedNetworkPolicy::default();
++    embedded_network_policy.bind_config(&mut config);
++    let policy = config.application_network_policy.clone();
++    let destination = "https://example.com".parse()?;
++    assert_eq!(
++        policy.acquire(&destination).unwrap_err(),
++        codex_http_client::NetworkPolicyDenied::Unavailable
++    );
++    let mut state_db = None;
++    let client = start_app_server(
++        &mut target,
++        Arg0DispatchPaths::default(),
++        config,
++        Vec::new(),
++        LoaderOverrides::without_managed_config_for_tests(),
++        /*strict_config*/ false,
++        CloudConfigBundleLoader::default(),
++        codex_feedback::CodexFeedback::new(),
++        /*log_db*/ None,
++        &mut state_db,
++        Arc::new(EnvironmentManager::default_for_tests()),
++        embedded_network_policy,
++    )
++    .await?;
++    assert_eq!(target, AppServerTarget::Embedded);
++    assert!(state_db.is_some());
++    assert!(matches!(client, AppServerClient::InProcess(_)));
++    assert!(policy.acquire(&destination).is_ok());
++    client.shutdown().await?;
++    assert_eq!(
++        server.finish().await,
++        vec![
++            vec!["initialize", "experimentalFeature/list"],
++            vec!["initialize"]
++        ]
++    );
++    Ok(())
++}
+diff --git a/codex-rs/tui/src/daemon_startup.rs b/codex-rs/tui/src/daemon_startup.rs
+index 9ce454fc9ec0060c77dff41a563d5ad0840be475..511a1326952e6c90921621570973980429d4ac75 100644
+--- a/codex-rs/tui/src/daemon_startup.rs
++++ b/codex-rs/tui/src/daemon_startup.rs
+@@ -1,6 +1,7 @@
+ //! Local daemon launch policy. Explicit embedded launches never discover or start a daemon;
+ //! optional attachment may fall back to embedded mode, while automatic launches
+-//! require a compatible shared server and a successful connection.
++//! require compatible features and a successful connection. A different daemon release
++//! always uses this CLI's embedded server without replacing the shared daemon.
+
+ use super::*;
+ use std::collections::BTreeMap;
+@@ -127,6 +128,7 @@ pub(super) async fn compatibility_warning(
+         return Ok(None);
+     };
+     let mut restart_features = None;
++    let mut version_mismatch = false;
+     let check = async {
+         // The feature-list RPC cannot report this process-scoped structured setting.
+         if !config.features.enabled(Feature::CodeModeHost)
+@@ -136,7 +138,16 @@ pub(super) async fn compatibility_warning(
+         }
+         let client = app_server_connection::connect(target)
+             .await
+-            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
++            .map_err(|error| {
++                version_mismatch = error
++                    .downcast_ref::<app_server_connection::LocalDaemonVersionMismatch>()
++                    .is_some();
++                if version_mismatch {
++                    error.to_string()
++                } else {
++                    "could not connect to check daemon feature settings".to_string()
++                }
++            })?;
+         let (tx, rx) = tokio::sync::oneshot::channel();
+         crate::experimental_features::fetch(
+             client.request_handle(),
+@@ -175,7 +186,7 @@ pub(super) async fn compatibility_warning(
+     .await;
+     match check {
+         Ok(()) => Ok(None),
+-        Err(reason) if *allow_embedded_fallback => Ok(Some(format!(
++        Err(reason) if *allow_embedded_fallback || version_mismatch => Ok(Some(format!(
+             "Running without the shared background server: {reason}."
+         ))),
+         Err(reason) => Err(CompatibilityError {
+diff --git a/codex-rs/tui/src/daemon_startup_tests.rs b/codex-rs/tui/src/daemon_startup_tests.rs
+index 8d0aa635355e9ad9fb1e35810d2a43553b36c7ac..ca9feaabe999e01be868d9b641f6e846aae39c6f 100644
+--- a/codex-rs/tui/src/daemon_startup_tests.rs
++++ b/codex-rs/tui/src/daemon_startup_tests.rs
+@@ -196,7 +196,7 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
+                         continue;
+                     };
+                     let response = if request.method == "initialize" {
+-                        json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
++                        json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
+                     } else {
+                         assert_eq!(request.method, "experimentalFeature/list");
+                         assert_eq!(request.params.unwrap()["threadId"], json!(null));
 diff --git a/codex-rs/tui/src/ghostty_fork.rs b/codex-rs/tui/src/ghostty_fork.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..3e31e5b9d0cc9c6b106674b2800338d1696e78ae
@@ -6461,7 +7069,7 @@ index 0000000000000000000000000000000000000000..aef73cb4b8b423f4e4af28b9f6822251
 +    assert_eq!(diagnostic.chars().count(), GHOSTTY_ERROR_LIMIT + 1);
 +}
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964794e8bb1 100644
+index a08ccd859c21aaa0f17dd06eef7742a1651a7145..51035c9344ad37337c6bb69bb4a7319b3319d133 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
 @@ -147,6 +147,7 @@ mod external_agent_config_migration;
@@ -6480,7 +7088,68 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
  mod terminal_palette;
  mod terminal_probe;
  mod terminal_title;
-@@ -899,12 +901,24 @@ async fn resolve_startup_resume_or_fork_cwd(
+@@ -324,14 +326,8 @@ impl AppServerTarget {
+     }
+
+     fn uses_embedded_network_policy(&self) -> bool {
+-        matches!(
+-            self,
+-            Self::Embedded
+-                | Self::LocalDaemon {
+-                    allow_embedded_fallback: true,
+-                    ..
+-                }
+-        )
++        // Even a required automatic daemon can fail the final release-identity check.
++        matches!(self, Self::Embedded | Self::LocalDaemon { .. })
+     }
+
+     fn environment_http_client_factory(
+@@ -341,16 +337,8 @@ impl AppServerTarget {
+     ) -> codex_http_client::HttpClientFactory {
+         let factory = config.http_client_factory();
+         match self {
+-            Self::Embedded
+-            | Self::LocalDaemon {
+-                allow_embedded_fallback: true,
+-                ..
+-            } => policy.bind(factory),
+-            Self::LocalDaemon {
+-                allow_embedded_fallback: false,
+-                ..
+-            }
+-            | Self::Remote { .. } => factory,
++            Self::Embedded | Self::LocalDaemon { .. } => policy.bind(factory),
++            Self::Remote { .. } => factory,
+         }
+     }
+
+@@ -545,7 +533,7 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
+ async fn start_app_server(
+     target: &mut AppServerTarget,
+     arg0_paths: Arg0DispatchPaths,
+-    config: Config,
++    mut config: Config,
+     cli_kv_overrides: Vec<(String, toml::Value)>,
+     loader_overrides: LoaderOverrides,
+     strict_config: bool,
+@@ -571,10 +559,14 @@ async fn start_app_server(
+                         allow_embedded_fallback: true,
+                         ..
+                     }
+-                ) =>
++                ) || matches!(target, AppServerTarget::LocalDaemon { .. })
++                    && err
++                        .downcast_ref::<app_server_connection::LocalDaemonVersionMismatch>()
++                        .is_some() =>
+             {
+                 tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
+                 *target = AppServerTarget::Embedded;
++                embedded_network_policy.activate(&mut config);
+                 *state_db = init_state_db_for_app_server_target(&config, target).await?;
+             }
+             Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
+@@ -942,12 +934,24 @@ async fn resolve_startup_resume_or_fork_cwd(
          resume_picker::SessionSelection::Fork(target_session) => {
              Some((CwdPromptAction::Fork, target_session))
          }
@@ -6506,7 +7175,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      if uses_remote_workspace_or_environment
          && cwd_override.is_none()
          && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
-@@ -971,6 +985,7 @@ fn app_server_target_for_launch(
+@@ -1014,6 +1018,7 @@ fn app_server_target_for_launch(
      can_reuse_implicit_local_daemon: bool,
      workload_identity_selected: bool,
      exec_server_url: Option<&std::ffi::OsStr>,
@@ -6514,7 +7183,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
  ) -> std::io::Result<AppServerTarget> {
      if workload_identity_selected {
          if explicit_remote_endpoint.is_some() {
-@@ -981,6 +996,9 @@ fn app_server_target_for_launch(
+@@ -1024,6 +1029,9 @@ fn app_server_target_for_launch(
          }
          return Ok(AppServerTarget::Embedded);
      }
@@ -6524,7 +7193,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      Ok(match explicit_remote_endpoint {
          Some(endpoint) => AppServerTarget::Remote { endpoint },
          // A shared daemon cannot adopt this invocation's executor selection.
-@@ -996,6 +1014,16 @@ fn app_server_target_for_launch(
+@@ -1039,6 +1047,16 @@ fn app_server_target_for_launch(
      })
  }
 
@@ -6541,7 +7210,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
  async fn cloud_config_bundle_for_app_server_target(
      app_server_target: &AppServerTarget,
      bootstrap_config: &ConfigTomlLoadResult,
-@@ -1075,6 +1103,25 @@ pub async fn run_main(
+@@ -1121,6 +1139,25 @@ pub async fn run_main(
      .await
  }
 
@@ -6567,7 +7236,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
  #[allow(clippy::too_many_arguments)]
  async fn run_ratatui_app(
      mut cli: Cli,
-@@ -1353,7 +1400,7 @@ async fn run_ratatui_app(
+@@ -1404,7 +1441,7 @@ async fn run_ratatui_app(
 
      let missing_session_exit =
          |id_str: &str,
@@ -6576,7 +7245,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
           tui: &mut Tui,
           terminal_restore_guard: &mut TerminalRestoreGuard| {
              error!("Error finding conversation path: {id_str}");
-@@ -1366,9 +1413,7 @@ async fn run_ratatui_app(
+@@ -1417,9 +1454,7 @@ async fn run_ratatui_app(
                  resume_hint: None,
                  disconnect_info: None,
                  update_action: None,
@@ -6587,7 +7256,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
              })
          };
 
-@@ -1386,6 +1431,22 @@ async fn run_ratatui_app(
+@@ -1437,6 +1472,22 @@ async fn run_ratatui_app(
      let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
      let mut session_selection = if cli.agents_overview {
          resume_picker::SessionSelection::AgentsOverview
@@ -6610,7 +7279,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      } else if use_fork {
          if let Some(id_str) = cli.fork_session_id.as_deref() {
              let Some(startup_app_server) = app_server.as_mut() else {
-@@ -1410,7 +1471,7 @@ async fn run_ratatui_app(
+@@ -1461,7 +1512,7 @@ async fn run_ratatui_app(
                      shutdown_app_server_if_present(app_server.take()).await;
                      return missing_session_exit(
                          id_str,
@@ -6619,7 +7288,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
                          &mut tui,
                          &mut terminal_restore_guard,
                      );
-@@ -1512,7 +1573,7 @@ async fn run_ratatui_app(
+@@ -1563,7 +1614,7 @@ async fn run_ratatui_app(
                  shutdown_app_server_if_present(app_server.take()).await;
                  return missing_session_exit(
                      id_str,
@@ -6628,7 +7297,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
                      &mut tui,
                      &mut terminal_restore_guard,
                  );
-@@ -1596,7 +1657,9 @@ async fn run_ratatui_app(
+@@ -1647,7 +1698,9 @@ async fn run_ratatui_app(
 
      if matches!(
          &session_selection,
@@ -6639,7 +7308,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      ) && let Err(err) = startup_draft.flush_pending_events(&mut tui).await
      {
          shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
-@@ -1653,7 +1716,9 @@ async fn run_ratatui_app(
+@@ -1704,7 +1757,9 @@ async fn run_ratatui_app(
      ) && (cli.resume_picker || cli.fork_picker);
 
      let reloaded_config = match &session_selection {
@@ -6650,7 +7319,18 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
              startup_draft
                  .run_until(
                      &mut tui,
-@@ -2283,6 +2348,19 @@ pub(crate) mod tests {
+@@ -2328,6 +2383,10 @@ mod daemon_telemetry;
+ #[path = "daemon_startup_tests.rs"]
+ mod daemon_startup_tests;
+
++#[cfg(test)]
++#[path = "daemon_identity_tests.rs"]
++mod daemon_identity_tests;
++
+ #[cfg(test)]
+ pub(crate) mod tests {
+     use super::*;
+@@ -2358,6 +2417,19 @@ pub(crate) mod tests {
          assert!(size < 64 * 1024, "TUI startup future is {size} bytes");
      }
 
@@ -6670,7 +7350,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
          ConfigBuilder::default()
              .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
-@@ -2993,6 +3071,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3076,6 +3148,7 @@ requires_openai_auth = {requires_openai_auth}
              /*can_reuse_implicit_local_daemon*/ true,
              /*workload_identity_selected*/ false,
              /*exec_server_url*/ None,
@@ -6678,7 +7358,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
          )?;
 
          assert_eq!(
-@@ -3018,6 +3097,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3101,6 +3174,7 @@ requires_openai_auth = {requires_openai_auth}
                      /*can_reuse_implicit_local_daemon*/ true,
                      /*workload_identity_selected*/ false,
                      Some(std::ffi::OsStr::new(executor)),
@@ -6686,7 +7366,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
                  )?,
                  AppServerTarget::Embedded,
              );
-@@ -3036,6 +3116,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3119,6 +3193,7 @@ requires_openai_auth = {requires_openai_auth}
              /*can_reuse_implicit_local_daemon*/ false,
              /*workload_identity_selected*/ false,
              Some(std::ffi::OsStr::new("none")),
@@ -6694,7 +7374,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
          )?;
 
          assert_eq!(
-@@ -3059,6 +3140,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3142,6 +3217,7 @@ requires_openai_auth = {requires_openai_auth}
              /*can_reuse_implicit_local_daemon*/ false,
              /*workload_identity_selected*/ false,
              /*exec_server_url*/ None,
@@ -6702,7 +7382,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
          )?;
 
          assert_eq!(target, AppServerTarget::Embedded);
-@@ -3075,6 +3157,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3158,6 +3234,7 @@ requires_openai_auth = {requires_openai_auth}
                  /*can_reuse_implicit_local_daemon*/ true,
                  /*workload_identity_selected*/ true,
                  /*exec_server_url*/ None,
@@ -6710,7 +7390,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
              )?,
              AppServerTarget::Embedded
          );
-@@ -3088,6 +3171,7 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3171,6 +3248,7 @@ requires_openai_auth = {requires_openai_auth}
              /*can_reuse_implicit_local_daemon*/ false,
              /*workload_identity_selected*/ true,
              /*exec_server_url*/ None,
@@ -6718,7 +7398,7 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
          )
          .expect_err("remote hosts must own workload identity");
          assert_eq!(
-@@ -3097,6 +3181,47 @@ requires_openai_auth = {requires_openai_auth}
+@@ -3180,6 +3258,47 @@ requires_openai_auth = {requires_openai_auth}
          Ok(())
      }
 
@@ -6767,10 +7447,10 @@ index 83f5c1a43f268058a84bb055b700b702b1ec6333..904c9d92ccc2759073434eaa7fa55964
      fn should_load_configured_environments_for_local_daemon() -> color_eyre::Result<()> {
          let target = AppServerTarget::LocalDaemon {
 diff --git a/codex-rs/tui/src/resume_picker.rs b/codex-rs/tui/src/resume_picker.rs
-index 43778a0857b3e5c10a27e3b55bd8081df9ae5040..d0a45539869459af66ebf4126893b2e1d4afe14a 100644
+index 5a976e468d28272a101167ec6603d18c8a9a7cb6..cbe80d77264dea480f808a70e8009e71c38623df 100644
 --- a/codex-rs/tui/src/resume_picker.rs
 +++ b/codex-rs/tui/src/resume_picker.rs
-@@ -127,6 +127,7 @@ pub enum SessionSelection {
+@@ -128,6 +128,7 @@ pub enum SessionSelection {
      AgentsOverview,
      Resume(SessionTarget),
      Fork(SessionTarget),
@@ -6779,7 +7459,7 @@ index 43778a0857b3e5c10a27e3b55bd8081df9ae5040..d0a45539869459af66ebf4126893b2e1
  }
 
 diff --git a/codex-rs/tui/src/session_archive_commands.rs b/codex-rs/tui/src/session_archive_commands.rs
-index 917a5e42f750c8bc8a7e1f92d5e1615f2bb712c7..9e1d236ae9e30244059af15a9c7b87d8e903047b 100644
+index f1172544687b61f659fc3eb2c3b7ef34aeb3b265..dcdb8fe1eb727d6b072c0200a983756d64293fa5 100644
 --- a/codex-rs/tui/src/session_archive_commands.rs
 +++ b/codex-rs/tui/src/session_archive_commands.rs
 @@ -268,6 +268,7 @@ pub(super) async fn start_app_server_for_session_command(
@@ -6872,10 +7552,10 @@ index 0000000000000000000000000000000000000000..192e13a10f1a3823010009887ab31912
 +---
 +Zellij only supports /side [--right|--down].
 diff --git a/codex-rs/tui/src/startup_draft.rs b/codex-rs/tui/src/startup_draft.rs
-index 7e0a498bf900c647edba40b0369e3ad38c0d328c..fa5634d504dceab95b15e0291be4cd19d148f869 100644
+index c7a127e480ff5abdc40737abb8e73a4d081f4d10..7590ef5a24445b1a834fdec0670b530e7c58340f 100644
 --- a/codex-rs/tui/src/startup_draft.rs
 +++ b/codex-rs/tui/src/startup_draft.rs
-@@ -278,7 +278,9 @@ impl StartupDraftPump {
+@@ -279,7 +279,9 @@ impl StartupDraftPump {
              | SessionSelection::Exit
              | SessionSelection::AgentsOverview => StartupDraftSessionAction::New,
              SessionSelection::Resume(_) => StartupDraftSessionAction::Resume,
@@ -6886,7 +7566,7 @@ index 7e0a498bf900c647edba40b0369e3ad38c0d328c..fa5634d504dceab95b15e0291be4cd19
          };
          let destination_changed = match self.resolved_selection.as_ref() {
              Some(SessionSelection::StartFresh) => {
-@@ -294,6 +296,9 @@ impl StartupDraftPump {
+@@ -295,6 +297,9 @@ impl StartupDraftPump {
              Some(SessionSelection::Fork(previous)) => {
                  !matches!(session_selection, SessionSelection::Fork(next) if previous.thread_id == next.thread_id && previous.cwd == next.cwd)
              }
@@ -6897,18 +7577,18 @@ index 7e0a498bf900c647edba40b0369e3ad38c0d328c..fa5634d504dceab95b15e0291be4cd19
          };
          if destination_changed
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index d25281e88ee9e169cc29d7e9350fe0bd20d42b48..d5a92e2a8fde4f459564067eab60e4ff8fc06046 100644
+index bef842a8aa4e1e597c2587fe823d38996f128cc6..80607ca52d146f7b7bd68f6f3872948eaa21e785 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
-@@ -100,6 +100,7 @@ pub(super) async fn run_main_inner(
-         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
-     }
+@@ -102,6 +102,7 @@ pub(super) async fn run_main_inner(
+     let embedded_network_policy =
+         codex_app_server_client::EmbeddedNetworkPolicy::load(&launch_loader_overrides).await;
      let workload_identity_selected = is_workload_identity_selected();
 +    let internal_side_session = cli.side_session_id.is_some();
 
      if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
          let validation_target = app_server_target_for_launch(
-@@ -108,6 +109,7 @@ pub(super) async fn run_main_inner(
+@@ -110,6 +111,7 @@ pub(super) async fn run_main_inner(
              /*can_reuse_implicit_local_daemon*/ false,
              workload_identity_selected,
              std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -6916,7 +7596,7 @@ index d25281e88ee9e169cc29d7e9350fe0bd20d42b48..d5a92e2a8fde4f459564067eab60e4ff
          )?;
          let validation_environment_manager =
              if should_load_configured_environments(&loader_overrides, &validation_target) {
-@@ -170,13 +172,19 @@ pub(super) async fn run_main_inner(
+@@ -173,13 +175,19 @@ pub(super) async fn run_main_inner(
          .await;
      }
 
@@ -6943,7 +7623,7 @@ index d25281e88ee9e169cc29d7e9350fe0bd20d42b48..d5a92e2a8fde4f459564067eab60e4ff
      let reuse_implicit_local_daemon = daemon_exclusion.is_none();
      let search_only_config_override = !workload_identity_selected
          && cli.web_search
-@@ -216,6 +224,7 @@ pub(super) async fn run_main_inner(
+@@ -219,6 +227,7 @@ pub(super) async fn run_main_inner(
          reuse_implicit_local_daemon,
          workload_identity_selected,
          std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -6951,7 +7631,7 @@ index d25281e88ee9e169cc29d7e9350fe0bd20d42b48..d5a92e2a8fde4f459564067eab60e4ff
      )?;
      let prepared_environment_manager =
          if should_load_configured_environments(&launch_loader_overrides, &presentation_target) {
-@@ -295,6 +304,7 @@ pub(super) async fn run_main_inner(
+@@ -312,6 +321,7 @@ pub(super) async fn run_main_inner(
          reuse_implicit_local_daemon,
          workload_identity_selected,
          std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -6959,7 +7639,7 @@ index d25281e88ee9e169cc29d7e9350fe0bd20d42b48..d5a92e2a8fde4f459564067eab60e4ff
      )?;
      let remote_cwd_override = cli
          .cwd
-@@ -832,7 +842,7 @@ pub(super) async fn run_main_inner(
+@@ -872,7 +882,7 @@ pub(super) async fn run_main_inner(
      .await
      .map_err(|err| {
          err.downcast::<std::io::Error>()

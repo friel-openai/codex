@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
-index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe4c2c882a 100644
+index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad4469831b44fb11 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 @@ -4,17 +4,24 @@ use app_test_support::TestAppServer;
@@ -27,7 +27,7 @@ index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::ItemCompletedEvent;
  use codex_protocol::protocol::SessionSource;
-@@ -226,3 +233,227 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
+@@ -228,3 +235,229 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
 
      Ok(())
  }
@@ -54,6 +54,8 @@ index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe
 +            session_id: source_id.into(),
 +            thread_id: source_id,
 +            extra_config: None,
++            creator_user_id: None,
++            creator_account_id: None,
 +            forked_from_id: None,
 +            parent_thread_id: None,
 +            source: SessionSource::Cli,
@@ -256,7 +258,7 @@ index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe
 +    Ok(())
 +}
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515de4abfd2 100644
+index 19d1749c64835bd3ed221ba9d2045b6a360d13db..f56966640995bc7c372097d69ac3cd5ebc2f77cc 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
 @@ -104,6 +104,24 @@ impl LocalThreadStore {
@@ -293,7 +295,7 @@ index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515
          )
          .await?;
          Ok(RolloutLineage {
-@@ -1641,7 +1659,10 @@ async fn trim_to_history_position(
+@@ -1639,7 +1657,10 @@ async fn trim_to_history_position(
  }
 
  /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
@@ -306,7 +308,7 @@ index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515
          malformed_lineage(
              end.thread_id,
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 8d63956de73d92c5bce080479d1a2402b0a7360e..d653c3d9363aac7d2d781c9f801005f01882c6b7 100644
+index 476c010ec4cf10137c8633e32957b609e0bc1c78..20e8f793948ece0f49f3088f9f07eeb6e118bc12 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
 @@ -119,6 +119,51 @@ WHERE next_rollout_byte_offset >= 0
@@ -437,7 +439,7 @@ index 8d63956de73d92c5bce080479d1a2402b0a7360e..d653c3d9363aac7d2d781c9f801005f0
          "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
      ] {
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 74cc5020eb3cbe13b1b42f366e8e2c4311c0b669..487ddf920bb43fe4d328230de9445d44373b726f 100644
+index 7dc6977afc35a2bde9d00776b661af98d8d3cdd3..f5dcdf4d47966ec927ccadb8252be23edb7373e1 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 @@ -37,6 +37,8 @@ use crate::SortDirection;
@@ -1395,7 +1397,7 @@ index 74cc5020eb3cbe13b1b42f366e8e2c4311c0b669..487ddf920bb43fe4d328230de9445d44
      );
  }
 
-@@ -3371,6 +4271,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+@@ -3406,6 +4306,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
      ))
  }
 
