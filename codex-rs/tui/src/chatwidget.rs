@@ -777,6 +777,7 @@ pub(crate) struct ChatWidget {
     blocks_direct_input: bool,
     external_writer_view: bool,
     misalignment_policy_violation: Option<misalignment_policy::MisalignmentViolation>,
+    standalone_side_conversation: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
     forked_from: Option<ThreadId>,

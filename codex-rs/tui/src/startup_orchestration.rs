@@ -100,6 +100,7 @@ pub(super) async fn run_main_inner(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     let workload_identity_selected = is_workload_identity_selected();
+    let internal_side_session = cli.side_session_id.is_some();
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         let validation_target = app_server_target_for_launch(
@@ -108,6 +109,7 @@ pub(super) async fn run_main_inner(
             /*can_reuse_implicit_local_daemon*/ false,
             workload_identity_selected,
             std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
+            internal_side_session,
         )?;
         let validation_environment_manager =
             if should_load_configured_environments(&loader_overrides, &validation_target) {
@@ -170,13 +172,19 @@ pub(super) async fn run_main_inner(
         .await;
     }
 
-    let mut daemon_exclusion = daemon_startup::exclusion(
-        &cli,
-        &cli_kv_overrides,
-        &launch_loader_overrides,
-        workload_identity_selected,
-        std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
-    );
+    // Side conversations need an embedded server for their ephemeral fork. Keep this
+    // exclusion through daemon auto-start, not just initial endpoint selection.
+    let mut daemon_exclusion = if internal_side_session {
+        Some("standalone side conversation")
+    } else {
+        daemon_startup::exclusion(
+            &cli,
+            &cli_kv_overrides,
+            &launch_loader_overrides,
+            workload_identity_selected,
+            std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
+        )
+    };
     let reuse_implicit_local_daemon = daemon_exclusion.is_none();
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
@@ -216,6 +224,7 @@ pub(super) async fn run_main_inner(
         reuse_implicit_local_daemon,
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
+        internal_side_session,
     )?;
     let prepared_environment_manager =
         if should_load_configured_environments(&launch_loader_overrides, &presentation_target) {
@@ -295,6 +304,7 @@ pub(super) async fn run_main_inner(
         reuse_implicit_local_daemon,
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
+        internal_side_session,
     )?;
     let remote_cwd_override = cli
         .cwd
@@ -832,7 +842,7 @@ pub(super) async fn run_main_inner(
     .await
     .map_err(|err| {
         err.downcast::<std::io::Error>()
-            .unwrap_or_else(|err| std::io::Error::other(err.to_string()))
+            .unwrap_or_else(|err| std::io::Error::other(format_error_chain(&err)))
     });
 
     if let Some(worktree) = managed_worktree.as_ref() {
