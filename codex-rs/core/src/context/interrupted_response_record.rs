@@ -7,7 +7,7 @@ pub(crate) struct InterruptedResponseRecord;
 
 impl ContextualUserFragment for InterruptedResponseRecord {
     fn content_kind(&self) -> ContentItemKind {
-        ContentItemKind("response.interrupted".to_string())
+        ContentItemKind("interrupted_response".to_string())
     }
 
     fn role(&self) -> &'static str {

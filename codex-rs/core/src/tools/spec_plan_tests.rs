@@ -277,8 +277,30 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
     .await;
     assert_eq!(
         supervisor.namespace_function_names("supervisor"),
-        ["close_self", "compact_parent_context", "snooze"]
+        [
+            "close_self",
+            "compact_parent_context",
+            "followup_parent",
+            "snooze"
+        ]
     );
+    let ToolSpec::Namespace(supervisor_namespace) = supervisor.visible_spec("supervisor") else {
+        panic!("expected supervisor namespace");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(followup_parent)) =
+        supervisor_namespace.tools.iter().find(|tool| {
+            matches!(tool, ResponsesApiNamespaceTool::Function(tool) if tool.name == "followup_parent")
+        })
+    else {
+        panic!("expected supervisor.followup_parent");
+    };
+    let message_schema = followup_parent
+        .parameters
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get("message"))
+        .expect("supervisor.followup_parent must accept a message");
+    assert_eq!(message_schema.encrypted, None);
 
     let supervisor_path_without_role = probe(|turn| {
         turn.session_source = source("/root/goal_supervisor", "worker");
@@ -291,6 +313,7 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
     );
     supervisor_path_without_role.assert_registered_lacks(&[
         "supervisor.close_self",
+        "supervisor.followup_parent",
         "supervisor.snooze",
         "supervisor.compact_parent_context",
     ]);
@@ -304,11 +327,22 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
     .await;
     assert_eq!(
         supervisor_role_on_custom_path.namespace_function_names("supervisor"),
-        ["close_self", "compact_parent_context", "snooze"]
+        [
+            "close_self",
+            "compact_parent_context",
+            "followup_parent",
+            "snooze"
+        ]
     );
 
     let root = probe(|turn| turn.session_source = SessionSource::Exec).await;
     assert!(root.namespace_function_names("supervisor").is_empty());
+    root.assert_registered_lacks(&[
+        "supervisor.close_self",
+        "supervisor.followup_parent",
+        "supervisor.snooze",
+        "supervisor.compact_parent_context",
+    ]);
 }
 
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
@@ -3272,10 +3306,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
-async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise_v2() {
+async fn goal_supervisor_uses_supervisor_tools_when_model_does_not_advertise_v2() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-        turn.model_info.multi_agent_version = Some(MultiAgentVersion::V1);
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).multi_agent_version =
+                Some(MultiAgentVersion::V1);
+        });
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: ThreadId::new(),
             depth: 1,
@@ -3288,11 +3325,20 @@ async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise
     })
     .await;
 
-    plan.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    plan.assert_registered_contains(&[
+    plan.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+    plan.assert_registered_lacks(&[
         &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "followup_task").to_string(),
         &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "list_agents").to_string(),
     ]);
+    assert_eq!(
+        plan.namespace_function_names("supervisor"),
+        [
+            "close_self",
+            "compact_parent_context",
+            "followup_parent",
+            "snooze"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -3346,6 +3392,46 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
                 .any(|name| name == tool_name),
             "expected {tool_name} in agents namespace"
         );
+    }
+}
+
+#[tokio::test]
+async fn encrypted_multi_agent_tools_stay_out_of_nested_code_mode() {
+    let plan = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+        });
+    })
+    .await;
+
+    assert_eq!(
+        plan.namespace_function_names("agents"),
+        &[
+            "followup_task".to_string(),
+            "interrupt_agent".to_string(),
+            "list_agents".to_string(),
+            "send_message".to_string(),
+            "spawn_agent".to_string(),
+            "wait_agent".to_string(),
+        ]
+    );
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        assert_eq!(
+            plan.exposure(&ToolName::namespaced("agents", tool_name).to_string()),
+            ToolExposure::Direct
+        );
+    }
+    let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+        panic!("expected exec tool");
+    };
+    for encrypted_tool in [
+        "agents__spawn_agent",
+        "agents__send_message",
+        "agents__followup_task",
+    ] {
+        assert!(!exec.description.contains(encrypted_tool));
     }
 }
 
