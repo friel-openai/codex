@@ -6,13 +6,16 @@ use crate::history_cell::new_user_prompt;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::HyperlinkParagraph;
 use crate::terminal_hyperlinks::LogicalLineSource;
+use crate::terminal_hyperlinks::UserMessageLayout;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
+use std::sync::Arc;
 
 #[test]
 fn visible_rows_fill_inherited_styles_without_painting_outside_the_viewport() {
@@ -74,18 +77,22 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
         let mut actual = Buffer::empty(area);
         layout.render(area, &mut actual, /*start_row*/ 0);
         let mut expected = Buffer::empty(area);
-        HyperlinkParagraph::new(&fresh_lines, style).render(area, &mut expected);
+        HyperlinkParagraph::new(&fresh_lines, Style::default()).render(area, &mut expected);
 
         assert_eq!(
             (layout.text(), layout.row_count()),
             (expected_copy.as_str(), fresh_lines.len()),
         );
+        assert_eq!(layout.row_count(), usize::from(cell.desired_height(width)));
         assert_eq!(actual, expected);
         assert_eq!(
             (0..area.height)
-                .map(|row| actual[(width - 1, row)].symbol())
+                .map(|row| {
+                    let cell = &actual[(width - 1, row)];
+                    (cell.symbol(), cell.bg)
+                })
                 .collect::<Vec<_>>(),
-            vec![" "; fresh_lines.len()],
+            vec![(" ", Color::Reset); fresh_lines.len()],
         );
         if width == 20 {
             insta::assert_snapshot!(name, format!("{actual:?}"));
@@ -99,7 +106,7 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
             layout.position_at(/*row*/ 1, /*column*/ 59),
             layout.position_at(/*row*/ 2, /*column*/ 2),
         ),
-        (57, 58, 58),
+        (46, 47, 47),
     );
 }
 
@@ -131,11 +138,28 @@ fn reserved_margin_uses_the_same_alignment_for_painting_and_selection() {
 }
 
 fn styled_prompt_lines(cell: &dyn HistoryCell, width: u16, style: Style) -> Vec<HyperlinkLine> {
-    cell.display_hyperlink_lines(width)
-        .into_iter()
-        .map(|mut line| {
-            line.line.style = style;
-            line
-        })
-        .collect()
+    let mut lines = cell.display_hyperlink_lines(width);
+    let original = lines[0]
+        .source
+        .as_ref()
+        .and_then(|source| source.user_message.as_ref())
+        .expect("user-message layout");
+    let user_message = Arc::new(UserMessageLayout {
+        style,
+        ..**original
+    });
+    for line in &mut lines {
+        for span in line
+            .line
+            .spans
+            .iter_mut()
+            .skip(usize::from(user_message.alignment_prefix_bytes > 0))
+        {
+            span.style = span.style.patch(style);
+        }
+        let source = line.source.as_mut().expect("user-message source");
+        source.line_style = source.line_style.patch(style);
+        source.user_message = Some(Arc::clone(&user_message));
+    }
+    lines
 }
