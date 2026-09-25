@@ -1676,7 +1676,7 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
 
     let home_display = home.display();
     let script = format!(
-        "HOME=\"{home_display}\"; export HOME; {}",
+        "unset BASH_ENV; HOME=\"{home_display}\"; export HOME; {}",
         snapshot_capture_script(
             ShellType::Bash,
             SnapshotCaptureOptions {
