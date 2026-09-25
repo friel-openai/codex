@@ -291,6 +291,11 @@ struct ForkHistory {
 
 /// Builds the canonical physical history used by a reference-backed full-history fork.
 pub(crate) fn full_history_from_frozen_segment(frozen: FrozenRolloutSegment) -> InitialHistory {
+    if let Some(history_base) = frozen.history_base {
+        let mut source_session_meta = frozen.source_session_meta;
+        source_session_meta.meta.history_base = Some(history_base);
+        return InitialHistory::Forked(vec![RolloutItem::SessionMeta(source_session_meta)]);
+    }
     InitialHistory::Forked(vec![
         RolloutItem::SessionMeta(frozen.source_session_meta),
         RolloutItem::RolloutReference(frozen.reference),
@@ -1806,10 +1811,17 @@ impl ThreadManager {
             } else {
                 InitialHistory::Forked(copied_history)
             }
+        } else if let Some(frozen_segment) = prepared.frozen_segment.clone() {
+            full_history_from_frozen_segment(frozen_segment)
+        } else if options.config.ephemeral {
+            snapshot_response_history.clone()
         } else {
-            full_history_from_frozen_segment(prepared.frozen_segment.clone())
+            return Err(CodexErr::Fatal(
+                "durable prepared fork is missing its frozen source segment".to_string(),
+            ));
         };
         if prepared.copied_history.is_none()
+            && prepared.frozen_segment.is_some()
             && !synthesized_suffix.is_empty()
             && let InitialHistory::Forked(history_items) = &mut history
         {
@@ -1875,7 +1887,7 @@ impl ThreadManager {
                 ForkHistory {
                     snapshot: None,
                     initial_history: history,
-                    forked_from_ordinal_exclusive: prepared.frozen_segment.next_rollout_ordinal,
+                    forked_from_ordinal_exclusive: Some(prepared.source_end_ordinal_exclusive),
                     model_history_override: Some(model_history_override),
                     settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                     shared_model_response_items,
@@ -2371,7 +2383,7 @@ impl ThreadManagerState {
                         "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                     ))
                 })?;
-            let forked_from_ordinal_exclusive = prepared.frozen_segment.next_rollout_ordinal;
+            let forked_from_ordinal_exclusive = Some(prepared.source_end_ordinal_exclusive);
             if let Some(copied_history) = &prepared.copied_history {
                 let logical_history = copied_history.as_ref().clone();
                 return Ok((
@@ -2383,8 +2395,13 @@ impl ThreadManagerState {
                     forked_from_ordinal_exclusive,
                 ));
             }
-            let reference_history =
-                full_history_from_frozen_segment(prepared.frozen_segment.clone());
+            let reference_history = full_history_from_frozen_segment(
+                prepared.frozen_segment.clone().ok_or_else(|| {
+                    CodexErr::Fatal(
+                        "prepared FullHistory source is missing its frozen segment".to_string(),
+                    )
+                })?,
+            );
             let logical_history = materialize_recent_rollout_lines_from(
                 codex_home,
                 reference_history
@@ -2516,7 +2533,12 @@ impl ThreadManagerState {
                         ))
                     })?;
                     (
-                        prepared.frozen_segment.clone(),
+                        prepared.frozen_segment.clone().ok_or_else(|| {
+                            CodexErr::Fatal(
+                                "prepared paginated fork source is missing its frozen segment"
+                                    .to_string(),
+                            )
+                        })?,
                         prepared.response_history.as_ref().clone(),
                         FullHistorySourceReservation::Prepared {
                             _prepared: Box::new(prepared),
