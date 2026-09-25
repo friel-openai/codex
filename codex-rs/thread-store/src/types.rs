@@ -284,7 +284,7 @@ impl FreezeRolloutSegmentParams {
 /// Segmentation shares immutable inherited history across full-history forks and bounds the
 /// mutable live rollout after compaction. It is independent of [`ThreadHistoryMode`] and is not a
 /// legacy compatibility mechanism.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrozenRolloutSegment {
     /// Reference to the immutable source prefix.
     pub reference: RolloutReferenceItem,
@@ -361,6 +361,15 @@ pub struct RevertThreadParams {
     pub multi_agent_version: Option<MultiAgentVersion>,
 }
 
+/// Whether shared response items retain their process-local source runtime identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkModelStateOrigin {
+    /// The response Arc can identify copy-on-write state in the loaded source runtime.
+    LoadedSource,
+    /// A transferred snapshot must reconstruct its state without consulting a live source.
+    Snapshot,
+}
+
 /// Frozen source history and model context for a reference-backed fork.
 #[derive(Debug)]
 pub struct PreparedFork {
@@ -368,7 +377,8 @@ pub struct PreparedFork {
     pub source_thread_id: ThreadId,
     /// Exclusive ordinal selected in the source before normalizing a boundary into its ancestor.
     /// Context-only forks retain this cutoff even when they do not freeze a source segment.
-    pub source_end_ordinal_exclusive: u64,
+    /// Legacy sources have no rollout ordinals and use `None`.
+    pub source_end_ordinal_exclusive: Option<u64>,
     /// Compatibility position selected while normalizing the paginated lineage.
     pub history_base: Option<HistoryPosition>,
     /// Canonical immutable rollout prefix inherited by a durable child.
@@ -390,6 +400,8 @@ pub struct PreparedFork {
     pub projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
     /// Authoritative copy-on-write model history retained without copying parent response items.
     pub shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
+    /// Imported Arcs cannot identify the originating runtime's copy-on-write model state.
+    pub model_state_origin: ForkModelStateOrigin,
     /// Whether a latest-state fork should synthesize an interruption for an open turn.
     pub interrupt_if_open: bool,
     /// Blocks source deletion until the child's history reference is durable.
@@ -413,7 +425,7 @@ impl PreparedFork {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_thread_id: ThreadId,
-        source_end_ordinal_exclusive: u64,
+        source_end_ordinal_exclusive: Option<u64>,
         history_base: Option<HistoryPosition>,
         frozen_segment: Option<FrozenRolloutSegment>,
         model_context: Arc<Vec<RolloutItem>>,
@@ -433,6 +445,7 @@ impl PreparedFork {
             copied_history: None,
             projected_response_turns: None,
             shared_model_response_items: None,
+            model_state_origin: ForkModelStateOrigin::LoadedSource,
             interrupt_if_open,
             _source_reservation: Box::new(source_reservation),
         }

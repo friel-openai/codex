@@ -641,7 +641,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
     };
     let prepared = PreparedFork::new(
         source_thread_id,
-        /*source_end_ordinal_exclusive*/ 1,
+        /*source_end_ordinal_exclusive*/ Some(1),
         /*history_base*/ None,
         Some(frozen_segment),
         Arc::new(boundary_context.clone()),
@@ -3607,20 +3607,24 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
     assert!(source_snapshot_state.ends_mid_turn);
     let expected_turn_id = source_snapshot_state.active_turn_id.clone();
     assert_eq!(expected_turn_id, None);
+    assert_eq!(
+        source_history.get_history_mode(ThreadHistoryMode::Paginated),
+        ThreadHistoryMode::Legacy,
+    );
 
+    // A live legacy source is not migrated, so its prepared fork has no ordinal cutoff.
     let source_end_ordinal_exclusive = std::fs::read_to_string(&source_path)
         .expect("read source rollout")
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
+        .filter_map(|line| {
             codex_rollout::parse_rollout_line(line)
                 .expect("parse source rollout line")
                 .ordinal
-                .expect("source rollout ordinal")
         })
         .max()
-        .expect("source rollout has items")
-        + 1;
+        .map(|ordinal| ordinal.checked_add(1).expect("source ordinal overflow"));
+    assert_eq!(source_end_ordinal_exclusive, None);
 
     let forked = manager
         .fork_thread(
@@ -3709,10 +3713,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
             .count(),
         1,
     );
-    let ephemeral_history = ephemeral_fork.thread.conversation_history_snapshot().await;
+    // ConversationHistorySnapshot omits contextual user messages, including the interrupt marker.
+    let ephemeral_history = ephemeral_fork.thread.session.clone_history().await;
     assert_eq!(
         ephemeral_history
-            .items()
+            .raw_items()
             .filter(|item| {
                 strip_response_item_ids_from_json(
                     serde_json::to_value(RolloutItem::ResponseItem((*item).clone().into()))

@@ -2035,19 +2035,23 @@ async fn active_turn_stores_only_its_start_position() {
     assert!(prepared.model_context.iter().any(|item| {
         matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == "turn-1")
     }));
-    // Another store may fork the persisted prefix while this store keeps the source writer open.
+    // The writer exports the immutable prefix; another store imports it without acquiring
+    // mutable ownership. App-server fork handoff uses this protocol for an active source.
     let other_store = projection_store(home.path()).await;
-    let other_prepared =
-        prepare_paginated_fork(&other_store, thread_id, ForkBoundary::Latest).await;
-    assert_eq!(
-        serde_json::to_value((
-            other_prepared.history_base,
-            other_prepared.model_context.as_ref()
-        ))
-        .expect("serialize other store's fork snapshot"),
-        serde_json::to_value((prepared.history_base, prepared.model_context.as_ref()))
-            .expect("serialize live store's fork snapshot"),
-    );
+    let export = store
+        .reserve_exported_fork(thread_id)
+        .await
+        .expect("export immutable prefix");
+    let import = other_store
+        .reserve_imported_fork(thread_id)
+        .await
+        .expect("import source lease");
+    other_store
+        .validate_imported_fork(thread_id, frozen)
+        .await
+        .expect("validate imported snapshot");
+    drop(import);
+    drop(export);
     let before_first_turn = prepare_paginated_fork(
         &store,
         thread_id,
@@ -2055,7 +2059,7 @@ async fn active_turn_stores_only_its_start_position() {
     )
     .await;
     assert_eq!(before_first_turn.history_base, None);
-    assert_eq!(before_first_turn.source_end_ordinal_exclusive, 1);
+    assert_eq!(before_first_turn.source_end_ordinal_exclusive, Some(1));
 }
 
 #[tokio::test]
