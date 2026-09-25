@@ -32,6 +32,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::materialize_rollout_items;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
@@ -563,6 +564,7 @@ async fn summarize_context_three_requests_and_instructions(
     });
     let test = builder.build(&server).await?;
     let codex = test.codex.clone();
+    let codex_home = test.config.codex_home.clone();
     let rollout_path = test.session_configured.rollout_path.expect("rollout path");
 
     // 1) Normal user input – should hit server once.
@@ -724,18 +726,13 @@ async fn summarize_context_three_requests_and_instructions(
 
     // Verify rollout contains user-turn TurnContext entries and a Compacted entry.
     println!("rollout path: {}", rollout_path.display());
-    let text = std::fs::read_to_string(&rollout_path).expect("failed to read rollout file");
+    let items = materialize_rollout_items(codex_home.as_path(), &rollout_path)
+        .await
+        .expect("failed to materialize rollout");
     let mut regular_turn_context_count = 0usize;
     let mut saw_compacted_summary = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(entry) = codex_rollout::parse_rollout_line(trimmed) else {
-            continue;
-        };
-        match entry.item {
+    for item in items {
+        match item {
             RolloutItem::TurnContext(_) => {
                 regular_turn_context_count += 1;
             }
@@ -3799,6 +3796,7 @@ async fn auto_compact_persists_rollout_entries() {
     });
     let test = builder.build(&server).await.unwrap();
     let codex = test.codex.clone();
+    let codex_home = test.config.codex_home.clone();
     let session_configured = test.session_configured;
 
     codex
@@ -3833,20 +3831,15 @@ async fn auto_compact_persists_rollout_entries() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
 
     let rollout_path = session_configured.rollout_path.expect("rollout path");
-    let text = std::fs::read_to_string(&rollout_path).expect("failed to read rollout file");
+    let items = materialize_rollout_items(codex_home.as_path(), &rollout_path)
+        .await
+        .expect("failed to materialize rollout");
 
     let mut turn_context_count = 0usize;
     let mut saw_compaction = false;
     let mut checkpoint = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(entry) = codex_rollout::parse_rollout_line(trimmed) else {
-            continue;
-        };
-        match entry.item {
+    for item in items {
+        match item {
             RolloutItem::TurnContext(_) => {
                 turn_context_count += 1;
             }

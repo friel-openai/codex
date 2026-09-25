@@ -50,6 +50,35 @@ async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn exact_reader_preserves_physical_sibling_and_read_metrics() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let plain = home.path().join("rollout-exact.jsonl");
+    let compressed = compressed_rollout_path(&plain);
+    fs::write(&plain, "plain sibling\n")?;
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(&b"compressed sibling\n"[..], 3)?,
+    )?;
+
+    for (path, contents, format) in [
+        (&plain, "plain sibling", "plain"),
+        (&compressed, "compressed sibling", "zstd"),
+    ] {
+        let mut reader = open_rollout_line_reader_exact(path).await?;
+        assert_eq!(reader.metrics.format, format);
+        assert_eq!(reader.next_line().await?, Some(contents.to_string()));
+        assert_eq!(reader.next_line().await?, None);
+        assert!(reader.metrics.reached_eof);
+    }
+    let mut preferred = open_rollout_line_reader(&compressed).await?;
+    assert_eq!(
+        preferred.next_line().await?,
+        Some("plain sibling".to_string())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn read_session_meta_line_stops_before_invalid_utf8_tail() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let uuid = Uuid::from_u128(16);
@@ -677,6 +706,7 @@ fn write_rollout(path: &std::path::Path, thread_id: ThreadId, message: &str) -> 
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
+            segment_id: None,
             forked_from_id: None,
             forked_from_ordinal_exclusive: None,
             parent_thread_id: None,

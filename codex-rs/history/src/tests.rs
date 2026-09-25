@@ -528,6 +528,13 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
             },
         }),
         json!({
+            "type": "rollout_reference",
+            "payload": {
+                "rollout_path": "parent.jsonl",
+                "max_depth": 2,
+            },
+        }),
+        json!({
             "type": "response_item",
             "payload": response_message("user"),
         }),
@@ -647,7 +654,33 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 12);
+    let mut variant_names = variants
+        .iter()
+        .map(|variant| {
+            variant["properties"]["type"]["enum"][0]
+                .as_str()
+                .expect("rollout variant name")
+        })
+        .collect::<Vec<_>>();
+    variant_names.sort_unstable();
+    assert_eq!(
+        variant_names,
+        [
+            "compacted",
+            "event_msg",
+            "inter_agent_communication",
+            "inter_agent_communication_metadata",
+            "realtime_item",
+            "response_item",
+            "retained_context",
+            "rollout_reference",
+            "security_risk_score",
+            "session_meta",
+            "token_usage_record",
+            "turn_context",
+            "world_state",
+        ]
+    );
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");

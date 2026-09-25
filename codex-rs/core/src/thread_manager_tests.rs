@@ -43,6 +43,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::DeleteThreadParams;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -831,6 +832,7 @@ async fn ignores_session_prefix_messages_when_truncating() {
     let mut items = session
         .build_initial_context_with_world_state(&step_context, &world_state)
         .await;
+    let prefix_len = items.len();
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));
     items.push(user_msg("second question"));
@@ -854,12 +856,11 @@ async fn ignores_session_prefix_messages_when_truncating() {
     );
     let got_items = truncated.get_rollout_items();
 
-    let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone().into()),
-        RolloutItem::ResponseItem(items[1].clone().into()),
-        RolloutItem::ResponseItem(items[2].clone().into()),
-        RolloutItem::ResponseItem(items[3].clone().into()),
-    ];
+    let expected = items[..prefix_len + 2]
+        .iter()
+        .cloned()
+        .map(|item| RolloutItem::ResponseItem(item.into()))
+        .collect::<Vec<_>>();
 
     assert_eq!(
         serde_json::to_value(got_items).unwrap(),
@@ -1887,6 +1888,151 @@ async fn selected_capability_roots_round_trip_through_fork() {
 }
 
 #[tokio::test]
+async fn cold_fork_preserves_version_from_discarded_turn_context_after_reopen() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.agents_enabled = true;
+    config
+        .features
+        .disable(codex_features::Feature::MultiAgentV2)
+        .expect("disable forced V2");
+    config
+        .features
+        .enable(codex_features::Feature::Collab)
+        .expect("use V1 as the configured fallback");
+    assert_eq!(config.multi_agent_version_override(), None);
+    assert_eq!(
+        config.multi_agent_version_from_features(),
+        MultiAgentVersion::V1
+    );
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    // Older rollouts can record the effective runtime only in a later TurnContext.
+    // Never load the source into the manager: a live runtime would mask this loss.
+    let source_id = ThreadId::new();
+    let recorder = RolloutRecorder::new(
+        &config,
+        crate::rollout::RolloutRecorderParams::new(
+            source_id,
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "cold-version-test".to_string(),
+            Default::default(),
+            Vec::new(),
+        ),
+    )
+    .await
+    .expect("create cold source recorder");
+    let context = serde_json::from_value(serde_json::json!({
+        "cwd": config.cwd,
+        "approval_policy": "never",
+        "sandbox_policy": { "type": "read-only" },
+        "model": "gpt-5.1-codex",
+        "summary": "auto",
+        "multi_agent_version": "v2"
+    }))
+    .expect("decode legacy turn context");
+    recorder
+        .record_canonical_items(&[
+            RolloutItem::ResponseItem(user_msg("retained question").into()),
+            RolloutItem::ResponseItem(assistant_msg("retained answer").into()),
+            RolloutItem::ResponseItem(user_msg("discarded question").into()),
+            RolloutItem::TurnContext(context),
+            RolloutItem::ResponseItem(assistant_msg("discarded answer").into()),
+        ])
+        .await
+        .expect("record source history");
+    recorder.persist().await.expect("persist source history");
+    recorder.shutdown().await.expect("close source recorder");
+    let source_path = recorder.rollout_path().to_path_buf();
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&source_path)
+            .await
+            .expect("read source physical metadata")
+            .meta
+            .multi_agent_version,
+        None
+    );
+    let source_history = RolloutRecorder::get_rollout_history(&source_path)
+        .await
+        .expect("read cold source history");
+    assert_eq!(
+        source_history.get_multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let fork = manager
+        .fork_thread(
+            ForkSnapshot::TruncateBeforeNthUserMessage(1),
+            StartThreadOptions {
+                environments: Some(Vec::new()),
+                ..StartThreadOptions::new(config.clone())
+            },
+            source_path,
+        )
+        .await
+        .expect("fork cold source before the version marker");
+    assert_eq!(
+        fork.thread.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
+    let fork_path = fork.thread.rollout_path().expect("fork rollout path");
+    let metadata = codex_rollout::read_session_meta_line(&fork_path)
+        .await
+        .expect("read fork physical metadata");
+    assert_eq!(metadata.meta.id, fork.thread_id);
+    assert_eq!(
+        metadata.meta.multi_agent_version,
+        Some(MultiAgentVersion::V2)
+    );
+    let inherited_items =
+        codex_rollout::materialize_rollout_items(config.codex_home.as_path(), fork_path.as_path())
+            .await
+            .expect("materialize truncated fork");
+    assert_eq!(
+        truncation::user_message_positions_in_rollout(&inherited_items).len(),
+        1,
+        "the fork retains the first question, not the discarded suffix"
+    );
+    assert!(
+        !inherited_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::TurnContext(_))),
+        "the only source version marker must be outside the fork cutoff"
+    );
+    fork.thread.shutdown_and_wait().await.expect("close fork");
+    manager.remove_thread(&fork.thread_id).await;
+    let reopened = manager
+        .resume_thread_from_rollout(
+            config,
+            fork_path,
+            Arc::clone(&manager.state.auth_manager),
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("reopen fork from its persisted metadata");
+    assert_eq!(
+        reopened.thread.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
+    reopened
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("close reopened fork");
+}
+
+#[tokio::test]
 async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
@@ -2341,7 +2487,7 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
 }
 
 #[tokio::test]
-async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
+async fn rollout_path_resume_reads_history_through_thread_store() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -2438,16 +2584,17 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
     let calls = in_memory_store.calls().await;
     assert_eq!(calls.read_thread_by_rollout_path, 2);
 
+    forked
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown path-forked thread");
+
     resumed_from_path
         .thread
         .shutdown_and_wait()
         .await
         .expect("shutdown path-resumed thread");
-    forked
-        .thread
-        .shutdown_and_wait()
-        .await
-        .expect("shutdown forked thread");
 }
 
 #[tokio::test]
@@ -2838,34 +2985,43 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
 }
 
 #[test]
-fn completed_legacy_event_history_is_not_mid_turn() {
-    let completed_history = InitialHistory::Forked(vec![
-        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
-            client_id: None,
-            message: "hello".to_string(),
-            images: None,
-            text_elements: Vec::new(),
-            local_images: Vec::new(),
-            ..Default::default()
-        })),
-        RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
-            message: "done".to_string(),
-            phase: None,
-            memory_citation: None,
-            delivery: None,
-            questions: None,
-        })),
-    ]);
+fn legacy_agent_message_phase_determines_turn_completion() {
+    for (phase, ends_mid_turn) in [
+        (None, false),
+        (
+            Some(codex_protocol::models::MessagePhase::FinalAnswer),
+            false,
+        ),
+        (Some(codex_protocol::models::MessagePhase::Commentary), true),
+    ] {
+        let completed_history = InitialHistory::Forked(vec![
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "hello".to_string(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "done".to_string(),
+                phase,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            })),
+        ]);
 
-    assert_eq!(
-        snapshot_turn_state(&completed_history),
-        SnapshotTurnState {
-            ends_mid_turn: false,
-            active_turn_id: None,
-            active_turn_started_at: None,
-            active_turn_start_index: None,
-        },
-    );
+        assert_eq!(
+            snapshot_turn_state(&completed_history),
+            SnapshotTurnState {
+                ends_mid_turn,
+                active_turn_id: None,
+                active_turn_started_at: None,
+                active_turn_start_index: None,
+            },
+        );
+    }
 }
 
 #[test]
@@ -2899,6 +3055,10 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config
+        .features
+        .disable(codex_features::Feature::MultiAgentV2)
+        .expect("exercise the legacy contextual-user interrupt marker");
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =
@@ -3108,12 +3268,327 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
     }));
 }
 
-#[tokio::test]
-async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source() {
+#[test]
+fn interrupted_fork_accepts_source_appends_before_freeze() {
+    let test_thread = std::thread::Builder::new()
+        .name("interrupted_fork_accepts_source_appends_before_freeze".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build fork snapshot test runtime")
+                .block_on(interrupted_fork_accepts_source_appends_before_freeze_inner())
+        })
+        .expect("spawn fork snapshot test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        passthrough_image_store(),
+        thread_store_from_config(&config, state_db.clone()),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let source = manager
+        .resume_thread_with_history(
+            config.clone(),
+            InitialHistory::Forked(vec![
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("first answer").into()),
+            ]),
+            auth_manager,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("create source thread");
+    let source_path = source
+        .thread
+        .rollout_path()
+        .expect("source rollout path should exist");
+    source.thread.flush_rollout().await.expect("flush source");
+    let stale_history = RolloutRecorder::get_rollout_history(&source_path)
+        .await
+        .expect("read source before append");
+    let appended_item = assistant_msg("append before freeze");
+    let (turn, _) = source
+        .thread
+        .session
+        .new_turn_with_sub_id(
+            "source-append".to_string(),
+            SessionSettingsUpdate::default(),
+            Default::default(),
+        )
+        .await
+        .expect("create append turn");
+    source
+        .thread
+        .session
+        .record_conversation_items(
+            &turn,
+            turn.model_info(),
+            std::slice::from_ref(&appended_item),
+        )
+        .await;
+    let forked = manager
+        .fork_thread_from_history(
+            ForkSnapshot::Interrupted,
+            StartThreadOptions::new(config.clone()),
+            stale_history.clone(),
+        )
+        .await
+        .expect("fork source after append");
+    let forked_path = forked
+        .thread
+        .rollout_path()
+        .expect("forked rollout path should exist");
+    let forked_items = codex_rollout::materialize_rollout_items(
+        config.codex_home.as_path(),
+        forked_path.as_path(),
+    )
+    .await
+    .expect("materialize fork history");
+    assert_eq!(
+        forked_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(item)
+                        if matches!(&item.item, ResponseItem::Message {
+                            role,
+                            content,
+                            ..
+                        } if role == "assistant"
+                        && content == &vec![ContentItem::OutputText {
+                            text: "append before freeze".to_string(),
+                        }])
+                )
+            })
+            .count(),
+        1,
+    );
+
+    let err = match manager
+        .fork_thread_from_history(
+            ForkSnapshot::TruncateBeforeNthUserMessage(1),
+            StartThreadOptions::new(config),
+            stale_history,
+        )
+        .await
+    {
+        Ok(_) => panic!("rollback fork should reject a source that changed before freeze"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("changed before its snapshot was frozen"),
+        "unexpected rollback fork error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn reference_backed_fork_reserves_source_until_child_reference_is_durable() {
+    struct BlockSecondThreadStartup {
+        starts: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl codex_extension_api::ThreadLifecycleContributor<Config> for BlockSecondThreadStartup {
+        fn on_thread_start<'a>(
+            &'a self,
+            _input: codex_extension_api::ThreadStartInput<'a, Config>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                if self.starts.fetch_add(1, Ordering::AcqRel) == 1 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+            })
+        }
+    }
+
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let observer = Arc::new(BlockSecondThreadStartup {
+        starts: std::sync::atomic::AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(observer.clone());
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let state_db = init_state_db(&config).await;
+    let manager = Arc::new(ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Arc::new(extensions.build()),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        passthrough_image_store(),
+        thread_store_from_config(&config, state_db.clone()),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    ));
+
+    let source = manager
+        .resume_thread_with_history(
+            config.clone(),
+            InitialHistory::Forked(vec![
+                RolloutItem::ResponseItem(user_msg("source history").into()),
+                RolloutItem::ResponseItem(assistant_msg("source answer").into()),
+            ]),
+            auth_manager,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("create source thread");
+    let source_thread_id = source.thread_id;
+    let source_path = source
+        .thread
+        .rollout_path()
+        .expect("source rollout path should exist");
+    source.thread.flush_rollout().await.expect("flush source");
+    let source_history = RolloutRecorder::get_rollout_history(&source_path)
+        .await
+        .expect("read source history");
+
+    let fork = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let config = config.clone();
+        async move {
+            manager
+                .fork_thread_from_history(
+                    ForkSnapshot::Interrupted,
+                    StartThreadOptions::new(config),
+                    source_history,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), observer.entered.notified())
+        .await
+        .expect("child should reach blocked startup");
+
+    let mut delete = Box::pin(
+        manager
+            .state
+            .thread_store
+            .delete_thread(DeleteThreadParams {
+                thread_id: source_thread_id,
+            }),
+    );
+    tokio::select! {
+        biased;
+        result = &mut delete => {
+            panic!("source deletion completed before child reference was durable: {result:?}")
+        }
+        _ = tokio::task::yield_now() => {}
+    }
+
+    observer.release.notify_one();
+    let child = fork
+        .await
+        .expect("fork task should finish")
+        .expect("fork should succeed");
+    let child_path = child
+        .thread
+        .rollout_path()
+        .expect("child rollout path should exist");
+    delete
+        .await
+        .expect("immutable child reference should permit source deletion");
+    let child_items =
+        codex_rollout::materialize_rollout_items(config.codex_home.as_path(), &child_path)
+            .await
+            .expect("child history should remain readable after source deletion");
+    assert!(
+        child_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(item)
+                if matches!(&item.item, ResponseItem::Message {
+                    role,
+                    content,
+                    ..
+                } if role == "user"
+                && content == &vec![ContentItem::OutputText {
+                    text: "source history".to_string(),
+                }])
+        )),
+        "child should retain inherited history through its immutable reference"
+    );
+}
+
+#[test]
+fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source() {
+    let test_thread = std::thread::Builder::new()
+        .name(
+            "interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source"
+                .to_string(),
+        )
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build persisted fork snapshot test runtime")
+                .block_on(
+                    interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source_inner(),
+                )
+        })
+        .expect("spawn persisted fork snapshot test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source_inner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config
+        .features
+        .disable(codex_features::Feature::MultiAgentV2)
+        .expect("exercise the legacy contextual-user interrupt marker");
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =
@@ -3211,11 +3686,13 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .thread
         .rollout_path()
         .expect("re-forked rollout path should exist");
-    let reforked_history = RolloutRecorder::get_rollout_history(&reforked_path)
-        .await
-        .expect("read re-forked rollout history");
-    let reforked_rollout_items: Vec<_> = reforked_history
-        .get_rollout_items()
+    let reforked_rollout_items = codex_rollout::materialize_rollout_items(
+        config.codex_home.as_path(),
+        reforked_path.as_path(),
+    )
+    .await
+    .expect("materialize re-forked rollout history");
+    let reforked_rollout_items: Vec<_> = reforked_rollout_items
         .iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
