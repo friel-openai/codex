@@ -23,6 +23,7 @@ use codex_extension_api::ThreadInstructionsProvider;
 use codex_extension_api::UserInstructionsProvider;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::ModelsManager;
@@ -321,6 +322,10 @@ impl ModelsManager for GatedModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.inner.auth_manager()
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        self.inner.custom_models()
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {

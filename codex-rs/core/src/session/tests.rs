@@ -2949,12 +2949,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, raw_history_items(&history_before_seed));
 
+    // Rendering after persistence would deduplicate the newly inserted role
+    // prompt and would no longer describe this first context update.
+    let initial_context = build_initial_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
     assert_eq!(
@@ -3854,6 +3856,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
     let mut builder = test_codex().with_config(|config| {
         config.update_plan_enabled = true;
+        config
+            .features
+            .disable(Feature::AgentPromptInjection)
+            .unwrap();
+        config.features.disable(Feature::MultiAgentV2).unwrap();
+        config.features.disable(Feature::Collab).unwrap();
         config.permissions.approval_policy =
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
     });
@@ -10195,12 +10203,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let initial_context = build_initial_context(&session, &turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
     let history = session.clone_history().await;
-    let initial_context = build_initial_context(&session, &turn_context).await;
     assert_eq!(
         strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
         strip_response_item_ids(&strip_metadata_from_items(&initial_context))
@@ -10251,6 +10259,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
         )
         .await;
 
+    let initial_context = build_initial_context(&session, &turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
@@ -10258,7 +10267,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected_history.extend(initial_context);
     assert_eq!(
         strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
@@ -12460,4 +12468,120 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
     }
 
     Ok(())
+}
+
+#[tokio::test]
+async fn root_agent_prompt_requires_explicit_fork_turns() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let prompt = load_root_agent_prompt(codex_home.path()).await;
+
+    assert!(prompt.contains("always explicitly provide a `fork_turns` value"));
+    assert!(prompt.contains("default to `\"fork_turns\":\"all\"` for subagents"));
+    assert!(!prompt.contains("omit `fork_turns` unless you need less context"));
+}
+
+#[tokio::test]
+async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let prompt = load_root_agent_prompt(codex_home.path()).await;
+
+    assert!(prompt.contains("Your first job is to accomplish the user's goal."));
+    assert!(prompt.contains("A plan file is support work, not the deliverable"));
+    assert!(prompt.contains("Prefer direct execution over coordination"));
+}
+
+#[tokio::test]
+async fn subagent_prompt_is_for_regular_subagents_only() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let prompt = load_subagent_prompt(codex_home.path()).await;
+
+    assert!(prompt.contains("# You are a Subagent"));
+    assert!(prompt.contains("## Subagent Responsibilities"));
+    assert!(!prompt.contains("You are also a **watchdog**"));
+    assert!(!prompt.contains("watchdog.snooze"));
+}
+
+#[tokio::test]
+async fn agent_prompt_loader_prefers_home_overrides() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    tokio::fs::write(codex_home.path().join("AGENTS.root.md"), "custom root")
+        .await
+        .expect("write root override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.subagent.md"),
+        "custom subagent",
+    )
+    .await
+    .expect("write subagent override");
+
+    assert_eq!(
+        load_root_agent_prompt(codex_home.path()).await,
+        "custom root"
+    );
+    assert_eq!(
+        load_subagent_prompt(codex_home.path()).await,
+        "custom subagent"
+    );
+}
+
+#[tokio::test]
+async fn root_agent_prompt_is_inline_developer_context_not_session_instructions() {
+    let session = make_session_with_config(|config| {
+        config
+            .features
+            .enable(Feature::AgentPromptInjection)
+            .expect("test config should enable prompt injection");
+    })
+    .await
+    .expect("session should build");
+
+    {
+        let state = session.state.lock().await;
+        assert_eq!(state.session_configuration.developer_instructions, None);
+    }
+
+    let turn_context = session.new_default_turn().await;
+    let initial_context = build_initial_context(session.as_ref(), &turn_context).await;
+
+    assert!(initial_context.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "developer"
+                && content.iter().any(|content_item| matches!(
+                    content_item,
+                    ContentItem::InputText { text }
+                        if text.contains("# You are the Root Agent")
+                ))
+    )));
+}
+
+#[tokio::test]
+async fn agent_prompt_injection_does_not_require_collab_feature() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .disable(Feature::Collab)
+        .expect("test config should disable collab");
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::default(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("Test Subagent".to_string()),
+        agent_role: Some("worker".to_string()),
+    });
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
+        .await
+        .expect("prompt injection should not require collab");
+
+    assert!(prompt.contains("# You are a Subagent"));
+    assert!(prompt.contains("## Subagent Responsibilities"));
 }
