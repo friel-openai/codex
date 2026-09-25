@@ -262,8 +262,14 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
     realtime_behavior: RealtimeRequestBehavior,
     loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
+    let mut config = config.clone();
+    if matches!(history_capabilities, HistoryCapabilities::LegacyOnly) {
+        config
+            .features
+            .disable(Feature::BackgroundPaginatedRolloutMigration)?;
+    }
     let state_db =
-        crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
+        crate::init_state_db_for_app_server_target(&config, &crate::AppServerTarget::Embedded)
             .await?;
     let mut embedded = crate::start_embedded_app_server(
         codex_arg0::Arg0DispatchPaths::default(),
@@ -626,8 +632,7 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
     .await?;
 
     Ok((
-        AppServerSession::new(app_server, thread_params_mode)
-            .with_local_codex_home(&config.codex_home),
+        AppServerSession::new(app_server, thread_params_mode).with_startup_config(&config),
         requests,
         proxy,
     ))

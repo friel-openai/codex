@@ -385,6 +385,7 @@ async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Res
         .thread_loaded_list(codex_app_server_protocol::ThreadLoadedListParams {
             cursor: None,
             limit: None,
+            ancestor_thread_id: None,
         })
         .await?;
     assert_eq!(

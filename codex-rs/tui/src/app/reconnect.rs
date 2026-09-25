@@ -56,7 +56,7 @@ pub(super) async fn reconnect(
             tokio::time::sleep(Duration::from_secs(delay)).await;
             let client = crate::app_server_connection::connect(&target).await?;
             let mut session = AppServerSession::new(client, mode)
-                .with_local_codex_home(&config.codex_home)
+                .with_startup_config(&config)
                 .with_remote_cwd_override(remote_cwd.clone())
                 .with_thread_tool_transport(task_tools.clone());
             let bootstrap = session.bootstrap(&config).await?;
