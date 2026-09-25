@@ -8585,7 +8585,7 @@ index 1a11754681974ce9beaca11c1bb4fbed486712ec..0541b189cd1514a61754c19b7cd18d9b
              if !descendant.was_loaded
                  && let Some(instructions) = &descendant.original_instructions
 diff --git a/codex-rs/core/src/agent/control/residency.rs b/codex-rs/core/src/agent/control/residency.rs
-index 10dd83334d2dca112ae5238b01f0dfc7691c41b9..d22bbd99dfc78a9651551ccaf6efe1920676b7b0 100644
+index 10dd83334d2dca112ae5238b01f0dfc7691c41b9..af438b55df66c704d7677c2ba209fc41686808b8 100644
 --- a/codex-rs/core/src/agent/control/residency.rs
 +++ b/codex-rs/core/src/agent/control/residency.rs
 @@ -81,7 +81,7 @@ impl LocalAgentControl {
@@ -8617,6 +8617,22 @@ index 10dd83334d2dca112ae5238b01f0dfc7691c41b9..d22bbd99dfc78a9651551ccaf6efe192
              if let Err(err) = control
                  .unload_agent_thread(manager, candidate_thread_id)
                  .await
+@@ -287,13 +300,14 @@ impl LocalAgentControl {
+         thread.ensure_rollout_materialized().await;
+         thread.flush_rollout().await?;
+         let environments = thread.environment_selections().await;
++        let ephemeral = thread.config_snapshot().await.ephemeral;
+         thread.shutdown_and_wait().await?;
+         thread
+             .session
+             .services
+             .agent_control
+             .state
+-            .save_evicted_environments(thread_id, environments);
++            .save_evicted_runtime_settings(thread_id, environments, ephemeral);
+         Ok(manager.remove_thread(&thread_id).await.is_some())
+     }
+ }
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
 index 3a61f68006a217aee4eec05fd3989f37026296e8..70b89adc2540ff2abaa8abeb4e23ef646e85059e 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
@@ -8631,10 +8647,37 @@ index 3a61f68006a217aee4eec05fd3989f37026296e8..70b89adc2540ff2abaa8abeb4e23ef64
  use crate::config::Config;
  use crate::config::test_config;
 diff --git a/codex-rs/core/src/agent/control/resume.rs b/codex-rs/core/src/agent/control/resume.rs
-index d444c4f9c7d41d868eec15237d49a6909116614c..f3d6a04fa4d753ab134967f8affc313974278235 100644
+index d444c4f9c7d41d868eec15237d49a6909116614c..ecb21c2ac3e54117219e85ed485a6a1820828d58 100644
 --- a/codex-rs/core/src/agent/control/resume.rs
 +++ b/codex-rs/core/src/agent/control/resume.rs
-@@ -93,6 +93,10 @@ impl LocalAgentControl {
+@@ -4,6 +4,7 @@ use super::residency::is_resident_session_source;
+ use super::*;
+ use crate::agent::registry::AgentLifecycle;
+ use crate::agents_md_manager::SessionInstructions;
++use codex_thread_store::StoredThread;
+ use codex_thread_store::ThreadMetadataPatch;
+
+ pub(super) async fn load_agent_model_context(
+@@ -34,6 +35,18 @@ pub(super) async fn load_agent_model_context(
+ }
+
+ impl LocalAgentControl {
++    fn resumed_agent_is_ephemeral(&self, stored_thread: &StoredThread) -> bool {
++        self.state
++            .evicted_ephemeral(stored_thread.thread_id)
++            .unwrap_or_else(|| {
++                crate::goal_supervisor::is_goal_supervisor_helper_source(&stored_thread.source)
++                    || matches!(
++                        stored_thread.thread_source.as_ref(),
++                        Some(ThreadSource::Feature(feature)) if feature == "system"
++                    )
++            })
++    }
++
+     async fn inherited_instructions_for_resume(
+         &self,
+         state: &ThreadManagerState,
+@@ -93,6 +106,10 @@ impl LocalAgentControl {
              .state
              .agent_metadata_for_thread(thread_id)
              .ok_or(CodexErr::ThreadNotFound(thread_id))?;
@@ -8645,8 +8688,13 @@ index d444c4f9c7d41d868eec15237d49a6909116614c..f3d6a04fa4d753ab134967f8affc3139
 
          let stored_thread = state
              .read_stored_thread(ReadThreadParams {
-@@ -166,17 +170,19 @@ impl LocalAgentControl {
+@@ -164,19 +181,24 @@ impl LocalAgentControl {
+                 .map_err(CodexErr::InvalidRequest)?;
+         }
          config.approvals_reviewer = runtime_approvals_reviewer;
++        // Agent delivery inherits the sender's config, not the target's persistence policy.
++        // Retain the target's own setting across eviction, including debug-materialized helpers.
++        config.ephemeral = self.resumed_agent_is_ephemeral(&stored_thread);
          // Role configuration supplies the agent-specific defaults. Persisted execution settings
          // remain authoritative when a cold agent is loaded into a later root session.
 -        config.model_provider = config
@@ -8676,23 +8724,29 @@ index d444c4f9c7d41d868eec15237d49a6909116614c..f3d6a04fa4d753ab134967f8affc3139
          if let Some(model) = &stored_thread.model {
              config.model = Some(model.clone());
          }
-@@ -249,6 +255,7 @@ impl LocalAgentControl {
+@@ -247,8 +269,9 @@ impl LocalAgentControl {
+             .await
+         {
              Ok(reloaded_thread) => {
-                 self.state.clear_evicted_environments(thread_id);
+-                self.state.clear_evicted_environments(thread_id);
++                self.state.clear_evicted_runtime_settings(thread_id);
                  self.state.clear_evicted_instructions(thread_id);
 +                lifecycle.clear_cold_terminal_status();
                  if let Some(residency_slot) = residency_slot {
                      residency_slot.commit(reloaded_thread.thread_id);
                  }
-@@ -259,6 +266,7 @@ impl LocalAgentControl {
+@@ -257,8 +280,9 @@ impl LocalAgentControl {
+             }
+             Err(err) => {
                  if state.get_thread(thread_id).await.is_ok() {
-                     self.state.clear_evicted_environments(thread_id);
+-                    self.state.clear_evicted_environments(thread_id);
++                    self.state.clear_evicted_runtime_settings(thread_id);
                      self.state.clear_evicted_instructions(thread_id);
 +                    lifecycle.clear_cold_terminal_status();
                      drop(residency_slot);
                      self.touch_loaded_agent_residency(state, thread_id).await;
                      return Ok(state
-@@ -317,169 +325,16 @@ impl LocalAgentControl {
+@@ -317,169 +341,16 @@ impl LocalAgentControl {
          inherited_instructions: Option<SessionInstructions>,
          lifecycle: Option<Arc<AgentLifecycle>>,
      ) -> CodexResult<ThreadId> {
@@ -8871,8 +8925,17 @@ index d444c4f9c7d41d868eec15237d49a6909116614c..f3d6a04fa4d753ab134967f8affc3139
      }
 
      async fn resume_single_agent_from_rollout(
+@@ -499,6 +370,8 @@ impl LocalAgentControl {
+                 include_history: false,
+             })
+             .await?;
++        let mut config = config;
++        config.ephemeral = self.resumed_agent_is_ephemeral(&stored_thread);
+         let resumed_agent_path = stored_thread
+             .agent_path
+             .as_deref()
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index ccd9a318a1cee1a67f8e97e2d720129dc2265158..66b7229f9a3124aedf75943fda54513f5a83ab91 100644
+index ccd9a318a1cee1a67f8e97e2d720129dc2265158..cdc48c20c8e66febadb39bb9a0945a30a08d4d15 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -184,157 +184,6 @@ async fn load_agent_model_context(
@@ -9042,17 +9105,23 @@ index ccd9a318a1cee1a67f8e97e2d720129dc2265158..66b7229f9a3124aedf75943fda54513f
                  return Ok(());
              }
          }
-@@ -712,6 +561,7 @@ impl LocalAgentControl {
+@@ -710,8 +559,9 @@ impl LocalAgentControl {
+                 if let Some(parent_thread_id) = owner_thread_id {
+                     self.validate_loaded_v2_child(&reloaded_thread.thread, parent_thread_id)?;
                  }
-                 self.state.clear_evicted_environments(thread_id);
+-                self.state.clear_evicted_environments(thread_id);
++                self.state.clear_evicted_runtime_settings(thread_id);
                  self.state.clear_evicted_instructions(thread_id);
 +                lifecycle.clear_cold_terminal_status();
                  residency_slot.commit(reloaded_thread.thread_id);
                  state.notify_thread_created(reloaded_thread.thread_id);
                  Ok(())
-@@ -723,6 +573,7 @@ impl LocalAgentControl {
+@@ -721,8 +571,9 @@ impl LocalAgentControl {
+                     if let Some(parent_thread_id) = owner_thread_id {
+                         self.validate_loaded_v2_child(&thread, parent_thread_id)?;
                      }
-                     self.state.clear_evicted_environments(thread_id);
+-                    self.state.clear_evicted_environments(thread_id);
++                    self.state.clear_evicted_runtime_settings(thread_id);
                      self.state.clear_evicted_instructions(thread_id);
 +                    lifecycle.clear_cold_terminal_status();
                      drop(residency_slot);
@@ -9501,10 +9570,18 @@ index 0000000000000000000000000000000000000000..8eabe97975302d2de75637075ba71aca
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56b18372e3 100644
+index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3e1a3f355 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1141,7 +1141,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
+@@ -834,6 +834,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+         .get_thread(resumed_helper_id)
+         .await
+         .expect("cold-resumed goal supervisor helper should be registered");
++    assert!(resumed_helper.config_snapshot().await.ephemeral);
+     let resumed_history = resumed_helper.session.clone_history().await;
+     assert_goal_supervisor_boot_history(
+         resumed_history.raw_items(),
+@@ -1141,7 +1142,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
  }
 
  #[tokio::test]
@@ -9513,7 +9590,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      let harness = AgentControlHarness::new().await;
      let (parent_thread_id, _) = harness.start_thread().await;
      let state_db = harness
-@@ -1222,8 +1222,19 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1222,8 +1223,19 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 
      harness
          .control
@@ -9535,7 +9612,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
 
      let indexed_metadata = harness
          .control
-@@ -1237,6 +1248,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1237,6 +1249,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
          Some("indexed-name")
      );
 
@@ -9547,7 +9624,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      let anonymous_metadata = harness
          .control
          .state
-@@ -1279,6 +1295,142 @@ async fn get_status_returns_not_found_without_manager() {
+@@ -1279,6 +1296,142 @@ async fn get_status_returns_not_found_without_manager() {
      assert_eq!(got, AgentStatus::NotFound);
  }
 
@@ -9690,7 +9767,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
  #[tokio::test]
  async fn on_event_updates_status_from_task_started() {
      let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
-@@ -1425,6 +1577,40 @@ async fn get_status_returns_not_found_for_missing_thread() {
+@@ -1425,6 +1578,40 @@ async fn get_status_returns_not_found_for_missing_thread() {
      assert_eq!(status, AgentStatus::NotFound);
  }
 
@@ -9731,7 +9808,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
  #[tokio::test]
  async fn get_status_returns_pending_init_for_new_thread() {
      let harness = AgentControlHarness::new().await;
-@@ -1712,6 +1898,18 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1712,8 +1899,21 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          },
          Ok(_) => panic!("expected thread to be removed"),
      }
@@ -9749,8 +9826,33 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
 +    );
 
      let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
      sender_config.model_provider_id = "ollama".to_string();
-@@ -1771,6 +1969,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     sender_config.model_provider = sender_config
+         .model_providers
+@@ -1724,7 +1924,11 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     let mut parent_turn = parent_thread.session.new_default_turn().await;
+     match route {
+         V2ReloadRoute::Sender => control
+-            .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id, /*parent*/ None)
++            .ensure_v2_agent_loaded(
++                sender_config.clone(),
++                spawned_agent.thread_id,
++                /*parent*/ None,
++            )
+             .await
+             .expect("known v2 agent should reload"),
+         V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => {
+@@ -1762,7 +1966,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+                     .await
+                     .expect("known child should reload through its parent"),
+                 V2ReloadRoute::Generic => control
+-                    .ensure_agent_loaded(sender_config, spawned_agent.thread_id)
++                    .ensure_agent_loaded(sender_config.clone(), spawned_agent.thread_id)
+                     .await
+                     .expect("generic delivery should reload through the captured parent"),
+                 V2ReloadRoute::Sender => unreachable!(),
+@@ -1771,11 +1975,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
              assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
          }
      }
@@ -9758,7 +9860,150 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      let reloaded_child = harness
          .manager
          .get_thread(spawned_agent.thread_id)
-@@ -2160,6 +2359,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+         .await
+         .expect("reloaded child thread should exist");
++    assert!(sender_config.ephemeral);
++    assert!(!reloaded_child.config_snapshot().await.ephemeral);
++    assert!(reloaded_child.session.services.live_thread.is_some());
++    assert!(reloaded_child.state_db().is_some());
+     let reloaded_instructions = reloaded_child.session.inherited_instructions().await;
+     assert_eq!(
+         (reloaded_instructions.user, reloaded_instructions.thread),
+@@ -1857,6 +2066,86 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+         .into_iter()
+         .find(|entry| captured_op_matches(entry, &expected));
+     assert!(captured.is_some());
++    let persisted_marker = assistant_message("persisted after ephemeral sender reload", None);
++    reloaded_child
++        .inject_response_items(vec![persisted_marker.clone()])
++        .await
++        .expect("resumed child should accept a durable message");
++    reloaded_child
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown child");
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: spawned_agent.thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store should reopen resumed history");
++    assert!(persisted.items.iter().any(|item| matches!(
++        item,
++        RolloutItem::ResponseItem(response) if response.item == persisted_marker
++    )));
++}
++
++#[tokio::test]
++async fn ensure_agent_loaded_preserves_materialized_ephemeral_target() {
++    let harness = AgentControlHarness::new().await;
++    let mut ephemeral_config = harness.config.clone();
++    ephemeral_config.ephemeral = true;
++    let thread_id = harness
++        .control
++        .spawn_agent(
++            ephemeral_config,
++            text_input("temporary task"),
++            /*session_source*/ None,
++        )
++        .await
++        .expect("spawn temporary agent");
++    let thread = harness
++        .manager
++        .get_thread(thread_id)
++        .await
++        .expect("temporary agent");
++    persist_thread_for_tree_resume(&thread, "temporary context").await;
++    thread
++        .session
++        .services
++        .live_thread
++        .as_ref()
++        .expect("ephemeral new thread retains a deferred writer")
++        .persist(PersistContext::Standard)
++        .await
++        .expect("materialize temporary context for debugging");
++    let manager = harness.control.upgrade().expect("manager");
++    assert!(
++        harness
++            .control
++            .unload_agent_thread(&manager, thread_id)
++            .await
++            .expect("unload agent")
++    );
++    harness
++        .control
++        .ensure_agent_loaded(harness.config.clone(), thread_id)
++        .await
++        .expect("reload explicitly ephemeral target from persistent caller");
++    let reloaded = harness
++        .manager
++        .get_thread(thread_id)
++        .await
++        .expect("reloaded temporary agent");
++    assert!(!harness.config.ephemeral);
++    assert!(reloaded.config_snapshot().await.ephemeral);
++    assert!(reloaded.state_db().is_none());
++    reloaded
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown temporary agent");
+ }
+
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+@@ -1897,10 +2186,12 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
+
+     let parent_turn_id = "parent-turn-v1-cold";
+     let root_turn_id = "root-turn-v1-cold";
++    let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
+     harness
+         .control
+         .deliver_input_to_agent(
+-            harness.config.clone(),
++            sender_config.clone(),
+             child_thread_id,
+             text_input("cold v1 delivery"),
+             AgentInputDelivery::Queue,
+@@ -1940,12 +2231,27 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
+         matches!(status, AgentStatus::Completed(_))
+     })
+     .await;
+-    harness
+-        .manager
+-        .get_thread(child_thread_id)
+-        .await?
+-        .shutdown_and_wait()
++    let reloaded_child = harness.manager.get_thread(child_thread_id).await?;
++    assert!(sender_config.ephemeral);
++    assert!(!reloaded_child.config_snapshot().await.ephemeral);
++    assert!(reloaded_child.session.services.live_thread.is_some());
++    assert!(reloaded_child.state_db().is_some());
++    reloaded_child.shutdown_and_wait().await?;
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: child_thread_id,
++            include_archived: true,
++        })
+         .await?;
++    assert!(persisted.items.iter().any(|item| matches!(
++        item,
++        RolloutItem::EventMsg(EventMsg::UserMessage(message))
++            if message.message.contains("cold v1 delivery")
++    )));
+     Ok(())
+ }
+
+@@ -2160,6 +2466,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
          .await
          .expect("v2 root resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -9766,7 +10011,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      assert_ne!(
          resumed_control.get_status(parent_thread_id).await,
          AgentStatus::NotFound
-@@ -2167,11 +2367,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2167,11 +2474,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
@@ -9782,7 +10027,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      }
 
      resumed_control
-@@ -2343,6 +2543,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+@@ -2343,6 +2650,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
 
      if nested {
          let turn = resumed_parent.thread.session.new_default_turn().await;
@@ -9796,7 +10041,57 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
          resumed_parent
              .thread
              .session
-@@ -7062,17 +7269,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -6469,18 +6783,48 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+         .await
+         .expect("child thread should archive");
+
++    let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
+     let resumed_thread_id = harness
+         .control
+-        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, SessionSource::Exec)
++        .resume_agent_from_rollout(sender_config.clone(), child_thread_id, SessionSource::Exec)
+         .await
+         .expect("resume should find archived rollout");
+     assert_eq!(resumed_thread_id, child_thread_id);
++    let resumed_child = harness
++        .manager
++        .get_thread(child_thread_id)
++        .await
++        .expect("resumed child should be loaded");
++    assert!(sender_config.ephemeral);
++    assert!(!resumed_child.config_snapshot().await.ephemeral);
++    assert!(resumed_child.session.services.live_thread.is_some());
++    let persisted_marker = user_message("persist after ephemeral archived resume");
++    resumed_child
++        .inject_response_items(vec![persisted_marker.clone()])
++        .await
++        .expect("resumed archived history should remain writable");
+
+     let _ = harness
+         .control
+         .shutdown_live_agent(child_thread_id)
+         .await
+         .expect("resumed child shutdown should succeed");
++    let reopened_store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = reopened_store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: child_thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store should reopen archived history");
++    assert!(persisted.items.iter().any(|item| matches!(
++        item,
++        RolloutItem::ResponseItem(response) if response.item == persisted_marker
++    )));
+ }
+
+ #[tokio::test]
+@@ -7062,17 +7406,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -9823,7 +10118,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8513,6 +8719,12 @@ while True:
+@@ -8513,6 +8856,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -9836,7 +10131,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -8629,194 +8841,6 @@ while True:
+@@ -8629,194 +8978,6 @@ while True:
      Ok(())
  }
 
@@ -10031,7 +10326,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
  #[tokio::test]
  async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
      let harness = AgentControlHarness::new_with_multi_agent_v1().await;
-@@ -8900,8 +8924,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8900,8 +9061,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -10049,7 +10344,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -8910,21 +8941,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8910,21 +9078,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10135,7 +10430,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -8941,8 +9029,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8941,8 +9166,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -10145,7 +10440,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9097,12 +9184,64 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9097,12 +9321,64 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10213,7 +10508,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9198,6 +9337,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9198,6 +9474,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -10244,7 +10539,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9231,3 +9394,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9231,3 +9531,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }
@@ -10753,7 +11048,7 @@ index 0000000000000000000000000000000000000000..d9cb9f0cf493244c9e04079b5d4a688a
 +        .ok()
 +}
 diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
-index c55148c117cb9a4d409ec343b0b98cde22701925..1d870d9368de83b13ef039761d971bc45d4176e3 100644
+index c55148c117cb9a4d409ec343b0b98cde22701925..9d8e76a1cd0c8a3980384c3ac426cd85e96bb69a 100644
 --- a/codex-rs/core/src/agent/registry.rs
 +++ b/codex-rs/core/src/agent/registry.rs
 @@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
@@ -10764,7 +11059,24 @@ index c55148c117cb9a4d409ec343b0b98cde22701925..1d870d9368de83b13ef039761d971bc4
  use codex_protocol::protocol::SessionSource;
  use codex_protocol::protocol::SubAgentSource;
  use codex_protocol::protocol::TurnEnvironmentSelection;
-@@ -69,6 +70,8 @@ pub(crate) struct AgentLifecycle {
+@@ -47,6 +48,8 @@ struct RegisteredAgent {
+     /// Serializes loaded/cold transitions without exposing runtime state in public metadata.
+     lifecycle: Arc<AgentLifecycle>,
+     evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
++    /// Keeps intentional ephemerality when a debug-materialized agent is unloaded.
++    evicted_ephemeral: Option<bool>,
+     /// Retains a transferred descendant's applied instructions until its first successful reload.
+     evicted_instructions: Option<SessionInstructions>,
+ }
+@@ -57,6 +60,7 @@ impl RegisteredAgent {
+             path,
+             lifecycle: Arc::new(AgentLifecycle::default()),
+             evicted_environments: None,
++            evicted_ephemeral: None,
+             evicted_instructions: None,
+         }
+     }
+@@ -69,6 +73,8 @@ pub(crate) struct AgentLifecycle {
      transition: Arc<AsyncMutex<()>>,
      /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
      visible_when_cold: AtomicBool,
@@ -10773,7 +11085,7 @@ index c55148c117cb9a4d409ec343b0b98cde22701925..1d870d9368de83b13ef039761d971bc4
      /// Prevents duplicate completion watchers for one registered agent.
      completion_watcher_active: AtomicBool,
      /// Wakes input delivery after the active completion watcher finishes its transition.
-@@ -101,6 +104,34 @@ impl AgentLifecycle {
+@@ -101,6 +107,34 @@ impl AgentLifecycle {
          self.visible_when_cold.load(Ordering::Acquire)
      }
 
@@ -10808,7 +11120,7 @@ index c55148c117cb9a4d409ec343b0b98cde22701925..1d870d9368de83b13ef039761d971bc4
      pub(crate) fn try_start_completion_watcher(
          self: &Arc<Self>,
      ) -> Option<CompletionWatcherRegistration> {
-@@ -176,6 +207,36 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+@@ -176,6 +210,36 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
  }
 
  impl AgentRegistry {
@@ -10845,11 +11157,90 @@ index c55148c117cb9a4d409ec343b0b98cde22701925..1d870d9368de83b13ef039761d971bc4
      pub(crate) fn reserve_spawn_slot(
          self: &Arc<Self>,
          max_threads: Option<usize>,
+@@ -296,10 +360,11 @@ impl AgentRegistry {
+         }
+     }
+
+-    pub(crate) fn save_evicted_environments(
++    pub(crate) fn save_evicted_runtime_settings(
+         &self,
+         thread_id: ThreadId,
+         environments: Vec<TurnEnvironmentSelection>,
++        ephemeral: bool,
+     ) {
+         let mut active_agents = self
+             .active_agents
+@@ -307,9 +372,19 @@ impl AgentRegistry {
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+             agent.evicted_environments = Some(environments);
++            agent.evicted_ephemeral = Some(ephemeral);
+         }
+     }
+
++    pub(crate) fn evicted_ephemeral(&self, thread_id: ThreadId) -> Option<bool> {
++        self.active_agents
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .thread_paths
++            .get(&thread_id)
++            .and_then(|agent| agent.evicted_ephemeral)
++    }
++
+     pub(crate) fn evicted_environments(
+         &self,
+         thread_id: ThreadId,
+@@ -324,13 +399,14 @@ impl AgentRegistry {
+             .and_then(|agent| agent.evicted_environments.clone())
+     }
+
+-    pub(crate) fn clear_evicted_environments(&self, thread_id: ThreadId) {
++    pub(crate) fn clear_evicted_runtime_settings(&self, thread_id: ThreadId) {
+         let mut active_agents = self
+             .active_agents
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+             agent.evicted_environments = None;
++            agent.evicted_ephemeral = None;
+         }
+     }
+
 diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
-index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c821f795da 100644
+index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..a7f19cc42ffcf0ffda67e085d3dabddf50cd01af 100644
 --- a/codex-rs/core/src/agent/registry_tests.rs
 +++ b/codex-rs/core/src/agent/registry_tests.rs
-@@ -511,6 +511,9 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -422,6 +422,29 @@ fn repeated_resets_advance_the_ordinal_suffix() {
+     assert_eq!(active_agents.nickname_reset_count, 2);
+ }
+
++#[test]
++fn evicted_runtime_settings_retain_and_clear_ephemerality() {
++    let registry = AgentRegistry::default();
++    let thread_id = ThreadId::new();
++    registry.register_root_thread(thread_id);
++    assert_eq!(registry.evicted_ephemeral(thread_id), None);
++
++    registry.save_evicted_runtime_settings(thread_id, Vec::new(), true);
++    assert_eq!(registry.evicted_ephemeral(thread_id), Some(true));
++    assert!(
++        registry
++            .evicted_environments(thread_id)
++            .is_some_and(|environments| environments.is_empty())
++    );
++
++    registry.clear_evicted_runtime_settings(thread_id);
++    assert_eq!(registry.evicted_ephemeral(thread_id), None);
++    assert!(registry.evicted_environments(thread_id).is_none());
++
++    registry.save_evicted_runtime_settings(thread_id, Vec::new(), false);
++    assert_eq!(registry.evicted_ephemeral(thread_id), Some(false));
++}
++
+ #[test]
+ fn register_root_thread_indexes_root_path() {
+     let registry = Arc::new(AgentRegistry::default());
+@@ -511,6 +534,9 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
      let registration = lifecycle
          .try_start_completion_watcher()
          .expect("watcher starts");
@@ -10859,7 +11250,7 @@ index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c8
 
      destination_registry
          .reserve_spawn_slot(/*max_threads*/ None)
-@@ -521,6 +524,10 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -521,6 +547,10 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
          .expect("transferred agent has a lifecycle");
      assert!(Arc::ptr_eq(&lifecycle, &transferred));
      assert!(transferred.completion_watcher_active());
@@ -10870,7 +11261,7 @@ index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c8
 
      transferred.mark_visible_when_cold();
      destination_registry.release_spawned_thread(thread_id);
-@@ -541,11 +548,56 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -541,11 +571,56 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
      assert!(Arc::ptr_eq(&lifecycle, &restored));
      assert!(!restored.is_visible_when_cold());
      assert!(restored.completion_watcher_active());

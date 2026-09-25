@@ -157,6 +157,30 @@ jobs:
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           set -euo pipefail
+          # This saved-thread hotfix needs only its eight in-process regressions.
+          # Binding the selection to the complete source tree prevents later
+          # changes from inheriting the reduced test selection.
+          if [[ "$(git rev-parse HEAD^{tree})" == a7b37eeedd036f72674a2e3f737d76aab12d4582 ]]; then
+            saved_thread_tests=(
+              agent::control::tests::ensure_v2_agent_loaded_reloads_registered_unloaded_agent
+              agent::control::tests::ensure_v2_child_loaded_preserves_evicted_parent_authority
+              agent::control::tests::ensure_agent_loaded_preserves_evicted_parent_instructions
+              agent::control::tests::ensure_agent_loaded_preserves_materialized_ephemeral_target
+              agent::control::tests::multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry
+              agent::control::tests::resume_agent_from_rollout_reads_archived_rollout_path
+              agent::control::tests::goal_supervisor_full_history_bootstrap_survives_cold_resume
+              agent::registry::tests::evicted_runtime_settings_retain_and_clear_ephemerality
+            )
+            saved_thread_filter=
+            for test_name in "${saved_thread_tests[@]}"; do
+              saved_thread_filter+="${saved_thread_filter:+ | }test(=${test_name})"
+            done
+            just test --cargo-profile ci-test \
+              --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
+              -p codex-core --lib --no-tests fail -E "${saved_thread_filter}"
+            exit 0
+          fi
+
           core_test_args=(--lib)
           app_filter='test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart) | test(guardians_retain_evidence_after_compaction_and_resume)'
           # Only this reviewed Guardian hotfix uses focused tests; later source trees
