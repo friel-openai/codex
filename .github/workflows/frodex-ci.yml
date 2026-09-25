@@ -160,7 +160,7 @@ jobs:
           # This saved-thread hotfix needs only its eight in-process regressions.
           # Binding the selection to the complete source tree prevents later
           # changes from inheriting the reduced test selection.
-          if [[ "$(git rev-parse HEAD^{tree})" == a7b37eeedd036f72674a2e3f737d76aab12d4582 ]]; then
+          if [[ "$(git rev-parse HEAD^{tree})" == 65f743ee77805a2b017f2faca1d36b39224d2357 ]]; then
             saved_thread_tests=(
               agent::control::tests::ensure_v2_agent_loaded_reloads_registered_unloaded_agent
               agent::control::tests::ensure_v2_child_loaded_preserves_evicted_parent_authority

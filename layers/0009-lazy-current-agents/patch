@@ -9570,7 +9570,7 @@ index 0000000000000000000000000000000000000000..8eabe97975302d2de75637075ba71aca
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3e1a3f355 100644
+index 834f7f4abd0a0d38fc52597645120dfcabe47c12..6c63c5d0430c167cf5b6213524d3ce4974200d7d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -834,6 +834,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
@@ -9869,11 +9869,23 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      let reloaded_instructions = reloaded_child.session.inherited_instructions().await;
      assert_eq!(
          (reloaded_instructions.user, reloaded_instructions.thread),
-@@ -1857,6 +2066,86 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1857,6 +2066,108 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          .into_iter()
          .find(|entry| captured_op_matches(entry, &expected));
      assert!(captured.is_some());
-+    let persisted_marker = assistant_message("persisted after ephemeral sender reload", None);
++    let mut persisted_marker = assistant_message("persisted after ephemeral sender reload", None);
++    // Recording fills missing identity fields; fix them so the disk comparison stays exact.
++    persisted_marker.set_id(Some(ResponseItemId::with_suffix(
++        "msg",
++        "persisted-after-reload",
++    )));
++    persisted_marker.set_turn_id_if_missing("persisted-after-reload");
++    persisted_marker.set_create_time_if_missing(123.into());
++    // History classifies unannotated message content as unknown.
++    let content = codex_context_fragments::to_annotated_content(&mut persisted_marker)
++        .expect("message content");
++    codex_context_fragments::set_annotated_content(&mut persisted_marker, content)
++        .expect("classified message content");
 +    reloaded_child
 +        .inject_response_items(vec![persisted_marker.clone()])
 +        .await
@@ -9893,10 +9905,20 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
 +        })
 +        .await
 +        .expect("independent store should reopen resumed history");
-+    assert!(persisted.items.iter().any(|item| matches!(
-+        item,
-+        RolloutItem::ResponseItem(response) if response.item == persisted_marker
-+    )));
++    let persisted_responses = persisted
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response) => Some(&response.item),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    let persisted_markers = persisted_responses
++        .iter()
++        .copied()
++        .filter(|item| history_contains_text([*item], "persisted after ephemeral sender reload"))
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&persisted_marker]);
 +}
 +
 +#[tokio::test]
@@ -9956,7 +9978,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
  }
 
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-@@ -1897,10 +2186,12 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
+@@ -1897,10 +2208,12 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
 
      let parent_turn_id = "parent-turn-v1-cold";
      let root_turn_id = "root-turn-v1-cold";
@@ -9970,7 +9992,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
              child_thread_id,
              text_input("cold v1 delivery"),
              AgentInputDelivery::Queue,
-@@ -1940,12 +2231,27 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
+@@ -1940,12 +2253,27 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10003,7 +10025,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      Ok(())
  }
 
-@@ -2160,6 +2466,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2160,6 +2488,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
          .await
          .expect("v2 root resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10011,7 +10033,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      assert_ne!(
          resumed_control.get_status(parent_thread_id).await,
          AgentStatus::NotFound
-@@ -2167,11 +2474,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2167,11 +2496,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
@@ -10027,7 +10049,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      }
 
      resumed_control
-@@ -2343,6 +2650,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+@@ -2343,6 +2672,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
 
      if nested {
          let turn = resumed_parent.thread.session.new_default_turn().await;
@@ -10041,7 +10063,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
          resumed_parent
              .thread
              .session
-@@ -6469,18 +6783,48 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -6469,18 +6805,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .await
          .expect("child thread should archive");
 
@@ -10062,7 +10084,19 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
 +    assert!(sender_config.ephemeral);
 +    assert!(!resumed_child.config_snapshot().await.ephemeral);
 +    assert!(resumed_child.session.services.live_thread.is_some());
-+    let persisted_marker = user_message("persist after ephemeral archived resume");
++    let mut persisted_marker = user_message("persist after ephemeral archived resume");
++    // Recording fills missing identity fields; fix them so the disk comparison stays exact.
++    persisted_marker.set_id(Some(ResponseItemId::with_suffix(
++        "msg",
++        "persisted-after-archive",
++    )));
++    persisted_marker.set_turn_id_if_missing("persisted-after-archive");
++    persisted_marker.set_create_time_if_missing(123.into());
++    // History classifies unannotated message content as unknown.
++    let content = codex_context_fragments::to_annotated_content(&mut persisted_marker)
++        .expect("message content");
++    codex_context_fragments::set_annotated_content(&mut persisted_marker, content)
++        .expect("classified message content");
 +    resumed_child
 +        .inject_response_items(vec![persisted_marker.clone()])
 +        .await
@@ -10084,14 +10118,24 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
 +        })
 +        .await
 +        .expect("independent store should reopen archived history");
-+    assert!(persisted.items.iter().any(|item| matches!(
-+        item,
-+        RolloutItem::ResponseItem(response) if response.item == persisted_marker
-+    )));
++    let persisted_responses = persisted
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response) => Some(&response.item),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    let persisted_markers = persisted_responses
++        .iter()
++        .copied()
++        .filter(|item| history_contains_text([*item], "persist after ephemeral archived resume"))
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&persisted_marker]);
  }
 
  #[tokio::test]
-@@ -7062,17 +7406,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -7062,17 +7450,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -10118,7 +10162,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8513,6 +8856,12 @@ while True:
+@@ -8513,6 +8900,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -10131,7 +10175,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -8629,194 +8978,6 @@ while True:
+@@ -8629,194 +9022,6 @@ while True:
      Ok(())
  }
 
@@ -10326,7 +10370,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
  #[tokio::test]
  async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
      let harness = AgentControlHarness::new_with_multi_agent_v1().await;
-@@ -8900,8 +9061,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8900,8 +9105,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -10344,7 +10388,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -8910,21 +9078,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8910,21 +9122,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10430,7 +10474,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -8941,8 +9166,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8941,8 +9210,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -10440,7 +10484,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9097,12 +9321,64 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9097,12 +9365,64 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10508,7 +10552,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9198,6 +9474,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9198,6 +9518,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -10539,7 +10583,7 @@ index 834f7f4abd0a0d38fc52597645120dfcabe47c12..11a4f828fb03110ad9f330994994a9f3
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9231,3 +9531,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9231,3 +9575,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }
