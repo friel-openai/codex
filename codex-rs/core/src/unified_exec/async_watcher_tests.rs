@@ -115,6 +115,55 @@ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyh
 }
 
 #[tokio::test]
+async fn streaming_output_buffers_multibyte_characters_across_chunks() {
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut output: Buffer = Buffer {
+        pending: Vec::new(),
+        transcript: Arc::clone(&transcript),
+        emitter: Emitter {
+            remaining_deltas: 1,
+            session,
+            turn,
+            call_id: "split-utf8-output-test".to_string(),
+        },
+    };
+
+    output.push(vec![0xc3]).await;
+    assert_eq!(output.pending, vec![0xc3]);
+    assert_eq!(output.emitter.remaining_deltas, 1);
+    assert!(rx_event.try_recv().is_err());
+    assert_eq!(
+        transcript.lock().await.to_bytes_with_omission_marker(),
+        vec![0xc3]
+    );
+
+    output.push(vec![0xa9]).await;
+    assert!(output.pending.is_empty());
+    assert_eq!(output.emitter.remaining_deltas, 0);
+    let event = rx_event
+        .try_recv()
+        .expect("complete multibyte output delta");
+    let EventMsg::ExecCommandOutputDelta(delta) = event.msg else {
+        panic!("expected ExecCommandOutputDelta");
+    };
+    assert_eq!(
+        delta,
+        ExecCommandOutputDeltaEvent {
+            call_id: "split-utf8-output-test".to_string(),
+            stream: ExecOutputStream::Stdout,
+            chunk: vec![0xc3, 0xa9],
+        }
+    );
+    assert_eq!(
+        transcript.lock().await.to_bytes_with_omission_marker(),
+        vec![0xc3, 0xa9]
+    );
+    output.finish().await;
+    assert!(rx_event.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
@@ -308,6 +357,37 @@ fn utf8_boundary_batches_malformed_output() {
     assert_eq!(utf8_boundary(&[0xe0, 0x80]), 2);
 
     assert_eq!(utf8_boundary(b"a\xffbbb"), 5);
+}
+
+#[tokio::test]
+async fn streaming_output_does_not_apply_a_cumulative_byte_limit() {
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut output: Buffer = Buffer {
+        pending: Vec::new(),
+        transcript: Arc::clone(&transcript),
+        emitter: Emitter {
+            remaining_deltas: crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL,
+            session,
+            turn,
+            call_id: "cumulative-output-test".to_string(),
+        },
+    };
+    // Exceed the former 1 MiB cutoff without exhausting the event count.
+    let bytes = vec![b'a'; 1024 * 1024 + 1];
+    output.push(bytes.clone()).await;
+    output.finish().await;
+
+    let mut streamed = Vec::new();
+    while let Ok(event) = rx_event.try_recv() {
+        let EventMsg::ExecCommandOutputDelta(delta) = event.msg else {
+            panic!("expected ExecCommandOutputDelta");
+        };
+        assert!(delta.chunk.len() <= super::UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES);
+        streamed.extend(delta.chunk);
+    }
+    assert_eq!(streamed, bytes);
+    assert_eq!(transcript.lock().await.total_bytes(), bytes.len());
 }
 
 #[tokio::test]
