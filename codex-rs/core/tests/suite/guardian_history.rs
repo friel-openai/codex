@@ -129,6 +129,7 @@ async fn guardian_history_survives_restart_and_user_fork(
                 prepared,
             )
             .await?
+            .0
     } else {
         initial
             .thread_manager
@@ -535,7 +536,27 @@ async fn guardian_history_survives_compaction_and_eviction_but_not_legacy_rollba
                 .thread;
         } else {
             assert!(!transcript.contains(">>> TRUSTED USER ANSWERS START"));
-            assert!(!transcript.contains("Do not publish anything."));
+            assert!(
+                !transcript.contains("Do not publish anything."),
+                "rolled-back answer remains in Guardian input: {:?}",
+                guardian
+                    .input()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        let serialized = item.to_string();
+                        let offset = serialized.find("Do not publish anything.")?;
+                        let start = serialized[..offset]
+                            .char_indices()
+                            .rev()
+                            .nth(160)
+                            .map_or(0, |(offset, _)| offset);
+                        let excerpt = serialized[start..].chars().take(640).collect::<String>();
+                        Some((index, item["type"].clone(), item["role"].clone(), excerpt))
+                    })
+                    .take(4)
+                    .collect::<Vec<_>>()
+            );
             assert!(!transcript.contains("Only publish to a private repository."));
             assert!(!transcript.contains("tool update_plan call"));
             assert!(!transcript.contains("tool update_plan result"));

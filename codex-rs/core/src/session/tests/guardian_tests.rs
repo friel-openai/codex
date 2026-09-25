@@ -1323,7 +1323,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         conversation_history: InitialHistory::New,
         disabled_plugin_ids: None,
         requested_history_mode: None,
-        fork_persistence: ForkPersistence::Copied,
+        fork_startup_items: ForkStartupItems::default(),
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             GUARDIAN_REVIEWER_NAME.to_string(),
         )),
