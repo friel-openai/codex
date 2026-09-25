@@ -2445,6 +2445,8 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
     let deepest_segment = SegmentId::new();
+    let oldest_segment = SegmentId::new();
+    let older_segment = SegmentId::new();
     let old_segment = SegmentId::new();
     let middle_segment = SegmentId::new();
     let current_segment = SegmentId::new();
@@ -2457,19 +2459,27 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
         deepest_segment,
         "2026-07-13T00-00-00",
     );
+    let oldest_path = immutable_segment_path(
+        home.path(),
+        thread_id,
+        oldest_segment,
+        "2026-07-13T00-01-00",
+    );
+    let older_path =
+        immutable_segment_path(home.path(), thread_id, older_segment, "2026-07-13T00-02-00");
     let old_path =
-        immutable_segment_path(home.path(), thread_id, old_segment, "2026-07-13T00-01-00");
+        immutable_segment_path(home.path(), thread_id, old_segment, "2026-07-13T00-03-00");
     let middle_path = immutable_segment_path(
         home.path(),
         thread_id,
         middle_segment,
-        "2026-07-13T00-02-00",
+        "2026-07-13T00-04-00",
     );
     let current_path = immutable_segment_path(
         home.path(),
         thread_id,
         current_segment,
-        "2026-07-13T00-03-00",
+        "2026-07-13T00-05-00",
     );
     let fork_path = home.path().join("fork.jsonl");
 
@@ -2492,16 +2502,58 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     };
     reference.max_depth = MAX_ROLLOUT_REFERENCE_DEPTH;
     write_rollout(
-        old_path.as_path(),
+        oldest_path.as_path(),
         &[
-            meta_line(thread_id, old_segment, /*ordinal*/ 2),
+            meta_line(thread_id, oldest_segment, /*ordinal*/ 2),
             deepest_reference,
-            agent_line("old", /*ordinal*/ 3),
+            agent_line("oldest", /*ordinal*/ 3),
         ],
     )?;
 
-    let mut old_reference =
-        reference_line(old_path.clone(), thread_id, old_segment, /*ordinal*/ 4);
+    let mut oldest_reference = reference_line(
+        oldest_path.clone(),
+        thread_id,
+        oldest_segment,
+        /*ordinal*/ 4,
+    );
+    let RolloutItem::RolloutReference(reference) = &mut oldest_reference.item else {
+        unreachable!();
+    };
+    reference.max_depth = MAX_ROLLOUT_REFERENCE_DEPTH;
+    write_rollout(
+        older_path.as_path(),
+        &[
+            meta_line(thread_id, older_segment, /*ordinal*/ 5),
+            oldest_reference,
+            agent_line("older", /*ordinal*/ 6),
+        ],
+    )?;
+
+    let mut older_reference = reference_line(
+        older_path.clone(),
+        thread_id,
+        older_segment,
+        /*ordinal*/ 7,
+    );
+    let RolloutItem::RolloutReference(reference) = &mut older_reference.item else {
+        unreachable!();
+    };
+    reference.max_depth = MAX_ROLLOUT_REFERENCE_DEPTH;
+    write_rollout(
+        old_path.as_path(),
+        &[
+            meta_line(thread_id, old_segment, /*ordinal*/ 8),
+            older_reference,
+            agent_line("old", /*ordinal*/ 9),
+        ],
+    )?;
+
+    let mut old_reference = reference_line(
+        old_path.clone(),
+        thread_id,
+        old_segment,
+        /*ordinal*/ 10,
+    );
     let RolloutItem::RolloutReference(reference) = &mut old_reference.item else {
         unreachable!();
     };
@@ -2509,9 +2561,9 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     write_rollout(
         middle_path.as_path(),
         &[
-            meta_line(thread_id, middle_segment, /*ordinal*/ 5),
+            meta_line(thread_id, middle_segment, /*ordinal*/ 11),
             old_reference,
-            agent_line("middle", /*ordinal*/ 6),
+            agent_line("middle", /*ordinal*/ 12),
         ],
     )?;
 
@@ -2519,7 +2571,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
         middle_path.clone(),
         thread_id,
         middle_segment,
-        /*ordinal*/ 7,
+        /*ordinal*/ 13,
     );
     let RolloutItem::RolloutReference(reference) = &mut middle_reference.item else {
         unreachable!();
@@ -2528,14 +2580,17 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     write_rollout(
         current_path.as_path(),
         &[
-            meta_line(thread_id, current_segment, /*ordinal*/ 8),
+            meta_line(thread_id, current_segment, /*ordinal*/ 14),
             middle_reference,
-            agent_line("current", /*ordinal*/ 9),
+            agent_line("current", /*ordinal*/ 15),
         ],
     )?;
 
     let bounded = materialize_recent_rollout_lines(home.path(), current_path.as_path()).await?;
-    assert_eq!(event_messages(&bounded), vec!["old", "middle", "current"]);
+    assert_eq!(
+        event_messages(&bounded),
+        vec!["oldest", "older", "old", "middle", "current"]
+    );
 
     let bounded_window = materialize_bounded_rollout_lines(
         home.path(),
@@ -2565,7 +2620,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
         current_path.clone(),
         thread_id,
         current_segment,
-        /*ordinal*/ 10,
+        /*ordinal*/ 16,
     );
     let RolloutItem::RolloutReference(reference) = &mut fork_reference.item else {
         unreachable!();
@@ -2574,7 +2629,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     write_rollout(
         fork_path.as_path(),
         &[
-            meta_line(fork_thread, fork_segment, /*ordinal*/ 11),
+            meta_line(fork_thread, fork_segment, /*ordinal*/ 17),
             fork_reference,
         ],
     )?;

@@ -1415,10 +1415,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Legacy,
+            initial_rollout_ordinal: 0,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
             history_base: None,
             subagent_history_start_ordinal: None,
-            persistence_mode: Default::default(),
-            initial_rollout_ordinal: 0,
             initial_window_id: "window-1".to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
