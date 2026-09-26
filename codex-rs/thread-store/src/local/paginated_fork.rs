@@ -1,7 +1,9 @@
 use codex_protocol::RolloutId;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
@@ -616,7 +618,7 @@ async fn prepare_with_response_history(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -629,7 +631,7 @@ async fn prepare_with_response_history(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         })
     } else {
@@ -655,7 +657,7 @@ async fn prepare_with_response_history(
     let prefix_rollout_path = prefix_segment.rollout_path.clone();
     let end_byte_offset =
         prefix_segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
@@ -721,9 +723,13 @@ async fn prepare_with_response_history(
     // only for compatibility lineages that apply filters; ordinary native history_base ancestry
     // remains zero-copy across both same-thread rotations and cross-thread forks.
     let copied_history = if lineage.requires_copied_history() {
-        Some(Arc::new(
-            model_context::load_full_for_fork(lineage.clone(), history_base).await?,
-        ))
+        let mut copied = model_context::load_full_for_fork(lineage.clone(), history_base).await?;
+        if let Some(RolloutItem::SessionMeta(meta)) = copied.first_mut() {
+            // The filtered copy is self-contained. Retaining its source pointer would
+            // prepend the unfiltered ancestor again when the child reconstructs history.
+            meta.meta.history_base = None;
+        }
+        Some(Arc::new(copied))
     } else {
         None
     };
@@ -1427,9 +1433,11 @@ async fn try_prepare_indexed_latest_fork(
     }
     let same_thread_history_base =
         history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
+    // Native rotation preserves fork provenance. The checkpoint and immediate predecessor,
+    // not forked_from_id, determine whether older JSONL must be replayed.
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
-        || session_meta.meta.forked_from_id.is_some()
+        || (session_meta.meta.forked_from_id.is_some() && session_meta.meta.history_base.is_none())
         || !same_thread_history_base
         || session_meta.meta.subagent_history_start_ordinal.is_some()
     {
@@ -1513,14 +1521,16 @@ async fn try_prepare_indexed_latest_fork(
         (model_context, None)
     };
     let projected_response_turns = if matches!(response_history, ForkResponseHistory::Full) {
-        let turns = load_projected_response_turns(store, thread_id).await?;
-        if turns
+        Some(Arc::new(
+            load_projected_response_turns(store, thread_id).await?,
+        ))
+    } else {
+        None
+    };
+    let latest_turn = if let Some(turns) = projected_response_turns.as_ref() {
+        turns
             .last()
-            .is_some_and(|turn| matches!(turn.status, StoredTurnStatus::InProgress))
-        {
-            fallback!("projected_full_history_has_active_turn");
-        }
-        Some(Arc::new(turns))
+            .map(|turn| (turn.status, turn.turn_id.clone(), turn.started_at))
     } else {
         let latest = super::thread_history::list_turns(
             store,
@@ -1534,15 +1544,31 @@ async fn try_prepare_indexed_latest_fork(
             },
         )
         .await?;
-        if latest
+        latest
             .turns
             .first()
-            .is_some_and(|turn| matches!(turn.status, StoredTurnStatus::InProgress))
-        {
-            fallback!("projected_latest_history_has_active_turn");
-        }
-        None
+            .map(|turn| (turn.status, turn.turn_id.clone(), turn.started_at))
     };
+    let fork_response_history =
+        if let Some((StoredTurnStatus::InProgress, turn_id, started_at)) = latest_turn {
+            // A checkpoint can follow TurnStarted, including across a segment rotation. Recover the
+            // lifecycle from the current projection so core synthesizes the original turn's abort
+            // only in the child. This seed is not persisted or added to model context.
+            let mut items = model_context.as_ref().clone();
+            items.push(RolloutItem::EventMsg(EventMsg::TurnStarted(
+                TurnStartedEvent {
+                    turn_id,
+                    root_turn_id: None,
+                    trace_id: None,
+                    started_at,
+                    model_context_window: None,
+                    collaboration_mode_kind: Default::default(),
+                },
+            )));
+            Arc::new(items)
+        } else {
+            Arc::clone(&model_context)
+        };
 
     let frozen_segment = if persistence == ForkPersistence::ReferenceBacked {
         let writer_reservation = repair_reservation
@@ -1580,7 +1606,7 @@ async fn try_prepare_indexed_latest_fork(
         frozen_segment,
         Arc::clone(&model_context),
         Arc::clone(&model_context),
-        Arc::clone(&model_context),
+        fork_response_history,
         /*interrupt_if_open*/ true,
         crate::ThreadLifecycleReservation::new(source_reservation),
     );
@@ -1642,7 +1668,7 @@ async fn try_prepare_certified_latest_model_context_fork(
         history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
-        || session_meta.meta.forked_from_id.is_some()
+        || (session_meta.meta.forked_from_id.is_some() && session_meta.meta.history_base.is_none())
         || !same_thread_history_base
         || session_meta.meta.subagent_history_start_ordinal.is_some()
     {
@@ -1961,7 +1987,7 @@ pub(super) async fn history_base_at_boundary(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -1974,7 +2000,7 @@ pub(super) async fn history_base_at_boundary(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         }))
     } else {
