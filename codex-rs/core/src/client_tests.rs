@@ -1183,6 +1183,18 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() 
         response_continuation.last_response.items_added,
         expected_latest_items
     );
+    let mut websocket = super::WebsocketSession::from_response_continuation(response_continuation);
+    assert!(websocket.connection.is_none());
+    assert_eq!(
+        websocket
+            .last_response_rx
+            .as_mut()
+            .expect("inherited response receiver")
+            .try_recv()
+            .expect("completed response")
+            .response_id,
+        "parent-resp"
+    );
 }
 
 #[test]
