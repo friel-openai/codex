@@ -73,6 +73,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoal;
@@ -82,6 +83,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnAbortReason;
@@ -89,6 +91,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutRecorder;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::AppendThreadItemsParams;
@@ -106,6 +109,7 @@ use codex_utils_path_uri::PathUri;
 use core_test_support::responses::assert_parent_turn;
 use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
@@ -115,6 +119,8 @@ use core_test_support::responses::sse_failed;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_response_item_ids;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
 use std::ffi::OsStr;
@@ -8739,6 +8745,408 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
             ThreadHistoryMode::Paginated,
         ),
     )
+}
+
+#[test]
+#[serial(fork_env)]
+fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record",
+        paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(false),
+    )
+}
+
+#[test]
+#[serial(fork_env)]
+fn paginated_goal_supervisor_follows_up_after_corrupt_rotated_ancestor() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "paginated_goal_supervisor_follows_up_after_corrupt_rotated_ancestor",
+        paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(true),
+    )
+}
+
+async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(
+    rotate_ancestor: bool,
+) -> anyhow::Result<()> {
+    const AGENTS_MARKER: &str = "corrupt-history-supervisor-parent-agents-marker";
+    const FOLLOWUP_MARKER: &str = "Continue the goal after loading the damaged parent history.";
+    let (parent_completion_tx, parent_completion_rx) = tokio::sync::oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("corrupt-history-parent"),
+                ev_completed("corrupt-history-parent"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("corrupt-history-supervisor"),
+                ev_function_call_with_namespace(
+                    "corrupt-history-followup",
+                    "supervisor",
+                    "followup_parent",
+                    &serde_json::json!({"message": FOLLOWUP_MARKER}).to_string(),
+                ),
+                ev_completed("corrupt-history-supervisor"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(parent_completion_rx),
+            body: sse(vec![
+                ev_response_created("corrupt-history-parent-followup"),
+                ev_completed("corrupt-history-parent-followup"),
+            ]),
+        }],
+    ])
+    .await;
+    let (home, mut config) = test_config().await;
+    for feature in [
+        Feature::AgentPromptInjection,
+        Feature::MultiAgentV2,
+        Feature::Goals,
+        Feature::GoalSupervisor,
+        Feature::Sqlite,
+    ] {
+        let _ = config.features.enable(feature);
+    }
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_provider.request_max_retries = Some(0);
+    config.model_provider.stream_max_retries = Some(0);
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    std::fs::write(workspace.join("AGENTS.md"), AGENTS_MARKER)?;
+    config.cwd = workspace.try_into().expect("absolute test workspace");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("isolated CODEX_HOME state db");
+    let parent = harness
+        .manager
+        .start_thread(StartThreadOptions {
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..StartThreadOptions::new(harness.config.clone())
+        })
+        .await
+        .expect("start paginated parent with the workspace environment");
+    let parent_thread_id = parent.thread_id;
+    let parent_thread = parent.thread;
+    parent_thread
+        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
+        .await?;
+    wait_for_turn_complete(parent_thread.as_ref()).await;
+    parent_thread.ensure_rollout_materialized().await;
+    parent_thread.flush_rollout().await?;
+    let source_path = parent_thread
+        .session
+        .current_rollout_path()
+        .await?
+        .expect("materialized paginated parent");
+    let seed_source = std::fs::read_to_string(source_path.as_path())?;
+    let mut seed_lines = seed_source.lines();
+    assert!(matches!(
+        codex_rollout::parse_rollout_line(seed_lines.next().expect("seed metadata"))?.item,
+        RolloutItem::SessionMeta(_)
+    ));
+    assert!(!matches!(
+        codex_rollout::parse_rollout_line(seed_lines.next().expect("first local seed record"))?
+            .item,
+        RolloutItem::SessionMeta(_)
+    ));
+    let (damaged_index, damaged_ordinal) = seed_source
+        .lines()
+        .enumerate()
+        .find_map(|(index, line)| {
+            let line = codex_rollout::parse_rollout_line(line).expect("valid seed record");
+            (index > 1 && matches!(&line.item, RolloutItem::EventMsg(_))).then(|| {
+                (
+                    index,
+                    line.ordinal.expect("explicit ordinary event ordinal"),
+                )
+            })
+        })
+        .expect("seed turn persisted an interior ordinary event after its first local record");
+    let interrupted_record = format!(
+        "{{\"timestamp\":\"2026-09-21T00:00:00Z\",\"ordinal\":{damaged_ordinal},\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"interrupted\n"
+    );
+    let placeholder = format!("{}\n", " ".repeat(interrupted_record.len() - 1));
+    if rotate_ancestor {
+        // Rotation records an immutable byte boundary. Reserve the interrupted line's bytes
+        // before rotation so replacing whitespace later cannot invalidate history_base.
+        let mut reserved_source = String::new();
+        for (index, line) in seed_source.split_inclusive('\n').enumerate() {
+            if index == damaged_index {
+                reserved_source.push_str(&placeholder);
+            }
+            reserved_source.push_str(line);
+        }
+        std::fs::write(source_path.as_path(), reserved_source)?;
+    }
+
+    // The current checkpoint is valid. Only an obsolete ordinary record is interrupted, so
+    // interactive resume can load the checkpoint while the supervisor's FullHistory fork must
+    // tolerate the same damage when it reads the complete parent history.
+    let thread_settings = parent_thread.session.thread_settings_snapshot().await;
+    let history = parent_thread.session.clone_history().await;
+    let (_, window_number, window_id) = parent_thread.session.current_window().await;
+    assert_eq!(
+        window_number, 0,
+        "the seed fixture has no previous compaction windows"
+    );
+    let info = parent_thread.session.token_usage_info().await;
+    let reference_context = parent_thread.session.reference_context_item().await;
+    let previous_turn_settings = SegmentPreviousTurnSettings {
+        model: thread_settings.model.clone(),
+        comp_hash: None,
+        realtime_active: None,
+    };
+    let checkpoint = {
+        CertifiedSegmentStateCheckpoint::new(
+            CompactedItem {
+                message: String::new(),
+                replacement_history: Some(history.annotated_items().to_vec()),
+                retained_context: Some(history.retained_context().clone()),
+                guardian_history: history.guardian_history_checkpoint(),
+                mcp_resource_origins: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
+                window_number: Some(window_number),
+                first_window_id: Some(window_id.to_string()),
+                previous_window_id: None,
+                window_id: Some(window_id.to_string()),
+                segment_state_checkpoint: None,
+            },
+            Some(previous_turn_settings),
+            None,
+            reference_context,
+            ThreadSettingsAppliedEvent {
+                thread_id: Some(parent_thread_id),
+                thread_settings,
+            },
+            TokenCountEvent {
+                info,
+                rate_limits: None,
+            },
+        )?
+    };
+    let damaged_path = if rotate_ancestor {
+        parent_thread
+            .session
+            .services
+            .live_thread
+            .as_ref()
+            .expect("paginated parent writer")
+            .freeze_local_segment(FreezeRolloutSegmentParams::rotate_checkpoint(checkpoint))
+            .await?
+            .expect("rotated parent segment")
+            .reference
+            .rollout_path
+    } else {
+        parent_thread
+            .session
+            .persist_rollout_items(checkpoint.items())
+            .await;
+        source_path.as_path().to_path_buf()
+    };
+    parent_thread.flush_rollout().await?;
+    let source = std::fs::read_to_string(&damaged_path)?;
+    let valid_lines = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(codex_rollout::parse_rollout_line)
+        .collect::<Result<Vec<_>, _>>()?;
+    let valid_ordinals = valid_lines
+        .iter()
+        .map(|line| line.ordinal)
+        .collect::<Vec<_>>();
+    assert!(valid_ordinals.iter().all(Option::is_some));
+    let active_path = parent_thread
+        .session
+        .current_rollout_path()
+        .await?
+        .expect("active rollout before damage");
+    let active_source = std::fs::read_to_string(active_path.as_path())?;
+    let head = codex_rollout::parse_rollout_line(active_source.lines().next().expect("metadata"))?;
+    let RolloutItem::SessionMeta(meta) = head.item else {
+        panic!("active rollout must start with session metadata");
+    };
+    let history_base_before = meta.meta.history_base;
+    assert_eq!(history_base_before.is_some(), rotate_ancestor);
+    let mut damaged_source = String::new();
+    let mut replaced_placeholders = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        if rotate_ancestor && line == placeholder {
+            damaged_source.push_str(&interrupted_record);
+            replaced_placeholders += 1;
+            continue;
+        }
+        if !rotate_ancestor && index == damaged_index {
+            damaged_source.push_str(&interrupted_record);
+        }
+        damaged_source.push_str(line);
+    }
+    if rotate_ancestor {
+        assert_eq!(replaced_placeholders, 1);
+        assert_eq!(damaged_source.len(), source.len());
+    }
+    std::fs::write(&damaged_path, &damaged_source)?;
+    assert_eq!(
+        damaged_source
+            .lines()
+            .filter(|line| codex_rollout::parse_rollout_line(line).is_ok())
+            .collect::<Vec<_>>(),
+        source
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>(),
+        "every complete source record must retain its exact bytes"
+    );
+    assert_eq!(
+        damaged_source
+            .lines()
+            .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
+            .map(|line| line.ordinal)
+            .collect::<Vec<_>>(),
+        valid_ordinals,
+        "interruption must not delete, renumber, or rewrite any complete source record"
+    );
+    let persisted_parent = state_db
+        .get_thread(parent_thread_id)
+        .await?
+        .expect("the materialized parent must already have thread metadata");
+    assert_eq!(persisted_parent.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(persisted_parent.rollout_path, active_path.as_path());
+    let state_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            parent_thread_id,
+            "Continue after an interrupted ordinary rollout record.",
+            codex_state::ThreadGoalStatus::Active,
+            None,
+        )
+        .await?;
+    let goal_id = state_goal.goal_id.clone();
+    let goal = crate::goal_supervisor::protocol_goal_from_state(state_goal);
+    let parent_after_goal = state_db
+        .get_thread(parent_thread_id)
+        .await?
+        .expect("goal setup must preserve the materialized parent");
+    assert_eq!(
+        parent_after_goal.history_mode,
+        persisted_parent.history_mode
+    );
+    assert_eq!(
+        parent_after_goal.rollout_path,
+        persisted_parent.rollout_path
+    );
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    timeout(Duration::from_secs(5), server.wait_for_request_count(3))
+        .await
+        .expect("the real supervisor followup should start a parent request");
+
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        3,
+        "the real followup tool must start a parent turn"
+    );
+    let parent_body: serde_json::Value = serde_json::from_slice(&requests[0])?;
+    let supervisor_body: serde_json::Value = serde_json::from_slice(&requests[1])?;
+    let followup_body: serde_json::Value = serde_json::from_slice(&requests[2])?;
+    let parent_input = parent_body["input"].as_array().expect("seed parent input");
+    let supervisor_input = supervisor_body["input"]
+        .as_array()
+        .expect("supervisor input");
+    assert!(
+        parent_input
+            .iter()
+            .any(|item| item.to_string().contains(AGENTS_MARKER))
+    );
+    assert_eq!(supervisor_body["instructions"], parent_body["instructions"]);
+    assert!(
+        supervisor_input.starts_with(parent_input),
+        "FullHistory must retain the exact parent instruction prefix and AGENTS.md order"
+    );
+    assert!(
+        followup_body["input"].to_string().contains(FOLLOWUP_MARKER),
+        "supervisor.followup_parent must deliver its message into the parent's actual request"
+    );
+    assert_eq!(
+        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
+        0,
+        "ordinary rollout damage must not start failure backoff"
+    );
+    assert_eq!(
+        state_db
+            .thread_goals()
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+            .await?,
+        None,
+        "successful followup must not leave a persisted failure retry"
+    );
+    // This harness has no goal extension. Check delivery and retry state before updating the
+    // fixture's goal directly, then release the parent's response. The response barrier prevents
+    // helper retirement from launching an unmocked replacement check while assertions run.
+    let completed_goal = state_db
+        .thread_goals()
+        .update_thread_goal(
+            parent_thread_id,
+            codex_state::GoalUpdate {
+                objective: None,
+                status: Some(codex_state::ThreadGoalStatus::Complete),
+                token_budget: None,
+                expected_goal_id: Some(goal_id.clone()),
+            },
+        )
+        .await?
+        .expect("fixture goal should complete after verified delivery");
+    assert_eq!(completed_goal.goal_id, goal_id);
+    assert_eq!(
+        completed_goal.status,
+        codex_state::ThreadGoalStatus::Complete
+    );
+    parent_completion_tx
+        .send(())
+        .expect("parent response should still be waiting at its completion barrier");
+    wait_for_turn_complete(parent_thread.as_ref()).await;
+    assert_eq!(server.requests().await.len(), 3);
+    parent_thread.flush_rollout().await?;
+    let source_after_followup = std::fs::read(&damaged_path)?;
+    assert!(
+        source_after_followup.starts_with(damaged_source.as_bytes()),
+        "tolerant loading must preserve both interrupted bytes and every complete source record"
+    );
+    if rotate_ancestor {
+        assert_eq!(source_after_followup, damaged_source.as_bytes());
+    }
+    let active_path = parent_thread
+        .session
+        .current_rollout_path()
+        .await?
+        .expect("active rollout after followup");
+    let active_source = std::fs::read_to_string(active_path.as_path())?;
+    let head = codex_rollout::parse_rollout_line(active_source.lines().next().expect("metadata"))?;
+    let RolloutItem::SessionMeta(meta) = head.item else {
+        panic!("active rollout must retain session metadata");
+    };
+    assert_eq!(
+        meta.meta.history_base, history_base_before,
+        "followup must preserve the exact native predecessor identity, ordinal, and byte boundary"
+    );
+    let _ = harness
+        .manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    server.shutdown().await;
+    Ok(())
 }
 
 async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(

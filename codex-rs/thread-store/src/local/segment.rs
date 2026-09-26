@@ -843,8 +843,13 @@ async fn freeze_thread_segment_reserved_with_publication(
             message: format!("thread {thread_id} does not have a readable rollout"),
         })?;
     let stable_path = codex_rollout::plain_rollout_path(recorded_path.as_path());
+    let validation = if params.is_snapshot() {
+        SourceRolloutValidation::Snapshot
+    } else {
+        SourceRolloutValidation::Rotation
+    };
     let (source_meta, next_rollout_ordinal, existing_reference, source_lines, skipped_records) =
-        validate_source_rollout(source_path.as_path(), thread_id).await?;
+        validate_source_rollout(source_path.as_path(), thread_id, validation).await?;
     let history_mode = source_meta.meta.history_mode;
     if let Some((_recorder, _rollout_id, live_history_mode)) = live_entry.as_ref()
         && *live_history_mode != history_mode
@@ -1662,8 +1667,12 @@ async fn freeze_paginated_prefix_reserved_inner(
 ) -> ThreadStoreResult<FrozenRolloutSegment> {
     debug_assert!(reservation.contains(source_thread_id));
     debug_assert!(reservation.contains(prefix_thread_id));
-    let (source_session_meta, _, _, _, _) =
-        validate_source_rollout(source_rollout_path, source_thread_id).await?;
+    let (source_session_meta, _, _, _, _) = validate_source_rollout(
+        source_rollout_path,
+        source_thread_id,
+        SourceRolloutValidation::Snapshot,
+    )
+    .await?;
     let history_mode = source_session_meta.meta.history_mode;
     if prefix_rollout_path != codex_rollout::plain_rollout_path(prefix_rollout_path) {
         return Err(ThreadStoreError::Internal {
@@ -1693,21 +1702,19 @@ async fn freeze_paginated_prefix_reserved_inner(
             ),
         });
     }
-    let mut prefix_lines = prefix
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .filter_map(
-            |line| match RolloutRecorder::parse_rollout_line_bytes(line) {
-                Ok(Some(line)) => Some(Ok(line)),
-                Ok(None) => None,
-                Err(err) => Some(Err(ThreadStoreError::Internal {
-                    message: format!(
-                        "failed to read prepared rollout prefix for {prefix_thread_id}: {err}"
-                    ),
-                })),
-            },
-        )
-        .collect::<ThreadStoreResult<Vec<_>>>()?;
+    let (prefix_lines, _, parse_errors) =
+        RolloutRecorder::load_rollout_lines_from_bytes(prefix_rollout_path, prefix)
+            .map_err(thread_store_io_error)?;
+    let mut prefix_lines = prefix_lines
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>();
+    if parse_errors != 0 {
+        // A malformed first local record could be a leading lineage reference. Interior
+        // recovery must not change which lineage the immutable snapshot represents.
+        super::rollout_lineage::read_rollout_head(prefix_rollout_path).await?;
+        validate_snapshot_ordinals(prefix_lines.as_slice())?;
+    }
     match prefix_lines.first().map(|line| &line.item) {
         Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == prefix_thread_id => {}
         Some(RolloutItem::SessionMeta(_)) => {
@@ -2083,9 +2090,17 @@ fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenc
             == right.compacted_replacement_history_filter_texts
 }
 
+/// Rotation can replace the active rollout; a snapshot writes a new immutable rollout ID.
+#[derive(Clone, Copy)]
+enum SourceRolloutValidation {
+    Rotation,
+    Snapshot,
+}
+
 async fn validate_source_rollout(
     path: &Path,
     thread_id: ThreadId,
+    validation: SourceRolloutValidation,
 ) -> ThreadStoreResult<(
     SessionMetaLine,
     Option<u64>,
@@ -2115,16 +2130,31 @@ async fn validate_source_rollout(
             });
         }
     };
-    if parse_errors != 0 && source_meta.meta.history_mode != ThreadHistoryMode::Legacy {
-        return Err(ThreadStoreError::Internal {
-            message: format!(
-                "rollout {} contains {parse_errors} invalid record(s)",
-                path.display()
-            ),
-        });
-    }
     let (next_rollout_ordinal, repaired_ordinals) =
-        repair_source_ordinals(lines.as_mut_slice(), source_meta.meta.history_mode)?;
+        if parse_errors != 0 && source_meta.meta.history_mode == ThreadHistoryMode::Paginated {
+            if matches!(validation, SourceRolloutValidation::Rotation) {
+                return Err(ThreadStoreError::Internal {
+                    message: format!(
+                        "rollout {} contains {parse_errors} invalid record(s)",
+                        path.display()
+                    ),
+                });
+            }
+            super::rollout_lineage::read_rollout_head(path).await?;
+            // The new snapshot ID has its own byte cutoff. Keep every accepted native ordinal,
+            // including gaps, without changing the source or a pre-existing HistoryPosition.
+            (Some(validate_snapshot_ordinals(lines.as_slice())?), false)
+        } else if source_meta.meta.history_mode == ThreadHistoryMode::Paginated
+            && matches!(validation, SourceRolloutValidation::Snapshot)
+            && let Ok(next_ordinal) = validate_snapshot_ordinals(lines.as_slice())
+        {
+            // A recovered snapshot parses cleanly but can retain ordinal gaps. Preserve those
+            // accepted boundaries when it becomes another fork's source.
+            super::rollout_lineage::read_rollout_head(path).await?;
+            (Some(next_ordinal), false)
+        } else {
+            repair_source_ordinals(lines.as_mut_slice(), source_meta.meta.history_mode)?
+        };
     let existing_reference = match lines.as_slice() {
         [
             RolloutLine {
@@ -2145,6 +2175,27 @@ async fn validate_source_rollout(
         lines,
         parse_errors != 0 || repaired_ordinals,
     ))
+}
+
+/// Validates accepted native records without inventing ordinals for damaged physical records.
+fn validate_snapshot_ordinals(lines: &[RolloutLine]) -> ThreadStoreResult<u64> {
+    let mut previous = None;
+    for line in lines {
+        let ordinal = line.ordinal.ok_or_else(|| ThreadStoreError::Internal {
+            message: "paginated snapshot line is missing an ordinal".to_string(),
+        })?;
+        if previous.is_some_and(|previous| ordinal <= previous) {
+            return Err(ThreadStoreError::Internal {
+                message: "paginated snapshot ordinals are not strictly increasing".to_string(),
+            });
+        }
+        previous = Some(ordinal);
+    }
+    previous
+        .and_then(|ordinal| ordinal.checked_add(1))
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: "paginated snapshot is empty or has an ordinal overflow".to_string(),
+        })
 }
 
 /// Restores the physical-record ordinal invariant before a segment is frozen.

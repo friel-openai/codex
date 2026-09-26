@@ -3828,6 +3828,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
 }
 
 #[tokio::test]
+async fn paginated_snapshot_preserves_clean_ordinal_gaps() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .expect("create native thread");
+    append_canonical_message(&store, thread_id, "before the ordinal gap").await;
+    append_canonical_message(&store, thread_id, "after the ordinal gap").await;
+    store.flush_thread(thread_id).await.expect("flush source");
+    let source_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("source path");
+    let (mut lines, _, parse_errors) = RolloutRecorder::load_rollout_lines(&source_path)
+        .await
+        .expect("read source");
+    assert_eq!(parse_errors, 0);
+    assert_eq!(lines.len(), 3);
+    lines[2].ordinal = Some(7);
+    let mut source = Vec::new();
+    for line in &lines {
+        serde_json::to_writer(&mut source, line).expect("encode recovered record");
+        source.push(b'\n');
+    }
+    tokio::fs::write(&source_path, &source)
+        .await
+        .expect("install clean recovered history");
+
+    for _ in 0..2 {
+        let frozen = store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+            .await
+            .expect("snapshot recovered history");
+        assert_eq!(frozen.next_rollout_ordinal, Some(8));
+        assert_eq!(
+            frozen.history_base.map(|base| base.end_ordinal_exclusive),
+            Some(8)
+        );
+        let (snapshot, _, snapshot_parse_errors) =
+            RolloutRecorder::load_rollout_lines(&frozen.reference.rollout_path)
+                .await
+                .expect("read native snapshot");
+        assert_eq!(snapshot_parse_errors, 0);
+        assert_eq!(
+            snapshot.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(7)]
+        );
+        let (_, next_ordinal, _, repeated, repaired) = super::validate_source_rollout(
+            &frozen.reference.rollout_path,
+            thread_id,
+            super::SourceRolloutValidation::Snapshot,
+        )
+        .await
+        .expect("validate the immutable snapshot as a later fork source");
+        assert_eq!(next_ordinal, Some(8));
+        assert!(!repaired);
+        assert_eq!(
+            serde_json::to_value(&repeated).expect("serialize repeated snapshot"),
+            serde_json::to_value(&snapshot).expect("serialize first snapshot")
+        );
+        assert_eq!(
+            tokio::fs::read(&source_path)
+                .await
+                .expect("unchanged source"),
+            source
+        );
+    }
+}
+
+#[tokio::test]
 async fn paginated_freeze_repairs_repeated_checkpoint_boundary_ordinals() {
     let home = TempDir::new().expect("temp dir");
     let store = state_backed_store(home.path()).await;
