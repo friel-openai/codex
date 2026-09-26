@@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -47,6 +48,8 @@ struct RegisteredAgent {
     /// Serializes loaded/cold transitions without exposing runtime state in public metadata.
     lifecycle: Arc<AgentLifecycle>,
     evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
+    /// Keeps intentional ephemerality when a debug-materialized agent is unloaded.
+    evicted_ephemeral: Option<bool>,
     /// Retains a transferred descendant's applied instructions until its first successful reload.
     evicted_instructions: Option<SessionInstructions>,
 }
@@ -57,6 +60,7 @@ impl RegisteredAgent {
             path,
             lifecycle: Arc::new(AgentLifecycle::default()),
             evicted_environments: None,
+            evicted_ephemeral: None,
             evicted_instructions: None,
         }
     }
@@ -69,6 +73,8 @@ pub(crate) struct AgentLifecycle {
     transition: Arc<AsyncMutex<()>>,
     /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
     visible_when_cold: AtomicBool,
+    /// Preserves a terminal status after the heavy thread state is unloaded.
+    cold_terminal_status: Mutex<Option<AgentStatus>>,
     /// Prevents duplicate completion watchers for one registered agent.
     completion_watcher_active: AtomicBool,
     /// Wakes input delivery after the active completion watcher finishes its transition.
@@ -99,6 +105,34 @@ impl AgentLifecycle {
 
     pub(crate) fn is_visible_when_cold(&self) -> bool {
         self.visible_when_cold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn remember_cold_terminal_status(
+        &self,
+        status: AgentStatus,
+        visible_when_cold: bool,
+    ) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+        if visible_when_cold {
+            self.mark_visible_when_cold();
+        }
+    }
+
+    pub(crate) fn cold_terminal_status(&self) -> Option<AgentStatus> {
+        self.cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn clear_cold_terminal_status(&self) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     pub(crate) fn try_start_completion_watcher(
@@ -176,6 +210,36 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
 }
 
 impl AgentRegistry {
+    pub(crate) fn registered_subtree_thread_ids(&self, root_thread_id: ThreadId) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
+        for metadata in active_agents.agent_tree.values() {
+            let (Some(thread_id), Some(parent_thread_id)) =
+                (metadata.agent_id, metadata.parent_thread_id)
+            else {
+                continue;
+            };
+            children
+                .entry(parent_thread_id)
+                .or_default()
+                .push(thread_id);
+        }
+        let mut subtree = vec![root_thread_id];
+        let mut stack = children.remove(&root_thread_id).unwrap_or_default();
+        let mut visited = HashSet::from([root_thread_id]);
+        while let Some(thread_id) = stack.pop() {
+            if !visited.insert(thread_id) {
+                continue;
+            }
+            subtree.push(thread_id);
+            stack.extend(children.remove(&thread_id).unwrap_or_default());
+        }
+        subtree
+    }
+
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,
@@ -296,10 +360,11 @@ impl AgentRegistry {
         }
     }
 
-    pub(crate) fn save_evicted_environments(
+    pub(crate) fn save_evicted_runtime_settings(
         &self,
         thread_id: ThreadId,
         environments: Vec<TurnEnvironmentSelection>,
+        ephemeral: bool,
     ) {
         let mut active_agents = self
             .active_agents
@@ -307,7 +372,17 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
             agent.evicted_environments = Some(environments);
+            agent.evicted_ephemeral = Some(ephemeral);
         }
+    }
+
+    pub(crate) fn evicted_ephemeral(&self, thread_id: ThreadId) -> Option<bool> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thread_paths
+            .get(&thread_id)
+            .and_then(|agent| agent.evicted_ephemeral)
     }
 
     pub(crate) fn evicted_environments(
@@ -324,13 +399,14 @@ impl AgentRegistry {
             .and_then(|agent| agent.evicted_environments.clone())
     }
 
-    pub(crate) fn clear_evicted_environments(&self, thread_id: ThreadId) {
+    pub(crate) fn clear_evicted_runtime_settings(&self, thread_id: ThreadId) {
         let mut active_agents = self
             .active_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
             agent.evicted_environments = None;
+            agent.evicted_ephemeral = None;
         }
     }
 

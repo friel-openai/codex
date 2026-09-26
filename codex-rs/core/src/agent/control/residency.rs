@@ -81,7 +81,7 @@ impl LocalAgentControl {
         }
     }
 
-    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+    pub(crate) fn forget_agent_residency(&self, thread_id: ThreadId) {
         self.agent_residency.remove(thread_id);
     }
 }
@@ -167,6 +167,19 @@ impl AgentResidency {
                 drop(_transition);
                 lifecycle.wait_for_completion_watcher().await;
                 return EvictionResult::Retry;
+            }
+            let status = candidate_thread.agent_status().await;
+            if matches!(
+                status,
+                AgentStatus::Completed(_)
+                    | AgentStatus::Errored(_)
+                    | AgentStatus::Interrupted
+                    | AgentStatus::Shutdown
+            ) {
+                lifecycle.remember_cold_terminal_status(
+                    status,
+                    candidate_thread.multi_agent_version() == Some(MultiAgentVersion::V2),
+                );
             }
             if let Err(err) = control
                 .unload_agent_thread(manager, candidate_thread_id)
@@ -287,13 +300,14 @@ impl LocalAgentControl {
         thread.ensure_rollout_materialized().await;
         thread.flush_rollout().await?;
         let environments = thread.environment_selections().await;
+        let ephemeral = thread.config_snapshot().await.ephemeral;
         thread.shutdown_and_wait().await?;
         thread
             .session
             .services
             .agent_control
             .state
-            .save_evicted_environments(thread_id, environments);
+            .save_evicted_runtime_settings(thread_id, environments, ephemeral);
         Ok(manager.remove_thread(&thread_id).await.is_some())
     }
 }

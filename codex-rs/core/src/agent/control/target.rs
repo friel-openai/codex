@@ -10,49 +10,55 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::SessionSource;
 
 impl LocalAgentControl {
-    pub(crate) fn resolve_target(
+    pub(crate) async fn resolve_target(
         &self,
         caller: ThreadId,
         target: &AgentTarget,
     ) -> CodexResult<ThreadId> {
         match target {
+            // Direct IDs also address loaded roots that are not registered as agents.
             AgentTarget::Id(thread_id) => Ok(*thread_id),
             AgentTarget::Reference(reference) => {
-                let caller = self.ensure_agent_known(caller)?;
+                let caller_metadata = self.ensure_agent_known(caller)?;
                 self.resolve_path_reference(
-                    &caller.agent_path.unwrap_or_else(AgentPath::root),
+                    caller,
+                    &caller_metadata.agent_path.unwrap_or_else(AgentPath::root),
                     reference,
                 )
+                .await
             }
         }
     }
 
     pub(crate) async fn resolve_agent_reference(
         &self,
-        _current_thread_id: ThreadId,
+        current_thread_id: ThreadId,
         current_session_source: &SessionSource,
         agent_reference: &str,
     ) -> CodexResult<ThreadId> {
         let current_agent_path = current_session_source
             .get_agent_path()
             .unwrap_or_else(AgentPath::root);
-        self.resolve_path_reference(&current_agent_path, agent_reference)
+        self.resolve_path_reference(current_thread_id, &current_agent_path, agent_reference)
+            .await
     }
 
-    fn resolve_path_reference(
+    async fn resolve_path_reference(
         &self,
+        current_thread_id: ThreadId,
         current_agent_path: &AgentPath,
         agent_reference: &str,
     ) -> CodexResult<ThreadId> {
         let agent_path = current_agent_path
             .resolve(agent_reference)
             .map_err(CodexErr::UnsupportedOperation)?;
-        if let Some(thread_id) = self.state.agent_id_for_path(&agent_path) {
-            return Ok(thread_id);
-        }
-        Err(CodexErr::UnsupportedOperation(format!(
-            "live agent path `{}` not found",
-            agent_path.as_str()
-        )))
+        self.ensure_open_agent_known_by_path(current_thread_id, &agent_path)
+            .await?
+            .agent_id
+            .ok_or_else(|| {
+                CodexErr::UnsupportedOperation(format!(
+                    "agent path `{agent_path}` is missing an agent_id"
+                ))
+            })
     }
 }

@@ -70,6 +70,7 @@ use crate::CreateThreadSectionParams;
 use crate::CreatedProject;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
+use crate::DeleteThreadsOutcome;
 use crate::DeleteThreadsParams;
 use crate::DeletedProject;
 use crate::FreezeRolloutSegmentParams;
@@ -91,6 +92,7 @@ use crate::PreparedFork;
 use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
+use crate::ReadThreadsParams;
 use crate::RemoveThreadAttachmentOutcome;
 use crate::RemoveThreadAttachmentParams;
 use crate::RenameThreadSectionParams;
@@ -904,6 +906,10 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { read_thread::read_thread(self, params).await })
     }
 
+    fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
+        Box::pin(async move { read_thread::read_threads(self, params).await })
+    }
+
     fn read_thread_by_rollout_path(
         &self,
         params: ReadThreadByRolloutPathParams,
@@ -1126,6 +1132,13 @@ impl ThreadStore for LocalThreadStore {
 
     fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { delete_thread::delete_threads(self, params).await })
+    }
+
+    fn delete_threads_with_outcome(
+        &self,
+        params: DeleteThreadsParams,
+    ) -> ThreadStoreFuture<'_, DeleteThreadsOutcome> {
+        Box::pin(async move { delete_thread::delete_threads_with_outcome(self, params).await })
     }
 }
 

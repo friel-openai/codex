@@ -2479,6 +2479,7 @@ async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<
             .thread_loaded_list(codex_app_server_protocol::ThreadLoadedListParams {
                 cursor: None,
                 limit: None,
+                ancestor_thread_id: None,
             })
             .await?
             .data
