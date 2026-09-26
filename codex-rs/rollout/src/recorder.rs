@@ -53,6 +53,7 @@ use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
 use super::ordinal::ordinal_state_for_rollout;
+use super::record_loader::RolloutLineLoader;
 use super::rollout_file_name::RolloutFileName;
 use super::session_index::find_thread_names_by_ids;
 use crate::InitialHistory;
@@ -1192,65 +1193,15 @@ impl RolloutRecorder {
     ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
         let mut lines: Vec<RolloutLine> = Vec::new();
-        let mut thread_id: Option<ThreadId> = None;
-        let mut parse_errors = 0usize;
+        let mut loader = RolloutLineLoader::new(path);
         let mut reader = compression::open_rollout_line_reader(path).await?;
-        let mut saw_non_empty_line = false;
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
-            saw_non_empty_line = true;
-            let value: Value = match serde_json::from_str(&line) {
-                Ok(value) => value,
-                Err(e) => {
-                    warn!("failed to parse line as JSON: {line:?}, error: {e}");
-                    parse_errors = parse_errors.saturating_add(1);
-                    continue;
-                }
-            };
-            if thread_id.is_none() {
-                // The first SessionMeta belongs to this rollout. Later SessionMeta lines
-                // can be copied from fork history, so only validate unknown history modes
-                // before we have parsed the rollout's own SessionMeta.
-                reject_unknown_thread_history_mode(&value)?;
-            }
-
-            let is_rollout_reference = matches!(
-                value.get("type").and_then(Value::as_str),
-                Some("rollout_reference" | "fork_reference")
-            );
-            let rollout_line = match Self::parse_rollout_line_value(value) {
-                Ok(Some(rollout_line)) => rollout_line,
-                Ok(None) => {
-                    trace!("skipping legacy ghost_snapshot rollout line");
-                    continue;
-                }
-                Err(e) => {
-                    if is_rollout_reference {
-                        return Err(IoError::new(
-                            std::io::ErrorKind::InvalidData,
-                            "invalid rollout reference record",
-                        ));
-                    }
-                    trace!("failed to parse rollout line: {e}");
-                    parse_errors = parse_errors.saturating_add(1);
-                    continue;
-                }
-            };
-
-            // Use the FIRST SessionMeta encountered in the file as the canonical
-            // thread id and main session information. Keep all items intact.
-            if thread_id.is_none()
-                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
-            {
-                thread_id = Some(session_meta_line.meta.id);
-            }
-            lines.push(rollout_line);
+            loader.push(line.as_bytes(), |line| lines.push(line))?;
         }
-        if !saw_non_empty_line {
-            return Err(IoError::other("empty session file"));
-        }
+        let (thread_id, parse_errors) = loader.finish()?;
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
@@ -1258,6 +1209,28 @@ impl RolloutRecorder {
             thread_id,
             parse_errors,
         );
+        Ok((lines, thread_id, parse_errors))
+    }
+
+    /// Loads a decoded JSONL snapshot with the same damaged-record policy as file loading.
+    ///
+    /// Each returned offset is the original physical line's start. Skipping a damaged native
+    /// record does not rewrite the source, move byte boundaries, or assign replacement ordinals.
+    pub fn load_rollout_lines_from_bytes(
+        path: &Path,
+        bytes: &[u8],
+    ) -> std::io::Result<(Vec<(u64, RolloutLine)>, Option<ThreadId>, usize)> {
+        let mut loader = RolloutLineLoader::new(path);
+        let mut lines = Vec::new();
+        let mut offset = 0_u64;
+        for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let start = offset;
+            offset = offset
+                .checked_add(u64::try_from(physical_line.len()).map_err(IoError::other)?)
+                .ok_or_else(|| IoError::other("rollout byte offset overflow"))?;
+            loader.push(physical_line, |line| lines.push((start, line)))?;
+        }
+        let (thread_id, parse_errors) = loader.finish()?;
         Ok((lines, thread_id, parse_errors))
     }
 
