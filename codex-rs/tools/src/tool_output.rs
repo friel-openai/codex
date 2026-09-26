@@ -22,6 +22,11 @@ pub trait ToolOutput: Send {
     /// Called before recording model-visible history; implementations must not measure time here.
     fn set_handler_duration_ms(&mut self, _handler_duration_ms: u64) {}
 
+    /// Whether this result ends the current model turn without adding a tool response to history.
+    fn terminal_no_response(&self) -> bool {
+        false
+    }
+
     /// Whether this output contains external context that should disable memory generation when
     /// `memories.disable_on_external_context` is enabled.
     fn contains_external_context(&self) -> bool {
@@ -81,6 +86,10 @@ where
 
     fn set_handler_duration_ms(&mut self, handler_duration_ms: u64) {
         (**self).set_handler_duration_ms(handler_duration_ms);
+    }
+
+    fn terminal_no_response(&self) -> bool {
+        (**self).terminal_no_response()
     }
 
     fn contains_external_context(&self) -> bool {
