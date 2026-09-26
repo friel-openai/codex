@@ -13,6 +13,7 @@ use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
 use crate::session::tests::tool_registry_for_test_step;
 use crate::session::turn_context::TurnContext;
 use crate::tools::ToolRouter;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::ExtensionData;
@@ -367,7 +368,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
     // Await in reverse order: each result must already own its record before history attachment.
     let mut outputs = Vec::new();
     for (arguments, future) in pending.into_iter().rev() {
-        let envelope = future.await.expect("plan result");
+        let ToolCallResponse::Response(envelope) = future.await.expect("plan result") else {
+            panic!("plan result must return a response");
+        };
         let item = &envelope.item;
         let ResponseItem::FunctionCallOutput {
             call_id: output_call_id,
@@ -419,10 +422,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         .disable(Feature::ExecutedToolCallMetadata)
         .expect("disable metadata");
     session.refresh_runtime_config(config.clone()).await;
-    let result = pending
+    let ToolCallResponse::Response(result) = pending
         .remove(0)
         .await
-        .expect("plan result after capture disabled");
+        .expect("plan result after capture disabled")
+    else {
+        panic!("plan result must return a response");
+    };
     assert!(result.item.executed_tool_call_metadata().is_none());
     session
         .services
@@ -439,11 +445,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         .enable(Feature::ExecutedToolCallMetadata)
         .expect("re-enable metadata");
     session.refresh_runtime_config(config).await;
-    let result = pending
+    let ToolCallResponse::Response(result) = pending
         .pop()
         .expect("call prepared before disable")
         .await
-        .expect("plan result after capture re-enabled");
+        .expect("plan result after capture re-enabled")
+    else {
+        panic!("plan result must return a response");
+    };
     assert!(result.item.executed_tool_call_metadata().is_none());
 }
 
