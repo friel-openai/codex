@@ -16,6 +16,7 @@ use tracing::info;
 use tracing::warn;
 
 use super::session::Session;
+use super::step_context::StepContext;
 use super::step_context::StepInputs;
 use super::turn_context::TurnContext;
 
@@ -106,12 +107,9 @@ impl Session {
         attempted: &HashSet<ModelRoutingCandidate>,
         inputs: &StepInputs,
     ) -> Option<ModelRoutingSelection> {
-        let profile = base
-            .config
-            .custom_models
-            .get(profile_name)?
-            .routing_profile
-            .as_ref()?;
+        let custom_model = base.config.custom_models.get(profile_name)?;
+        let profile = custom_model.routing_profile.as_ref()?;
+        let trust_candidate_constraints = custom_model.trust_candidate_constraints;
         let now = self.model_routing_now().await;
         let mut attempted = attempted.clone();
         let mut last_rejected = None;
@@ -153,15 +151,26 @@ impl Session {
                     });
                 }
             };
-            if let Some(context) = base
-                .with_routing_candidate(
+            let context = if trust_candidate_constraints {
+                Some(
+                    base.with_unchecked_routing_candidate(
+                        profile_name,
+                        &candidate,
+                        &self.services.models_manager,
+                        inputs,
+                    )
+                    .await,
+                )
+            } else {
+                base.with_routing_candidate(
                     profile_name,
                     &candidate,
                     &self.services.models_manager,
                     inputs,
                 )
                 .await
-            {
+            };
+            if let Some(context) = context {
                 return Some(ModelRoutingSelection {
                     context,
                     last_success: previous_success,
@@ -176,10 +185,10 @@ impl Session {
 
     pub(super) async fn record_model_routing_failure(
         &self,
-        turn_context: &TurnContext,
+        step: &StepContext,
         failure: &ModelRoutingFailure,
     ) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
         let now = self.model_routing_now().await;
@@ -191,8 +200,8 @@ impl Session {
         );
     }
 
-    pub(super) async fn record_model_routing_success(&self, turn_context: &TurnContext) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+    pub(super) async fn record_model_routing_success(&self, step: &StepContext) {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
         self.state
@@ -259,6 +268,17 @@ impl Session {
         )
         .await;
     }
+}
+
+// Sparse active settings updates can override a routed model without changing its TurnContext.
+// Attribute health only when the request still executed the resolved routing tuple.
+fn executed_routing_candidate(step: &StepContext) -> Option<&ModelRoutingCandidate> {
+    let initial = &step.turn.initial_settings;
+    (step.settings.model_info.slug == initial.model_info.slug
+        && step.settings.effective_reasoning_effort() == initial.effective_reasoning_effort()
+        && step.settings.service_tier == initial.service_tier)
+        .then_some(step.turn.model_routing_candidate.as_ref())
+        .flatten()
 }
 
 pub(super) fn classify_model_routing_failure(

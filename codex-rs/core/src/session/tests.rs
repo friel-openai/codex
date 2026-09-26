@@ -5502,6 +5502,7 @@ async fn turn_context_with_model_updates_model_fields() {
             Arc::clone(&settings.model_info),
             /*fast_mode_enabled*/ true,
         );
+        settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::AutoReview);
     });
     Arc::make_mut(&mut turn_context.config).service_tier =
         turn_context.initial_settings.service_tier.clone();
@@ -5513,12 +5514,14 @@ async fn turn_context_with_model_updates_model_fields() {
         .collaboration_mode
         .settings
         .reasoning_effort = Some(ReasoningEffortConfig::High);
+    let mut current_settings = ResolvedStepSettings::new(
+        Arc::new(current_selection),
+        Arc::clone(turn_context.model_info()),
+        /*fast_mode_enabled*/ true,
+    );
+    current_settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::User);
     let current = Arc::new(StepInputs {
-        settings: Arc::new(ResolvedStepSettings::new(
-            Arc::new(current_selection),
-            Arc::clone(turn_context.model_info()),
-            /*fast_mode_enabled*/ true,
-        )),
+        settings: Arc::new(current_settings),
         environments: captured.environments.clone(),
     });
     turn_context.next_step_input.store(Arc::clone(&current));
@@ -5565,6 +5568,22 @@ async fn turn_context_with_model_updates_model_fields() {
         &turn_context.next_step_input.load_full()
     ));
     assert!(!Arc::ptr_eq(&captured.settings, &updated.initial_settings));
+    assert_eq!(
+        updated.initial_settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    assert_eq!(
+        captured.settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    assert_eq!(
+        turn_context
+            .next_step_input
+            .load()
+            .settings
+            .mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::User)
+    );
     assert!(Arc::ptr_eq(
         &updated.initial_settings,
         &updated.next_step_input.load().settings
