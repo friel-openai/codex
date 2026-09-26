@@ -38,6 +38,9 @@ use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::timeout;
 
+#[path = "compaction_goal.rs"]
+mod compaction_goal;
+
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
 // subprocesses or processing test RPCs under load.
 #[cfg(any(target_os = "macos", windows))]
