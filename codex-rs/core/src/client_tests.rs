@@ -1,7 +1,10 @@
 use super::AuthRequestTelemetryContext;
+use super::LastResponse;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ResponseContinuation;
+use super::ResponsesApiRequest;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -46,6 +49,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ToolResultMetadata;
@@ -65,6 +70,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::start_websocket_server;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -130,6 +138,31 @@ fn test_model_client_with_thread_id(
 
 fn test_model_provider() -> SharedModelProvider {
     test_model_client(SessionSource::Cli).state.provider.clone()
+}
+
+fn fork_test_model_client(parent: &ModelClient, session_source: SessionSource) -> ModelClient {
+    ModelClient::new_with_response_continuation(
+        parent.auth_manager(),
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        parent.state.provider.info().clone(),
+        session_source,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
+        /*reasoning_effort_override_enabled*/ false,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        Some(parent.fork_prompt_cache_key()),
+        parent.response_continuation_for_fork(),
+    )
 }
 
 #[tokio::test]
@@ -1068,6 +1101,357 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
     }
 }
 
+fn user_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn reasoning_item(id: &str, text: &str) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: Some(codex_protocol::ResponseItemId::new(id)),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "summary".to_string(),
+        }],
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: text.to_string(),
+        }]),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn test_response_continuation() -> ResponseContinuation {
+    let user_message = user_message_item("hello");
+    let old_reasoning = reasoning_item("rs-old", "old analysis");
+    let latest_reasoning = reasoning_item("rs-latest", "latest analysis");
+    let latest_message = output_message("msg-latest", "assistant output");
+    ResponseContinuation {
+        request: ResponsesApiRequest {
+            model: "gpt-test".to_string(),
+            instructions: "base instructions".to_string(),
+            input: vec![user_message, old_reasoning],
+            tools: Some(
+                Arc::<serde_json::value::RawValue>::from(
+                    serde_json::value::RawValue::from_string("[]".to_string())
+                        .expect("valid tool JSON"),
+                )
+                .into(),
+            ),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            stream_options: None,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: Some(ThreadId::new().to_string()),
+            text: None,
+            client_metadata: None,
+            access_programs: None,
+        },
+        last_response: LastResponse {
+            response_id: "parent-resp".to_string(),
+            items_added: vec![latest_reasoning, latest_message],
+        },
+        transport: super::ResponseContinuationTransport::default(),
+    }
+}
+
+#[test]
+fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() {
+    let response_continuation = test_response_continuation();
+    let expected_latest_items = response_continuation.last_response.items_added.clone();
+    let response_continuation = response_continuation.for_fork();
+
+    assert_eq!(
+        response_continuation.request.input,
+        vec![user_message_item("hello")]
+    );
+    assert_eq!(
+        response_continuation.last_response.items_added,
+        expected_latest_items
+    );
+}
+
+#[test]
+fn response_continuation_for_fork_rejects_changed_auth_owner() {
+    let mut client = test_model_client(SessionSource::Cli);
+    let mut provider = client.state.provider.info().clone();
+    provider.supports_websockets = true;
+    Arc::get_mut(&mut client.state).unwrap().provider =
+        create_model_provider(provider, /*auth_manager*/ None);
+    let mut continuation = test_response_continuation();
+    *client.state.latest_response_continuation.lock().unwrap() = Some(continuation.clone());
+    assert!(client.response_continuation_for_fork().is_some());
+
+    continuation.transport.auth_owner_generation = Some(1);
+    *client.state.latest_response_continuation.lock().unwrap() = Some(continuation);
+    assert!(client.response_continuation_for_fork().is_none());
+}
+
+#[tokio::test]
+async fn fork_response_continuation_retains_route_but_resets_for_new_auth_owner() {
+    let client = test_model_client(SessionSource::Cli);
+    let setup = client
+        .current_client_setup(super::ClientRouting::Workspace)
+        .await
+        .unwrap();
+    let mut continuation = test_response_continuation();
+    let connection_key = Arc::new(codex_model_provider::ResponsesConnectionKey::new(
+        &setup.api_provider,
+        setup.auth_revision,
+    ));
+    continuation.transport.connection_key = Some(Arc::clone(&connection_key));
+    continuation
+        .transport
+        .responses_headers
+        .insert("x-test-context", "parent".parse().unwrap());
+    client.store_cached_websocket_session(super::WebsocketSession::from_response_continuation(
+        continuation.clone(),
+    ));
+    let mut session = client.new_session();
+    assert_eq!(
+        session.websocket_session.connection_key,
+        Some(connection_key)
+    );
+    assert_eq!(
+        session.websocket_session.responses_headers,
+        continuation.transport.responses_headers
+    );
+    assert_eq!(
+        session.get_last_response().unwrap().response_id,
+        "parent-resp"
+    );
+
+    continuation.transport.auth_owner_generation = Some(1);
+    client.store_cached_websocket_session(super::WebsocketSession::from_response_continuation(
+        continuation,
+    ));
+    let mut changed_owner_session = client.new_session();
+    assert!(
+        changed_owner_session
+            .websocket_session
+            .last_request
+            .is_none()
+    );
+    assert!(changed_owner_session.get_last_response().is_none());
+}
+
+/// Changes to the completed parent response's identity before a child preconnects.
+#[derive(Clone, Copy)]
+enum ForkContinuationIdentity {
+    Unchanged,
+    AuthOwnerChanged,
+    RouteChanged,
+}
+
+#[test_case::test_case(ForkContinuationIdentity::Unchanged; "same identity")]
+#[test_case::test_case(ForkContinuationIdentity::AuthOwnerChanged; "changed auth owner")]
+#[test_case::test_case(ForkContinuationIdentity::RouteChanged; "changed provider route")]
+#[tokio::test]
+async fn fork_preconnect_preserves_only_eligible_response_continuation(
+    identity: ForkContinuationIdentity,
+) {
+    core_test_support::skip_if_no_network!();
+
+    let server = start_websocket_server(vec![
+        vec![vec![
+            ev_response_created("parent-resp"),
+            ev_completed("parent-resp"),
+        ]],
+        vec![vec![
+            ev_response_created("child-resp"),
+            ev_completed("child-resp"),
+        ]],
+    ])
+    .await;
+    let mut parent = test_model_client(SessionSource::Cli);
+    let mut provider =
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    provider.supports_websockets = true;
+    Arc::get_mut(&mut parent.state).unwrap().provider =
+        create_model_provider(provider, /*auth_manager*/ None);
+    let parent_metadata = test_responses_metadata_for_client(
+        &parent,
+        Some("parent-turn"),
+        "parent-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut prompt = Prompt {
+        input: vec![user_message_item("parent question")],
+        ..Prompt::default()
+    };
+    assert_eq!(
+        stream_client_test_request(&mut parent.new_session(), &prompt, &parent_metadata).await,
+        "parent-resp"
+    );
+    let child = fork_test_model_client(&parent, spawned_session_source());
+    let mut session = child.new_session();
+    match identity {
+        ForkContinuationIdentity::Unchanged => {}
+        ForkContinuationIdentity::AuthOwnerChanged => {
+            session.websocket_session.auth_owner_generation = Some(1);
+        }
+        ForkContinuationIdentity::RouteChanged => {
+            let mut setup = child
+                .current_client_setup(super::ClientRouting::Workspace)
+                .await
+                .unwrap();
+            setup.api_provider.base_url = "https://old-provider.example/v1".to_string();
+            session.websocket_session.connection_key =
+                Some(Arc::new(codex_model_provider::ResponsesConnectionKey::new(
+                    &setup.api_provider,
+                    setup.auth_revision,
+                )));
+        }
+    }
+    let connection_metadata = test_responses_metadata_for_client(
+        &child,
+        /*turn_id*/ None,
+        "child-window".to_string(),
+        Some(parent.state.thread_id),
+        TestCodexResponsesRequestKind::WebsocketConnection,
+    );
+    session
+        .preconnect_websocket(
+            &test_model_info(),
+            &test_session_telemetry(),
+            &connection_metadata,
+        )
+        .await
+        .expect("child preconnect succeeds");
+    assert_eq!(server.connections().iter().map(Vec::len).sum::<usize>(), 1);
+    assert_eq!(server.handshakes().len(), 2);
+    prompt.input.push(user_message_item("child question"));
+    let child_metadata = test_responses_metadata_for_client(
+        &child,
+        Some("child-turn"),
+        "child-window".to_string(),
+        Some(parent.state.thread_id),
+        TestCodexResponsesRequestKind::Turn,
+    );
+    assert_eq!(
+        stream_client_test_request(&mut session, &prompt, &child_metadata).await,
+        "child-resp"
+    );
+    let requests = server.connections();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    let request = requests[1][0].body_json();
+    match identity {
+        ForkContinuationIdentity::Unchanged => {
+            assert_eq!(request["previous_response_id"], json!("parent-resp"));
+            assert_eq!(
+                request["input"],
+                serde_json::to_value(&prompt.input[1..]).unwrap()
+            );
+        }
+        ForkContinuationIdentity::AuthOwnerChanged | ForkContinuationIdentity::RouteChanged => {
+            assert_eq!(request.get("previous_response_id"), None);
+            assert_eq!(
+                request["input"],
+                serde_json::to_value(&prompt.input).unwrap()
+            );
+        }
+    }
+    server.shutdown().await;
+}
+
+async fn stream_client_test_request(
+    session: &mut super::ModelClientSession,
+    prompt: &Prompt,
+    metadata: &CodexResponsesMetadata,
+) -> String {
+    let mut stream = session
+        .stream(
+            prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await
+        .expect("websocket stream starts");
+    while let Some(event) = stream.next().await {
+        if let ResponseEvent::Completed { response_id, .. } = event.expect("websocket response") {
+            return response_id;
+        }
+    }
+    panic!("websocket stream ended without a completed response");
+}
+
+#[test]
+fn ephemeral_root_fork_cache_key_survives_transitive_subagent_forks() {
+    let original_root_id = ThreadId::new();
+    let (sender, _receiver) = async_channel::unbounded();
+    let ephemeral_root = test_model_client(SessionSource::Cli).with_session_context(
+        Some(original_root_id.to_string()),
+        sender,
+        /*codex_responses_headers*/ None,
+    );
+    let child = fork_test_model_client(&ephemeral_root, spawned_session_source());
+    let grandchild = fork_test_model_client(&child, spawned_session_source());
+    for client in [&ephemeral_root, &child, &grandchild] {
+        let metadata = test_responses_metadata_for_client(
+            client,
+            Some("turn"),
+            "window".to_string(),
+            Some(original_root_id),
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let request = client
+            .build_responses_request(
+                &Prompt::default(),
+                &test_model_info(),
+                /*effort*/ None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                /*service_tier*/ None,
+                &metadata,
+            )
+            .unwrap();
+        assert_eq!(client.fork_prompt_cache_key(), original_root_id);
+        assert_eq!(request.prompt_cache_key, Some(original_root_id.to_string()));
+        assert_ne!(client.state.thread_id, original_root_id);
+    }
+    assert_ne!(child.state.thread_id, grandchild.state.thread_id);
+}
+
+#[test]
+fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
+    let parent_thread_id = ThreadId::new();
+    let source = SessionSource::SubAgent(SubAgentSource::Other(
+        crate::guardian::GUARDIAN_REVIEWER_NAME.to_string(),
+    ));
+    let key = crate::guardian::prompt_cache_key_override_for_review_session(
+        &source,
+        Some(parent_thread_id),
+    )
+    .unwrap();
+    let (sender, _receiver) = async_channel::unbounded();
+    let guardian = test_model_client(source).with_session_context(
+        Some(key.clone()),
+        sender,
+        /*codex_responses_headers*/ None,
+    );
+    let child = fork_test_model_client(&guardian, spawned_session_source());
+    assert_eq!(child.fork_prompt_cache_key(), guardian.state.thread_id);
+    assert_ne!(child.fork_prompt_cache_key().to_string(), key);
+}
+
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
     let mut rollout = replay_bundle(temp.path())?;
     for _ in 0..50 {
@@ -1122,7 +1506,10 @@ fn build_subagent_headers_sets_other_subagent_label() {
 #[test]
 fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
     let parent_thread_id = ThreadId::new();
-    let client = test_model_client(SessionSource::Internal(InternalSessionSource::Guardian));
+    let mut client = test_model_client(SessionSource::Internal(InternalSessionSource::Guardian));
+    Arc::get_mut(&mut client.state)
+        .expect("new client state is uniquely owned")
+        .prompt_cache_key_override = Some(parent_thread_id);
     let metadata = test_responses_metadata_for_client(
         &client,
         Some("turn-123"),
@@ -1252,6 +1639,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*continuation_recorder*/ None,
+        /*request*/ None,
     );
 
     let observed = stream
@@ -1303,6 +1692,8 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
+        /*continuation_recorder*/ None,
+        /*request*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -1524,6 +1915,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*continuation_recorder*/ None,
+        /*request*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
