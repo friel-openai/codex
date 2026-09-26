@@ -270,6 +270,11 @@ async fn reserve_segment_writers(
         };
         let (source_path, live_recorder, allow_missing_source) = match live_source {
             Some((source_path, recorder, allow_missing_source)) => {
+                // Durable creation still defers the first file write. Materialize that header
+                // before discovering references; deferred threads remain buffered until freeze.
+                if !allow_missing_source {
+                    recorder.persist().await.map_err(thread_store_io_error)?;
+                }
                 (source_path, Some(recorder), allow_missing_source)
             }
             None => {

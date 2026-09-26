@@ -614,6 +614,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
 }
 
 #[tokio::test]
+async fn worker_compresses_all_segments_of_one_thread_in_one_run() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let mut paths = Vec::new();
+    let transcript = "shared thread segment\n".repeat(16_384);
+    for _ in 0..16 {
+        let path = archived_rollout_path(home.path(), "2025-01-03T12-00-00", Uuid::new_v4());
+        write_rollout(&path, thread_id, &transcript)?;
+        set_old_mtime(&path)?;
+        paths.push(path);
+    }
+    worker::run(home.path().to_path_buf(), Startup).await?;
+    for path in paths {
+        assert!(
+            !path.exists(),
+            "compression must publish every physical segment of the thread: {path:?}"
+        );
+        assert!(compressed_rollout_path(&path).exists());
+        let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(loaded_id, Some(thread_id));
+        assert_eq!(errors, 0);
+        assert_eq!(items.len(), 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let uuid = Uuid::from_u128(10);
