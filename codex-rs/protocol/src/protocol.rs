@@ -102,6 +102,7 @@ pub use crate::approvals::NetworkPolicyAmendment;
 pub use crate::approvals::NetworkPolicyRuleAction;
 pub use crate::environment::EnvironmentConfig;
 pub use crate::environment::EnvironmentConfigState;
+pub use crate::environment::PersistedEnvironmentSelections;
 pub use crate::environment::has_full_access;
 pub use crate::legacy_events::HasLegacyEvent;
 pub use crate::permissions::FileSystemAccessMode;
@@ -2224,6 +2225,40 @@ pub struct ThreadSettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Sticky environment locations and configuration authority used by future turns.
+    ///
+    /// New checkpoint records use `Some`. Older rollout records omit this field and readers retain
+    /// environment selections derived from current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environments: Option<PersistedEnvironmentSelections>,
+    /// Effective workspace roots used to materialize symbolic `:workspace_roots` entries in
+    /// `permission_profile`.
+    ///
+    /// New checkpoint records use `Some`, including `Some(Vec::new())`. Older rollout records omit
+    /// this field; readers may fall back to the latest `TurnContextItem::workspace_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Workspace roots supplied by the persisted active permission profile.
+    ///
+    /// New checkpoint records use `Some`, including `Some(Vec::new())`. Older rollout records omit
+    /// this field and readers retain roots resolved from current configuration.
+    /// Native paths and explicit file URIs retain their spelling, including foreign Windows roots.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_profile_workspace_roots"
+    )]
+    #[ts(optional)]
+    pub profile_workspace_roots: Option<Vec<LegacyAppPathString>>,
+    /// Effective Windows sandbox mode for future turns.
+    ///
+    /// New checkpoint records use `Some`. Older rollout records omit this field and readers retain
+    /// the mode resolved from current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub windows_sandbox_level: Option<WindowsSandboxLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2234,6 +2269,67 @@ pub struct ThreadSettingsSnapshot {
     /// Thread-owned plugin selection, retained even when a plugin is unavailable.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
+}
+
+/// Validates persisted profile roots without resolving foreign paths on the current host.
+fn deserialize_profile_workspace_roots<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<LegacyAppPathString>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let roots = Option::<Vec<LegacyAppPathString>>::deserialize(deserializer)?;
+    if let Some(roots) = &roots {
+        for root in roots {
+            if PathUri::parse(root.as_str()).is_err() {
+                PathUri::try_from(root.clone()).map_err(D::Error::custom)?;
+            }
+        }
+    }
+    Ok(roots)
+}
+
+/// Versioned state needed in addition to replacement history to resume from one rollout segment.
+///
+/// Full world-state and reference-context payloads remain ordinary adjacent rollout items. This
+/// descriptor records whether each payload is present or intentionally cleared and preserves
+/// previous-turn settings that are otherwise available only in older segments. Version 1 also
+/// requires adjacent `ThreadSettingsApplied` and `TokenCount` events.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct SegmentStateCheckpoint {
+    /// Checkpoint grammar version interpreted by rollout readers.
+    pub version: u32,
+    /// Settings from the newest completed real user turn, or `None` when no such turn exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_turn_settings: Option<SegmentPreviousTurnSettings>,
+    /// Whether an adjacent full `WorldStateItem` establishes the comparison baseline.
+    pub world_state: SegmentStateCheckpointDisposition,
+    /// Whether an adjacent `TurnContextItem` establishes the reference-context baseline.
+    pub reference_context: SegmentStateCheckpointDisposition,
+}
+
+/// Previous-turn settings required to construct model-visible settings changes after resume.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct SegmentPreviousTurnSettings {
+    /// Model used by the previous completed real user turn.
+    pub model: String,
+    /// Compact prompt hash used by the previous completed real user turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comp_hash: Option<String>,
+    /// Whether realtime mode was active for the previous completed real user turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_active: Option<bool>,
+}
+
+/// Whether a checkpoint establishes or intentionally clears an adjacent comparison baseline.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SegmentStateCheckpointDisposition {
+    /// The checkpoint contains the corresponding adjacent full snapshot.
+    Established,
+    /// The checkpoint intentionally has no baseline for the corresponding state.
+    Cleared,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -4637,6 +4733,280 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
+
+    fn thread_settings_snapshot_with_profile_roots(
+        profile_workspace_roots: Option<Vec<LegacyAppPathString>>,
+    ) -> ThreadSettingsSnapshot {
+        let cwd = test_path_buf("/workspace").abs();
+        ThreadSettingsSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "openai".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::OnRequest,
+            approvals_reviewer: ApprovalsReviewer::User,
+            permission_profile: PermissionProfile::read_only(),
+            active_permission_profile: Some(ActivePermissionProfile::read_only()),
+            cwd: cwd.clone(),
+            runtime_workspace_roots: Some(vec![cwd.clone()]),
+            environments: Some(TurnEnvironmentSelections::new(cwd.clone(), Vec::new()).into()),
+            workspace_roots: Some(vec![cwd]),
+            profile_workspace_roots,
+            windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+            reasoning_effort: None,
+            reasoning_summary: Some(ReasoningSummaryConfig::Auto),
+            personality: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: crate::config_types::Settings {
+                    model: "gpt-5".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            disabled_plugin_ids: vec!["disabled-plugin".to_string()],
+        }
+    }
+
+    #[test]
+    fn thread_settings_environments_persist_locations_without_owner_config() -> Result<()> {
+        let cwd = test_path_buf("/workspace").abs();
+        let mut shell_environment_policy = crate::config_types::ShellEnvironmentPolicy::default();
+        shell_environment_policy
+            .r#set
+            .insert("OWNER_SECRET".to_string(), "not-persisted".to_string());
+        let owner_config = EnvironmentConfig {
+            allow_login_shell: false,
+            workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+            permission_profile: crate::models::PermissionProfileSnapshot::legacy(
+                PermissionProfile::Disabled,
+            ),
+            shell_environment_policy,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_type: crate::sandbox::SandboxType::None,
+            use_legacy_landlock: false,
+            exec_policy: None,
+            mcp_policy: None,
+            network_policy: None,
+            selected_capability_roots: Vec::new(),
+        };
+        for (config, expected_source, restored_config) in [
+            (
+                EnvironmentConfigState::FromThread,
+                "thread",
+                EnvironmentConfigState::FromThread,
+            ),
+            (
+                EnvironmentConfigState::Pending,
+                "owner",
+                EnvironmentConfigState::Pending,
+            ),
+            (
+                EnvironmentConfigState::Ready(owner_config),
+                "owner",
+                EnvironmentConfigState::Pending,
+            ),
+            (
+                EnvironmentConfigState::Failed("transient startup failure".to_string()),
+                "owner",
+                EnvironmentConfigState::Pending,
+            ),
+        ] {
+            let selection = TurnEnvironmentSelection {
+                environment_id: "selected-environment".to_string(),
+                cwd: PathUri::from_abs_path(&cwd),
+                workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+                config: config.clone(),
+            };
+            let mut snapshot = thread_settings_snapshot_with_profile_roots(None);
+            snapshot.environments =
+                Some(TurnEnvironmentSelections::new(cwd.clone(), vec![selection.clone()]).into());
+            let encoded = serde_json::to_value(&snapshot)?;
+            assert_eq!(
+                encoded["environments"],
+                json!({
+                    "legacy_fallback_cwd": cwd,
+                    "environments": [{
+                        "environment_id": selection.environment_id,
+                        "cwd": selection.cwd,
+                        "workspace_roots": selection.workspace_roots,
+                        "config_source": expected_source,
+                    }],
+                })
+            );
+            let decoded: ThreadSettingsSnapshot = serde_json::from_value(encoded.clone())?;
+            assert_eq!(decoded, snapshot);
+            let mut poisoned = encoded.clone();
+            poisoned["environments"]["environments"][0]["config"] = json!({
+                "ready": {
+                    "shell_environment_policy": "must not be accepted from rollout history"
+                }
+            });
+            let poisoned_decoded: ThreadSettingsSnapshot = serde_json::from_value(poisoned)?;
+            assert_eq!(poisoned_decoded, decoded);
+            assert_eq!(serde_json::to_value(&poisoned_decoded)?, encoded);
+            let restored: TurnEnvironmentSelection = poisoned_decoded
+                .environments
+                .expect("persisted environments")
+                .environments
+                .into_iter()
+                .next()
+                .expect("persisted selection")
+                .into();
+            assert_eq!(
+                restored,
+                TurnEnvironmentSelection {
+                    config: restored_config,
+                    ..selection.clone()
+                }
+            );
+            assert_eq!(selection.config, config);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thread_settings_environments_read_legacy_selections_and_absence() -> Result<()> {
+        let cwd = test_path_buf("/workspace").abs();
+        let mut encoded = serde_json::to_value(thread_settings_snapshot_with_profile_roots(None))?;
+        encoded["environments"] = json!({
+            "legacy_fallback_cwd": cwd,
+            "environments": [{
+                "environment_id": "legacy-environment",
+                "cwd": PathUri::from_abs_path(&cwd),
+                "workspace_roots": [PathUri::from_abs_path(&cwd)],
+            }],
+        });
+        let decoded: ThreadSettingsSnapshot = serde_json::from_value(encoded.clone())?;
+        let mut poisoned = encoded.clone();
+        poisoned["environments"]["environments"][0]["config"] = json!({
+            "ready": {
+                "shell_environment_policy": "must not be accepted from rollout history"
+            }
+        });
+        let poisoned_decoded: ThreadSettingsSnapshot = serde_json::from_value(poisoned)?;
+        assert_eq!(poisoned_decoded, decoded);
+        assert_eq!(
+            serde_json::to_value(&poisoned_decoded)?,
+            serde_json::to_value(&decoded)?
+        );
+        let restored: TurnEnvironmentSelection = poisoned_decoded
+            .environments
+            .expect("legacy selections")
+            .environments
+            .into_iter()
+            .next()
+            .expect("legacy selection")
+            .into();
+        assert_eq!(
+            restored,
+            TurnEnvironmentSelection {
+                environment_id: "legacy-environment".to_string(),
+                cwd: PathUri::from_abs_path(&cwd),
+                workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+                config: EnvironmentConfigState::FromThread,
+            }
+        );
+        encoded
+            .as_object_mut()
+            .expect("snapshot")
+            .remove("environments");
+        let absent: ThreadSettingsSnapshot = serde_json::from_value(encoded.clone())?;
+        assert_eq!(absent.environments, None);
+        encoded["environments"] = Value::Null;
+        assert_eq!(
+            serde_json::from_value::<ThreadSettingsSnapshot>(encoded)?,
+            absent
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn thread_settings_profile_roots_roundtrip_without_host_reinterpretation() -> Result<()> {
+        for roots in [
+            vec!["/workspace/local", "/workspace/remote repo"],
+            vec![r"C:\Work\Project", r"\\server\share\Project"],
+            vec!["/C:/secret"],
+            vec!["file:///C:/Work/Project", "file://server/share/Project"],
+            vec!["file:///%00/bad/path/YQ"],
+        ] {
+            let expected = thread_settings_snapshot_with_profile_roots(Some(
+                roots
+                    .iter()
+                    .map(|root| LegacyAppPathString::from_string(*root))
+                    .collect(),
+            ));
+            let encoded = serde_json::to_value(&expected)?;
+            assert_eq!(encoded["profile_workspace_roots"], json!(roots));
+            let decoded: ThreadSettingsSnapshot = serde_json::from_value(encoded.clone())?;
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded)?, encoded);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thread_settings_profile_roots_preserve_missing_null_and_empty() -> Result<()> {
+        let missing = thread_settings_snapshot_with_profile_roots(None);
+        let encoded = serde_json::to_value(&missing)?;
+        assert_eq!(encoded.get("profile_workspace_roots"), None);
+        assert_eq!(
+            serde_json::from_value::<ThreadSettingsSnapshot>(encoded.clone())?,
+            missing
+        );
+        let mut null = encoded;
+        null["profile_workspace_roots"] = Value::Null;
+        assert_eq!(
+            serde_json::from_value::<ThreadSettingsSnapshot>(null)?,
+            missing
+        );
+
+        let empty = thread_settings_snapshot_with_profile_roots(Some(Vec::new()));
+        let encoded = serde_json::to_value(&empty)?;
+        assert_eq!(encoded["profile_workspace_roots"], json!([]));
+        assert_eq!(
+            serde_json::from_value::<ThreadSettingsSnapshot>(encoded)?,
+            empty
+        );
+        assert_ne!(missing, empty);
+        Ok(())
+    }
+
+    #[test]
+    fn thread_settings_profile_root_case_changes_remain_distinct() -> Result<()> {
+        for (original, changed) in [
+            (r"C:\Work\Project", r"C:\work\project"),
+            (r"\\server\share\Project", r"\\server\share\project"),
+            ("file:///C:/Work/Project", "file:///C:/work/project"),
+        ] {
+            let snapshot = |root| {
+                thread_settings_snapshot_with_profile_roots(Some(vec![
+                    LegacyAppPathString::from_string(root),
+                ]))
+            };
+            let original = snapshot(original);
+            let changed = snapshot(changed);
+            assert_ne!(original, changed);
+            assert_ne!(
+                serde_json::from_value::<ThreadSettingsSnapshot>(serde_json::to_value(original)?)?,
+                serde_json::from_value::<ThreadSettingsSnapshot>(serde_json::to_value(changed)?)?,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thread_settings_profile_roots_reject_relative_paths_and_non_file_urls() -> Result<()> {
+        for root in ["workspace/project", "C:project", "https://example.com/root"] {
+            let mut encoded =
+                serde_json::to_value(thread_settings_snapshot_with_profile_roots(None))?;
+            encoded["profile_workspace_roots"] = json!([root]);
+            assert!(
+                serde_json::from_value::<ThreadSettingsSnapshot>(encoded).is_err(),
+                "accepted invalid profile root {root}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn old_turn_started_records_have_no_root_attribution() {
