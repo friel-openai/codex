@@ -19,10 +19,13 @@ use crate::mcp::mcp_permission_prompt_is_auto_approved;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+#[cfg(test)]
 use async_channel::Sender;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::approvals::ElicitationRequestEvent;
+#[cfg(test)]
 use codex_protocol::mcp::ClientMcpExtensions;
+#[cfg(test)]
 use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
 use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_KEY;
@@ -64,6 +67,9 @@ pub trait ElicitationReviewer: Send + Sync {
 }
 
 pub type ElicitationReviewerHandle = Arc<dyn ElicitationReviewer>;
+
+/// Dispatches events through the session route that owns the pending MCP request.
+pub(crate) type SendEvent = Arc<dyn Fn(Event) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Holds an owner-provided registration while an MCP elicitation is waiting for a response.
 #[derive(Clone)]
@@ -158,12 +164,12 @@ impl ElicitationRequestRouter {
 
     async fn request_user_interaction(
         &self,
-        events: Option<Sender<Event>>,
+        send_event: Option<SendEvent>,
         authority: &ElicitationAuthority,
         server_name: String,
         request: ElicitationRequest,
     ) -> Result<ElicitationResponse> {
-        let Some(events) = events else {
+        let Some(send_event) = send_event else {
             return Ok(ElicitationResponse {
                 action: ElicitationAction::Decline,
                 content: None,
@@ -203,18 +209,17 @@ impl ElicitationRequestRouter {
             router: self.clone(),
             key: request_key,
         };
-        events
-            .send(Event {
-                id: "mcp_elicitation_request".to_string(),
-                msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
-                    turn_id: None,
-                    server_name,
-                    id: ProtocolRequestId::String(public_request_id),
-                    request,
-                }),
-            })
-            .await
-            .context(delivery_context)?;
+        send_event(Event {
+            id: "mcp_elicitation_request".to_string(),
+            msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                turn_id: None,
+                server_name,
+                id: ProtocolRequestId::String(public_request_id),
+                request,
+            }),
+        })
+        .await
+        .context(delivery_context)?;
         rx.await.context(response_context)
     }
 }
@@ -266,6 +271,17 @@ impl ElicitationRequestManager {
         true
     }
 
+    #[cfg(test)]
+    pub(crate) async fn resolve(
+        &self,
+        server_name: String,
+        id: RequestId,
+        response: ElicitationResponse,
+    ) -> Result<()> {
+        self.router.resolve(server_name, id, response).await
+    }
+
+    #[cfg(test)]
     pub(crate) fn make_sender(
         &self,
         server_name: String,
@@ -278,11 +294,31 @@ impl ElicitationRequestManager {
             .get(OPENAI_ELICITATION_EXTENSION_ID)
             .and_then(|settings| settings.get("userVerification"))
             .is_some_and(Value::is_object);
+        let send_event = tx_event.map(|tx_event| {
+            Arc::new(move |event| {
+                let tx_event = tx_event.clone();
+                async move {
+                    tx_event.send(event).await.map_err(|error| {
+                        anyhow!("failed to deliver MCP elicitation request: {error}")
+                    })
+                }
+                .boxed()
+            }) as SendEvent
+        });
+        self.make_sender_with_event_dispatch(server_name, send_event, user_verification_enabled)
+    }
+
+    pub(crate) fn make_sender_with_event_dispatch(
+        &self,
+        server_name: String,
+        send_event: Option<SendEvent>,
+        user_verification_enabled: bool,
+    ) -> SendElicitation {
         let router = self.router.clone();
         let authority = self.authority.clone();
         Box::new(move |id, elicitation| {
             let router = router.clone();
-            let tx_event = tx_event.clone();
+            let send_event = send_event.clone();
             let server_name = server_name.clone();
             let authority = authority.clone();
             async move {
@@ -306,7 +342,7 @@ impl ElicitationRequestManager {
                     }
                     return user_verification_elicitation::route(
                         router,
-                        tx_event,
+                        send_event,
                         authority,
                         server_name,
                         ElicitationRequest::UserVerification {
@@ -531,7 +567,7 @@ impl ElicitationRequestManager {
                     },
                 };
                 router
-                    .request_user_interaction(tx_event, &authority, server_name, request)
+                    .request_user_interaction(send_event, &authority, server_name, request)
                     .await
             }
             .boxed()
