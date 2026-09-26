@@ -105,6 +105,24 @@ impl LocalThreadStore {
         &self,
         requested_thread_id: ThreadId,
     ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Resolve)
+            .await
+    }
+
+    /// Authenticates lineage heads; consumers authenticate byte boundaries only when read.
+    pub(super) async fn resolve_rollout_lineage_deferred(
+        &self,
+        requested_thread_id: ThreadId,
+    ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Deferred)
+            .await
+    }
+
+    async fn resolve_rollout_lineage_with_offsets(
+        &self,
+        requested_thread_id: ThreadId,
+        offset_mode: LineageOffsetMode,
+    ) -> ThreadStoreResult<RolloutLineage> {
         let resolved =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
                 .await?
@@ -119,7 +137,7 @@ impl LocalThreadStore {
             /*inherited_filter_texts*/ None,
             /*graph_depth*/ 0,
             &mut active_paths,
-            LineageOffsetMode::Resolve,
+            offset_mode,
         )
         .await?;
         Ok(RolloutLineage {
@@ -1641,7 +1659,10 @@ async fn trim_to_history_position(
 }
 
 /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
-fn validated_history_byte_offset(bytes: &[u8], end: HistoryPosition) -> ThreadStoreResult<u64> {
+pub(super) fn validated_history_byte_offset(
+    bytes: &[u8],
+    end: HistoryPosition,
+) -> ThreadStoreResult<u64> {
     let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
         malformed_lineage(
             end.thread_id,

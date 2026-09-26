@@ -580,6 +580,8 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
 /// function to require an `Arc<&Self>`.
 pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
+    /// The target's first published persistence setting survives eviction and caller-config drift.
+    thread_ephemeral_intent: std::sync::Mutex<HashMap<ThreadId, bool>>,
     shared_thread_instructions: shared_instructions::SharedThreadInstructionsProviders,
     /// Serializes ownership changes and registry commits across every root in this manager.
     lifecycle_mutation: Arc<AsyncMutex<()>>,
@@ -746,6 +748,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
                 shared_thread_instructions: Default::default(),
                 lifecycle_mutation: Arc::new(AsyncMutex::new(())),
                 temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
@@ -898,6 +901,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
                 shared_thread_instructions: Default::default(),
                 lifecycle_mutation: Arc::new(AsyncMutex::new(())),
                 temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
@@ -1118,7 +1122,14 @@ impl ThreadManager {
     }
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
-        self.state.get_thread(thread_id).await
+        let thread = self.state.get_thread(thread_id).await?;
+        if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
+            thread
+                .restore_saved_thread_persistence()
+                .await
+                .map_err(thread_store_rollout_read_error)?;
+        }
+        Ok(thread)
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.
@@ -2165,6 +2176,14 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
+        self.thread_ephemeral_intent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            == Some(&false)
+    }
+
     pub(crate) fn shared_thread_instructions_provider(
         &self,
         root_thread_id: ThreadId,
@@ -3436,6 +3455,7 @@ impl ThreadManagerState {
         model_history_complete: bool,
     ) -> CodexResult<NewThread> {
         let thread_id = session.thread_id();
+        let ephemeral = session.get_config().await.ephemeral;
         let event = io.next_event().await?;
         let session_configured = match event {
             Event {
@@ -3450,6 +3470,12 @@ impl ThreadManagerState {
         {
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
+                // A later reload must not replace the target's intent with its sender's config.
+                self.thread_ephemeral_intent
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entry(thread_id)
+                    .or_insert(ephemeral);
                 let thread = Arc::new(CodexThread::new(
                     session,
                     io,

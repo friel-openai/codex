@@ -3333,7 +3333,9 @@ impl ThreadRequestProcessor {
                 ))
             })?
             .and_then(|metadata| metadata.daybreak_enabled);
-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        let loaded_thread = get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+            .await
+            .map_err(ThreadReadViewError::JsonRpc)?;
         let mut thread = if include_turns {
             if let Some(loaded_thread) = loaded_thread.as_ref() {
                 // Loaded thread with turns: use persisted metadata when it exists,
@@ -3575,6 +3577,8 @@ impl ThreadRequestProcessor {
         } = params;
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let loaded_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_uuid).await?;
         let legacy_rollout_path = match self
             .thread_store
             .read_thread(StoreReadThreadParams {
@@ -3635,7 +3639,7 @@ impl ThreadRequestProcessor {
                 .await?
         {
             if indexed_legacy_generation
-                && let Some(thread) = self.thread_manager.get_thread(thread_uuid).await.ok()
+                && let Some(thread) = loaded_thread.as_ref()
                 && matches!(thread.agent_status().await, AgentStatus::Running)
             {
                 let active_turn = {
@@ -3730,7 +3734,6 @@ impl ThreadRequestProcessor {
         // Reference-backed legacy history expands only until this page has coherent turns.
         // Other legacy history still replays the complete rollout on each request because
         // rollback and compaction events can change earlier turns.
-        let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
         let has_live_running_thread = match loaded_thread.as_ref() {
             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
             None => false,
@@ -3873,6 +3876,8 @@ impl ThreadRequestProcessor {
         sort_direction: Option<SortDirection>,
         items_view: Option<TurnItemsView>,
     ) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
+        let loaded_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         let items_view = items_view.unwrap_or(TurnItemsView::Summary);
         let page_size = thread_turns_page_size(limit);
         let api_sort_direction = sort_direction.unwrap_or(SortDirection::Desc);
@@ -3941,7 +3946,6 @@ impl ThreadRequestProcessor {
             }
             turns.push(turn);
         }
-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let has_live_running_thread = match loaded_thread.as_ref() {
             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
             None => false,
@@ -3994,6 +3998,8 @@ impl ThreadRequestProcessor {
         {
             return Ok(None);
         }
+        let loaded_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         let Some(stored_thread) = self
             .read_stored_thread_for_read(thread_id, /*include_history*/ false)
             .await
@@ -4068,7 +4074,6 @@ impl ThreadRequestProcessor {
             .await
             .map_err(thread_read_view_error)?
         };
-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let has_live_running_thread = match loaded_thread.as_ref() {
             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
             None => false,
@@ -4279,7 +4284,8 @@ impl ThreadRequestProcessor {
             .lock()
             .await
             .contains(&thread_id);
-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        let loaded_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         if !allow_running
             && let Some(thread) = loaded_thread.as_ref()
             && matches!(thread.agent_status().await, AgentStatus::Running)
@@ -4606,6 +4612,7 @@ impl ThreadRequestProcessor {
         } = params;
         let thread_id = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         let page_size = limit
             .map(|value| value as usize)
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
@@ -5184,7 +5191,10 @@ impl ThreadRequestProcessor {
                 let thread_id = ThreadId::from_string(&params.thread_id)
                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
                 // Recheck under the same permit as client resume, including after config loading.
-                if self.thread_manager.get_thread(thread_id).await.is_ok() {
+                if get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+                    .await?
+                    .is_some()
+                {
                     if let Some(saved) = saved {
                         self.continue_daemon_turn(&params.thread_id, saved.clone())
                             .await;
@@ -5931,11 +5941,9 @@ impl ThreadRequestProcessor {
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-                && self
-                    .thread_manager
-                    .get_thread(existing_thread_id)
-                    .await
-                    .is_ok()
+                && get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
+                    .await?
+                    .is_some()
             {
                 return Err(invalid_request(format!(
                     "cannot resume thread {existing_thread_id} with history while it is already running"
@@ -5943,7 +5951,8 @@ impl ThreadRequestProcessor {
             }
             None
         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-            && let Ok(existing_thread) = self.thread_manager.get_thread(existing_thread_id).await
+            && let Some(existing_thread) =
+                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?
         {
             let source_thread = self
                 .read_stored_thread_for_resume(
@@ -5962,9 +5971,11 @@ impl ThreadRequestProcessor {
                 )
                 .await?;
             let existing_thread_id = source_thread.thread_id;
-            match self.thread_manager.get_thread(existing_thread_id).await {
-                Ok(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
-                Err(_) => {
+            match get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
+                .await?
+            {
+                Some(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
+                None => {
                     return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
                         source_thread,
                     ))));
@@ -6431,13 +6442,31 @@ impl ThreadRequestProcessor {
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
         let result = if let Some(path) = path {
-            self.thread_store
+            // Explicit paths determine the source ID. Read only metadata until any loaded
+            // source has been repaired, then reread the requested path to retain its selection.
+            let stored_thread = self
+                .thread_store
                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
                     rollout_path: path.clone(),
                     include_archived: true,
-                    include_history,
+                    include_history: false,
                 })
                 .await
+                .map_err(thread_store_resume_read_error)?;
+            let loaded_thread =
+                get_loaded_thread_for_persistence(&self.thread_manager, stored_thread.thread_id)
+                    .await?;
+            if loaded_thread.is_some() || include_history {
+                self.thread_store
+                    .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
+                        rollout_path: path.clone(),
+                        include_archived: true,
+                        include_history,
+                    })
+                    .await
+            } else {
+                Ok(stored_thread)
+            }
         } else {
             let existing_thread_id = match ThreadId::from_string(thread_id) {
                 Ok(id) => id,
@@ -6445,6 +6474,7 @@ impl ThreadRequestProcessor {
                     return Err(invalid_request(format!("invalid session id: {err}")));
                 }
             };
+            get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?;
             let params = StoreReadThreadParams {
                 thread_id: existing_thread_id,
                 include_archived: true,
@@ -6593,6 +6623,7 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
+        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         self.thread_store
             .read_thread(StoreReadThreadParams {
                 thread_id,
@@ -6884,7 +6915,9 @@ impl ThreadRequestProcessor {
             let model_context =
                 if matches!(&params.boundary, codex_thread_store::ForkBoundary::Latest)
                     && let Some(local_store) = local_store
-                    && let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await
+                    && let Some(parent) =
+                        get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id)
+                            .await?
                     && !matches!(parent.agent_status().await, AgentStatus::Running)
                     && parent.flush_rollout().await.is_ok()
                     && let Ok(Some(expected_position)) = local_store
@@ -7124,7 +7157,8 @@ impl ThreadRequestProcessor {
             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
         let needs_latest_settings =
             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
-        let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
+        let loaded_parent =
+            get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id).await?;
         let loaded_parent_settings = if let Some(settings) = imported_settings {
             Some(settings)
         } else if paginated_source && needs_latest_settings {

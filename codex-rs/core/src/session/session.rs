@@ -101,6 +101,11 @@ pub(crate) struct Session {
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     /// Orders mutations before checkpoint capture or after commit classification.
     pub(super) checkpoint_admission_lock: Arc<Mutex<()>>,
+    /// Orders retained-history mutations and their appends with writer recovery.
+    /// Acquire after `state`; event producers may already hold `state` when persisting.
+    pub(super) persistence_repair_lock: Mutex<super::persistence_repair::PersistenceRepairState>,
+    /// Published only after surviving history is durable; the original Session stays alive.
+    pub(super) repaired_persistence: OnceLock<super::persistence_repair::RepairedPersistence>,
     pub(crate) input_queue: InputQueue,
     /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
     /// terminal action. The persisted snooze deadline is reconstructed from the goals database;
@@ -1887,6 +1892,8 @@ impl Session {
                 active_turn: Mutex::new(None),
                 async_hook_results,
                 checkpoint_admission_lock: Arc::new(Mutex::new(())),
+                persistence_repair_lock: Mutex::default(),
+                repaired_persistence: OnceLock::new(),
                 input_queue: InputQueue::new(),
                 goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,

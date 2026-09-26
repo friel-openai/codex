@@ -400,6 +400,39 @@ impl LocalThreadStore {
         self.state_db.clone()
     }
 
+    /// Finds existing turns for saved-runtime recovery without loading their items.
+    /// An incomplete projection cannot prove absence, so repair it once before querying.
+    pub async fn existing_history_turns(
+        &self,
+        thread_id: ThreadId,
+        turn_ids: &[String],
+    ) -> ThreadStoreResult<HashSet<String>> {
+        if !self.has_history_projection(thread_id).await?
+            && !self.rebuild_history_projection(thread_id).await?
+        {
+            return Err(ThreadStoreError::Unsupported {
+                operation: "existing_history_turns",
+            });
+        }
+        let lineage = match thread_history::indexed_same_thread_lineage(self, thread_id).await? {
+            Some(lineage) => lineage,
+            None => self.resolve_rollout_lineage(thread_id).await?,
+        };
+        let pool = self.thread_history_db().await?;
+        let mut existing = HashSet::new();
+        for turn_id in turn_ids {
+            match thread_history::find_visible_turn(pool, &lineage, turn_id).await {
+                Ok(_) => {
+                    existing.insert(turn_id.clone());
+                }
+                Err(ThreadStoreError::InvalidRequest { message })
+                    if message == format!("turn not found: {turn_id}") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(existing)
+    }
+
     /// Returns whether the projected visible history can satisfy paginated reads.
     pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
         let Some(resolved) =

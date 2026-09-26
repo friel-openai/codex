@@ -187,7 +187,7 @@ fn restart_active_goal_supervisor_task(
     session: Arc<Session>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
     Box::pin(async move {
-        let Some(state_db) = session.services.state_db.as_ref() else {
+        let Some(state_db) = session.state_db() else {
             return;
         };
         let goal = match state_db
@@ -338,7 +338,7 @@ pub(crate) async fn maybe_start_supervisor_checkin_after_goal_resume(
     invalidate_supervisor_wakeup(session).await;
     *session.goal_supervisor_runtime.snoozed_until.lock().await = None;
     reset_failure_backoff(session).await;
-    if let Some(state_db) = session.services.state_db.as_ref() {
+    if let Some(state_db) = session.state_db().as_ref() {
         state_db
             .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
@@ -402,7 +402,7 @@ async fn schedule_supervisor_failure_retry_locked(
     goal_id: &str,
     failure: &str,
 ) {
-    let retry_active_goal = if let Some(state_db) = session.services.state_db.as_ref() {
+    let retry_active_goal = if let Some(state_db) = session.state_db().as_ref() {
         match state_db
             .thread_goals()
             .get_thread_goal(session.thread_id)
@@ -434,7 +434,7 @@ async fn schedule_supervisor_failure_retry_locked(
     let retry = next_failure_retry(session, goal_id).await;
     let retry_delay_ms = i64::try_from(retry.delay.as_millis()).unwrap_or(i64::MAX);
     let persisted_deadline_ms = Utc::now().timestamp_millis().saturating_add(retry_delay_ms);
-    if let Some(state_db) = session.services.state_db.as_ref()
+    if let Some(state_db) = session.state_db().as_ref()
         && let Err(err) = state_db
             .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
@@ -660,7 +660,7 @@ pub(crate) async fn snooze_supervisor_helper(
         return Ok(None);
     };
     let delay_seconds = delay_seconds.max(MIN_SUPERVISOR_SNOOZE_SECONDS);
-    if let Some(state_db) = session.services.state_db.as_ref()
+    if let Some(state_db) = session.state_db().as_ref()
         && let Some(goal) = state_db
             .thread_goals()
             .get_thread_goal(session.thread_id)
@@ -840,7 +840,7 @@ pub(crate) async fn complete_supervised_goal(
         let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
         return Ok(None);
     };
-    let Some(state_db) = session.services.state_db.as_ref() else {
+    let Some(state_db) = session.state_db() else {
         return Ok(None);
     };
     let updated = state_db
@@ -1036,7 +1036,7 @@ async fn persisted_snooze_delay(
     session: &Arc<Session>,
     goal_id: &str,
 ) -> anyhow::Result<Option<Duration>> {
-    let Some(state_db) = session.services.state_db.as_ref() else {
+    let Some(state_db) = session.state_db() else {
         return Ok(None);
     };
     let Some(snoozed_until_ms) = state_db

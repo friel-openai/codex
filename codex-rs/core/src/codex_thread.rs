@@ -806,7 +806,38 @@ impl CodexThread {
     }
 
     pub fn rollout_path(&self) -> Option<PathBuf> {
-        self.rollout_path.clone()
+        self.rollout_path
+            .clone()
+            .or_else(|| self.session.repaired_rollout_path())
+    }
+
+    /// Restores persistence after the caller verifies that this is a saved target, not
+    /// an intentionally ephemeral task. Keeps the Session, active turn and mailbox intact.
+    pub async fn restore_saved_thread_persistence(&self) -> ThreadStoreResult<()> {
+        self.session
+            .restore_saved_thread_persistence()
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!("failed to restore saved thread persistence: {error:#}"),
+            })
+    }
+
+    /// Whether this runtime has a writer, including one restored after loading.
+    pub fn has_persistence(&self) -> bool {
+        self.session.live_thread().is_some()
+    }
+
+    async fn ensure_saved_target_persistence(&self) -> ThreadStoreResult<()> {
+        if !self.has_persistence()
+            && self
+                .session
+                .services
+                .agent_control
+                .is_saved_target(self.session.thread_id)
+        {
+            self.restore_saved_thread_persistence().await?;
+        }
+        Ok(())
     }
 
     /// Returns startup metadata without the one-time initial message replay.
@@ -831,6 +862,7 @@ impl CodexThread {
         &self,
         include_archived: bool,
     ) -> ThreadStoreResult<StoredThreadHistory> {
+        self.ensure_saved_target_persistence().await?;
         let live_thread = self
             .session
             .live_thread_for_persistence("load history")
@@ -845,6 +877,7 @@ impl CodexThread {
         include_archived: bool,
         include_history: bool,
     ) -> ThreadStoreResult<StoredThread> {
+        self.ensure_saved_target_persistence().await?;
         let live_thread = self
             .session
             .live_thread_for_persistence("read thread")
@@ -861,6 +894,7 @@ impl CodexThread {
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> ThreadStoreResult<StoredThread> {
+        self.ensure_saved_target_persistence().await?;
         let live_thread = self
             .session
             .live_thread_for_persistence("update thread metadata")
@@ -872,6 +906,7 @@ impl CodexThread {
 
     /// Appends rollout items through the live thread so derived metadata stays in sync.
     pub async fn append_rollout_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
+        self.ensure_saved_target_persistence().await?;
         let live_thread = self
             .session
             .live_thread_for_persistence("append rollout items")

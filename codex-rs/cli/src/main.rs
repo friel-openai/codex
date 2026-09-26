@@ -1,3 +1,6 @@
+// Match the app-server and TUI limits when laying out their nested async futures.
+#![recursion_limit = "256"]
+
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
