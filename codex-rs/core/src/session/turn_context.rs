@@ -1606,7 +1606,8 @@ impl Session {
         // Workspace changes rebuild environments, not the active turn's model preferences.
         // Future thread settings may already differ from this request's settings.
         session_configuration.step_settings = Arc::new(inputs.settings.selected().clone());
-        let environments = self.services.turn_environments.snapshot().await;
+        session_configuration.environments = inputs.environments.all_selections();
+        let environments = inputs.environments.clone();
         let refreshed = self
             .new_turn_context_from_configuration(
                 current.sub_id.clone(),

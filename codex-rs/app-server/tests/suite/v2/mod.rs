@@ -152,10 +152,10 @@ mod turn_settings_update;
 mod turn_start;
 mod turn_start_zsh_fork;
 mod turn_steer;
+mod user_verification;
+mod user_verification_mcp;
 mod view_image;
 mod web_search;
 mod windows_sandbox_setup;
+mod workspace_cwd;
 mod workspace_routing;
-
-mod user_verification;
-mod user_verification_mcp;

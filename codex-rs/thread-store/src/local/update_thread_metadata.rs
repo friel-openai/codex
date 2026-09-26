@@ -72,6 +72,7 @@ pub(super) async fn update_thread_metadata(
         .is_some_and(|patch| patch.memory_mode.is_some() || patch.git_info.is_some());
     let requires_rollout_compat =
         staged_requires_rollout_compat || requires_rollout_compatibility_update(&patch);
+    let needs_workspace_cwd_compat = needs_workspace_cwd_compatibility_update(&patch);
     let has_explicit_metadata = patch.name.is_some() || requires_rollout_compat;
     let history_mode = if has_explicit_metadata {
         match live_writer::live_writer_parts(store, thread_id).await {
@@ -183,6 +184,7 @@ pub(super) async fn update_thread_metadata(
         message: format!("thread not found: {thread_id}"),
     })?;
     let name = patch.name;
+    let cwd = patch.cwd;
     let git_info = patch.git_info;
     if let Some(memory_mode) = patch.memory_mode
         && let Some(writer_lock) = writer_lock.as_ref()
@@ -203,17 +205,19 @@ pub(super) async fn update_thread_metadata(
     }
 
     let state_db_ctx = store.state_db().await;
-    codex_rollout::state_db::reconcile_rollout(
-        state_db_ctx.as_deref(),
-        resolved_rollout.path.as_path(),
-        store.config.default_model_provider_id.as_str(),
-        /*builder*/ None,
-        &[],
-        /*archived_only*/
-        (resolved_rollout.location == RolloutLocation::Archived).then_some(true),
-        /*new_thread_memory_mode*/ None,
-    )
-    .await;
+    if !needs_workspace_cwd_compat {
+        codex_rollout::state_db::reconcile_rollout(
+            state_db_ctx.as_deref(),
+            resolved_rollout.path.as_path(),
+            store.config.default_model_provider_id.as_str(),
+            /*builder*/ None,
+            &[],
+            /*archived_only*/
+            (resolved_rollout.location == RolloutLocation::Archived).then_some(true),
+            /*new_thread_memory_mode*/ None,
+        )
+        .await;
+    }
 
     if let Some(name) = name {
         append_thread_name(
@@ -280,6 +284,9 @@ pub(super) async fn update_thread_metadata(
                     branch: branch.clone(),
                     repository_url: origin_url.clone(),
                 });
+                if let Some(cwd) = cwd.as_ref() {
+                    meta.meta.cwd = cwd.clone();
+                }
                 meta.meta.memory_mode = memory_mode.clone();
             },
         )
@@ -287,7 +294,6 @@ pub(super) async fn update_thread_metadata(
         refresh_resolved_rollout_path(&mut resolved_rollout).await;
         apply_thread_git_info(store, thread_id, sha, branch, origin_url).await?;
     }
-
     let mut thread = match read_thread::read_thread(
         store,
         ReadThreadParams {
@@ -311,6 +317,9 @@ pub(super) async fn update_thread_metadata(
     };
     if let Some(((sha, branch, origin_url), _memory_mode)) = resolved_git_info {
         thread.git_info = git_info_from_parts(sha, branch, origin_url);
+    }
+    if let Some(cwd) = cwd {
+        thread.cwd = cwd;
     }
     if pending_patch.is_some() {
         remove_pending_thread_metadata(store, thread_id, &mut pending_metadata).await;
@@ -705,10 +714,19 @@ async fn canonical_history_mode(
 }
 
 fn requires_rollout_compatibility_update(patch: &ThreadMetadataPatch) -> bool {
+    if needs_workspace_cwd_compatibility_update(patch) {
+        return true;
+    }
     if patch.memory_mode.is_none() && patch.git_info.is_none() {
         return false;
     }
     !has_observed_metadata_facts(patch)
+}
+
+fn needs_workspace_cwd_compatibility_update(patch: &ThreadMetadataPatch) -> bool {
+    patch.cwd.is_some()
+        && patch.git_info.is_some()
+        && !has_observed_metadata_facts_except_cwd(patch)
 }
 
 fn sqlite_write_failure_should_block(patch: &ThreadMetadataPatch) -> bool {
@@ -728,6 +746,10 @@ fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
 }
 
 fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
+    patch.cwd.is_some() || has_observed_metadata_facts_except_cwd(patch)
+}
+
+fn has_observed_metadata_facts_except_cwd(patch: &ThreadMetadataPatch) -> bool {
     patch.rollout_path.is_some()
         || patch.preview.is_some()
         || patch.title.is_some()
@@ -741,7 +763,6 @@ fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
         || patch.agent_nickname.is_some()
         || patch.agent_role.is_some()
         || patch.agent_path.is_some()
-        || patch.cwd.is_some()
         || patch.cli_version.is_some()
         || patch.approval_mode.is_some()
         || patch.permission_profile.is_some()
@@ -1559,6 +1580,129 @@ mod tests {
         assert_eq!(
             git_info.repository_url.as_deref(),
             Some("https://github.com/openai/codex")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_thread_metadata_persists_workspace_cwd_in_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let uuid = Uuid::from_u128(318);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let path =
+            write_session_file(home.path(), "2025-01-03T20-45-00", uuid).expect("session file");
+        let worktree_cwd = home.path().join("linked-worktree");
+        std::fs::create_dir(&worktree_cwd).expect("create linked worktree cwd");
+
+        let params = UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                cwd: Some(worktree_cwd.clone()),
+                git_info: Some(GitInfoPatch {
+                    sha: Some(Some("abc123".to_string())),
+                    branch: Some(Some("linked-branch".to_string())),
+                    origin_url: Some(Some(
+                        SanitizedGitUrl::try_from("https://github.com/openai/codex")
+                            .expect("valid git remote URL"),
+                    )),
+                }),
+                ..Default::default()
+            },
+            include_archived: false,
+        };
+        store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read original thread");
+        let original_cwd = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("read original metadata")
+            .map(|metadata| metadata.cwd);
+        let original_rollout = std::fs::read(&path).expect("read original rollout");
+        let competitor = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let competing_writer = competitor
+            .acquire_writer_lock(thread_id)
+            .expect("reserve competing writer");
+        let error = store
+            .update_thread_metadata(params.clone())
+            .await
+            .expect_err("workspace change must respect writer ownership");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert_eq!(
+            std::fs::read(&path).expect("read unchanged rollout"),
+            original_rollout
+        );
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("read metadata")
+                .map(|metadata| metadata.cwd),
+            original_cwd
+        );
+        drop(competing_writer);
+
+        let thread = store
+            .update_thread_metadata(params)
+            .await
+            .expect("set workspace metadata")
+            .expect("local store returns updated thread");
+
+        assert_eq!(thread.cwd, worktree_cwd);
+        assert_eq!(
+            thread.git_info.expect("git info").branch.as_deref(),
+            Some("linked-branch")
+        );
+        let appended = last_rollout_item(path.as_path());
+        assert_eq!(appended["type"], "session_meta");
+        assert_eq!(appended["payload"]["cwd"], json!(worktree_cwd));
+        assert_eq!(appended["payload"]["git"]["branch"], "linked-branch");
+
+        assert_eq!(
+            runtime
+                .delete_thread(thread_id)
+                .await
+                .expect("delete sqlite thread row"),
+            1
+        );
+        codex_rollout::state_db::reconcile_rollout(
+            Some(runtime.as_ref()),
+            path.as_path(),
+            config.default_model_provider_id.as_str(),
+            /*builder*/ None,
+            &[],
+            /*archived_only*/ None,
+            /*new_thread_memory_mode*/ None,
+        )
+        .await;
+        let rebuilt = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("read rebuilt thread metadata");
+        assert_eq!(rebuilt.cwd, worktree_cwd);
+        assert_eq!(
+            rebuilt
+                .git_info
+                .expect("rebuilt git info")
+                .branch
+                .as_deref(),
+            Some("linked-branch")
         );
     }
 
