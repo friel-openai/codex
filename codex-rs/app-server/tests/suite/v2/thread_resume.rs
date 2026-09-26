@@ -3115,12 +3115,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
 }
 
 #[tokio::test]
-async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
+async fn app_server_restart_recovers_overdue_goal_with_default_supervisor() -> Result<()> {
+    let server = MockServer::start().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("recovered-supervisor"),
+            responses::ev_function_call_with_namespace(
+                "recovered-snooze",
+                "supervisor",
+                "snooze",
+                r#"{"delay_seconds":3600}"#,
+            ),
+            responses::ev_completed("recovered-supervisor"),
+        ]),
+    )
+    .await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri())
         .enable_feature(Feature::Goals)
-        .enable_feature(Feature::GoalSupervisor)
         .write(codex_home.path())?;
     let thread_id = create_fake_rollout(
         codex_home.path(),
@@ -3200,6 +3213,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
         .to_string();
     assert!(input.contains("# Goal Supervisor Assignment"));
     assert!(input.contains("continue after app-server restart"));
+
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            if state_db
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await?
+                .is_some_and(|deadline| deadline > Utc::now().timestamp_millis())
+            {
+                break anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    // A successful helper snooze must not leave an ordinary parent continuation queued.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(response_mock.requests().len(), 1);
+    let response_requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should record requests")
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .count();
+    assert_eq!(
+        response_requests, 1,
+        "only the authorized helper may run after restart"
+    );
+    timeout(DEFAULT_READ_TIMEOUT, second.shutdown_gracefully()).await??;
 
     Ok(())
 }
