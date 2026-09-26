@@ -16,6 +16,7 @@ use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::materialize_rollout_items;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
@@ -87,10 +88,20 @@ async fn fork_thread_twice_drops_to_first_message() {
         }
         pos
     };
+    let turn_boundary_for_user = |items: &[RolloutItem], user_position: usize| {
+        items[..user_position]
+            .iter()
+            .rposition(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))))
+            .unwrap_or(user_position)
+    };
     let user_inputs = find_user_input_positions(&base_items);
 
     // After cutting at nth user input (n=1 → second user message), cut strictly before that input.
-    let cut1 = user_inputs.get(1).copied().unwrap_or(0);
+    let cut1 = user_inputs
+        .get(1)
+        .copied()
+        .map(|position| turn_boundary_for_user(&base_items, position))
+        .unwrap_or(0);
     let mut expected_after_first: Vec<RolloutItem> = base_items[..cut1].to_vec();
 
     // After dropping again (n=1 on fork1), compute expected relative to fork1's rollout.
@@ -116,7 +127,22 @@ async fn fork_thread_twice_drops_to_first_message() {
     ));
 
     // GetHistory on fork1 flushed; the file is ready.
-    let fork1_items = read_rollout_items(&fork1_path);
+    let fork1_raw_items = read_rollout_items(&fork1_path);
+    assert!(
+        fork1_raw_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+    );
+    assert!(
+        fork1_raw_items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::ResponseItem(_)))
+    );
+    let fork1_items = without_session_meta(
+        materialize_rollout_items(test.config.codex_home.as_path(), &fork1_path)
+            .await
+            .expect("materialize first fork"),
+    );
     pretty_assertions::assert_eq!(
         serde_json::to_value(&fork1_items).unwrap(),
         serde_json::to_value(&expected_after_first).unwrap()
@@ -138,21 +164,74 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     let fork2_path = codex_fork2.rollout_path().expect("rollout path");
     // GetHistory on fork2 flushed; the file is ready.
-    let fork1_items = read_rollout_items(&fork1_path);
     let fork1_user_inputs = find_user_input_positions(&fork1_items);
     let cut_last_on_fork1 = fork1_user_inputs
         .get(fork1_user_inputs.len().saturating_sub(1))
         .copied()
+        .map(|position| turn_boundary_for_user(&fork1_items, position))
         .unwrap_or(0);
     let mut expected_after_second: Vec<RolloutItem> = fork1_items[..cut_last_on_fork1].to_vec();
     expected_after_second.push(thread_settings_applied_item(
         fork2_thread_id,
         codex_fork2.thread_settings_snapshot().await,
     ));
-    let fork2_items = read_rollout_items(&fork2_path);
+    let fork2_raw_items = read_rollout_items(&fork2_path);
+    assert!(
+        fork2_raw_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+    );
+    assert!(
+        fork2_raw_items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::ResponseItem(_)))
+    );
+    let fork2_items = without_session_meta(
+        materialize_rollout_items(test.config.codex_home.as_path(), &fork2_path)
+            .await
+            .expect("materialize second fork"),
+    );
     pretty_assertions::assert_eq!(
         serde_json::to_value(&fork2_items).unwrap(),
         serde_json::to_value(&expected_after_second).unwrap()
+    );
+
+    // Re-forking the first truncated child at its current boundary must preserve that child's
+    // inherited cutoff. It must not reopen the original parent suffix excluded by the first fork.
+    let NewThread {
+        thread_id: refork_thread_id,
+        thread: codex_refork,
+        ..
+    } = thread_manager
+        .fork_thread(
+            ForkSnapshot::Interrupted,
+            codex_core::StartThreadOptions::new(config_for_fork),
+            fork1_path,
+        )
+        .await
+        .expect("re-fork truncated child");
+    let refork_path = codex_refork.rollout_path().expect("re-fork rollout path");
+    let refork_raw_items = read_rollout_items(&refork_path);
+    assert!(matches!(
+        without_session_meta(refork_raw_items).as_slice(),
+        [
+            RolloutItem::RolloutReference(_),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+        ]
+    ));
+    let refork_items = without_session_meta(
+        materialize_rollout_items(test.config.codex_home.as_path(), &refork_path)
+            .await
+            .expect("materialize re-forked history"),
+    );
+    let mut expected_refork_items = fork1_items;
+    expected_refork_items.push(thread_settings_applied_item(
+        refork_thread_id,
+        codex_refork.thread_settings_snapshot().await,
+    ));
+    pretty_assertions::assert_eq!(
+        serde_json::to_value(&refork_items).unwrap(),
+        serde_json::to_value(&expected_refork_items).unwrap()
     );
 }
 
@@ -185,12 +264,21 @@ async fn fork_thread_restores_history_selection_and_preserves_explicit_clear() -
         },
     )
     .await?;
+    let owner_id = test.codex.startup_metadata().thread_id;
+    let owner_settings = test.codex.thread_settings_snapshot().await;
+    let mut earlier_owner_settings = owner_settings.clone();
+    earlier_owner_settings.disabled_plugin_ids = vec!["earlier-selection@tests".to_string()];
+    let mut foreign_settings = owner_settings.clone();
+    foreign_settings.disabled_plugin_ids = vec!["foreign-selection@tests".to_string()];
+    let foreign_id = ThreadId::new();
     let history = InitialHistory::Resumed(ResumedHistory {
-        conversation_id: test.session_configured.thread_id,
-        history: Arc::new(vec![thread_settings_applied_item(
-            test.session_configured.thread_id,
-            test.codex.thread_settings_snapshot().await,
-        )]),
+        conversation_id: owner_id,
+        history: Arc::new(vec![
+            thread_settings_applied_item(owner_id, earlier_owner_settings),
+            thread_settings_applied_item(foreign_id, foreign_settings.clone()),
+            thread_settings_applied_item(owner_id, owner_settings),
+            thread_settings_applied_item(foreign_id, foreign_settings),
+        ]),
         rollout_path: None,
     });
     submit_thread_settings(
@@ -285,6 +373,7 @@ async fn assert_copied_fork_persists_inherited_history(history_mode: ThreadHisto
         .expect("submit initial user turn");
     let _ = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
+    codex.flush_rollout().await.expect("flush source rollout");
     let source_path = codex.rollout_path().expect("source rollout path");
     let source_items = read_rollout_items(&source_path);
     let source_meta = codex_rollout::read_session_meta_line(source_path.as_path())
@@ -309,7 +398,17 @@ async fn assert_copied_fork_persists_inherited_history(history_mode: ThreadHisto
         .expect("fork from stored history");
 
     let forked_path = forked_thread.rollout_path().expect("forked rollout path");
-    let forked_items = read_rollout_items(&forked_path);
+    let forked_raw_items = read_rollout_items(&forked_path);
+    assert!(
+        forked_raw_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+    );
+    let forked_items = without_session_meta(
+        materialize_rollout_items(test.config.codex_home.as_path(), &forked_path)
+            .await
+            .expect("materialize forked history"),
+    );
     let forked_items = forked_items
         .iter()
         .map(|item| serde_json::to_value(item).expect("serialize forked rollout item"))
@@ -384,4 +483,11 @@ fn read_rollout_items(path: &std::path::Path) -> Vec<RolloutItem> {
         }
     }
     items
+}
+
+fn without_session_meta(items: Vec<RolloutItem>) -> Vec<RolloutItem> {
+    items
+        .into_iter()
+        .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+        .collect()
 }
