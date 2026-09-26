@@ -473,6 +473,10 @@ impl ChatWidget {
             }),
             item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
             item @ ThreadItem::DynamicToolCall { .. } => self.on_dynamic_tool_item(item),
+            ThreadItem::InterAgentCommunication { communication, .. } => {
+                self.on_inter_agent_communication(communication)
+            }
+            ThreadItem::RawResponseItem { item, .. } => self.on_raw_response_item(item),
             ThreadItem::Sleep(_) => {}
         }
 

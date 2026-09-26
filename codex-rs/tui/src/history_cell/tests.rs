@@ -231,6 +231,13 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
         .collect()
 }
 
+fn render_lines_trimmed(lines: &[Line<'static>]) -> Vec<String> {
+    render_lines(lines)
+        .into_iter()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
 fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
     render_lines(&cell.transcript_lines(u16::MAX))
 }
@@ -563,6 +570,8 @@ fn raw_mode_toggle_transcript_snapshot() {
                     .into_iter()
                     .map(|span| span.content.into_owned())
                     .collect::<String>()
+                    .trim_end()
+                    .to_string()
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -2370,7 +2379,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
     // Small width to force wrapping more clearly. Effective wrap width is width-2 due to the ▌ prefix and trailing space.
     let width: u16 = 12;
     let lines = cell.display_lines(width);
-    let rendered = render_lines(&lines).join("\n");
+    let rendered = render_lines_trimmed(&lines).join("\n");
 
     assert_eq!(render_lines(&cell.raw_lines()), ["_count_rows"]);
     insta::assert_snapshot!(rendered);
@@ -2412,8 +2421,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
         linked_rows.iter().all(|line| {
             line.line
                 .spans
-                .first()
-                .is_some_and(|span| span.content == "  ")
+                .iter()
+                .take_while(|span| span.content.chars().all(|ch| ch == ' '))
+                .map(|span| span.content.len())
+                .sum::<usize>()
+                >= 2
         }),
         "wrapped URL rows must retain the user-message gutter: {linked_rows:?}"
     );
@@ -2428,8 +2440,168 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 
     insta::assert_snapshot!(
         "user_history_cell_wraps_long_urls_inside_the_message_gutter",
-        render_lines(&cell.display_lines(width)).join("\n")
+        render_lines_trimmed(&cell.display_lines(width)).join("\n")
     );
+}
+
+#[test]
+fn user_history_cell_right_aligns_with_wide_cap_and_narrow_fallback() {
+    let cell = UserHistoryCell {
+        spoken: false,
+        message: "界".repeat(100),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: Vec::new(),
+    };
+
+    let wide = cell.display_lines(/*width*/ 100);
+    let wide_content = wide
+        .iter()
+        .filter(|line| line.width() > 0)
+        .collect::<Vec<_>>();
+    assert!(!wide_content.is_empty());
+    for line in &wide_content {
+        assert_eq!(line.width(), 99);
+        assert_eq!(line.style, Style::default());
+        let alignment_width = line.spans.first().map(Span::width).unwrap_or(0);
+        assert_eq!(alignment_width, 19);
+        assert!(line.width().saturating_sub(alignment_width) <= 80);
+    }
+
+    let boundary = cell.display_lines(/*width*/ 40);
+    assert!(
+        boundary
+            .iter()
+            .filter(|line| line.width() > 0)
+            .all(|line| line.width() == 39)
+    );
+    let narrow = cell.display_lines(/*width*/ 39);
+    assert!(
+        narrow
+            .iter()
+            .filter(|line| line.width() > 0)
+            .all(|line| line.width() <= 38)
+    );
+    assert_eq!(cell.display_lines(/*width*/ 100), wide);
+    insta::assert_snapshot!(render_lines_trimmed(&wide).join("\n"));
+}
+
+#[test]
+fn user_message_alignment_padding_does_not_inherit_bubble_background() {
+    let bubble_style = Style::default().bg(Color::Blue);
+    let lines = finish_user_message_lines(
+        vec![
+            Line::default().style(bubble_style).into(),
+            Line::from(vec!["› ".dim(), "longer".into()])
+                .style(bubble_style)
+                .into(),
+            Line::from(vec!["  ".into(), "x".into()])
+                .style(bubble_style)
+                .into(),
+            Line::default().style(bubble_style).into(),
+        ],
+        /*width*/ 40,
+        /*available_width*/ 39,
+        bubble_style,
+    );
+    let first_alignment_width = lines[1].line.spans[0].width();
+    assert_eq!(first_alignment_width, lines[2].line.spans[0].width());
+    assert_eq!(lines[0].line.style, Style::default());
+    assert_eq!(lines[0].line.spans[0].style, Style::default());
+    assert_eq!(lines[1].line.spans[0].style, Style::default());
+
+    let area = Rect::new(0, 0, 40, 4);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(Text::from(visible_lines(lines))).render(area, &mut buffer);
+    for x in 0..first_alignment_width as u16 {
+        for y in 0..4 {
+            assert_eq!(buffer[(x, y)].bg, Color::Reset);
+        }
+    }
+    for x in first_alignment_width as u16..39 {
+        for y in 0..4 {
+            assert_eq!(buffer[(x, y)].bg, Color::Blue);
+        }
+    }
+    for y in 0..4 {
+        assert_eq!(buffer[(39, y)].bg, Color::Reset);
+    }
+}
+
+#[test]
+fn user_history_cell_raw_lines_remain_unaligned_and_unstyled() {
+    let cell = UserHistoryCell {
+        spoken: false,
+        message: "copy\nthis".to_string(),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: vec!["https://example.test/image.png".to_string()],
+    };
+
+    let raw = cell.raw_lines();
+    assert_eq!(render_lines(&raw), vec!["copy", "this", "", "[Image #1]"]);
+    assert_unstyled_lines(&raw);
+}
+
+#[test]
+fn user_history_cell_alignment_preserves_logical_source_coordinates() {
+    for spoken in [false, true] {
+        let cell = UserHistoryCell {
+            spoken,
+            message:
+                "  Read https://example.test/a/long/url/that/wraps/in/a/narrow/terminal\n界 final"
+                    .to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: vec!["https://example.test/image.png".to_string()],
+        };
+        for width in [39, 80] {
+            let lines = cell.display_hyperlink_lines(width);
+            let source_lines = lines
+                .iter()
+                .filter(|line| line.source.is_some())
+                .collect::<Vec<_>>();
+            assert!(!source_lines.is_empty());
+            for line in source_lines {
+                let source = line.source.as_ref().unwrap();
+                let rendered = line
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert_eq!(
+                    rendered.get(source.prefix_bytes..source.prefix_bytes + source.range.len()),
+                    Some(&source.text[source.range.clone()]),
+                    "source coordinates must exclude alignment and the message gutter"
+                );
+                assert_eq!(source.right_reserve, 1);
+                let alignment_width = if width >= 40 {
+                    line.line.spans.first().map(Span::width).unwrap_or(0)
+                } else {
+                    0
+                };
+                let gutter_width = if source.prefix_bytes > alignment_width {
+                    2
+                } else {
+                    0
+                };
+                assert_eq!(
+                    source.continuation_indent.width(),
+                    alignment_width + gutter_width
+                );
+            }
+            let marker = lines
+                .iter()
+                .flat_map(|line| &line.line.spans)
+                .find(|span| span.content == "› ")
+                .unwrap();
+            if spoken {
+                assert_eq!(marker.style.fg, Some(Color::Red));
+                assert!(marker.style.add_modifier.contains(Modifier::BOLD));
+            }
+        }
+    }
 }
 
 #[test]
@@ -2442,7 +2614,7 @@ fn user_history_cell_renders_remote_image_urls() {
         remote_image_urls: vec!["https://example.com/example.png".to_string()],
     };
 
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    let rendered = render_lines_trimmed(&cell.display_lines(/*width*/ 80)).join("\n");
 
     assert!(rendered.contains("[Image #1]"));
     assert!(rendered.contains("describe these"));
@@ -2499,7 +2671,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
         remote_image_urls: vec!["data:image/png;base64,aGVsbG8=".to_string()],
     };
 
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    let rendered = render_lines_trimmed(&cell.display_lines(/*width*/ 80)).join("\n");
 
     assert!(rendered.contains("[Image #1]"));
     assert!(rendered.contains("describe inline image"));
@@ -2528,7 +2700,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
         ],
     };
 
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    let rendered = render_lines_trimmed(&cell.display_lines(/*width*/ 80)).join("\n");
 
     assert!(rendered.contains("[Image #1]"));
     assert!(rendered.contains("[Image #2]"));
@@ -2645,7 +2817,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
         .enumerate()
         .map(|(index, row)| {
             if index == 0 {
-                row.strip_prefix("› ").unwrap().trim()
+                row.trim_start().strip_prefix("› ").unwrap().trim()
             } else {
                 row.trim()
             }
