@@ -88,6 +88,7 @@ impl RolloutReferenceIndex {
         mut stack: Vec<PathBuf>,
         thread_ids: Option<&HashSet<ThreadId>>,
     ) -> io::Result<Self> {
+        let canonical_home = tokio::fs::canonicalize(codex_home).await.ok();
         let mut rollouts_by_id = HashMap::new();
         let mut direct_references_by_rollout = HashMap::new();
         while let Some(directory) = stack.pop() {
@@ -136,6 +137,9 @@ impl RolloutReferenceIndex {
                 }
                 if let Some(reference) = leading_reference
                     && !references_detached_segment(codex_home, &reference)
+                    && !canonical_home
+                        .as_ref()
+                        .is_some_and(|home| references_detached_segment(home, &reference))
                     && let Some(referenced_rollout_id) =
                         reference.rollout_id.or(reference.thread_id)
                 {
