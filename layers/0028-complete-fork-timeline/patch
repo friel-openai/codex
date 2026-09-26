@@ -1,3 +1,788 @@
+diff --git a/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f51367bd9d75dd50c9519526f505de51aa528ff5
+--- /dev/null
++++ b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
+@@ -0,0 +1,289 @@
++use super::*;
++use codex_app_server_protocol::ThreadItem;
++use codex_app_server_protocol::ThreadItemsListParams;
++use codex_app_server_protocol::ThreadItemsListResponse;
++use codex_app_server_protocol::ThreadReadParams;
++use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadResumeParams;
++use codex_app_server_protocol::ThreadResumeResponse;
++use codex_app_server_protocol::ThreadTurnsListParams;
++use codex_app_server_protocol::ThreadTurnsListResponse;
++use codex_app_server_protocol::TurnItemsView;
++use codex_core::StartThreadOptions;
++use codex_protocol::ResponseItemId;
++use codex_protocol::mcp::ClientMcpExtensions;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::MessagePhase;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_protocol::protocol::ThreadMemoryMode;
++use codex_rollout::RolloutItem;
++use codex_thread_store::LiveThread;
++use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::ResumeThreadParams;
++use codex_thread_store::ThreadPersistenceMetadata;
++use pretty_assertions::assert_eq;
++
++const LIVE_MESSAGE: &str = "message accepted only by the writerless saved runtime";
++
++fn marker(text: &str, turn_id: &str) -> ResponseItem {
++    let mut item = ResponseItem::Message {
++        id: Some(ResponseItemId::with_suffix("msg", text)),
++        role: "assistant".to_string(),
++        content: vec![ContentItem::OutputText {
++            text: text.to_string(),
++        }],
++        phase: Some(MessagePhase::FinalAnswer),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    item.set_turn_id_if_missing(turn_id);
++    item
++}
++
++fn assert_live_message_once<'a>(items: impl Iterator<Item = &'a ThreadItem>) {
++    assert_eq!(
++        items
++            .filter_map(|item| match item {
++                ThreadItem::AgentMessage { text, .. } if text == LIVE_MESSAGE =>
++                    Some(text.as_str()),
++                _ => None,
++            })
++            .collect::<Vec<_>>(),
++        vec![LIVE_MESSAGE],
++    );
++}
++
++#[test]
++#[serial(app_server_tracing)]
++fn saved_thread_read_repairs_live_runtime_and_rejects_stale_fallback() -> Result<()> {
++    run_current_thread_test_with_stack("saved-thread-api-repair", async {
++        let mut harness = TracingHarness::new_with_sqlite().await?;
++        // The outer transport registers the connection after writing Initialize's
++        // response. Running-thread resume does not reply to a closed connection.
++        harness
++            .processor
++            .connection_initialized(TEST_CONNECTION_ID, harness.session.request_attestation())
++            .await;
++        let (manager, store) = harness
++            .processor
++            .thread_processor
++            .saved_thread_persistence_test_resources();
++        let config = ConfigBuilder::default()
++            .codex_home(harness._codex_home.path().to_path_buf())
++            .build()
++            .await?;
++        let auth_manager =
++            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await?;
++
++        for (case, block_writer) in [false, true].into_iter().enumerate() {
++            let mut options = StartThreadOptions::new(config.clone());
++            options.history_mode = Some(ThreadHistoryMode::Paginated);
++            let saved = manager.start_thread(options).await?;
++            let thread_id = saved.thread_id;
++            saved
++                .thread
++                .inject_response_items(vec![marker("already saved", "saved-api-turn")])
++                .await?;
++            saved.thread.ensure_rollout_materialized().await;
++            saved.thread.flush_rollout().await?;
++            let rollout_path = saved.thread.rollout_path().expect("saved rollout");
++            saved.thread.shutdown_and_wait().await?;
++            assert!(manager.remove_thread(&thread_id).await.is_some());
++            drop(saved);
++
++            // Bypass the fixed agent loader to reproduce the old runtime's bad config.
++            let mut broken_config = config.clone();
++            broken_config.ephemeral = true;
++            let broken = manager
++                .resume_thread_from_rollout(
++                    broken_config,
++                    rollout_path.clone(),
++                    Arc::clone(&auth_manager),
++                    /*parent_trace*/ None,
++                    ClientMcpExtensions::default(),
++                )
++                .await?
++                .thread;
++            assert!(!broken.has_persistence());
++            let live_marker = marker(LIVE_MESSAGE, "live-api-turn");
++            broken
++                .inject_response_items(vec![live_marker.clone()])
++                .await?;
++            let stored_before = store
++                .load_history(LoadThreadHistoryParams {
++                    thread_id,
++                    include_archived: true,
++                })
++                .await?;
++            assert!(!stored_before.items.iter().any(|item| matches!(
++                item,
++                RolloutItem::ResponseItem(response)
++                    if response.item.id() == live_marker.id()
++            )));
++
++            let request_id = 10 + case as i64 * 10;
++            if block_writer {
++                let blocker = LiveThread::resume(
++                    Arc::clone(&store),
++                    ThreadHistoryMode::Paginated,
++                    ResumeThreadParams {
++                        thread_id,
++                        rollout_path: Some(rollout_path),
++                        history: None,
++                        include_archived: true,
++                        metadata: ThreadPersistenceMetadata {
++                            cwd: Some(config.cwd.to_path_buf()),
++                            model_provider: config.model_provider_id.clone(),
++                            memory_mode: ThreadMemoryMode::Disabled,
++                        },
++                    },
++                )
++                .await?;
++                for request in [
++                    ClientRequest::ThreadRead {
++                        request_id: RequestId::Integer(request_id),
++                        params: ThreadReadParams {
++                            thread_id: thread_id.to_string(),
++                            include_turns: true,
++                        },
++                    },
++                    ClientRequest::ThreadForkPrepare {
++                        request_id: RequestId::Integer(request_id + 1),
++                        params: ThreadForkParams {
++                            thread_id: thread_id.to_string(),
++                            exclude_turns: true,
++                            ..Default::default()
++                        },
++                    },
++                ] {
++                    let id = request.id().clone();
++                    harness
++                        .processor
++                        .process_request(
++                            TEST_CONNECTION_ID,
++                            request_from_client_request(request),
++                            &AppServerTransport::Stdio,
++                            Arc::clone(&harness.session),
++                        )
++                        .await;
++                    let error = read_repair_error(&mut harness.outgoing_rx, id).await?;
++                    assert_eq!(error.code, crate::error_code::INTERNAL_ERROR_CODE);
++                    assert!(error.message.contains("failed to access loaded thread"));
++                    assert!(
++                        error
++                            .message
++                            .contains("failed to restore saved thread persistence")
++                    );
++                    assert!(!broken.has_persistence());
++                }
++                blocker.shutdown().await?;
++            }
++
++            let read: ThreadReadResponse = harness
++                .request(
++                    ClientRequest::ThreadRead {
++                        request_id: RequestId::Integer(request_id + 2),
++                        params: ThreadReadParams {
++                            thread_id: thread_id.to_string(),
++                            include_turns: true,
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert!(!read.thread.ephemeral);
++            assert!(broken.has_persistence());
++            assert_live_message_once(read.thread.turns.iter().flat_map(|turn| &turn.items));
++
++            let turns: ThreadTurnsListResponse = harness
++                .request(
++                    ClientRequest::ThreadTurnsList {
++                        request_id: RequestId::Integer(request_id + 3),
++                        params: ThreadTurnsListParams {
++                            thread_id: thread_id.to_string(),
++                            cursor: None,
++                            limit: Some(10),
++                            sort_direction: None,
++                            items_view: Some(TurnItemsView::Full),
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(turns.data.iter().flat_map(|turn| &turn.items));
++
++            let items: ThreadItemsListResponse = harness
++                .request(
++                    ClientRequest::ThreadItemsList {
++                        request_id: RequestId::Integer(request_id + 4),
++                        params: ThreadItemsListParams {
++                            thread_id: thread_id.to_string(),
++                            turn_id: None,
++                            cursor: None,
++                            limit: Some(100),
++                            sort_direction: None,
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(items.data.iter().map(|entry| &entry.item));
++
++            let resumed: ThreadResumeResponse = harness
++                .request(
++                    ClientRequest::ThreadResume {
++                        request_id: RequestId::Integer(request_id + 5),
++                        params: ThreadResumeParams {
++                            thread_id: thread_id.to_string(),
++                            ..Default::default()
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(resumed.thread.turns.iter().flat_map(|turn| &turn.items));
++            assert!(Arc::ptr_eq(&broken, &manager.get_thread(thread_id).await?));
++            broken.shutdown_and_wait().await?;
++            assert!(manager.remove_thread(&thread_id).await.is_some());
++        }
++        harness.shutdown().await;
++        Ok(())
++    })
++}
++
++async fn read_repair_error(
++    outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++    request_id: RequestId,
++) -> Result<codex_app_server_protocol::JSONRPCErrorError> {
++    tokio::time::timeout(std::time::Duration::from_secs(5), async {
++        loop {
++            let envelope = outgoing_rx.recv().await.expect("outgoing channel");
++            let crate::outgoing_message::OutgoingEnvelope::ToConnection {
++                connection_id,
++                message,
++                ..
++            } = envelope
++            else {
++                continue;
++            };
++            if connection_id != TEST_CONNECTION_ID {
++                continue;
++            }
++            match message {
++                crate::outgoing_message::OutgoingMessage::Error(error)
++                    if error.id == request_id =>
++                {
++                    return error.error;
++                }
++                crate::outgoing_message::OutgoingMessage::Response(response)
++                    if response.id == request_id =>
++                {
++                    panic!("repair error returned stale data: {response:?}");
++                }
++                _ => {}
++            }
++        }
++    })
++    .await
++    .map_err(Into::into)
++}
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index 0f905ecc93b1880e36c4fee4600ff6f760fe1615..159e2765586baa4e0b8fc44533262882addf547d 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -59,6 +59,9 @@ use wiremock::MockServer;
+
+ const TEST_CONNECTION_ID: ConnectionId = ConnectionId(7);
+
++#[path = "message_processor_saved_thread_persistence_tests.rs"]
++mod saved_thread_persistence_tests;
++
+ struct TestTracing {
+     exporter: InMemorySpanExporter,
+     provider: SdkTracerProvider,
+@@ -124,6 +127,30 @@ impl TracingHarness {
+         let codex_home = TempDir::new()?;
+         let config = Arc::new(build_test_config(codex_home.path(), &server.uri()).await?);
+         let (processor, outgoing_rx) = build_test_processor(config).await;
++        Self::from_processor(server, codex_home, processor, outgoing_rx).await
++    }
++
++    async fn new_with_sqlite() -> Result<Self> {
++        let server = create_mock_responses_server_repeating_assistant("Done").await;
++        let codex_home = TempDir::new()?;
++        let config = Arc::new(build_test_config(codex_home.path(), &server.uri()).await?);
++        // Saved-thread repair reads the SQLite history projection, as production does.
++        // Existing tracing-only fixtures intentionally leave this database unavailable.
++        let state_db = crate::init_sqlite_state_db_with_fresh_start_on_corruption(&config)
++            .await?
++            .state_db
++            .expect("initialized isolated SQLite state");
++        let (processor, outgoing_rx) =
++            build_test_processor_with_state_db(config, Some(state_db)).await;
++        Self::from_processor(server, codex_home, processor, outgoing_rx).await
++    }
++
++    async fn from_processor(
++        server: MockServer,
++        codex_home: TempDir,
++        processor: Arc<MessageProcessor>,
++        outgoing_rx: mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++    ) -> Result<Self> {
+         let tracing = init_test_tracing();
+         tracing.exporter.reset();
+         tracing::callsite::rebuild_interest_cache();
+@@ -237,6 +264,16 @@ async fn build_test_processor(
+ ) -> (
+     Arc<MessageProcessor>,
+     mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++) {
++    build_test_processor_with_state_db(config, /*state_db*/ None).await
++}
++
++async fn build_test_processor_with_state_db(
++    config: Arc<Config>,
++    state_db: Option<crate::rollout_state_db::StateDbHandle>,
++) -> (
++    Arc<MessageProcessor>,
++    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+ ) {
+     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
+     let auth_manager =
+@@ -267,7 +304,7 @@ async fn build_test_processor(
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         feedback: CodexFeedback::new(),
+         log_db: None,
+-        state_db: None,
++        state_db,
+         config_warnings: Vec::new(),
+         session_source: SessionSource::VSCode,
+         user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+@@ -511,7 +548,9 @@ async fn read_response<T: serde::de::DeserializeOwned>(
+     loop {
+         let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), outgoing_rx.recv())
+             .await
+-            .expect("timed out waiting for response")
++            .unwrap_or_else(|error| {
++                panic!("timed out waiting for response to request {request_id}: {error}")
++            })
+             .expect("outgoing channel closed");
+         let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+             connection_id,
+@@ -524,8 +563,14 @@ async fn read_response<T: serde::de::DeserializeOwned>(
+         if connection_id != TEST_CONNECTION_ID {
+             continue;
+         }
+-        let crate::outgoing_message::OutgoingMessage::Response(response) = message else {
+-            continue;
++        let response = match message {
++            crate::outgoing_message::OutgoingMessage::Response(response) => response,
++            crate::outgoing_message::OutgoingMessage::Error(error)
++                if error.id == RequestId::Integer(request_id) =>
++            {
++                panic!("request {request_id} failed: {error:?}");
++            }
++            _ => continue,
+         };
+         if response.id != RequestId::Integer(request_id) {
+             continue;
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index a5fa417204fb30f3d6357656a68a8e9e4f62fb47..c6de4b8e8a80f1ed30eb9393734f1e6070ace78a 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -609,6 +609,28 @@ use crate::thread_state::ThreadStateManager;
+ use token_usage_replay::restored_token_usage_turn_id;
+ use token_usage_replay::send_thread_token_usage_update_to_connection;
+
++/// Repairs loaded saved threads before callers read storage. Only a missing runtime permits
++/// a stored-thread fallback; repair failures must not return stale stored history.
++async fn get_loaded_thread_for_persistence(
++    thread_manager: &ThreadManager,
++    thread_id: ThreadId,
++) -> Result<Option<Arc<CodexThread>>, JSONRPCErrorError> {
++    match thread_manager.get_thread(thread_id).await {
++        Ok(thread) => Ok(Some(thread)),
++        Err(error)
++            if matches!(
++                error.details(),
++                codex_protocol::error::CodexErrorDetails::ThreadNotFound(_)
++            ) =>
++        {
++            Ok(None)
++        }
++        Err(error) => Err(internal_error(format!(
++            "failed to access loaded thread {thread_id}: {error}"
++        ))),
++    }
++}
++
+ pub(crate) fn apply_live_thread_settings(
+     thread: &mut Thread,
+     config_snapshot: &ThreadConfigSnapshot,
+diff --git a/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
+index 30cab360ee2e1440031f8598913595e6c07aae11..c6006968c667fda3a178c8f7ddfb778a72baf587 100644
+--- a/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
++++ b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
+@@ -112,11 +112,13 @@ impl ThreadRequestProcessor {
+             validate_handoff_params(&params)?;
+             let source = ThreadId::from_string(&params.thread_id)
+                 .map_err(|error| invalid_request(error.to_string()))?;
+-            let parent = self.thread_manager.get_thread(source).await.map_err(|_| {
+-                invalid_request(
+-                    "fork preparation must be requested from the app-server owning the source",
+-                )
+-            })?;
++            let parent = get_loaded_thread_for_persistence(&self.thread_manager, source)
++                .await?
++                .ok_or_else(|| {
++                    invalid_request(
++                        "fork preparation must be requested from the app-server owning the source",
++                    )
++                })?;
+             let permit = Arc::clone(&self.fork_handoff_slots)
+                 .try_acquire_owned()
+                 .map_err(|_| {
+diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+index 6d52f5b52f460608937c4c45b868db98a57aba77..bedc13a576d20f0705bd514e64b4a849b95994d4 100644
+--- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+@@ -150,17 +150,19 @@ impl ThreadGoalRequestProcessor {
+             .map(ThreadGoalStatus::to_core)
+             .or_else(|| existing_goal.as_ref().map(|goal| goal.status))
+             .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         if resulting_status == codex_protocol::protocol::ThreadGoalStatus::Active
+-            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
++            && let Some(thread) = loaded_thread.as_ref()
+         {
+             self.config_manager
+                 .check_thread_model_provider(thread.config().await.as_ref())
+                 .await
+                 .map_err(|error| config_load_error(&error))?;
+         }
+-        let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
+-            Ok(thread) => thread.config().await.max_goal_token_budget,
+-            Err(_) => self.config.max_goal_token_budget,
++        let max_goal_token_budget = match loaded_thread.as_ref() {
++            Some(thread) => thread.config().await.max_goal_token_budget,
++            None => self.config.max_goal_token_budget,
+         };
+
+         let listener_command_tx = {
+@@ -192,8 +194,8 @@ impl ThreadGoalRequestProcessor {
+             .map_err(goal_service_error)?;
+         let goal = ThreadGoal::from(outcome.goal.clone());
+
+-        let persist_result = match self.thread_manager.get_thread(thread_id).await {
+-            Ok(thread) => match thread.rollout_path() {
++        let persist_result = match loaded_thread.as_ref() {
++            Some(thread) => match thread.rollout_path() {
+                 Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
+                     // Goal-first threads need their settings captured when the goal creates the
+                     // rollout. Once materialized, normal settings updates own this event.
+@@ -226,7 +228,7 @@ impl ThreadGoalRequestProcessor {
+                         .await
+                 }
+             },
+-            Err(_) => Ok(()),
++            None => Ok(()),
+         };
+         if let Err(err) = persist_result {
+             warn!("failed to persist goal update for live thread {thread_id}: {err}");
+@@ -307,7 +309,9 @@ impl ThreadGoalRequestProcessor {
+         thread_id: ThreadId,
+         access: GoalAccess,
+     ) -> Result<StateDbHandle, JSONRPCErrorError> {
+-        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
++        if let Some(thread) =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?
++        {
+             if matches!(access, GoalAccess::Mutate) {
+                 ensure_direct_input_allowed(thread.as_ref()).await?;
+             }
+@@ -374,7 +378,8 @@ impl ThreadGoalRequestProcessor {
+         thread_id: ThreadId,
+         state_db: &StateDbHandle,
+     ) -> Result<(), JSONRPCErrorError> {
+-        let running_thread = self.thread_manager.get_thread(thread_id).await.ok();
++        let running_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         let rollout_path = match running_thread.as_ref() {
+             Some(thread) => thread.rollout_path().ok_or_else(|| {
+                 invalid_request(format!(
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 23e16173b66d28d0dce519e7ddfbe39f25e14771..822b6d0a72c73acfe77907107b9e38abf1b635de 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -3333,7 +3333,9 @@ impl ThreadRequestProcessor {
+                 ))
+             })?
+             .and_then(|metadata| metadata.daybreak_enabled);
+-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
++        let loaded_thread = get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
++            .await
++            .map_err(ThreadReadViewError::JsonRpc)?;
+         let mut thread = if include_turns {
+             if let Some(loaded_thread) = loaded_thread.as_ref() {
+                 // Loaded thread with turns: use persisted metadata when it exists,
+@@ -3575,6 +3577,8 @@ impl ThreadRequestProcessor {
+         } = params;
+         let thread_uuid = ThreadId::from_string(&thread_id)
+             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_uuid).await?;
+         let legacy_rollout_path = match self
+             .thread_store
+             .read_thread(StoreReadThreadParams {
+@@ -3635,7 +3639,7 @@ impl ThreadRequestProcessor {
+                 .await?
+         {
+             if indexed_legacy_generation
+-                && let Some(thread) = self.thread_manager.get_thread(thread_uuid).await.ok()
++                && let Some(thread) = loaded_thread.as_ref()
+                 && matches!(thread.agent_status().await, AgentStatus::Running)
+             {
+                 let active_turn = {
+@@ -3730,7 +3734,6 @@ impl ThreadRequestProcessor {
+         // Reference-backed legacy history expands only until this page has coherent turns.
+         // Other legacy history still replays the complete rollout on each request because
+         // rollback and compaction events can change earlier turns.
+-        let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
+         let has_live_running_thread = match loaded_thread.as_ref() {
+             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
+             None => false,
+@@ -3873,6 +3876,8 @@ impl ThreadRequestProcessor {
+         sort_direction: Option<SortDirection>,
+         items_view: Option<TurnItemsView>,
+     ) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         let items_view = items_view.unwrap_or(TurnItemsView::Summary);
+         let page_size = thread_turns_page_size(limit);
+         let api_sort_direction = sort_direction.unwrap_or(SortDirection::Desc);
+@@ -3941,7 +3946,6 @@ impl ThreadRequestProcessor {
+             }
+             turns.push(turn);
+         }
+-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+         let has_live_running_thread = match loaded_thread.as_ref() {
+             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
+             None => false,
+@@ -3994,6 +3998,8 @@ impl ThreadRequestProcessor {
+         {
+             return Ok(None);
+         }
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         let Some(stored_thread) = self
+             .read_stored_thread_for_read(thread_id, /*include_history*/ false)
+             .await
+@@ -4068,7 +4074,6 @@ impl ThreadRequestProcessor {
+             .await
+             .map_err(thread_read_view_error)?
+         };
+-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+         let has_live_running_thread = match loaded_thread.as_ref() {
+             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
+             None => false,
+@@ -4279,7 +4284,8 @@ impl ThreadRequestProcessor {
+             .lock()
+             .await
+             .contains(&thread_id);
+-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         if !allow_running
+             && let Some(thread) = loaded_thread.as_ref()
+             && matches!(thread.agent_status().await, AgentStatus::Running)
+@@ -4606,6 +4612,7 @@ impl ThreadRequestProcessor {
+         } = params;
+         let thread_id = ThreadId::from_string(&thread_id)
+             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
++        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         let page_size = limit
+             .map(|value| value as usize)
+             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
+@@ -5184,7 +5191,10 @@ impl ThreadRequestProcessor {
+                 let thread_id = ThreadId::from_string(&params.thread_id)
+                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+                 // Recheck under the same permit as client resume, including after config loading.
+-                if self.thread_manager.get_thread(thread_id).await.is_ok() {
++                if get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
++                    .await?
++                    .is_some()
++                {
+                     if let Some(saved) = saved {
+                         self.continue_daemon_turn(&params.thread_id, saved.clone())
+                             .await;
+@@ -5931,11 +5941,9 @@ impl ThreadRequestProcessor {
+     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
+         let running_thread = if params.history.is_some() {
+             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
+-                && self
+-                    .thread_manager
+-                    .get_thread(existing_thread_id)
+-                    .await
+-                    .is_ok()
++                && get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
++                    .await?
++                    .is_some()
+             {
+                 return Err(invalid_request(format!(
+                     "cannot resume thread {existing_thread_id} with history while it is already running"
+@@ -5943,7 +5951,8 @@ impl ThreadRequestProcessor {
+             }
+             None
+         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
+-            && let Ok(existing_thread) = self.thread_manager.get_thread(existing_thread_id).await
++            && let Some(existing_thread) =
++                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?
+         {
+             let source_thread = self
+                 .read_stored_thread_for_resume(
+@@ -5962,9 +5971,11 @@ impl ThreadRequestProcessor {
+                 )
+                 .await?;
+             let existing_thread_id = source_thread.thread_id;
+-            match self.thread_manager.get_thread(existing_thread_id).await {
+-                Ok(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
+-                Err(_) => {
++            match get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
++                .await?
++            {
++                Some(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
++                None => {
+                     return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
+                         source_thread,
+                     ))));
+@@ -6431,13 +6442,31 @@ impl ThreadRequestProcessor {
+         include_history: bool,
+     ) -> Result<StoredThread, JSONRPCErrorError> {
+         let result = if let Some(path) = path {
+-            self.thread_store
++            // Explicit paths determine the source ID. Read only metadata until any loaded
++            // source has been repaired, then reread the requested path to retain its selection.
++            let stored_thread = self
++                .thread_store
+                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
+                     rollout_path: path.clone(),
+                     include_archived: true,
+-                    include_history,
++                    include_history: false,
+                 })
+                 .await
++                .map_err(thread_store_resume_read_error)?;
++            let loaded_thread =
++                get_loaded_thread_for_persistence(&self.thread_manager, stored_thread.thread_id)
++                    .await?;
++            if loaded_thread.is_some() || include_history {
++                self.thread_store
++                    .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
++                        rollout_path: path.clone(),
++                        include_archived: true,
++                        include_history,
++                    })
++                    .await
++            } else {
++                Ok(stored_thread)
++            }
+         } else {
+             let existing_thread_id = match ThreadId::from_string(thread_id) {
+                 Ok(id) => id,
+@@ -6445,6 +6474,7 @@ impl ThreadRequestProcessor {
+                     return Err(invalid_request(format!("invalid session id: {err}")));
+                 }
+             };
++            get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?;
+             let params = StoreReadThreadParams {
+                 thread_id: existing_thread_id,
+                 include_archived: true,
+@@ -6593,6 +6623,7 @@ impl ThreadRequestProcessor {
+         thread_id: ThreadId,
+         include_history: bool,
+     ) -> Result<StoredThread, JSONRPCErrorError> {
++        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         self.thread_store
+             .read_thread(StoreReadThreadParams {
+                 thread_id,
+@@ -6884,7 +6915,9 @@ impl ThreadRequestProcessor {
+             let model_context =
+                 if matches!(&params.boundary, codex_thread_store::ForkBoundary::Latest)
+                     && let Some(local_store) = local_store
+-                    && let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await
++                    && let Some(parent) =
++                        get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id)
++                            .await?
+                     && !matches!(parent.agent_status().await, AgentStatus::Running)
+                     && parent.flush_rollout().await.is_ok()
+                     && let Ok(Some(expected_position)) = local_store
+@@ -7124,7 +7157,8 @@ impl ThreadRequestProcessor {
+             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
+         let needs_latest_settings =
+             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
+-        let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
++        let loaded_parent =
++            get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id).await?;
+         let loaded_parent_settings = if let Some(settings) = imported_settings {
+             Some(settings)
+         } else if paginated_source && needs_latest_settings {
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+index 7b48a4b2e8b6d97d788a5dfc7cea91052998770e..2236da7e34580c1278664058c086da309204d888 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+@@ -12,7 +12,9 @@ impl ThreadRequestProcessor {
+         let requested_id = ThreadId::from_string(&params.thread_id).ok();
+         loop {
+             let running = if let Some(thread_id) = requested_id {
+-                self.thread_manager.get_thread(thread_id).await.is_ok()
++                get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
++                    .await?
++                    .is_some()
+             } else {
+                 false
+             };
+@@ -68,7 +70,9 @@ impl ThreadRequestProcessor {
+             let permit = self.acquire_thread_list_state_permit().await?;
+             if !prepared
+                 && let Some(thread_id) = requested_id
+-                && self.thread_manager.get_thread(thread_id).await.is_err()
++                && get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
++                    .await?
++                    .is_none()
+             {
+                 // An idle runtime can unload while this request waits for the lifecycle permit.
+                 drop(permit);
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index d4d0f4af6bdd12c34bcfa26e70972737df820c6a..493058fde3df37a950d9449c5b8fdb31e9abfe00 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -1,3 +1,19 @@
++impl super::ThreadRequestProcessor {
++    /// Shares the actual dispatcher's manager and store so API tests can reproduce a
++    /// writerless saved runtime without adding production mutation APIs.
++    pub(crate) fn saved_thread_persistence_test_resources(
++        &self,
++    ) -> (
++        std::sync::Arc<codex_core::ThreadManager>,
++        std::sync::Arc<dyn codex_thread_store::ThreadStore>,
++    ) {
++        (
++            std::sync::Arc::clone(&self.thread_manager),
++            std::sync::Arc::clone(&self.thread_store),
++        )
++    }
++}
++
+ mod thread_list_cwd_filter_tests {
+     use super::super::normalize_thread_list_cwd_filters;
+     use codex_app_server_protocol::ThreadListCwdFilter;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe4c2c882a 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
@@ -255,6 +1040,1452 @@ index 78e0d8d48438fc5b929d0143846d1be40d1817ce..8d4d549d007d9c280946606213720abe
 +    assert!(app_server.shutdown_gracefully().await?.success());
 +    Ok(())
 +}
+diff --git a/codex-rs/core/src/agent/control/inspection.rs b/codex-rs/core/src/agent/control/inspection.rs
+index e105c8db9554dfa365944d2444ded339eaec813f..a9ba012e5d56f5872d5a0ce49a5365f8239da5b4 100644
+--- a/codex-rs/core/src/agent/control/inspection.rs
++++ b/codex-rs/core/src/agent/control/inspection.rs
+@@ -10,6 +10,11 @@ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
+
+ impl LocalAgentControl {
++    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
++        self.upgrade()
++            .is_ok_and(|manager| manager.is_saved_target(thread_id))
++    }
++
+     pub(crate) async fn inspect(
+         &self,
+         caller: ThreadId,
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index a2426a29942a8214b2d7ae49966b6aa367064534..1138d4e32fe903153eb792f4ddd291d67165618c 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -1298,7 +1298,7 @@ impl LocalAgentControl {
+                     role_prompt_item(role_prompt).into(),
+                 ));
+             }
+-            if let Some(state_db) = parent_thread.session.services.state_db.as_ref()
++            if let Some(state_db) = parent_thread.session.state_db().as_ref()
+                 && let Ok(Some(parent_goal)) = state_db
+                     .thread_goals()
+                     .get_thread_goal(parent_thread_id)
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index cd7c2324721609a0287ca31561cd97336eb0b985..0f5e7e25875e68319a2222e9a52f41825ed9a4ff 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2137,6 +2137,448 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     assert_eq!(persisted_markers, vec![&persisted_marker]);
+ }
+
++#[tokio::test]
++async fn read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::Single).await;
++}
++
++#[tokio::test]
++async fn concurrent_saved_thread_reads_preserve_active_turn_and_messages() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::ConcurrentWithActiveTurn).await;
++}
++
++#[tokio::test]
++async fn saved_thread_read_retries_after_writer_acquisition_conflict() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::WriterAcquisitionRetry).await;
++}
++
++/// Exercises saved/live divergence under ordinary reads, concurrency or writer conflict.
++enum SavedThreadRepairRead {
++    Single,
++    ConcurrentWithActiveTurn,
++    WriterAcquisitionRetry,
++}
++
++async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
++    let (home, mut config) = test_config().await;
++    let _ = config.features.enable(Feature::Sqlite);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let (thread_id, saved_thread) = harness.start_paginated_thread().await;
++    let [
++        saved_marker,
++        live_marker,
++        concurrent_marker,
++        repaired_marker,
++    ] = [
++        "saved before accidental ephemeral resume",
++        "accepted only in the accidentally ephemeral runtime",
++        "accepted while saved-thread readers repair persistence",
++        "accepted after saved-thread read repairs persistence",
++    ]
++    .map(|text| {
++        let mut marker = assistant_message(text, Some(MessagePhase::FinalAnswer));
++        marker.set_id(Some(ResponseItemId::with_suffix("msg", text)));
++        marker.set_turn_id_if_missing(&format!("saved-thread-recovery-{text}"));
++        marker.set_create_time_if_missing(123.into());
++        let content =
++            codex_context_fragments::to_annotated_content(&mut marker).expect("marker content");
++        codex_context_fragments::set_annotated_content(&mut marker, content)
++            .expect("classified marker content");
++        marker
++    });
++    saved_thread
++        .inject_response_items(vec![saved_marker.clone()])
++        .await
++        .expect("persist initial message");
++    saved_thread.ensure_rollout_materialized().await;
++    saved_thread
++        .flush_rollout()
++        .await
++        .expect("flush saved task");
++    let rollout_path = saved_thread.rollout_path().expect("selected saved rollout");
++    saved_thread
++        .shutdown_and_wait()
++        .await
++        .expect("stop original saved runtime");
++    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
++    drop(saved_thread);
++
++    // Bypass agent delivery's prevention fix to reproduce a runtime loaded by an old daemon.
++    let mut broken_config = harness.config.clone();
++    broken_config.ephemeral = true;
++    let broken_thread = harness
++        .manager
++        .resume_thread_from_rollout(
++            broken_config,
++            rollout_path.clone(),
++            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
++            /*parent_trace*/ None,
++            ClientMcpExtensions::default(),
++        )
++        .await
++        .expect("direct resume reproduces the accidentally ephemeral saved task")
++        .thread;
++    assert_eq!(broken_thread.session.thread_id, thread_id);
++    assert!(broken_thread.config_snapshot().await.ephemeral);
++    assert!(broken_thread.session.services.live_thread.is_none());
++    assert!(broken_thread.state_db().is_none());
++    broken_thread
++        .inject_response_items(vec![live_marker.clone()])
++        .await
++        .expect("broken runtime accepts a newer message without persisting it");
++    let live_history_before_read = broken_thread.session.clone_history().await;
++    for marker in [&saved_marker, &live_marker] {
++        assert_eq!(
++            live_history_before_read
++                .raw_items()
++                .filter(|item| *item == marker)
++                .count(),
++            1,
++        );
++    }
++
++    let disk_before_read = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let selected = disk_before_read
++        .read_thread(ReadThreadParams {
++            thread_id,
++            include_archived: true,
++            include_history: false,
++        })
++        .await
++        .expect("independent store reads the valid selected saved task");
++    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
++    assert_eq!(selected.rollout_path, Some(rollout_path));
++    let saved_history = disk_before_read
++        .load_history(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store reopens saved history");
++    let persisted_markers = saved_history
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response)
++                if response.item == saved_marker || response.item == live_marker =>
++            {
++                Some(&response.item)
++            }
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&saved_marker]);
++    drop(disk_before_read);
++
++    let mut expected_live = live_history_before_read
++        .raw_items()
++        .cloned()
++        .collect::<Vec<_>>();
++    let mut expected_persisted = vec![&saved_marker, &live_marker];
++    // Recovery must act on the still-loaded runtime, not reload its older saved history.
++    match read {
++        SavedThreadRepairRead::Single => {
++            broken_thread
++                .read_thread(
++                    /*include_archived*/ true, /*include_history*/ false,
++                )
++                .await
++                .expect("reading a saved thread repairs accidental ephemerality");
++        }
++        SavedThreadRepairRead::WriterAcquisitionRetry => {
++            // Reserve the writer through the same production store without attaching it to
++            // the broken Session. Recovery must not steal or close this owner's writer.
++            let competing_writer = codex_thread_store::LiveThread::resume(
++                Arc::clone(&broken_thread.session.services.thread_store),
++                ThreadHistoryMode::Paginated,
++                codex_thread_store::ResumeThreadParams {
++                    thread_id,
++                    rollout_path: selected.rollout_path.clone(),
++                    history: None,
++                    include_archived: true,
++                    metadata: ThreadPersistenceMetadata {
++                        cwd: Some(harness.config.cwd.to_path_buf()),
++                        model_provider: harness.config.model_provider_id.clone(),
++                        memory_mode: if harness.config.memories.generate_memories {
++                            ThreadMemoryMode::Enabled
++                        } else {
++                            ThreadMemoryMode::Disabled
++                        },
++                    },
++                },
++            )
++            .await
++            .expect("reserve competing writer before recovery acquisition");
++            let error = broken_thread
++                .read_thread(
++                    /*include_archived*/ true, /*include_history*/ false,
++                )
++                .await
++                .expect_err("recovery must fail at duplicate writer acquisition");
++            assert!(
++                error.to_string().contains(&format!(
++                    "thread {thread_id} already has a live local writer"
++                )),
++                "unexpected recovery failure: {error}"
++            );
++            assert!(!broken_thread.has_persistence());
++            assert!(broken_thread.state_db().is_none());
++            assert!(broken_thread.config_snapshot().await.ephemeral);
++            assert_eq!(
++                broken_thread
++                    .session
++                    .clone_history()
++                    .await
++                    .raw_items()
++                    .collect::<Vec<_>>(),
++                expected_live.iter().collect::<Vec<_>>(),
++                "failed acquisition must preserve the newer live conversation",
++            );
++            competing_writer
++                .flush()
++                .await
++                .expect("failed recovery must leave the competing writer owned and usable");
++            competing_writer
++                .shutdown()
++                .await
++                .expect("release the competing writer before retry");
++            let retried = harness
++                .manager
++                .get_thread(thread_id)
++                .await
++                .expect("automatic recovery succeeds after writer ownership is released");
++            assert!(Arc::ptr_eq(&retried, &broken_thread));
++            assert!(Arc::ptr_eq(&retried.session, &broken_thread.session));
++        }
++        SavedThreadRepairRead::ConcurrentWithActiveTurn => {
++            let active_turn = ActiveTurn::default();
++            let turn_state = Arc::clone(&active_turn.turn_state);
++            let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
++            turn_state
++                .lock()
++                .await
++                .insert_pending_approval("pending during recovery".to_owned(), approval_tx);
++            *broken_thread.session.active_turn.lock().await = Some(active_turn);
++            let recording_context = broken_thread.session.new_inject_items_context().await;
++            let recording_items = [concurrent_marker.clone()];
++            let (read_result, lookup_result, ()) =
++                tokio::time::timeout(std::time::Duration::from_secs(10), async {
++                    tokio::join!(
++                        broken_thread.read_thread(
++                            /*include_archived*/ true, /*include_history*/ true,
++                        ),
++                        harness.manager.get_thread(thread_id),
++                        broken_thread.session.record_conversation_items(
++                            &recording_context,
++                            recording_context.model_info(),
++                            &recording_items,
++                        ),
++                    )
++                })
++                .await
++                .expect("concurrent repair must not deadlock");
++            read_result.expect("direct read repairs persistence");
++            let looked_up = lookup_result.expect("manager lookup repairs persistence");
++            assert!(Arc::ptr_eq(&looked_up, &broken_thread));
++            let active = broken_thread.session.active_turn.lock().await;
++            assert!(Arc::ptr_eq(
++                &active.as_ref().expect("active turn preserved").turn_state,
++                &turn_state,
++            ));
++            drop(active);
++            assert!(matches!(
++                approval_rx.try_recv(),
++                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
++            ));
++            assert!(
++                turn_state
++                    .lock()
++                    .await
++                    .remove_pending_approval("pending during recovery")
++                    .is_some()
++            );
++            *broken_thread.session.active_turn.lock().await = None;
++            expected_live.push(concurrent_marker.clone());
++            expected_persisted.push(&concurrent_marker);
++        }
++    }
++    assert!(!broken_thread.config_snapshot().await.ephemeral);
++    assert!(broken_thread.state_db().is_some());
++    broken_thread
++        .read_thread(
++            /*include_archived*/ true, /*include_history*/ true,
++        )
++        .await
++        .expect("repeated full read uses the repaired writer");
++    assert_eq!(
++        broken_thread
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .collect::<Vec<_>>(),
++        expected_live.iter().collect::<Vec<_>>(),
++        "reading the saved task must preserve its newer in-memory conversation",
++    );
++    broken_thread
++        .inject_response_items(vec![repaired_marker.clone()])
++        .await
++        .expect("repaired task accepts another durable message");
++    broken_thread
++        .flush_rollout()
++        .await
++        .expect("repaired writer flushes without replacing the runtime");
++    let history_before_shutdown = broken_thread.session.clone_history().await;
++    broken_thread
++        .shutdown_and_wait()
++        .await
++        .expect("release repaired writer before independent cold read");
++    let disk_after_read = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let recovered_history = disk_after_read
++        .load_history(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store reopens repaired history");
++    let recovered_markers = recovered_history
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response)
++                if response.item == saved_marker
++                    || response.item == live_marker
++                    || response.item == concurrent_marker
++                    || response.item == repaired_marker =>
++            {
++                Some(&response.item)
++            }
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    expected_persisted.push(&repaired_marker);
++    assert_eq!(
++        recovered_markers, expected_persisted,
++        "repair persists the missing live message and new messages exactly once",
++    );
++    let mut desktop_history = codex_app_server_protocol::ThreadHistoryBuilder::new();
++    for item in &recovered_history.items {
++        desktop_history.handle_paginated_rollout_item(item);
++    }
++    let visible_message = |item: &codex_app_server_protocol::ThreadItem| match item {
++        codex_app_server_protocol::ThreadItem::AgentMessage { id, text, .. }
++            if Some(id.as_str()) == live_marker.id().map(|id| id.as_ref()) =>
++        {
++            Some(text.clone())
++        }
++        _ => None,
++    };
++    assert_eq!(
++        desktop_history
++            .finish()
++            .iter()
++            .flat_map(|turn| &turn.items)
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "the recovered message must be visible in the full Desktop history",
++    );
++    let page = disk_after_read
++        .list_items(codex_thread_store::ListItemsParams {
++            thread_id,
++            turn_id: None,
++            include_archived: true,
++            cursor: None,
++            page_size: 100,
++            sort_direction: codex_thread_store::SortDirection::Asc,
++            sort_key: codex_thread_store::ItemSortKey::CreatedAtOrdinal,
++            after_updated_at_ordinal: None,
++        })
++        .await
++        .expect("page repaired native history");
++    assert!(page.next_cursor.is_none());
++    let visible_items = page
++        .items
++        .iter()
++        .map(|item| {
++            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
++                .expect("stored Desktop item")
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        visible_items
++            .iter()
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "the same recovered message must be visible through paginated history",
++    );
++    let turn_page = disk_after_read
++        .list_turns(codex_thread_store::ListTurnsParams {
++            thread_id,
++            include_archived: true,
++            cursor: None,
++            page_size: 100,
++            sort_direction: codex_thread_store::SortDirection::Asc,
++            items_view: codex_thread_store::StoredTurnItemsView::Summary,
++        })
++        .await
++        .expect("page repaired turns");
++    assert!(turn_page.next_cursor.is_none());
++    let visible_turn_items = turn_page
++        .turns
++        .iter()
++        .flat_map(|turn| &turn.items)
++        .map(|item| {
++            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
++                .expect("stored turn's Desktop item")
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        visible_turn_items
++            .iter()
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "turn pagination must not drop an item whose original lifecycle event was unsaved",
++    );
++    drop(disk_after_read);
++    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
++    let resumed = harness
++        .manager
++        .resume_thread_from_rollout(
++            harness.config.clone(),
++            broken_thread.rollout_path().expect("repaired rollout path"),
++            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
++            /*parent_trace*/ None,
++            ClientMcpExtensions::default(),
++        )
++        .await
++        .expect("cold resume reopens the repaired checkpoint")
++        .thread;
++    assert!(!resumed.config_snapshot().await.ephemeral);
++    assert_eq!(
++        resumed
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .collect::<Vec<_>>(),
++        history_before_shutdown.raw_items().collect::<Vec<_>>(),
++        "cold resume preserves the entire surviving model history",
++    );
++    resumed
++        .shutdown_and_wait()
++        .await
++        .expect("stop cold resumed task");
++}
++
+ #[tokio::test]
+ async fn ensure_agent_loaded_preserves_materialized_ephemeral_target() {
+     let harness = AgentControlHarness::new().await;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 4898d4fd9f250b0622243f7bafe5e37041d1deb5..e55d74926fccc22f256a95ec82b37b64a56acb9a 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -806,7 +806,38 @@ impl CodexThread {
+     }
+
+     pub fn rollout_path(&self) -> Option<PathBuf> {
+-        self.rollout_path.clone()
++        self.rollout_path
++            .clone()
++            .or_else(|| self.session.repaired_rollout_path())
++    }
++
++    /// Restores persistence after the caller verifies that this is a saved target, not
++    /// an intentionally ephemeral task. Keeps the Session, active turn and mailbox intact.
++    pub async fn restore_saved_thread_persistence(&self) -> ThreadStoreResult<()> {
++        self.session
++            .restore_saved_thread_persistence()
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to restore saved thread persistence: {error:#}"),
++            })
++    }
++
++    /// Whether this runtime has a writer, including one restored after loading.
++    pub fn has_persistence(&self) -> bool {
++        self.session.live_thread().is_some()
++    }
++
++    async fn ensure_saved_target_persistence(&self) -> ThreadStoreResult<()> {
++        if !self.has_persistence()
++            && self
++                .session
++                .services
++                .agent_control
++                .is_saved_target(self.session.thread_id)
++        {
++            self.restore_saved_thread_persistence().await?;
++        }
++        Ok(())
+     }
+
+     /// Returns startup metadata without the one-time initial message replay.
+@@ -831,6 +862,7 @@ impl CodexThread {
+         &self,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThreadHistory> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("load history")
+@@ -845,6 +877,7 @@ impl CodexThread {
+         include_archived: bool,
+         include_history: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("read thread")
+@@ -861,6 +894,7 @@ impl CodexThread {
+         patch: ThreadMetadataPatch,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("update thread metadata")
+@@ -872,6 +906,7 @@ impl CodexThread {
+
+     /// Appends rollout items through the live thread so derived metadata stays in sync.
+     pub async fn append_rollout_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("append rollout items")
+diff --git a/codex-rs/core/src/goal_supervisor.rs b/codex-rs/core/src/goal_supervisor.rs
+index 36e785cb968a9eb228211003da94fc25a8bde22e..ca25b52022f6bdda5cda26d2a9e9707dc98b1a3d 100644
+--- a/codex-rs/core/src/goal_supervisor.rs
++++ b/codex-rs/core/src/goal_supervisor.rs
+@@ -187,7 +187,7 @@ fn restart_active_goal_supervisor_task(
+     session: Arc<Session>,
+ ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+     Box::pin(async move {
+-        let Some(state_db) = session.services.state_db.as_ref() else {
++        let Some(state_db) = session.state_db() else {
+             return;
+         };
+         let goal = match state_db
+@@ -338,7 +338,7 @@ pub(crate) async fn maybe_start_supervisor_checkin_after_goal_resume(
+     invalidate_supervisor_wakeup(session).await;
+     *session.goal_supervisor_runtime.snoozed_until.lock().await = None;
+     reset_failure_backoff(session).await;
+-    if let Some(state_db) = session.services.state_db.as_ref() {
++    if let Some(state_db) = session.state_db().as_ref() {
+         state_db
+             .thread_goals()
+             .set_thread_goal_supervisor_snoozed_until_ms(
+@@ -402,7 +402,7 @@ async fn schedule_supervisor_failure_retry_locked(
+     goal_id: &str,
+     failure: &str,
+ ) {
+-    let retry_active_goal = if let Some(state_db) = session.services.state_db.as_ref() {
++    let retry_active_goal = if let Some(state_db) = session.state_db().as_ref() {
+         match state_db
+             .thread_goals()
+             .get_thread_goal(session.thread_id)
+@@ -434,7 +434,7 @@ async fn schedule_supervisor_failure_retry_locked(
+     let retry = next_failure_retry(session, goal_id).await;
+     let retry_delay_ms = i64::try_from(retry.delay.as_millis()).unwrap_or(i64::MAX);
+     let persisted_deadline_ms = Utc::now().timestamp_millis().saturating_add(retry_delay_ms);
+-    if let Some(state_db) = session.services.state_db.as_ref()
++    if let Some(state_db) = session.state_db().as_ref()
+         && let Err(err) = state_db
+             .thread_goals()
+             .set_thread_goal_supervisor_snoozed_until_ms(
+@@ -660,7 +660,7 @@ pub(crate) async fn snooze_supervisor_helper(
+         return Ok(None);
+     };
+     let delay_seconds = delay_seconds.max(MIN_SUPERVISOR_SNOOZE_SECONDS);
+-    if let Some(state_db) = session.services.state_db.as_ref()
++    if let Some(state_db) = session.state_db().as_ref()
+         && let Some(goal) = state_db
+             .thread_goals()
+             .get_thread_goal(session.thread_id)
+@@ -840,7 +840,7 @@ pub(crate) async fn complete_supervised_goal(
+         let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
+         return Ok(None);
+     };
+-    let Some(state_db) = session.services.state_db.as_ref() else {
++    let Some(state_db) = session.state_db() else {
+         return Ok(None);
+     };
+     let updated = state_db
+@@ -1036,7 +1036,7 @@ async fn persisted_snooze_delay(
+     session: &Arc<Session>,
+     goal_id: &str,
+ ) -> anyhow::Result<Option<Duration>> {
+-    let Some(state_db) = session.services.state_db.as_ref() else {
++    let Some(state_db) = session.state_db() else {
+         return Ok(None);
+     };
+     let Some(snoozed_until_ms) = state_db
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index e3407cd1d63a5ea0c70bbd1e4f1e792c61a06b2a..94edb400ea380ca39cf85dc4fb0d047ff0f5262b 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -903,7 +903,7 @@ pub(crate) async fn emit_hook_completed_events(
+         })
+     {
+         state_db::mark_thread_memory_mode_polluted(
+-            sess.services.state_db.as_deref(),
++            sess.state_db().as_deref(),
+             sess.thread_id,
+             "mcp_tool_hook",
+         )
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index 9c32660abb671b8821199c719b7afa048f1c0f0f..4c3831c8aedb85991771d50ab2fc3500c5056b63 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -901,7 +901,7 @@ async fn maybe_mark_thread_memory_mode_polluted(
+         return;
+     }
+     state_db::mark_thread_memory_mode_polluted(
+-        sess.services.state_db.as_deref(),
++        sess.state_db().as_deref(),
+         sess.thread_id,
+         "mcp_tool_call",
+     )
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index dcea9a99d24e9b1ecf7fcfaa20f3966b0ce63bca..962855cadeb1ebc62d39699cb30274e5b7844ec2 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -284,6 +284,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
+ }
+
+ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
++    sess.close_persistence_repair().await;
+     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
+         startup_prewarm.abort().await;
+     }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 1ccd73a488526df572a8dcade4f87c8417130388..a47e9871dc8f5188b688c3d13f31e9c32be8517c 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -256,6 +256,7 @@ mod mcp_runtime;
+ mod model_alias_refresh;
+ mod model_routing;
+ pub(crate) mod multi_agents;
++mod persistence_repair;
+ mod plugin_selection;
+ mod realtime_history;
+ mod retained_context;
+@@ -1700,7 +1701,11 @@ impl Session {
+     }
+
+     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
+-        self.services.state_db.clone()
++        self.services.state_db.clone().or_else(|| {
++            self.repaired_persistence
++                .get()
++                .and_then(|persistence| persistence.state_db.clone())
++        })
+     }
+
+     pub(crate) fn live_thread_for_persistence(
+@@ -1712,7 +1717,11 @@ impl Session {
+     }
+
+     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
+-        self.services.live_thread.as_ref()
++        self.services.live_thread.as_ref().or_else(|| {
++            self.repaired_persistence
++                .get()
++                .map(|persistence| &persistence.live_thread)
++        })
+     }
+
+     pub(crate) async fn set_thread_memory_mode(
+@@ -4353,8 +4362,9 @@ impl Session {
+             .iter()
+             .map(|envelope| envelope.item.clone())
+             .collect::<Vec<_>>();
+-        {
++        let persistence = {
+             let mut state = self.state.lock().await;
++            let persistence = self.persistence_repair_lock.lock().await;
+             state
+                 .current_time_reminder
+                 .note_recorded_items(&response_items);
+@@ -4377,7 +4387,8 @@ impl Session {
+             state
+                 .history
+                 .record_annotated_items(&items, model_info.truncation_policy.into());
+-        }
++            persistence
++        };
+         for image in image_preparations {
+             self.services
+                 .analytics_events_client
+@@ -4388,7 +4399,8 @@ impl Session {
+         }
+         let rollout_items: Vec<RolloutItem> =
+             items.into_iter().map(RolloutItem::ResponseItem).collect();
+-        self.persist_rollout_items(&rollout_items).await;
++        self.persist_rollout_items_locked(&rollout_items).await;
++        drop(persistence);
+         if turn_context.config.memories.disable_on_external_context
+             && let Some(item) = response_items
+                 .iter()
+@@ -4660,18 +4672,21 @@ impl Session {
+             .await;
+         let items = items.as_ref();
+         let response_item = items[0].clone();
+-        {
++        let persistence = {
+             let mut state = self.state.lock().await;
++            let persistence = self.persistence_repair_lock.lock().await;
+             state.current_time_reminder.note_recorded_items(items);
+             state.record_items(items.iter(), model_info.truncation_policy.into());
+-        }
+-        self.persist_rollout_items(&[
++            persistence
++        };
++        self.persist_rollout_items_locked(&[
+             RolloutItem::InterAgentCommunicationMetadata {
+                 trigger_turn: communication.trigger_turn,
+             },
+             RolloutItem::ResponseItem(response_item.into()),
+         ])
+         .await;
++        drop(persistence);
+         self.send_raw_response_items(turn_context, items).await;
+     }
+
+@@ -5340,6 +5355,11 @@ impl Session {
+
+     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
+     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
++        let _persistence = self.persistence_repair_lock.lock().await;
++        self.persist_rollout_items_locked(items).await;
++    }
++
++    async fn persist_rollout_items_locked(&self, items: &[RolloutItem]) {
+         if self.persistence_restart_required() {
+             error!("failed to record rollout items: thread persistence requires a restart");
+             return;
+@@ -5615,12 +5635,14 @@ impl Session {
+         // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
+         // durable baseline. This normally records one item per user turn; a tool that changes the
+         // active context may record another item before the next model step in that turn.
+-        self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
++        // Recovery must not checkpoint the previous reference after this append.
++        let mut state = self.state.lock().await;
++        let _persistence = self.persistence_repair_lock.lock().await;
++        self.persist_rollout_items_locked(&[RolloutItem::TurnContext(turn_context_item.clone())])
+             .await;
+
+         // Advance the persisted-settings baseline even when this turn emitted no model-visible
+         // context items.
+-        let mut state = self.state.lock().await;
+         state.set_reference_context_item(Some(turn_context_item));
+         Ok(world_state)
+     }
+diff --git a/codex-rs/core/src/session/persistence_repair.rs b/codex-rs/core/src/session/persistence_repair.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..05ee6abdc0c853e5146e7bc4227b1968fd0f3112
+--- /dev/null
++++ b/codex-rs/core/src/session/persistence_repair.rs
+@@ -0,0 +1,358 @@
++use super::*;
++use codex_protocol::items::FunctionCallOutputItem;
++use codex_protocol::protocol::ItemCompletedEvent;
++use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::ReadThreadParams;
++
++/// Teardown closes writer attachment before it observes the current live writer.
++#[derive(Default)]
++pub(super) enum PersistenceRepairState {
++    #[default]
++    Active,
++    ShuttingDown,
++}
++
++/// Persistence attached to an existing Session after its saved-task intent is established.
++/// Publishing one bundle keeps writer, database, and local rollout selection consistent.
++pub(super) struct RepairedPersistence {
++    pub(super) live_thread: LiveThread,
++    pub(super) state_db: Option<state_db::StateDbHandle>,
++    pub(super) rollout_path: Option<PathBuf>,
++}
++
++impl Session {
++    pub(super) async fn close_persistence_repair(&self) {
++        *self.persistence_repair_lock.lock().await = PersistenceRepairState::ShuttingDown;
++    }
++
++    pub(crate) fn repaired_rollout_path(&self) -> Option<PathBuf> {
++        self.repaired_persistence
++            .get()
++            .and_then(|persistence| persistence.rollout_path.clone())
++    }
++
++    /// Restores a saved target's writer without replacing its live Session.
++    /// The caller must establish target persistence intent independently of Config.ephemeral.
++    pub(crate) async fn restore_saved_thread_persistence(&self) -> anyhow::Result<()> {
++        if self.live_thread().is_some() {
++            return Ok(());
++        }
++        let turn_context = self.new_inject_items_context().await;
++        let _admission = self
++            .lock_checkpoint_admission("restore saved thread persistence")
++            .await?;
++        let _settings = self.thread_settings_persistence.acquire().await?;
++        let mut state = self.state.lock().await;
++        let _persistence = self.persistence_repair_lock.lock().await;
++        anyhow::ensure!(
++            matches!(*_persistence, PersistenceRepairState::Active),
++            "cannot restore saved thread persistence during shutdown"
++        );
++        if self.live_thread().is_some() {
++            return Ok(());
++        }
++        anyhow::ensure!(
++            !state.session_configuration.is_system_ephemeral()
++                && !crate::goal_supervisor::is_goal_supervisor_helper_source(
++                    &state.session_configuration.session_source
++                ),
++            "temporary system agents cannot be converted to saved tasks"
++        );
++        let store = &self.services.thread_store;
++        let stored = store
++            .read_thread(ReadThreadParams {
++                thread_id: self.thread_id,
++                include_archived: true,
++                include_history: false,
++            })
++            .await?;
++        anyhow::ensure!(
++            stored.history_mode == state.session_configuration.history_mode,
++            "saved thread history mode differs from the live session"
++        );
++        let config = &state.session_configuration.original_config_do_not_use;
++        let params = ResumeThreadParams {
++            thread_id: self.thread_id,
++            rollout_path: stored.rollout_path,
++            history: None,
++            include_archived: true,
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(state.session_configuration.cwd().to_path_buf()),
++                model_provider: config.model_provider_id.clone(),
++                memory_mode: if config.memories.generate_memories {
++                    ThreadMemoryMode::Enabled
++                } else {
++                    ThreadMemoryMode::Disabled
++                },
++            },
++        };
++        let mut guard = LiveThreadInitGuard::default();
++        let live_thread = guard
++            .acquire(LiveThread::resume(
++                Arc::clone(store),
++                stored.history_mode,
++                params,
++            ))
++            .await?;
++        let result: anyhow::Result<RepairedPersistence> = async {
++            // Read after reserving the writer: another process cannot append between the
++            // comparison and recovery. Paginated histories read only their current context.
++            let history_params = LoadThreadHistoryParams {
++                thread_id: self.thread_id,
++                include_archived: true,
++            };
++            let saved = match stored.history_mode {
++                ThreadHistoryMode::Paginated => {
++                    store.load_latest_model_context(history_params).await?.items
++                }
++                ThreadHistoryMode::Legacy => store.load_history(history_params).await?.items,
++            };
++            let reconstructed = self
++                .reconstruct_history_from_rollout(&turn_context, &saved)
++                .await;
++            let mut saved_counts = HashMap::<Vec<u8>, usize>::new();
++            for envelope in &reconstructed.history {
++                *saved_counts
++                    .entry(recovery_item_key(&envelope.item)?)
++                    .or_default() += 1;
++            }
++            let mut recovered = Vec::new();
++            let mut presentations = Vec::new();
++            let mut occurrences = HashMap::<Vec<u8>, usize>::new();
++            let mut tool_calls = HashMap::new();
++            for envelope in state.history.annotated_items() {
++                match &envelope.item {
++                    ResponseItem::FunctionCall { call_id, .. }
++                    | ResponseItem::CustomToolCall { call_id, .. } => {
++                        tool_calls.insert(call_id.as_str(), &envelope.item);
++                    }
++                    _ => {}
++                }
++            }
++            for envelope in state.history.annotated_items() {
++                let key = recovery_item_key(&envelope.item)?;
++                let occurrence = occurrences.entry(key.clone()).or_default();
++                let item_id = envelope
++                    .item
++                    .id()
++                    .map(ToString::to_string)
++                    .unwrap_or_else(|| {
++                        let seed = format!("{}:{occurrence}:", self.thread_id);
++                        let mut bytes = seed.into_bytes();
++                        bytes.extend_from_slice(&key);
++                        format!(
++                            "recovered-{}",
++                            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes)
++                        )
++                    });
++                *occurrence += 1;
++                if let Some(count) = saved_counts.get_mut(&key)
++                    && *count > 0
++                {
++                    *count -= 1;
++                } else {
++                    if let Some(item) = recovery_turn_item(&envelope.item, item_id, &tool_calls) {
++                        let turn_id = if stored.history_mode == ThreadHistoryMode::Legacy {
++                            format!("recovered-{}", self.thread_id)
++                        } else {
++                            envelope
++                                .item
++                                .turn_id()
++                                .map(str::to_owned)
++                                .unwrap_or_else(|| format!("recovered-{}", self.thread_id))
++                        };
++                        presentations.push((turn_id, item));
++                    }
++                    recovered.push(RolloutItem::ResponseItem(envelope.clone()));
++                }
++            }
++            let turn_ids: Vec<String> = presentations
++                .iter()
++                .map(|(turn_id, _)| turn_id.clone())
++                .collect::<HashSet<_>>()
++                .into_iter()
++                .collect();
++            let mut existing_turns = match stored.history_mode {
++                ThreadHistoryMode::Paginated if !turn_ids.is_empty() => {
++                    let local_store = store
++                        .as_any()
++                        .downcast_ref::<LocalThreadStore>()
++                        .ok_or_else(|| {
++                            anyhow::anyhow!("saved history turn lookup is unavailable")
++                        })?;
++                    local_store
++                        .existing_history_turns(self.thread_id, &turn_ids)
++                        .await?
++                }
++                ThreadHistoryMode::Legacy | ThreadHistoryMode::Paginated => saved
++                    .iter()
++                    .filter_map(|item| match item {
++                        RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
++                            Some(event.turn_id.clone())
++                        }
++                        _ => None,
++                    })
++                    .collect(),
++            };
++            let mut presentation_items = Vec::new();
++            // The old runtime did not retain item completion times. Record recovery
++            // publication time rather than pretending these items completed at the epoch.
++            let recovered_at_ms = chrono::Utc::now().timestamp_millis();
++            for (turn_id, item) in presentations {
++                if existing_turns.insert(turn_id.clone()) {
++                    presentation_items.push(RolloutItem::EventMsg(EventMsg::TurnStarted(
++                        TurnStartedEvent {
++                            turn_id: turn_id.clone(),
++                            root_turn_id: None,
++                            trace_id: None,
++                            started_at: None,
++                            model_context_window: None,
++                            collaboration_mode_kind: Default::default(),
++                        },
++                    )));
++                }
++                if stored.history_mode == ThreadHistoryMode::Legacy {
++                    presentation_items.extend(
++                        item.as_legacy_events(/*show_raw_agent_reasoning*/ false)
++                            .into_iter()
++                            .map(RolloutItem::EventMsg),
++                    );
++                }
++                presentation_items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
++                    ItemCompletedEvent {
++                        thread_id: self.thread_id,
++                        turn_id,
++                        item,
++                        started_at_ms: None,
++                        completed_at_ms: recovered_at_ms,
++                    },
++                )));
++            }
++            // Presentation precedes raw responses so a partially persisted batch cannot make
++            // the next attempt skip a response whose UI item has not yet been saved.
++            presentation_items.append(&mut recovered);
++            recovered = presentation_items;
++            // Keep saved UI history and append surviving unsaved items. The checkpoint
++            // separately preserves exact current model state, including prior compaction.
++            // Neither operation claims to reconstruct records the old runtime discarded.
++            recovered.extend(
++                self.segment_state_checkpoint_from_state(&state)
++                    .into_items(),
++            );
++            live_thread.append_items(&recovered).await?;
++            live_thread.flush().await?;
++            let rollout_path = live_thread.local_rollout_path().await?;
++            let state_db = match store.as_any().downcast_ref::<LocalThreadStore>() {
++                Some(local_store) => local_store.state_db().await,
++                None => None,
++            };
++            Ok(RepairedPersistence {
++                live_thread,
++                state_db,
++                rollout_path,
++            })
++        }
++        .await;
++        let restored = match result {
++            Ok(restored) => restored,
++            Err(error) => {
++                // Any durable prefix remains available for comparison on the next attempt.
++                // Transfer the only cleanup owner before awaiting: discard takes its handle
++                // before it awaits, so cancelling this read must not cancel writer cleanup.
++                let cleanup = tokio::spawn(async move { guard.discard().await });
++                if let Err(cleanup_error) = cleanup.await {
++                    warn!("saved thread persistence cleanup task failed: {cleanup_error}");
++                }
++                return Err(error);
++            }
++        };
++        anyhow::ensure!(
++            self.repaired_persistence.set(restored).is_ok(),
++            "saved thread persistence was attached concurrently"
++        );
++        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral =
++            false;
++        guard.commit();
++        Ok(())
++    }
++}
++
++// Compare payloads as well as IDs: a surviving revision must update the UI item, not
++// disappear behind an older saved version with the same ID. Preserve multiplicity.
++fn recovery_item_key(item: &ResponseItem) -> serde_json::Result<Vec<u8>> {
++    serde_json::to_vec(item)
++}
++
++/// Reuses native presentation items without inferring turn completion or tool success.
++fn recovery_turn_item(
++    response: &ResponseItem,
++    id: String,
++    tool_calls: &HashMap<&str, &ResponseItem>,
++) -> Option<TurnItem> {
++    if let Some(mut item) = parse_turn_item(response) {
++        match &mut item {
++            TurnItem::UserMessage(item) => item.id = id,
++            TurnItem::AgentMessage(item) => item.id = id,
++            TurnItem::Reasoning(item) => item.id = id,
++            TurnItem::WebSearch(item) => item.id = id,
++            TurnItem::ImageGeneration(item) => item.id = id,
++            TurnItem::HookPrompt(item) => item.id = id,
++            _ => return None,
++        }
++        return Some(item);
++    }
++    let (call_id, name, namespace, output) = match response {
++        ResponseItem::FunctionCallOutput {
++            call_id,
++            name,
++            namespace,
++            output,
++            ..
++        } => (
++            call_id.as_deref(),
++            name.clone(),
++            namespace.clone(),
++            output.body.clone(),
++        ),
++        ResponseItem::CustomToolCallOutput {
++            call_id,
++            name,
++            output,
++            ..
++        } => (
++            Some(call_id.as_str()),
++            name.clone(),
++            None,
++            output.body.clone(),
++        ),
++        _ => return None,
++    };
++    let (name, namespace) = match (name, call_id.and_then(|id| tool_calls.get(id))) {
++        (Some(name), _) => (name, namespace),
++        (
++            None,
++            Some(
++                ResponseItem::FunctionCall {
++                    name, namespace, ..
++                }
++                | ResponseItem::CustomToolCall {
++                    name, namespace, ..
++                },
++            ),
++        ) => (name.clone(), namespace.clone()),
++        (None, _) => (
++            "Recovered tool output (name unavailable)".to_owned(),
++            namespace,
++        ),
++    };
++    Some(TurnItem::FunctionCallOutput(FunctionCallOutputItem {
++        id,
++        name,
++        namespace,
++        output,
++    }))
++}
++
++#[cfg(test)]
++#[path = "persistence_repair_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/session/persistence_repair_tests.rs b/codex-rs/core/src/session/persistence_repair_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1543287c5014c57621224425ff6cc145e1692d20
+--- /dev/null
++++ b/codex-rs/core/src/session/persistence_repair_tests.rs
+@@ -0,0 +1,83 @@
++use super::*;
++use codex_protocol::ResponseItemId;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::models::FunctionCallOutputPayload;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn recovery_presentation_preserves_distinct_user_ids_and_assistant_revisions() {
++    let user = ResponseItem::Message {
++        id: None,
++        role: "user".to_owned(),
++        content: vec![ContentItem::InputText {
++            text: "same text".to_owned(),
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let first = recovery_turn_item(&user, "user-first".to_owned(), &HashMap::new()).unwrap();
++    let second = recovery_turn_item(&user, "user-second".to_owned(), &HashMap::new()).unwrap();
++    assert_eq!(
++        (first.id(), second.id()),
++        ("user-first".to_owned(), "user-second".to_owned())
++    );
++
++    let mut assistant = ResponseItem::Message {
++        id: Some(ResponseItemId::with_suffix("msg", "updated")),
++        role: "assistant".to_owned(),
++        content: vec![ContentItem::OutputText {
++            text: "old text".to_owned(),
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let saved_key = recovery_item_key(&assistant).unwrap();
++    if let ResponseItem::Message { content, .. } = &mut assistant {
++        *content = vec![ContentItem::OutputText {
++            text: "new text".to_owned(),
++        }];
++    }
++    assert_ne!(saved_key, recovery_item_key(&assistant).unwrap());
++    let item = recovery_turn_item(&assistant, "msg_updated".to_owned(), &HashMap::new()).unwrap();
++    let expected = serde_json::json!({
++        "type": "AgentMessage", "id": "msg_updated",
++        "content": [{"type": "Text", "text": "new text"}]
++    });
++    assert_eq!(serde_json::to_value(item).unwrap(), expected);
++
++    let hook = codex_protocol::items::build_hook_prompt_message(&[
++        codex_protocol::items::HookPromptFragment::from_single_hook("Retained hook text", "hook-1"),
++    ])
++    .unwrap();
++    let first = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
++    let second = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
++    assert_eq!(first.id(), "recovered-hook".to_owned());
++    assert_eq!(
++        serde_json::to_value(first).unwrap(),
++        serde_json::to_value(second).unwrap()
++    );
++}
++
++#[test]
++fn recovery_tool_output_keeps_payload_without_inventing_execution_status() {
++    let response = ResponseItem::FunctionCallOutput {
++        id: None,
++        call_id: Some("call-1".to_owned()),
++        name: Some("read_file".to_owned()),
++        namespace: None,
++        output: FunctionCallOutputPayload::from_text("retained output".to_owned()),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let actual = recovery_turn_item(&response, "output-1".to_owned(), &HashMap::new()).unwrap();
++    let expected = TurnItem::FunctionCallOutput(FunctionCallOutputItem {
++        id: "output-1".to_owned(),
++        name: "read_file".to_owned(),
++        namespace: None,
++        output: FunctionCallOutputBody::Text("retained output".to_owned()),
++    });
++    assert_eq!(
++        serde_json::to_value(actual).unwrap(),
++        serde_json::to_value(expected).unwrap()
++    );
++}
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 46b2a842733f10af1f16055c0da94abe0193338e..a4e77c5fefd649a34d253a19b84701fd393d882c 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -101,6 +101,11 @@ pub(crate) struct Session {
+     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+     /// Orders mutations before checkpoint capture or after commit classification.
+     pub(super) checkpoint_admission_lock: Arc<Mutex<()>>,
++    /// Orders retained-history mutations and their appends with writer recovery.
++    /// Acquire after `state`; event producers may already hold `state` when persisting.
++    pub(super) persistence_repair_lock: Mutex<super::persistence_repair::PersistenceRepairState>,
++    /// Published only after surviving history is durable; the original Session stays alive.
++    pub(super) repaired_persistence: OnceLock<super::persistence_repair::RepairedPersistence>,
+     pub(crate) input_queue: InputQueue,
+     /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
+     /// terminal action. The persisted snooze deadline is reconstructed from the goals database;
+@@ -1887,6 +1892,8 @@ impl Session {
+                 active_turn: Mutex::new(None),
+                 async_hook_results,
+                 checkpoint_admission_lock: Arc::new(Mutex::new(())),
++                persistence_repair_lock: Mutex::default(),
++                repaired_persistence: OnceLock::new(),
+                 input_queue: InputQueue::new(),
+                 goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
+                 services,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index d0bf3402713c796e12a608ddcf8e43086230bdfe..546963342fe2a8a7bcc81c9eb0f170355ac0b1dc 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -8226,6 +8226,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         active_turn: Mutex::new(None),
+         async_hook_results,
+         checkpoint_admission_lock: Arc::new(Mutex::new(())),
++        persistence_repair_lock: Default::default(),
++        repaired_persistence: Default::default(),
+         input_queue: super::input_queue::InputQueue::new(),
+         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
+         services,
+@@ -10599,6 +10601,8 @@ where
+         active_turn: Mutex::new(None),
+         async_hook_results,
+         checkpoint_admission_lock: Arc::new(Mutex::new(())),
++        persistence_repair_lock: Default::default(),
++        repaired_persistence: Default::default(),
+         input_queue: super::input_queue::InputQueue::new(),
+         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
+         services,
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 6a4faeffa08f4e53baa2242f7e0bd125058f015c..02348046238282a4e2ba2f7855171d1e1acb77d1 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -121,7 +121,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+             .await;
+     }
+     mark_thread_memory_mode_polluted_if_external_context(sess, turn_context, item).await;
+-    let memory_usage_db = match sess.services.state_db.as_ref() {
++    let memory_usage_db = match sess.state_db().as_ref() {
+         Some(db) => db
+             .memories_for_version(turn_context.config.memories.version)
+             .await
+@@ -163,7 +163,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
+         return;
+     }
+     state_db::mark_thread_memory_mode_polluted(
+-        sess.services.state_db.as_deref(),
++        sess.state_db().as_deref(),
+         sess.thread_id,
+         "record_completed_response_item",
+     )
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 6e35f8c1d9974294c8ce32a2fce91de04bd6ec5f..ffeb8820bb568521777233ee1ff4d435f9d15d87 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -580,6 +580,8 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
+ /// function to require an `Arc<&Self>`.
+ pub(crate) struct ThreadManagerState {
+     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
++    /// The target's first published persistence setting survives eviction and caller-config drift.
++    thread_ephemeral_intent: std::sync::Mutex<HashMap<ThreadId, bool>>,
+     shared_thread_instructions: shared_instructions::SharedThreadInstructionsProviders,
+     /// Serializes ownership changes and registry commits across every root in this manager.
+     lifecycle_mutation: Arc<AsyncMutex<()>>,
+@@ -746,6 +748,7 @@ impl ThreadManager {
+         Self {
+             state: Arc::new(ThreadManagerState {
+                 threads: Arc::new(RwLock::new(HashMap::new())),
++                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
+                 shared_thread_instructions: Default::default(),
+                 lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                 temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+@@ -898,6 +901,7 @@ impl ThreadManager {
+         Self {
+             state: Arc::new(ThreadManagerState {
+                 threads: Arc::new(RwLock::new(HashMap::new())),
++                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
+                 shared_thread_instructions: Default::default(),
+                 lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                 temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+@@ -1118,7 +1122,14 @@ impl ThreadManager {
+     }
+
+     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
+-        self.state.get_thread(thread_id).await
++        let thread = self.state.get_thread(thread_id).await?;
++        if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
++            thread
++                .restore_saved_thread_persistence()
++                .await
++                .map_err(thread_store_rollout_read_error)?;
++        }
++        Ok(thread)
+     }
+
+     /// Updates metadata for loaded and cold threads through one entrypoint.
+@@ -2165,6 +2176,14 @@ impl ThreadManager {
+ }
+
+ impl ThreadManagerState {
++    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
++        self.thread_ephemeral_intent
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(&thread_id)
++            == Some(&false)
++    }
++
+     pub(crate) fn shared_thread_instructions_provider(
+         &self,
+         root_thread_id: ThreadId,
+@@ -3436,6 +3455,7 @@ impl ThreadManagerState {
+         model_history_complete: bool,
+     ) -> CodexResult<NewThread> {
+         let thread_id = session.thread_id();
++        let ephemeral = session.get_config().await.ephemeral;
+         let event = io.next_event().await?;
+         let session_configured = match event {
+             Event {
+@@ -3450,6 +3470,12 @@ impl ThreadManagerState {
+         {
+             let mut threads = self.threads.write().await;
+             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
++                // A later reload must not replace the target's intent with its sender's config.
++                self.thread_ephemeral_intent
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .entry(thread_id)
++                    .or_insert(ephemeral);
+                 let thread = Arc::new(CodexThread::new(
+                     session,
+                     io,
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 8051ab1a3608888b7feb826b1d0b2b3d22d4de4b..2c52dda81e2aace30e8122f61518f5576b398691 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -816,7 +816,7 @@ async fn handle_any_tool(
+         && invocation.turn.config.memories.disable_on_external_context
+     {
+         state_db::mark_thread_memory_mode_polluted(
+-            invocation.session.services.state_db.as_deref(),
++            invocation.session.state_db().as_deref(),
+             invocation.session.thread_id,
+             "tool_output",
+         )
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index ab532f30928523aa902438dddbb7e23c723e7799..47a33043e38f20d90f1d629da106f204b5b4d507 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -400,6 +400,39 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+
++    /// Finds existing turns for saved-runtime recovery without loading their items.
++    /// An incomplete projection cannot prove absence, so repair it once before querying.
++    pub async fn existing_history_turns(
++        &self,
++        thread_id: ThreadId,
++        turn_ids: &[String],
++    ) -> ThreadStoreResult<HashSet<String>> {
++        if !self.has_history_projection(thread_id).await?
++            && !self.rebuild_history_projection(thread_id).await?
++        {
++            return Err(ThreadStoreError::Unsupported {
++                operation: "existing_history_turns",
++            });
++        }
++        let lineage = match thread_history::indexed_same_thread_lineage(self, thread_id).await? {
++            Some(lineage) => lineage,
++            None => self.resolve_rollout_lineage(thread_id).await?,
++        };
++        let pool = self.thread_history_db().await?;
++        let mut existing = HashSet::new();
++        for turn_id in turn_ids {
++            match thread_history::find_visible_turn(pool, &lineage, turn_id).await {
++                Ok(_) => {
++                    existing.insert(turn_id.clone());
++                }
++                Err(ThreadStoreError::InvalidRequest { message })
++                    if message == format!("turn not found: {turn_id}") => {}
++                Err(error) => return Err(error),
++            }
++        }
++        Ok(existing)
++    }
++
+     /// Returns whether the projected visible history can satisfy paginated reads.
+     pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
+         let Some(resolved) =
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
 index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515de4abfd2 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
@@ -306,10 +2537,18 @@ index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515
          malformed_lineage(
              end.thread_id,
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 8d63956de73d92c5bce080479d1a2402b0a7360e..d653c3d9363aac7d2d781c9f801005f01882c6b7 100644
+index 8d63956de73d92c5bce080479d1a2402b0a7360e..c8180fc495f281e26655ee9f5fb227cf8518a337 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
-@@ -119,6 +119,51 @@ WHERE next_rollout_byte_offset >= 0
+@@ -19,6 +19,7 @@ mod turn_lookup;
+ pub(super) use bulk_projection::BulkProjection;
+ pub(super) use read::has_complete_root_projection_for_resolved;
+ pub(super) use read::has_complete_segmented_legacy_projection;
++pub(super) use read::indexed_same_thread_lineage;
+ pub(super) use read::list_existing_segmented_legacy_turns;
+ pub(super) use read::list_items;
+ pub(super) use read::list_segmented_legacy_items;
+@@ -119,6 +120,51 @@ WHERE next_rollout_byte_offset >= 0
          .await
          .map_err(thread_history_error)?;
      }
@@ -361,7 +2600,7 @@ index 8d63956de73d92c5bce080479d1a2402b0a7360e..d653c3d9363aac7d2d781c9f801005f0
      for statement in [
          r#"
  CREATE TRIGGER IF NOT EXISTS frodex_thread_turns_projection_insert
-@@ -204,6 +249,61 @@ BEGIN
+@@ -204,6 +250,61 @@ BEGIN
          ELSE next_rollout_byte_offset
      END
      WHERE thread_id = OLD.thread_id;
@@ -423,7 +2662,7 @@ index 8d63956de73d92c5bce080479d1a2402b0a7360e..d653c3d9363aac7d2d781c9f801005f0
  END
          "#,
      ] {
-@@ -386,9 +486,11 @@ pub(super) async fn publish_staged_projection(
+@@ -386,9 +487,11 @@ pub(super) async fn publish_staged_projection(
              ),
          });
      }

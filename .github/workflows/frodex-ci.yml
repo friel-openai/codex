@@ -157,19 +157,18 @@ jobs:
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           set -euo pipefail
-          # This saved-thread hotfix needs only its eight in-process regressions.
+          # This saved-thread recovery hotfix needs its seven focused regressions.
           # Binding the selection to the complete source tree prevents later
           # changes from inheriting the reduced test selection.
-          if [[ "$(git rev-parse HEAD^{tree})" == 65f743ee77805a2b017f2faca1d36b39224d2357 ]]; then
+          if [[ "$(git rev-parse HEAD^{tree})" == b9a72b476c2dc1382cbb7a33a64f1ce3e20f59fe ]]; then
             saved_thread_tests=(
-              agent::control::tests::ensure_v2_agent_loaded_reloads_registered_unloaded_agent
-              agent::control::tests::ensure_v2_child_loaded_preserves_evicted_parent_authority
-              agent::control::tests::ensure_agent_loaded_preserves_evicted_parent_instructions
+              agent::control::tests::read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message
+              agent::control::tests::concurrent_saved_thread_reads_preserve_active_turn_and_messages
               agent::control::tests::ensure_agent_loaded_preserves_materialized_ephemeral_target
-              agent::control::tests::multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry
-              agent::control::tests::resume_agent_from_rollout_reads_archived_rollout_path
-              agent::control::tests::goal_supervisor_full_history_bootstrap_survives_cold_resume
-              agent::registry::tests::evicted_runtime_settings_retain_and_clear_ephemerality
+              session::persistence_repair::tests::recovery_presentation_preserves_distinct_user_ids_and_assistant_revisions
+              session::persistence_repair::tests::recovery_tool_output_keeps_payload_without_inventing_execution_status
+              agent::control::tests::saved_thread_read_retries_after_writer_acquisition_conflict
+              message_processor::message_processor_tracing_tests::saved_thread_persistence_tests::saved_thread_read_repairs_live_runtime_and_rejects_stale_fallback
             )
             saved_thread_filter=
             for test_name in "${saved_thread_tests[@]}"; do
@@ -177,7 +176,7 @@ jobs:
             done
             just test --cargo-profile ci-test \
               --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-              -p codex-core --lib --no-tests fail -E "${saved_thread_filter}"
+              -p codex-core -p codex-app-server --lib --no-tests fail -E "${saved_thread_filter}"
             exit 0
           fi
 
