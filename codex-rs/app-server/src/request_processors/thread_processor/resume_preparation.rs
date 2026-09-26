@@ -12,7 +12,9 @@ impl ThreadRequestProcessor {
         let requested_id = ThreadId::from_string(&params.thread_id).ok();
         loop {
             let running = if let Some(thread_id) = requested_id {
-                self.thread_manager.get_thread(thread_id).await.is_ok()
+                get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+                    .await?
+                    .is_some()
             } else {
                 false
             };
@@ -68,7 +70,9 @@ impl ThreadRequestProcessor {
             let permit = self.acquire_thread_list_state_permit().await?;
             if !prepared
                 && let Some(thread_id) = requested_id
-                && self.thread_manager.get_thread(thread_id).await.is_err()
+                && get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+                    .await?
+                    .is_none()
             {
                 // An idle runtime can unload while this request waits for the lifecycle permit.
                 drop(permit);

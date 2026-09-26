@@ -10,6 +10,11 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 
 impl LocalAgentControl {
+    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
+        self.upgrade()
+            .is_ok_and(|manager| manager.is_saved_target(thread_id))
+    }
+
     pub(crate) async fn inspect(
         &self,
         caller: ThreadId,

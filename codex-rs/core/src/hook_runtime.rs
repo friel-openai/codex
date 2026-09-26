@@ -903,7 +903,7 @@ pub(crate) async fn emit_hook_completed_events(
         })
     {
         state_db::mark_thread_memory_mode_polluted(
-            sess.services.state_db.as_deref(),
+            sess.state_db().as_deref(),
             sess.thread_id,
             "mcp_tool_hook",
         )

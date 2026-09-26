@@ -1298,7 +1298,7 @@ impl LocalAgentControl {
                     role_prompt_item(role_prompt).into(),
                 ));
             }
-            if let Some(state_db) = parent_thread.session.services.state_db.as_ref()
+            if let Some(state_db) = parent_thread.session.state_db().as_ref()
                 && let Ok(Some(parent_goal)) = state_db
                     .thread_goals()
                     .get_thread_goal(parent_thread_id)

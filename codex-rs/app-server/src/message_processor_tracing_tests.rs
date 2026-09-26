@@ -59,6 +59,9 @@ use wiremock::MockServer;
 
 const TEST_CONNECTION_ID: ConnectionId = ConnectionId(7);
 
+#[path = "message_processor_saved_thread_persistence_tests.rs"]
+mod saved_thread_persistence_tests;
+
 struct TestTracing {
     exporter: InMemorySpanExporter,
     provider: SdkTracerProvider,
@@ -124,6 +127,30 @@ impl TracingHarness {
         let codex_home = TempDir::new()?;
         let config = Arc::new(build_test_config(codex_home.path(), &server.uri()).await?);
         let (processor, outgoing_rx) = build_test_processor(config).await;
+        Self::from_processor(server, codex_home, processor, outgoing_rx).await
+    }
+
+    async fn new_with_sqlite() -> Result<Self> {
+        let server = create_mock_responses_server_repeating_assistant("Done").await;
+        let codex_home = TempDir::new()?;
+        let config = Arc::new(build_test_config(codex_home.path(), &server.uri()).await?);
+        // Saved-thread repair reads the SQLite history projection, as production does.
+        // Existing tracing-only fixtures intentionally leave this database unavailable.
+        let state_db = crate::init_sqlite_state_db_with_fresh_start_on_corruption(&config)
+            .await?
+            .state_db
+            .expect("initialized isolated SQLite state");
+        let (processor, outgoing_rx) =
+            build_test_processor_with_state_db(config, Some(state_db)).await;
+        Self::from_processor(server, codex_home, processor, outgoing_rx).await
+    }
+
+    async fn from_processor(
+        server: MockServer,
+        codex_home: TempDir,
+        processor: Arc<MessageProcessor>,
+        outgoing_rx: mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+    ) -> Result<Self> {
         let tracing = init_test_tracing();
         tracing.exporter.reset();
         tracing::callsite::rebuild_interest_cache();
@@ -238,6 +265,16 @@ async fn build_test_processor(
     Arc<MessageProcessor>,
     mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
 ) {
+    build_test_processor_with_state_db(config, /*state_db*/ None).await
+}
+
+async fn build_test_processor_with_state_db(
+    config: Arc<Config>,
+    state_db: Option<crate::rollout_state_db::StateDbHandle>,
+) -> (
+    Arc<MessageProcessor>,
+    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+) {
     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
     let auth_manager =
         AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false)
@@ -267,7 +304,7 @@ async fn build_test_processor(
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         feedback: CodexFeedback::new(),
         log_db: None,
-        state_db: None,
+        state_db,
         config_warnings: Vec::new(),
         session_source: SessionSource::VSCode,
         user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
@@ -511,7 +548,9 @@ async fn read_response<T: serde::de::DeserializeOwned>(
     loop {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), outgoing_rx.recv())
             .await
-            .expect("timed out waiting for response")
+            .unwrap_or_else(|error| {
+                panic!("timed out waiting for response to request {request_id}: {error}")
+            })
             .expect("outgoing channel closed");
         let crate::outgoing_message::OutgoingEnvelope::ToConnection {
             connection_id,
@@ -524,8 +563,14 @@ async fn read_response<T: serde::de::DeserializeOwned>(
         if connection_id != TEST_CONNECTION_ID {
             continue;
         }
-        let crate::outgoing_message::OutgoingMessage::Response(response) = message else {
-            continue;
+        let response = match message {
+            crate::outgoing_message::OutgoingMessage::Response(response) => response,
+            crate::outgoing_message::OutgoingMessage::Error(error)
+                if error.id == RequestId::Integer(request_id) =>
+            {
+                panic!("request {request_id} failed: {error:?}");
+            }
+            _ => continue,
         };
         if response.id != RequestId::Integer(request_id) {
             continue;

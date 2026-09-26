@@ -816,7 +816,7 @@ async fn handle_any_tool(
         && invocation.turn.config.memories.disable_on_external_context
     {
         state_db::mark_thread_memory_mode_polluted(
-            invocation.session.services.state_db.as_deref(),
+            invocation.session.state_db().as_deref(),
             invocation.session.thread_id,
             "tool_output",
         )

@@ -112,11 +112,13 @@ impl ThreadRequestProcessor {
             validate_handoff_params(&params)?;
             let source = ThreadId::from_string(&params.thread_id)
                 .map_err(|error| invalid_request(error.to_string()))?;
-            let parent = self.thread_manager.get_thread(source).await.map_err(|_| {
-                invalid_request(
-                    "fork preparation must be requested from the app-server owning the source",
-                )
-            })?;
+            let parent = get_loaded_thread_for_persistence(&self.thread_manager, source)
+                .await?
+                .ok_or_else(|| {
+                    invalid_request(
+                        "fork preparation must be requested from the app-server owning the source",
+                    )
+                })?;
             let permit = Arc::clone(&self.fork_handoff_slots)
                 .try_acquire_owned()
                 .map_err(|_| {

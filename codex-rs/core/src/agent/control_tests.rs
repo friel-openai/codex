@@ -2138,6 +2138,448 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
 }
 
 #[tokio::test]
+async fn read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message() {
+    check_saved_thread_read_repair(SavedThreadRepairRead::Single).await;
+}
+
+#[tokio::test]
+async fn concurrent_saved_thread_reads_preserve_active_turn_and_messages() {
+    check_saved_thread_read_repair(SavedThreadRepairRead::ConcurrentWithActiveTurn).await;
+}
+
+#[tokio::test]
+async fn saved_thread_read_retries_after_writer_acquisition_conflict() {
+    check_saved_thread_read_repair(SavedThreadRepairRead::WriterAcquisitionRetry).await;
+}
+
+/// Exercises saved/live divergence under ordinary reads, concurrency or writer conflict.
+enum SavedThreadRepairRead {
+    Single,
+    ConcurrentWithActiveTurn,
+    WriterAcquisitionRetry,
+}
+
+async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Sqlite);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (thread_id, saved_thread) = harness.start_paginated_thread().await;
+    let [
+        saved_marker,
+        live_marker,
+        concurrent_marker,
+        repaired_marker,
+    ] = [
+        "saved before accidental ephemeral resume",
+        "accepted only in the accidentally ephemeral runtime",
+        "accepted while saved-thread readers repair persistence",
+        "accepted after saved-thread read repairs persistence",
+    ]
+    .map(|text| {
+        let mut marker = assistant_message(text, Some(MessagePhase::FinalAnswer));
+        marker.set_id(Some(ResponseItemId::with_suffix("msg", text)));
+        marker.set_turn_id_if_missing(&format!("saved-thread-recovery-{text}"));
+        marker.set_create_time_if_missing(123.into());
+        let content =
+            codex_context_fragments::to_annotated_content(&mut marker).expect("marker content");
+        codex_context_fragments::set_annotated_content(&mut marker, content)
+            .expect("classified marker content");
+        marker
+    });
+    saved_thread
+        .inject_response_items(vec![saved_marker.clone()])
+        .await
+        .expect("persist initial message");
+    saved_thread.ensure_rollout_materialized().await;
+    saved_thread
+        .flush_rollout()
+        .await
+        .expect("flush saved task");
+    let rollout_path = saved_thread.rollout_path().expect("selected saved rollout");
+    saved_thread
+        .shutdown_and_wait()
+        .await
+        .expect("stop original saved runtime");
+    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
+    drop(saved_thread);
+
+    // Bypass agent delivery's prevention fix to reproduce a runtime loaded by an old daemon.
+    let mut broken_config = harness.config.clone();
+    broken_config.ephemeral = true;
+    let broken_thread = harness
+        .manager
+        .resume_thread_from_rollout(
+            broken_config,
+            rollout_path.clone(),
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("direct resume reproduces the accidentally ephemeral saved task")
+        .thread;
+    assert_eq!(broken_thread.session.thread_id, thread_id);
+    assert!(broken_thread.config_snapshot().await.ephemeral);
+    assert!(broken_thread.session.services.live_thread.is_none());
+    assert!(broken_thread.state_db().is_none());
+    broken_thread
+        .inject_response_items(vec![live_marker.clone()])
+        .await
+        .expect("broken runtime accepts a newer message without persisting it");
+    let live_history_before_read = broken_thread.session.clone_history().await;
+    for marker in [&saved_marker, &live_marker] {
+        assert_eq!(
+            live_history_before_read
+                .raw_items()
+                .filter(|item| *item == marker)
+                .count(),
+            1,
+        );
+    }
+
+    let disk_before_read = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&harness.config),
+        harness.state_db.clone(),
+    );
+    let selected = disk_before_read
+        .read_thread(ReadThreadParams {
+            thread_id,
+            include_archived: true,
+            include_history: false,
+        })
+        .await
+        .expect("independent store reads the valid selected saved task");
+    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(selected.rollout_path, Some(rollout_path));
+    let saved_history = disk_before_read
+        .load_history(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: true,
+        })
+        .await
+        .expect("independent store reopens saved history");
+    let persisted_markers = saved_history
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ResponseItem(response)
+                if response.item == saved_marker || response.item == live_marker =>
+            {
+                Some(&response.item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_markers, vec![&saved_marker]);
+    drop(disk_before_read);
+
+    let mut expected_live = live_history_before_read
+        .raw_items()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut expected_persisted = vec![&saved_marker, &live_marker];
+    // Recovery must act on the still-loaded runtime, not reload its older saved history.
+    match read {
+        SavedThreadRepairRead::Single => {
+            broken_thread
+                .read_thread(
+                    /*include_archived*/ true, /*include_history*/ false,
+                )
+                .await
+                .expect("reading a saved thread repairs accidental ephemerality");
+        }
+        SavedThreadRepairRead::WriterAcquisitionRetry => {
+            // Reserve the writer through the same production store without attaching it to
+            // the broken Session. Recovery must not steal or close this owner's writer.
+            let competing_writer = codex_thread_store::LiveThread::resume(
+                Arc::clone(&broken_thread.session.services.thread_store),
+                ThreadHistoryMode::Paginated,
+                codex_thread_store::ResumeThreadParams {
+                    thread_id,
+                    rollout_path: selected.rollout_path.clone(),
+                    history: None,
+                    include_archived: true,
+                    metadata: ThreadPersistenceMetadata {
+                        cwd: Some(harness.config.cwd.to_path_buf()),
+                        model_provider: harness.config.model_provider_id.clone(),
+                        memory_mode: if harness.config.memories.generate_memories {
+                            ThreadMemoryMode::Enabled
+                        } else {
+                            ThreadMemoryMode::Disabled
+                        },
+                    },
+                },
+            )
+            .await
+            .expect("reserve competing writer before recovery acquisition");
+            let error = broken_thread
+                .read_thread(
+                    /*include_archived*/ true, /*include_history*/ false,
+                )
+                .await
+                .expect_err("recovery must fail at duplicate writer acquisition");
+            assert!(
+                error.to_string().contains(&format!(
+                    "thread {thread_id} already has a live local writer"
+                )),
+                "unexpected recovery failure: {error}"
+            );
+            assert!(!broken_thread.has_persistence());
+            assert!(broken_thread.state_db().is_none());
+            assert!(broken_thread.config_snapshot().await.ephemeral);
+            assert_eq!(
+                broken_thread
+                    .session
+                    .clone_history()
+                    .await
+                    .raw_items()
+                    .collect::<Vec<_>>(),
+                expected_live.iter().collect::<Vec<_>>(),
+                "failed acquisition must preserve the newer live conversation",
+            );
+            competing_writer
+                .flush()
+                .await
+                .expect("failed recovery must leave the competing writer owned and usable");
+            competing_writer
+                .shutdown()
+                .await
+                .expect("release the competing writer before retry");
+            let retried = harness
+                .manager
+                .get_thread(thread_id)
+                .await
+                .expect("automatic recovery succeeds after writer ownership is released");
+            assert!(Arc::ptr_eq(&retried, &broken_thread));
+            assert!(Arc::ptr_eq(&retried.session, &broken_thread.session));
+        }
+        SavedThreadRepairRead::ConcurrentWithActiveTurn => {
+            let active_turn = ActiveTurn::default();
+            let turn_state = Arc::clone(&active_turn.turn_state);
+            let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
+            turn_state
+                .lock()
+                .await
+                .insert_pending_approval("pending during recovery".to_owned(), approval_tx);
+            *broken_thread.session.active_turn.lock().await = Some(active_turn);
+            let recording_context = broken_thread.session.new_inject_items_context().await;
+            let recording_items = [concurrent_marker.clone()];
+            let (read_result, lookup_result, ()) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    tokio::join!(
+                        broken_thread.read_thread(
+                            /*include_archived*/ true, /*include_history*/ true,
+                        ),
+                        harness.manager.get_thread(thread_id),
+                        broken_thread.session.record_conversation_items(
+                            &recording_context,
+                            recording_context.model_info(),
+                            &recording_items,
+                        ),
+                    )
+                })
+                .await
+                .expect("concurrent repair must not deadlock");
+            read_result.expect("direct read repairs persistence");
+            let looked_up = lookup_result.expect("manager lookup repairs persistence");
+            assert!(Arc::ptr_eq(&looked_up, &broken_thread));
+            let active = broken_thread.session.active_turn.lock().await;
+            assert!(Arc::ptr_eq(
+                &active.as_ref().expect("active turn preserved").turn_state,
+                &turn_state,
+            ));
+            drop(active);
+            assert!(matches!(
+                approval_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(
+                turn_state
+                    .lock()
+                    .await
+                    .remove_pending_approval("pending during recovery")
+                    .is_some()
+            );
+            *broken_thread.session.active_turn.lock().await = None;
+            expected_live.push(concurrent_marker.clone());
+            expected_persisted.push(&concurrent_marker);
+        }
+    }
+    assert!(!broken_thread.config_snapshot().await.ephemeral);
+    assert!(broken_thread.state_db().is_some());
+    broken_thread
+        .read_thread(
+            /*include_archived*/ true, /*include_history*/ true,
+        )
+        .await
+        .expect("repeated full read uses the repaired writer");
+    assert_eq!(
+        broken_thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .collect::<Vec<_>>(),
+        expected_live.iter().collect::<Vec<_>>(),
+        "reading the saved task must preserve its newer in-memory conversation",
+    );
+    broken_thread
+        .inject_response_items(vec![repaired_marker.clone()])
+        .await
+        .expect("repaired task accepts another durable message");
+    broken_thread
+        .flush_rollout()
+        .await
+        .expect("repaired writer flushes without replacing the runtime");
+    let history_before_shutdown = broken_thread.session.clone_history().await;
+    broken_thread
+        .shutdown_and_wait()
+        .await
+        .expect("release repaired writer before independent cold read");
+    let disk_after_read = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&harness.config),
+        harness.state_db.clone(),
+    );
+    let recovered_history = disk_after_read
+        .load_history(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: true,
+        })
+        .await
+        .expect("independent store reopens repaired history");
+    let recovered_markers = recovered_history
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ResponseItem(response)
+                if response.item == saved_marker
+                    || response.item == live_marker
+                    || response.item == concurrent_marker
+                    || response.item == repaired_marker =>
+            {
+                Some(&response.item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    expected_persisted.push(&repaired_marker);
+    assert_eq!(
+        recovered_markers, expected_persisted,
+        "repair persists the missing live message and new messages exactly once",
+    );
+    let mut desktop_history = codex_app_server_protocol::ThreadHistoryBuilder::new();
+    for item in &recovered_history.items {
+        desktop_history.handle_paginated_rollout_item(item);
+    }
+    let visible_message = |item: &codex_app_server_protocol::ThreadItem| match item {
+        codex_app_server_protocol::ThreadItem::AgentMessage { id, text, .. }
+            if Some(id.as_str()) == live_marker.id().map(|id| id.as_ref()) =>
+        {
+            Some(text.clone())
+        }
+        _ => None,
+    };
+    assert_eq!(
+        desktop_history
+            .finish()
+            .iter()
+            .flat_map(|turn| &turn.items)
+            .filter_map(visible_message)
+            .collect::<Vec<_>>(),
+        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
+        "the recovered message must be visible in the full Desktop history",
+    );
+    let page = disk_after_read
+        .list_items(codex_thread_store::ListItemsParams {
+            thread_id,
+            turn_id: None,
+            include_archived: true,
+            cursor: None,
+            page_size: 100,
+            sort_direction: codex_thread_store::SortDirection::Asc,
+            sort_key: codex_thread_store::ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
+        })
+        .await
+        .expect("page repaired native history");
+    assert!(page.next_cursor.is_none());
+    let visible_items = page
+        .items
+        .iter()
+        .map(|item| {
+            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
+                .expect("stored Desktop item")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visible_items
+            .iter()
+            .filter_map(visible_message)
+            .collect::<Vec<_>>(),
+        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
+        "the same recovered message must be visible through paginated history",
+    );
+    let turn_page = disk_after_read
+        .list_turns(codex_thread_store::ListTurnsParams {
+            thread_id,
+            include_archived: true,
+            cursor: None,
+            page_size: 100,
+            sort_direction: codex_thread_store::SortDirection::Asc,
+            items_view: codex_thread_store::StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("page repaired turns");
+    assert!(turn_page.next_cursor.is_none());
+    let visible_turn_items = turn_page
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .map(|item| {
+            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
+                .expect("stored turn's Desktop item")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visible_turn_items
+            .iter()
+            .filter_map(visible_message)
+            .collect::<Vec<_>>(),
+        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
+        "turn pagination must not drop an item whose original lifecycle event was unsaved",
+    );
+    drop(disk_after_read);
+    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
+    let resumed = harness
+        .manager
+        .resume_thread_from_rollout(
+            harness.config.clone(),
+            broken_thread.rollout_path().expect("repaired rollout path"),
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("cold resume reopens the repaired checkpoint")
+        .thread;
+    assert!(!resumed.config_snapshot().await.ephemeral);
+    assert_eq!(
+        resumed
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .collect::<Vec<_>>(),
+        history_before_shutdown.raw_items().collect::<Vec<_>>(),
+        "cold resume preserves the entire surviving model history",
+    );
+    resumed
+        .shutdown_and_wait()
+        .await
+        .expect("stop cold resumed task");
+}
+
+#[tokio::test]
 async fn ensure_agent_loaded_preserves_materialized_ephemeral_target() {
     let harness = AgentControlHarness::new().await;
     let mut ephemeral_config = harness.config.clone();

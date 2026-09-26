@@ -609,6 +609,28 @@ use crate::thread_state::ThreadStateManager;
 use token_usage_replay::restored_token_usage_turn_id;
 use token_usage_replay::send_thread_token_usage_update_to_connection;
 
+/// Repairs loaded saved threads before callers read storage. Only a missing runtime permits
+/// a stored-thread fallback; repair failures must not return stale stored history.
+async fn get_loaded_thread_for_persistence(
+    thread_manager: &ThreadManager,
+    thread_id: ThreadId,
+) -> Result<Option<Arc<CodexThread>>, JSONRPCErrorError> {
+    match thread_manager.get_thread(thread_id).await {
+        Ok(thread) => Ok(Some(thread)),
+        Err(error)
+            if matches!(
+                error.details(),
+                codex_protocol::error::CodexErrorDetails::ThreadNotFound(_)
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(internal_error(format!(
+            "failed to access loaded thread {thread_id}: {error}"
+        ))),
+    }
+}
+
 pub(crate) fn apply_live_thread_settings(
     thread: &mut Thread,
     config_snapshot: &ThreadConfigSnapshot,
