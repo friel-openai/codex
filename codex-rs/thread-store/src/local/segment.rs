@@ -879,7 +879,11 @@ async fn freeze_thread_segment_reserved_with_publication(
     }
 
     if params.is_snapshot() {
-        let segment_id = snapshot_segment_id(source_lines.as_slice())?;
+        let segment_id = if matches!(history_mode, ThreadHistoryMode::Legacy) {
+            Some(snapshot_segment_id(source_lines.as_slice())?)
+        } else {
+            None
+        };
         let snapshot_rollout_id = if matches!(history_mode, ThreadHistoryMode::Paginated) {
             ThreadId::new()
         } else {
@@ -895,14 +899,14 @@ async fn freeze_thread_segment_reserved_with_publication(
             immutable_segment_path(
                 store.config.codex_home.as_path(),
                 thread_id,
-                Some(segment_id),
+                segment_id,
                 codex_rollout::plain_rollout_path(source_path.as_path()).as_path(),
             )?
         };
         install_snapshot_segment(
             source_lines.as_slice(),
             immutable_path.as_path(),
-            matches!(history_mode, ThreadHistoryMode::Legacy).then_some(segment_id),
+            segment_id,
         )
         .await?;
         return Ok(FrozenRolloutSegmentResult {
@@ -912,7 +916,7 @@ async fn freeze_thread_segment_reserved_with_publication(
                     rollout_path: immutable_path.clone(),
                     thread_id: Some(thread_id),
                     rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
-                    segment_id: Some(segment_id),
+                    segment_id,
                     max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                     nth_user_message: None,
                     compacted_replacement_history_filter_texts: None,
@@ -1603,7 +1607,6 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
         )
         .await?;
     }
-    let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
     let snapshot_rollout_id = ThreadId::new();
     let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
@@ -1622,7 +1625,7 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
             rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
-            segment_id: Some(segment_id),
+            segment_id: None,
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
@@ -1765,7 +1768,6 @@ async fn freeze_paginated_prefix_reserved_inner(
         )
         .await?;
     }
-    let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
     let snapshot_rollout_id = ThreadId::new();
     let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
@@ -1784,7 +1786,7 @@ async fn freeze_paginated_prefix_reserved_inner(
             rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
-            segment_id: Some(segment_id),
+            segment_id: None,
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
@@ -2052,23 +2054,21 @@ fn is_immutable_segment_path(
     thread_id: ThreadId,
     segment_id: Option<SegmentId>,
 ) -> bool {
-    if path.starts_with(
-        codex_home
-            .join(codex_rollout::SESSIONS_SUBDIR)
-            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR),
-    ) {
-        return true;
-    }
-    path.starts_with(
-        codex_home
-            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-            .join(thread_id.to_string())
-            .join(
-                segment_id
-                    .map(|segment_id| segment_id.to_string())
-                    .unwrap_or_else(|| "initial".to_string()),
-            ),
-    )
+    let native_directory =
+        Path::new(codex_rollout::SESSIONS_SUBDIR).join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR);
+    let rotated_directory = Path::new(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(
+            segment_id
+                .map(|segment_id| segment_id.to_string())
+                .unwrap_or_else(|| "initial".to_string()),
+        );
+    let is_immutable = |home: &Path| {
+        path.starts_with(home.join(&native_directory))
+            || path.starts_with(home.join(&rotated_directory))
+    };
+    is_immutable(codex_home)
+        || std::fs::canonicalize(codex_home).is_ok_and(|home| is_immutable(&home))
 }
 
 fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenceItem) -> bool {
