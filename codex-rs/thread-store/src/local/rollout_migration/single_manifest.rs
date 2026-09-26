@@ -48,7 +48,7 @@ pub(super) async fn measure_single_rollout(
     path: &Path,
     kind: RolloutMigrationKind,
 ) -> ThreadStoreResult<MeasuredSingleRollout> {
-    let canonical_session_meta = canonical_session_meta(path).await?;
+    let canonical_session_meta = super::session_metadata::canonical_session_meta(path).await?;
     let RolloutItem::SessionMeta(session_meta) = &canonical_session_meta.item else {
         return Err(migration_error("canonical session metadata is missing"));
     };
@@ -241,24 +241,6 @@ where
     }
     canonicalizer.finish(writer, &last_timestamp).await?;
     Ok(canonicalizer.next_ordinal())
-}
-
-async fn canonical_session_meta(path: &Path) -> ThreadStoreResult<RolloutLine> {
-    let mut reader = codex_rollout::open_rollout_line_reader(path)
-        .await
-        .map_err(migration_error)?;
-    while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
-        if raw.len() > MAX_ROLLOUT_LINE_BYTES {
-            continue;
-        }
-        let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
-            continue;
-        };
-        if matches!(line.item, RolloutItem::SessionMeta(_)) {
-            return Ok(line);
-        }
-    }
-    Err(migration_error("rollout contains no session metadata"))
 }
 
 async fn build_rollback_plan(path: &Path) -> ThreadStoreResult<RollbackPlan> {
