@@ -73,6 +73,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginMetricsSidecar;
 use codex_core_plugins::strip_output_env;
+use codex_network_proxy::EnvironmentProxyLease;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -542,6 +543,7 @@ impl UnifiedExecProcessManager {
             process,
             metrics_sidecar,
             permissions,
+            environment_proxy_lease,
         } = attempt;
         let process = Arc::new(process);
         if let Some(completion) = completion.as_ref() {
@@ -615,6 +617,7 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 network_denial_monitor,
                 metrics_sidecar,
+                environment_proxy_lease,
                 Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
             )
@@ -1204,6 +1207,7 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
         metrics_sidecar: Option<PluginMetricsSidecar>,
+        environment_proxy_lease: Option<EnvironmentProxyLease>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
     ) {
@@ -1230,13 +1234,8 @@ impl UnifiedExecProcessManager {
             store.processes.insert(process_id, entry);
             pruned_entry
         };
-        // prune_processes_if_needed runs while holding process_store; do async
-        // network-approval cleanup only after dropping that lock.
-        if let Some(pruned_entry) = pruned_entry {
-            unregister_network_approval_for_entry(&pruned_entry).await;
-            pruned_entry.process.terminate();
-        }
-
+        // Transfer the lease before awaiting cleanup: cancellation must not leave
+        // the newly stored process without its proxy listeners.
         spawn_exit_watcher(
             Arc::clone(&process),
             context,
@@ -1248,7 +1247,15 @@ impl UnifiedExecProcessManager {
             started_at,
             network_denial_monitor,
             plugin_metrics_sidecar,
+            environment_proxy_lease,
         );
+
+        // prune_processes_if_needed runs while holding process_store; do async
+        // network-approval cleanup only after dropping that lock.
+        if let Some(pruned_entry) = pruned_entry {
+            unregister_network_approval_for_entry(&pruned_entry).await;
+            pruned_entry.process.terminate();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
