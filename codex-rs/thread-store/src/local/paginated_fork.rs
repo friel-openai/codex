@@ -429,6 +429,10 @@ async fn prepare_with_response_history(
             resolve_compatibility_fork_lineage(store, thread_id, expected_rollout_id).await?
         };
     trace_fork_stage("resolved_reference_lineage");
+    let source_end_ordinal_exclusive = lineage
+        .segments()
+        .last()
+        .and_then(super::rollout_lineage::RolloutLineageSegment::end_ordinal);
     let mut frozen_before_projection = None;
     if matches!(boundary, ForkBoundary::Latest) && persistence == ForkPersistence::ReferenceBacked {
         let writer_reservation =
@@ -463,6 +467,34 @@ async fn prepare_with_response_history(
         }
         frozen_before_projection = Some(frozen);
         trace_fork_stage("froze_latest_prefix_before_projection");
+    }
+    if matches!(boundary, ForkBoundary::Latest)
+        && matches!(response_history, ForkResponseHistory::ModelContext)
+        && !lineage.requires_copied_history()
+        && let Some(context) = prepared_same_thread_model_context.as_ref()
+    {
+        // The reserved lineage already reconstructed authoritative model context. Old Paginated
+        // rollouts may retain legacy presentation events that a stateless UI projection cannot
+        // represent; a context-only fork must not require that unrelated projection.
+        let history_base = frozen_before_projection
+            .as_ref()
+            .and_then(|frozen| frozen.history_base);
+        return Ok(PreparedFork::new(
+            thread_id,
+            Some(
+                source_end_ordinal_exclusive.ok_or_else(|| ThreadStoreError::Internal {
+                    message: "prepared same-thread lineage is missing its ordinal boundary"
+                        .to_string(),
+                })?,
+            ),
+            history_base,
+            frozen_before_projection,
+            Arc::clone(context),
+            Arc::clone(context),
+            Arc::clone(context),
+            /*interrupt_if_open*/ true,
+            source_reservation,
+        ));
     }
     let source_segment = lineage
         .segments()
@@ -730,7 +762,7 @@ async fn prepare_with_response_history(
     trace_fork_stage("loaded_response_history");
     let mut prepared = PreparedFork::new(
         thread_id,
-        position.end_ordinal_exclusive,
+        Some(position.end_ordinal_exclusive),
         history_base,
         frozen_segment,
         model_context,
@@ -999,7 +1031,7 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     drop(history_access);
     Ok(IndexedForkAttempt::Prepared(Box::new(PreparedFork::new(
         thread_id,
-        position.end_ordinal_exclusive,
+        Some(position.end_ordinal_exclusive),
         Some(position),
         frozen_segment,
         Arc::clone(&model_context),
@@ -1544,7 +1576,7 @@ async fn try_prepare_indexed_latest_fork(
     drop(history_access);
     let mut prepared = PreparedFork::new(
         thread_id,
-        position.end_ordinal_exclusive,
+        Some(position.end_ordinal_exclusive),
         Some(position),
         frozen_segment,
         Arc::clone(&model_context),
@@ -1673,7 +1705,7 @@ async fn try_prepare_certified_latest_model_context_fork(
     let model_context = Arc::new(active_scan.items);
     Ok(IndexedForkAttempt::Prepared(Box::new(PreparedFork::new(
         thread_id,
-        end_ordinal_exclusive,
+        Some(end_ordinal_exclusive),
         Some(position),
         frozen_segment,
         Arc::clone(&model_context),

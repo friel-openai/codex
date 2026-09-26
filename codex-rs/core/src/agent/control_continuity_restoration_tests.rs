@@ -92,7 +92,7 @@ async fn indexed_supervisor_continuity_uses_projected_parent_completion_inner() 
     ))]);
     let mut prepared = PreparedFork::new(
         parent_id,
-        /*source_end_ordinal_exclusive*/ 1,
+        /*source_end_ordinal_exclusive*/ Some(1),
         /*history_base*/ None,
         /*frozen_segment*/ None,
         Arc::clone(&model_context),
