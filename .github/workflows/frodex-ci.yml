@@ -160,7 +160,10 @@ jobs:
           # This saved-thread recovery hotfix needs its seven focused regressions.
           # Binding the selection to the complete source tree prevents later
           # changes from inheriting the reduced test selection.
-          if [[ "$(git rev-parse HEAD^{tree})" == b9a72b476c2dc1382cbb7a33a64f1ce3e20f59fe ]]; then
+          if [[ "$(git rev-parse HEAD^{tree})" == c1ba8bbeee69b695cfb9448d1700ba4cf4e9ee3c ]]; then
+            # Library tests do not compile the recovery future through cli_main.
+            cargo build --manifest-path codex-rs/Cargo.toml \
+              --profile ci-test -p codex-cli --bin codex --locked
             saved_thread_tests=(
               agent::control::tests::read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message
               agent::control::tests::concurrent_saved_thread_reads_preserve_active_turn_and_messages
