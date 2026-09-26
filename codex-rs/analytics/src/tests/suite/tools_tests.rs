@@ -369,6 +369,8 @@ async fn collaborator_tool_events_keep_response_ids_when_completion_races_sampli
             status: CollabAgentToolCallStatus::Failed,
             sender_thread_id: "thread-1".into(),
             receiver_thread_ids: Vec::new(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,

@@ -2,6 +2,7 @@
 
 use super::RequestEffortUsage;
 use crate::session::step_settings::ResolvedStepSettings;
+use crate::session::tests::attach_thread_persistence;
 use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
 use codex_features::Feature;
 use codex_history::InitialHistory;
@@ -21,17 +22,21 @@ use test_case::test_case;
 }); "resume")]
 #[tokio::test]
 async fn initial_replay_preserves_prewarmed_effort(history: InitialHistory) {
-    let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
-        CodexAuth::from_api_key("Test API Key"),
-        Vec::new(),
-        |config| {
-            config
-                .features
-                .enable(Feature::ReasoningEffortOverride)
-                .unwrap();
-        },
-    )
-    .await;
+    let (mut session, turn_context, _events) =
+        make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                config
+                    .features
+                    .enable(Feature::ReasoningEffortOverride)
+                    .unwrap();
+            },
+        )
+        .await;
+    if matches!(&history, InitialHistory::Forked(_)) {
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    }
     let mut model_info = Arc::clone(&turn_context.initial_settings.model_info);
     Arc::make_mut(&mut model_info).supports_reasoning_effort_updates = true;
     let mut selected = turn_context.initial_settings.selected().clone();
