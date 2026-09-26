@@ -40,6 +40,10 @@ fn settings_item(
                 active_permission_profile,
                 cwd: cwd(),
                 runtime_workspace_roots: None,
+                environments: None,
+                workspace_roots: None,
+                profile_workspace_roots: None,
+                windows_sandbox_level: None,
                 reasoning_effort: None,
                 reasoning_summary: None,
                 personality: None,
@@ -92,6 +96,19 @@ fn turn_context_item(
     })
 }
 
+fn turn_started_item(turn_id: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TurnStarted(
+        codex_protocol::protocol::TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        },
+    ))
+}
+
 #[test]
 fn latest_settings_snapshot_wins() {
     let expected = PersistedResumeSettings {
@@ -137,6 +154,33 @@ fn latest_turn_context_wins_over_earlier_settings_update() {
     ];
 
     assert_eq!(latest_persisted_resume_settings(&history), Some(expected));
+}
+
+#[test]
+fn settings_applied_during_turn_wins_over_stale_compaction_context() {
+    let history = vec![
+        turn_started_item("turn-1"),
+        settings_item(
+            AskForApproval::Never,
+            ApprovalsReviewer::AutoReview,
+            Some(ActivePermissionProfile::new("dev")),
+        ),
+        turn_context_item(
+            "turn-1",
+            AskForApproval::OnRequest,
+            Some(ApprovalsReviewer::User),
+            Some(ActivePermissionProfile::read_only()),
+        ),
+    ];
+
+    assert_eq!(
+        latest_persisted_resume_settings(&history),
+        Some(PersistedResumeSettings {
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+            active_permission_profile: Some(ActivePermissionProfile::new("dev")),
+        })
+    );
 }
 
 #[test]

@@ -2587,6 +2587,7 @@ async fn paginated_fork_rollout_file_open_count(
                     window_id: None,
                     compaction_response_id: None,
                     latest_token_usage_record: None,
+                    segment_state_checkpoint: None,
                 }),
                 RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some(turn_id.clone()),
