@@ -1014,13 +1014,20 @@ impl Session {
         }
         let configured_config = Arc::clone(&config);
         let configured_multi_agent_version = config.multi_agent_version_override();
-        let multi_agent_version = configured_or_persisted_multi_agent_version(
-            &conversation_history,
-            configured_multi_agent_version,
-        )
-        .or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        // Internal sessions must not gain agent tools from Frodex's default v2 setting.
+        let multi_agent_version = if inherited_multi_agent_version
+            == Some(MultiAgentVersion::Disabled)
+        {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            configured_or_persisted_multi_agent_version(
+                &conversation_history,
+                configured_multi_agent_version,
+            )
+            .or_else(|| {
+                resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+            })
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );

@@ -211,9 +211,15 @@ impl LocalAgentControl {
                     )
                     .await?
                 };
-                if let Some(communication) = delivered_parent_message {
-                    self.record_goal_supervisor_followup_action(target, &communication)
-                        .await;
+                if let Some(communication) = delivered_parent_message
+                    && !self
+                        .record_goal_supervisor_followup_action(target, &communication)
+                        .await
+                {
+                    return Err(CodexErr::InvalidRequest(
+                        "The parent received the follow-up, but its goal supervisor action was not recorded."
+                            .to_string(),
+                    ));
                 }
                 (receiver, submission_id)
             }

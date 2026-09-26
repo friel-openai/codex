@@ -12676,6 +12676,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     assert!(rx.try_recv().is_err());
 }
 
+#[path = "late_steer_tests.rs"]
+mod late_steer_tests;
+
 async fn submit_steer_only(
     sess: &Arc<Session>,
     input: Vec<UserInput>,
@@ -13316,9 +13319,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     );
 }
 
+#[test_case::test_case(MultiAgentVersion::V1, "user", TurnAborted::INTERRUPTED_GUIDANCE; "v1")]
+#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
-    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+async fn abort_review_task_emits_exited_then_aborted_and_records_history(
+    version: MultiAgentVersion,
+    expected_role: &str,
+    expected_guidance: &str,
+) {
+    let (sess, mut tc, rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("unshared test turn")
+        .multi_agent_version = version;
     let input = vec![TurnInput::UserInput {
         acceptance_order: None,
         content: vec![UserInput::Text {
@@ -13380,14 +13392,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
             let ResponseItem::Message { role, content, .. } = item else {
                 return false;
             };
-            if role != "user" {
+            if role != expected_role {
                 return false;
             }
             content.iter().any(|content_item| {
                 let ContentItem::InputText { text } = content_item else {
                     return false;
                 };
-                TurnAborted::matches_text(text)
+                TurnAborted::matches_text(text) && text.contains(expected_guidance)
             })
         }),
         "expected a model-visible turn aborted marker in history after interrupt"
