@@ -1069,6 +1069,17 @@ impl Session {
                 let guard = managed_guard.as_deref_mut().unwrap_or(&mut local_guard);
                 let live_thread = match &initial_history {
                     InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                        let inherited_history_base = match &initial_history {
+                            InitialHistory::Forked(items) => {
+                                items.iter().find_map(|item| match item {
+                                    RolloutItem::SessionMeta(meta) => meta.meta.history_base,
+                                    _ => None,
+                                })
+                            }
+                            InitialHistory::New
+                            | InitialHistory::Cleared
+                            | InitialHistory::Resumed(_) => None,
+                        };
                         let reference_backed_subagent = is_paginated_subagent
                             && matches!(
                                 &initial_history,
@@ -1076,12 +1087,23 @@ impl Session {
                                     if items.iter().any(|item| matches!(
                                         item,
                                         RolloutItem::RolloutReference(_)
-                                    ))
+                                    )) || inherited_history_base.is_some()
                             );
                         let subagent_history_start_ordinal = if reference_backed_subagent {
-                            Some(initial_rollout_ordinal.checked_add(2).ok_or_else(|| {
-                                anyhow::anyhow!("reference-backed subagent ordinal overflow")
-                            })?)
+                            let local_metadata_records = if inherited_history_base.is_some() {
+                                1
+                            } else {
+                                2
+                            };
+                            Some(
+                                initial_rollout_ordinal
+                                    .checked_add(local_metadata_records)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "reference-backed subagent ordinal overflow"
+                                        )
+                                    })?,
+                            )
                         } else {
                             None
                         };
@@ -1102,7 +1124,7 @@ impl Session {
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
                             history_mode: session_configuration.history_mode,
-                            history_base: None,
+                            history_base: inherited_history_base,
                             subagent_history_start_ordinal,
                             persistence_mode: if defer_ephemeral_rollout {
                                 ThreadPersistenceMode::Deferred
@@ -1129,6 +1151,7 @@ impl Session {
                             && !items
                                 .iter()
                                 .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+                            && inherited_history_base.is_none()
                         {
                             LiveThread::create_with_inherited_model_context(
                                 Arc::clone(&thread_store),

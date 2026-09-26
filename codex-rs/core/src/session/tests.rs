@@ -4498,12 +4498,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
-    assert_eq!(
-        child_rollout_items
+    assert!(
+        matches!(child_rollout_items.first(), Some(RolloutItem::SessionMeta(meta))
+        if meta.meta.history_base.is_some())
+    );
+    assert!(
+        !child_rollout_items
             .iter()
-            .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
-            .count(),
-        1
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
     );
     let child_response_items = child_rollout_items
         .iter()
@@ -4752,7 +4754,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
     assert!(
         child_rollout_items
             .iter()
-            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .any(|line| matches!(&line.item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()))
     );
     assert!(
         child_rollout_items
@@ -5754,14 +5756,39 @@ async fn record_legacy_guardian_checkpoint(
 
 #[tokio::test]
 async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
+    assert_compacted_history_freezes_the_previous_rollout_segment(
+        /*thread_owned_guardian*/ false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn replace_compacted_history_freezes_the_previous_rollout_segment_with_thread_owned_guardian()
+{
+    assert_compacted_history_freezes_the_previous_rollout_segment(
+        /*thread_owned_guardian*/ true,
+    )
+    .await;
+}
+
+async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+    thread_owned_guardian: bool,
+) {
     let (mut session, turn_context, _) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
-            config
-                .features
-                .enable(Feature::GuardianThreadContext)
-                .expect("enable thread-owned Guardian context");
+            if thread_owned_guardian {
+                config
+                    .features
+                    .enable(Feature::GuardianThreadContext)
+                    .expect("enable thread-owned Guardian context");
+            } else {
+                config
+                    .features
+                    .disable(Feature::GuardianThreadContext)
+                    .expect("disable thread-owned Guardian context");
+            }
         },
     )
     .await;
@@ -5769,37 +5796,58 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
     let expected_world_state = world_state.snapshot();
     let session = Arc::get_mut(&mut session).expect("session should have one owner");
     let stable_path = attach_thread_persistence(session).await;
+    let retained_answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "retained-turn".to_owned(),
+            call_id: "ask-before-compaction".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Publish?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: Some(1),
+    };
     session
-        .record_retained_context(codex_history::RetainedContextEvent::VerifiedAnswer {
-            answer: codex_history::VerifiedAnswer {
-                turn_id: "retained-turn".to_owned(),
-                call_id: "ask-before-compaction".to_owned(),
-                questions: vec![codex_history::VerifiedQuestionAnswer {
-                    question: "Publish?".to_owned(),
-                    answer: "Only privately.".to_owned(),
-                }],
-            },
-            acceptance_order: Some(1),
-        })
+        .record_retained_context(retained_answer.clone())
         .await;
+    let user_item_id = ResponseItemId::with_suffix("msg", "before-compaction");
+    let mut user_item = user_message("before compaction");
+    user_item.set_id(Some(user_item_id.clone()));
+    let mut expected_retained_context = codex_history::RetainedContext::default();
+    expected_retained_context.record(&retained_answer);
+    if thread_owned_guardian {
+        expected_retained_context.record_user_message(
+            codex_history::RetainedUserMessage {
+                turn_id: turn_context.sub_id.clone(),
+                message_id: Some(user_item_id.as_str().to_owned()),
+                text: "before compaction".to_owned(),
+                complete: false,
+            },
+            codex_history::RetainedInputSource::Local(None),
+        );
+        // Recording the assistant message reserves the next shared input order.
+        assert_eq!(expected_retained_context.reserve_order(), 3);
+    } else {
+        expected_retained_context.mark_user_messages_incomplete();
+    }
     session
         .record_conversation_items(
             turn_context.as_ref(),
             turn_context.model_info(),
-            &[
-                user_message("before compaction"),
-                assistant_message("before compaction answer"),
-            ],
+            &[user_item, assistant_message("before compaction answer")],
         )
         .await;
-    let guardian_checkpoint = record_legacy_guardian_checkpoint(session, &turn_context).await;
-    let expected_retained_context = session
-        .state
-        .lock()
-        .await
-        .history
-        .retained_context()
-        .clone();
+    assert_eq!(
+        session.state.lock().await.history.retained_context(),
+        &expected_retained_context,
+    );
+    let guardian_checkpoint = if thread_owned_guardian {
+        None
+    } else {
+        Some(codex_history::GuardianHistoryCheckpoint(raw_history_items(
+            &session.clone_history().await,
+        )))
+    };
     session
         .flush_rollout()
         .await
@@ -5865,7 +5913,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         RolloutItem::Compacted(item) => item.guardian_history.clone(),
         _ => None,
     });
-    assert_eq!(persisted_guardian, Some(guardian_checkpoint.clone()));
+    assert_eq!(persisted_guardian, guardian_checkpoint.clone());
     assert!(replacement_items.iter().any(|item| {
         matches!(
             item,
@@ -5973,6 +6021,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         Some(expected_world_state)
     );
     assert_eq!(reconstructed.retained_context, expected_retained_context);
+    assert_eq!(reconstructed.guardian_history, guardian_checkpoint);
 }
 
 #[tokio::test]
@@ -6010,7 +6059,22 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
     };
     let (_, history_reset) = session.history_reset().await;
     let state_before_compaction = session.state.lock().await.checkpoint_mutation_snapshot();
+    let guardian_before_compaction = session
+        .state
+        .lock()
+        .await
+        .history
+        .guardian_history_checkpoint();
     let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
+    let history_params = codex_thread_store::LoadThreadHistoryParams {
+        thread_id: session.thread_id,
+        include_archived: false,
+    };
+    let stored_before = store
+        .load_history(history_params.clone())
+        .await
+        .expect("read initial storage");
+    store.fail_next_checkpoint(session.thread_id).await;
 
     let error = session
         .replace_compacted_history(
@@ -6031,7 +6095,18 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
             },
         )
         .await
-        .expect_err("unsupported checkpoint persistence must not commit");
+        .expect_err("failed checkpoint persistence must not commit");
+    assert_eq!(
+        serde_json::to_value(
+            store
+                .load_history(history_params)
+                .await
+                .expect("read unchanged storage")
+        )
+        .unwrap(),
+        serde_json::to_value(stored_before).unwrap(),
+        "NotCommitted must leave every persisted record unchanged",
+    );
     assert!(
         error
             .to_string()
@@ -6063,6 +6138,16 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
                 .as_ref()
         ),
         GuardianContextMode::Legacy
+    );
+    assert_eq!(
+        session
+            .state
+            .lock()
+            .await
+            .history
+            .guardian_history_checkpoint(),
+        guardian_before_compaction,
+        "failed compaction must preserve durable Guardian history"
     );
     assert!(!session.persistence_restart_required());
 
