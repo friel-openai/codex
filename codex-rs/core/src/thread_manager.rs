@@ -1839,7 +1839,9 @@ impl ThreadManager {
         };
         model_history_override.extend_from_slice(synthesized_suffix);
         let shared_model_response_items = prepared.shared_model_response_items.clone();
-        let mut shared_model_state = if let Some(items) = &shared_model_response_items {
+        let mut shared_model_state = if let Some(items) = &shared_model_response_items
+            && prepared.model_state_origin == codex_thread_store::ForkModelStateOrigin::LoadedSource
+        {
             if let Ok(source) = self.state.get_thread(source_thread_id).await {
                 Some(
                     source
@@ -1884,7 +1886,7 @@ impl ThreadManager {
                 ForkHistory {
                     snapshot: None,
                     initial_history: history,
-                    forked_from_ordinal_exclusive: Some(prepared.source_end_ordinal_exclusive),
+                    forked_from_ordinal_exclusive: prepared.source_end_ordinal_exclusive,
                     model_history_override: Some(model_history_override),
                     settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                     shared_model_response_items,
@@ -2383,7 +2385,7 @@ impl ThreadManagerState {
                         "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                     ))
                 })?;
-            let forked_from_ordinal_exclusive = Some(prepared.source_end_ordinal_exclusive);
+            let forked_from_ordinal_exclusive = prepared.source_end_ordinal_exclusive;
             if let Some(copied_history) = &prepared.copied_history {
                 let logical_history = copied_history.as_ref().clone();
                 let model_history = prepared.model_context.as_ref().clone();

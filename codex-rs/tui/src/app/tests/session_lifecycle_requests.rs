@@ -2610,6 +2610,97 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
     Ok(())
 }
 
+#[test]
+fn durable_fork_import_hydrates_bounded_history_and_keeps_parent_title() -> Result<()> {
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("durable-fork-import-history".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(
+                    durable_fork_import_hydrates_bounded_history_and_keeps_parent_title_inner(),
+                )
+        })?
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+async fn durable_fork_import_hydrates_bounded_history_and_keeps_parent_title_inner() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
+    app.local_settings.tui.alternate_screen = codex_config::types::AltScreenMode::Never;
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(1);
+    let parent_thread_id = create_history_rollout(
+        &app.config,
+        ThreadHistoryMode::Paginated,
+        "durable fork import parent",
+    )?;
+    let (mut source, source_requests, source_proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    source
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            parent_thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+        )
+        .await?;
+    source
+        .thread_set_name(parent_thread_id, "Durable fork parent".to_string())
+        .await?;
+    let handoff = source
+        .prepare_fork_handoff(app.config.clone(), parent_thread_id)
+        .await?;
+    let prepared = recorded_params(&source_requests, "thread/fork/prepare");
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0]["excludeTurns"], true);
+    assert_eq!(
+        prepared[0]["runtimeWorkspaceRoots"],
+        serde_json::to_value(&app.config.workspace_roots)?
+    );
+    let (mut receiver, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    let imported = receiver
+        .import_fork_handoff(&app.local_settings, app.config.clone(), handoff.as_path())
+        .await?;
+
+    assert_ne!(imported.session.thread_id, parent_thread_id);
+    assert_eq!(
+        imported.session.fork_parent_title.as_deref(),
+        Some("Durable fork parent")
+    );
+    assert!(!imported.turns.is_empty());
+    assert_eq!(recorded_params(&requests, "thread/fork/import").len(), 1);
+    assert_eq!(recorded_params(&requests, "thread/turns/list").len(), 1);
+    let item_requests = recorded_params(&requests, "thread/items/list");
+    assert!(!item_requests.is_empty());
+    assert_eq!(item_requests[0]["limit"], 1);
+    let reads = recorded_params(&requests, "thread/read");
+    assert!(
+        reads.iter().all(|params| params["includeTurns"] != true),
+        "durable fork import requested full history: {reads:?}"
+    );
+
+    receiver.shutdown().await?;
+    source.shutdown().await?;
+    proxy.await??;
+    source_proxy.await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
