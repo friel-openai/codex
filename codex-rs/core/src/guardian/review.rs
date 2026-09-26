@@ -14,7 +14,11 @@ use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
 use codex_guardian_reviewer::GuardianReviewSessionLimits;
 use codex_guardian_reviewer::ReviewModel;
+use codex_models_manager::CustomModelConfig;
+use codex_models_manager::ModelRoutingCandidate;
+use codex_models_manager::ModelRoutingProfile;
 use codex_prompts::ResolvedModelMessages;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ReviewDecision;
@@ -46,6 +50,9 @@ use super::review_session::build_guardian_review_session_config;
 use codex_guardian_reviewer::guardian_output_schema;
 
 const GUARDIAN_PLUGIN_ATTRIBUTION_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const ULTRAFAST_AUTO_REVIEW_MODEL: &str = "gpt-5.6-sol";
+const ULTRAFAST_AUTO_REVIEW_PROFILE: &str = "__frodex_auto_review_ultrafast";
+const ULTRAFAST_SERVICE_TIER: &str = "ultrafast";
 
 async fn plugin_attribution_for_guardian_request(
     context: &GuardianReviewContext,
@@ -121,7 +128,6 @@ pub(crate) struct GuardianReviewOptions {
 pub(super) struct GuardianReviewSessionConfig {
     pub(super) spawn_config: crate::config::Config,
     pub(super) node_repl_policy: GuardianNodeReplPolicy,
-    pub(super) compaction_model_hash: Option<String>,
     review_model: ReviewModel,
 }
 
@@ -143,6 +149,7 @@ pub(super) async fn guardian_review_session_config(
         .get::<codex_guardian_reviewer::ReviewerConfig<crate::config::Config>>()
         .ok_or_else(|| anyhow::anyhow!("Guardian reviewer configuration is not installed"))?;
     let model_messages = ResolvedModelMessages::from_model(&guardian_model_info);
+    let use_ultrafast = turn.config.auto_review_use_ultrafast;
     let mut spawn_config = build_guardian_review_session_config(
         (reviewer_config.0)(turn.config.as_ref())?,
         live_network_config,
@@ -162,13 +169,33 @@ pub(super) async fn guardian_review_session_config(
                 )
             })?;
     }
-    if review_model.model != context.model_info.slug {
+    if use_ultrafast {
+        let candidates = [ULTRAFAST_SERVICE_TIER, ServiceTier::Fast.request_value()]
+            .into_iter()
+            .map(|service_tier| ModelRoutingCandidate {
+                model: ULTRAFAST_AUTO_REVIEW_MODEL.to_string(),
+                reasoning_effort: review_model.reasoning_effort.clone(),
+                service_tier: Some(service_tier.to_string()),
+            })
+            .collect();
+        spawn_config.custom_models.insert(
+            ULTRAFAST_AUTO_REVIEW_PROFILE.to_string(),
+            CustomModelConfig {
+                model: ULTRAFAST_AUTO_REVIEW_MODEL.to_string(),
+                routing_profile: Some(ModelRoutingProfile { candidates }),
+                model_context_window: None,
+                model_auto_compact_token_limit: None,
+                trust_candidate_constraints: true,
+            },
+        );
+        spawn_config.model = Some(ULTRAFAST_AUTO_REVIEW_PROFILE.to_string());
+    }
+    if use_ultrafast || review_model.model != context.model_info.slug {
         spawn_config.model_context_window = None;
         spawn_config.model_auto_compact_token_limit = None;
     }
     Ok(GuardianReviewSessionConfig {
         spawn_config,
-        compaction_model_hash: guardian_model_info.comp_hash.clone(),
         node_repl_policy: GuardianNodeReplPolicy::from_messages(model_messages),
         review_model,
     })
@@ -227,7 +254,6 @@ async fn run_guardian_review_session_before_deadline(
                 reasons,
                 schema,
                 review_model: session_config.review_model,
-                compaction_model_hash: session_config.compaction_model_hash,
                 reasoning_summary: context.reasoning_summary,
                 personality: context.personality,
                 external_cancel,

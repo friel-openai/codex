@@ -49,7 +49,6 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
     .unwrap();
     params.parent_session = Arc::clone(&parent);
     params.parent_context = GuardianReviewContext::from(Arc::clone(&turn));
-    params.compaction_model_hash = Some("matching".to_owned());
     let evidence: ResponseItem = serde_json::from_value(serde_json::json!({
         "type": "function_call_output", "call_id": "prior-inspection", "output": EVIDENCE
     }))
@@ -252,7 +251,6 @@ async fn test_review_params() -> GuardianReviewSessionParams {
             model_overridden: false,
             model_override: None,
         },
-        compaction_model_hash: None,
         reasoning_summary,
         personality,
         external_cancel: None,
@@ -479,7 +477,7 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
     }]);
     assert_eq!(
         policy
-            .parent_compaction(&history, Some("compatible"))
+            .parent_compaction(&history)
             .expect("valid checkpoint"),
         Some(item)
     );
@@ -494,7 +492,7 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
         .into(),
     );
     history.replace_annotated(items);
-    let result = policy.parent_compaction(&history, Some("compatible"));
+    let result = policy.parent_compaction(&history);
     if thread_context_enabled {
         assert!(result.is_err());
     } else {
@@ -701,8 +699,10 @@ fn token_usage_delta_never_reports_negative_usage() {
     );
 }
 
+#[test_case::test_case(Some("guardian-routing-alias"); "configured routing alias")]
+#[test_case::test_case(None; "concrete model fallback")]
 #[tokio::test]
-async fn run_review_on_reused_session_waits_for_submitted_turn() {
+async fn run_review_on_reused_session_waits_for_submitted_turn(routing_model: Option<&str>) {
     let (review_session, tx_event, rx_sub) = test_review_session().await;
     {
         let mut state = review_session.state.lock().await;
@@ -713,7 +713,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
                 transcript_entry_count: 0,
             });
     }
-    let params = test_review_params().await;
+    let mut params = test_review_params().await;
+    let concrete_model = params.review_model.model.clone();
+    params.spawn_config.model = routing_model.map(str::to_string);
+    let expected_submission_model = routing_model.unwrap_or(&concrete_model).to_string();
 
     let review = tokio::spawn(async move {
         run_review_on_session(
@@ -726,9 +729,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
     });
     let submission = rx_sub.recv().await.expect("guardian submission");
     let id = submission.id;
-    let Op::TurnInput { reply, .. } = submission.op else {
+    let Op::TurnInput { request, reply, .. } = submission.op else {
         panic!("expected turn-input submission");
     };
+    assert_eq!(
+        request
+            .thread_settings
+            .collaboration_mode
+            .expect("reviewer collaboration mode")
+            .settings
+            .model,
+        expected_submission_model
+    );
     reply
         .send(Ok(TurnInputSubmission::Started {
             turn_id: id.clone(),
@@ -752,6 +764,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
         panic!("expected submitted turn completion");
     };
     assert_eq!(last_agent_message.as_deref(), Some("fresh"));
+    assert_eq!(analytics_result.guardian_model, Some(concrete_model));
     assert_eq!(analytics_result.time_to_first_token_ms, Some(42));
     assert_eq!(disposition, SessionDisposition::Reusable);
 }

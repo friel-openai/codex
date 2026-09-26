@@ -113,7 +113,6 @@ pub(crate) struct GuardianReviewSessionParams {
     pub(crate) reasons: ApprovalRequestReasons,
     pub(crate) schema: Value,
     pub(crate) review_model: ReviewModel,
-    pub(crate) compaction_model_hash: Option<String>,
     pub(crate) reasoning_summary: ReasoningSummaryConfig,
     pub(crate) personality: Option<Personality>,
     pub(crate) external_cancel: Option<CancellationToken>,
@@ -665,7 +664,12 @@ async fn run_review_on_session(
         permission_profile: params.spawn_config.permissions.permission_profile().clone(),
         reasoning_summary: params.reasoning_summary,
         personality: params.personality,
-        model: review_model.model.clone(),
+        // Per-review settings must preserve the routing alias selected at session creation.
+        model: params
+            .spawn_config
+            .model
+            .clone()
+            .unwrap_or_else(|| review_model.model.clone()),
         reasoning_effort: review_model.reasoning_effort.clone(),
         parent_response_id: params.parent_context.parent_response_id.clone(),
         schema: params.schema.clone(),
