@@ -372,7 +372,9 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
         vec![ThreadItem::AgentMessage {
             id: PARTIAL_MESSAGE_ID.to_string(),
             text: String::new(),
+            questions: None,
             phase: None,
+            delivery: None,
             memory_citation: None,
         }]
     );
@@ -382,7 +384,9 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
         vec![ThreadItem::AgentMessage {
             id: PARTIAL_MESSAGE_ID.to_string(),
             text: PARTIAL_TEXT.to_string(),
+            questions: None,
             phase: None,
+            delivery: None,
             memory_citation: None,
         }]
     );
@@ -459,6 +463,7 @@ fn write_profile_config(
     };
     MockResponsesConfig::new(server_uri)
         .with_model(profile)
+        .with_root_config("tools.update_plan.enabled = true")
         .disable_feature(Feature::RemoteModels)
         .enable_feature(Feature::FastMode)
         .with_extra_config(&format!(
