@@ -126,7 +126,10 @@ impl ToolExecutor<ToolInvocation> for AdoptHandler {
         create_adopt_agent_tool(self.hide_agent_metadata)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             handle_agent_start(invocation, AgentStartOperation::Adopt)
                 .await
@@ -308,7 +311,12 @@ async fn handle_agent_start(
                         parent_turn_id: Some(turn.sub_id.clone()),
                         root_turn_id: turn.turn_metadata_state.root_turn_id(),
                         turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-                        environments: Some(step_context.environments.all_selections()),
+                        environments: Some(
+                            step_context
+                                .environments
+                                .to_spawn_selections()
+                                .map_err(collab_spawn_error)?,
+                        ),
                         multi_agent_v2_usage_hints,
                         cyber_access_program: turn.cyber_access_program,
                         initial_task_message: None,

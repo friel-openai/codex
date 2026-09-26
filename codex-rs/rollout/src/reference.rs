@@ -91,19 +91,29 @@ struct ExpansionCursor {
 
 /// Keeps cycle detection and optional immutable reuse scoped to a single reference expansion.
 struct ExpansionState<'a> {
+    /// Emit source SessionMeta transitions for callers reducing mixed persistence formats.
+    retain_source_metadata: bool,
     /// Reference identities currently being expanded for cycle detection.
     active_segments: HashSet<ReferenceIdentity>,
+    /// Physical native predecessors currently being expanded, including mixed-format cycles.
+    active_history_bases: HashSet<RolloutId>,
     /// Immutable records reused only during this request's expansion attempts.
     cache: Option<&'a mut ImmutableRolloutCache>,
 }
 
 /// Owns one referenced segment while preserving chronological replay without call-stack growth.
 struct ExpansionFrame {
+    /// Restores the containing segment's format after a predecessor finishes expanding.
+    session_meta: RolloutLine,
     lines: std::vec::IntoIter<RolloutLine>,
     materialized: Vec<RolloutLine>,
     cursor: ExpansionCursor,
     inherited_filter_texts: Option<Arc<[String]>>,
     inbound_reference: Option<InboundReference>,
+    /// Expand the native predecessor before this segment's local records.
+    history_base: Option<HistoryPosition>,
+    /// Remove this physical identity from cycle detection when the frame completes.
+    inbound_history_base: Option<RolloutId>,
 }
 
 /// Applies the source reference's filter and fork cutoff after its segment finishes expanding.
@@ -143,6 +153,8 @@ pub struct BoundedRolloutMaterializer<'a> {
     codex_home: &'a Path,
     rollout_path: &'a Path,
     cache: ImmutableRolloutCache,
+    /// Migration comparisons need each physical segment's persistence format.
+    retain_source_metadata: bool,
 }
 
 impl<'a> BoundedRolloutMaterializer<'a> {
@@ -152,7 +164,15 @@ impl<'a> BoundedRolloutMaterializer<'a> {
             codex_home,
             rollout_path,
             cache: ImmutableRolloutCache::default(),
+            retain_source_metadata: false,
         }
+    }
+
+    /// Includes SessionMeta transitions between expanded segments. These markers describe source
+    /// formats, not additional physical records, and must not advance replay item indices.
+    pub fn retaining_source_metadata(mut self) -> Self {
+        self.retain_source_metadata = true;
+        self
     }
 
     /// Expands from the active rollout while reusing previously validated immutable records.
@@ -168,6 +188,7 @@ impl<'a> BoundedRolloutMaterializer<'a> {
             MaterializationPolicy::OrdinaryReferenceLimit(ordinary_reference_limit),
             &mut has_older_reference,
             Some(&mut self.cache),
+            self.retain_source_metadata,
         )
         .await?;
         Ok(BoundedRolloutLines {
@@ -532,6 +553,7 @@ pub async fn materialize_model_context_rollout_items_from(
             MaterializationPolicy::OrdinaryReferenceLimit(ordinary_reference_limit),
             &mut has_older_reference,
             Some(&mut cache),
+            /*retain_source_metadata*/ false,
         )
         .await?;
         let mut scan = ModelContextScan::default();
@@ -634,6 +656,7 @@ async fn materialize_rollout_lines_from_with_policy(
         policy,
         has_older_reference,
         /*cache*/ None,
+        /*retain_source_metadata*/ false,
     )
     .await
 }
@@ -644,12 +667,13 @@ async fn materialize_rollout_lines_from_with_cache(
     policy: MaterializationPolicy,
     has_older_reference: &mut bool,
     cache: Option<&mut ImmutableRolloutCache>,
+    retain_source_metadata: bool,
 ) -> io::Result<Vec<RolloutLine>> {
-    let lines =
-        materialize_history_base_prefix(codex_home, lines, policy, has_older_reference).await?;
     let root_thread_id = canonical_session_meta(&lines)?.meta.id;
     let mut state = ExpansionState {
+        retain_source_metadata,
         active_segments: HashSet::new(),
+        active_history_bases: HashSet::new(),
         cache,
     };
 
@@ -782,22 +806,98 @@ async fn expand_lines(
     policy: MaterializationPolicy,
     has_older_reference: &mut bool,
 ) -> io::Result<Vec<RolloutLine>> {
+    let metadata = canonical_session_meta(&lines)?;
+    let history_base = (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
+        .then_some(metadata.meta.history_base)
+        .flatten();
     let mut frames = vec![ExpansionFrame {
+        session_meta: lines[0].clone(),
         materialized: Vec::with_capacity(lines.len()),
         lines: lines.into_iter(),
         cursor,
         inherited_filter_texts: inherited_filter_texts
             .map(|filter_texts| Arc::<[String]>::from(filter_texts.to_vec())),
         inbound_reference: None,
+        history_base,
+        inbound_history_base: None,
     }];
 
     while let Some(frame) = frames.last_mut() {
+        if let Some(position) = frame.history_base.take() {
+            let ordinary_limit = match policy {
+                MaterializationPolicy::Complete => None,
+                MaterializationPolicy::RecentSegments => Some(FRODEX_RECENT_ROLLOUT_REFERENCES),
+                MaterializationPolicy::OrdinaryReferenceLimit(limit) => Some(limit),
+            };
+            if ordinary_limit.is_some_and(|limit| frame.cursor.ordinary_reference_depth >= limit) {
+                *has_older_reference = true;
+                continue;
+            }
+            if !state.active_history_bases.insert(position.thread_id) {
+                return Err(io::Error::other(format!(
+                    "history_base cycle detected at rollout {}",
+                    position.thread_id
+                )));
+            }
+            let predecessor = load_history_base_prefix(codex_home, position).await?;
+            let metadata = canonical_session_meta(&predecessor)?;
+            let fork_boundary = metadata.meta.id != frame.cursor.current_thread_id;
+            if fork_boundary && frame.cursor.graph_depth >= MAX_ROLLOUT_REFERENCE_DEPTH {
+                return Err(io::Error::other(format!(
+                    "history_base graph exceeds maximum depth of {MAX_ROLLOUT_REFERENCE_DEPTH}"
+                )));
+            }
+            if let Some(cache) = state.cache.as_deref_mut() {
+                cache.saw_cross_thread_reference |= fork_boundary;
+            }
+            let predecessor_frame = ExpansionFrame {
+                session_meta: predecessor[0].clone(),
+                materialized: if state.retain_source_metadata {
+                    vec![predecessor[0].clone()]
+                } else {
+                    Vec::with_capacity(predecessor.len())
+                },
+                cursor: ExpansionCursor {
+                    graph_depth: frame.cursor.graph_depth + usize::from(fork_boundary),
+                    ordinary_reference_depth: frame.cursor.ordinary_reference_depth + 1,
+                    current_thread_id: metadata.meta.id,
+                },
+                history_base: (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
+                    .then_some(metadata.meta.history_base)
+                    .flatten(),
+                lines: predecessor.into_iter(),
+                inherited_filter_texts: frame.inherited_filter_texts.clone(),
+                inbound_reference: None,
+                inbound_history_base: Some(position.thread_id),
+            };
+            frames.push(predecessor_frame);
+            continue;
+        }
         let Some(mut line) = frame.lines.next() else {
             let Some(mut completed) = frames.pop() else {
                 return Err(io::Error::other(
                     "rollout reference expansion stack is empty",
                 ));
             };
+            if let Some(rollout_id) = completed.inbound_history_base {
+                state.active_history_bases.remove(&rollout_id);
+                let Some(parent) = frames.last_mut() else {
+                    return Err(io::Error::other(
+                        "history_base expansion frame has no parent",
+                    ));
+                };
+                // A native predecessor is processed before any local records. Transfer its
+                // buffer rather than moving the whole prefix once per ancestor.
+                debug_assert!(
+                    parent.materialized.is_empty()
+                        || (state.retain_source_metadata && parent.materialized.len() == 1)
+                );
+                parent.materialized = completed.materialized;
+                if state.retain_source_metadata {
+                    parent.materialized.push(parent.session_meta.clone());
+                }
+                continue;
+            }
             if let Some(inbound) = completed.inbound_reference {
                 state.active_segments.remove(&inbound.identity);
                 if let Some(filter_texts) = inbound.filter_texts.as_deref() {
@@ -812,6 +912,9 @@ async fn expand_lines(
                     ));
                 };
                 parent.materialized.extend(completed.materialized);
+                if state.retain_source_metadata {
+                    parent.materialized.push(parent.session_meta.clone());
+                }
                 continue;
             }
             return Ok(completed.materialized);
@@ -893,7 +996,12 @@ async fn expand_lines(
         .map(Arc::<[String]>::from);
 
         frames.push(ExpansionFrame {
-            materialized: Vec::with_capacity(referenced_lines.len().saturating_sub(1)),
+            session_meta: referenced_lines[0].clone(),
+            materialized: if state.retain_source_metadata {
+                vec![referenced_lines[0].clone()]
+            } else {
+                Vec::with_capacity(referenced_lines.len().saturating_sub(1))
+            },
             lines: referenced_lines
                 .into_iter()
                 .skip(1)
@@ -993,15 +1101,22 @@ async fn read_candidate_session_meta(path: &Path) -> io::Result<SessionMetaLine>
             format!("rollout at {} is empty", path.display()),
         ));
     };
-    let line = crate::parse_rollout_line(first_line.as_str()).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "rollout at {} has invalid session metadata: {err}",
-                path.display()
-            ),
-        )
-    })?;
+    let line = RolloutRecorder::parse_rollout_line_bytes(first_line.as_bytes())
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "rollout at {} has invalid session metadata: {err}",
+                    path.display()
+                ),
+            )
+        })?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("rollout at {} has invalid session metadata", path.display()),
+            )
+        })?;
     match line.item {
         RolloutItem::SessionMeta(meta) => Ok(meta),
         _ => Err(io::Error::new(

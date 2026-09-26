@@ -21,6 +21,10 @@ use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::ReviewCodeLocation;
+use codex_protocol::protocol::ReviewFinding;
+use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -1579,6 +1583,246 @@ async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io
 
     let lines = read_rollout_lines(&rollout_path)?;
     assert_eq!(lines.last().and_then(|line| line.ordinal), Some(5));
+    Ok(())
+}
+
+#[test]
+fn rate_limit_decimal_spellings_decode_through_tagged_rollout_events() {
+    for spelling in [
+        "12.50",
+        "1.25e1",
+        "125e-1",
+        "12.50000000000000000000000000000001",
+    ] {
+        let window =
+            format!(r#"{{"used_percent":{spelling},"window_minutes":300,"resets_at":1786689000}}"#);
+        let event =
+            format!(r#"{{"type":"token_count","info":null,"rate_limits":{{"primary":{window}}}}}"#);
+        let record = format!(
+            r#"{{"timestamp":"2025-01-03T12:00:00Z","ordinal":274,"type":"event_msg","payload":{event}}}"#
+        );
+        let direct_window: codex_protocol::protocol::RateLimitWindow =
+            serde_json::from_str(&window).expect("decode direct rate-limit number");
+        let direct_event: EventMsg =
+            serde_json::from_str(&event).expect("decode tagged token count");
+        let canonical = RolloutRecorder::parse_rollout_line_bytes(record.as_bytes())
+            .expect("decode canonical rollout")
+            .expect("numeric event retained");
+        let expected_window = codex_protocol::protocol::RateLimitWindow {
+            used_percent: 12.5,
+            window_minutes: Some(300),
+            resets_at: Some(1786689000),
+        };
+        assert_eq!(direct_window, expected_window, "{spelling}");
+        for decoded in [RolloutItem::EventMsg(direct_event), canonical.item] {
+            let RolloutItem::EventMsg(EventMsg::TokenCount(event)) = decoded else {
+                panic!("numeric event changed variants");
+            };
+            assert_eq!(
+                event.rate_limits.expect("limits").primary,
+                Some(expected_window.clone()),
+                "{spelling}"
+            );
+        }
+    }
+    for invalid in [r#""12.5""#, "null", "{}", "1e10000"] {
+        let event = format!(
+            r#"{{"type":"token_count","info":null,"rate_limits":{{"primary":{{"used_percent":{invalid}}}}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<EventMsg>(&event).is_err(),
+            "reject {invalid}"
+        );
+    }
+}
+
+#[test]
+fn review_confidence_decimal_spellings_decode_through_tagged_rollout_events() {
+    let output = |finding: &str, overall: &str| {
+        format!(
+            r#"{{"findings":[{{"title":"Review finding","body":"Finding evidence","confidence_score":{finding},"priority":2,"code_location":{{"absolute_file_path":"/tmp/review.rs","line_range":{{"start":3,"end":5}}}}}}],"overall_correctness":"patch is incorrect","overall_explanation":"Review evidence","overall_confidence_score":{overall}}}"#
+        )
+    };
+    let events = |output: &str| {
+        [
+            format!(
+                r#"{{"type":"exited_review_mode","turn_id":"turn-1","item_id":"review-1","review_output":{output}}}"#
+            ),
+            format!(
+                r#"{{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000001","turn_id":"turn-1","started_at_ms":1,"completed_at_ms":2,"item":{{"type":"ExitedReviewMode","id":"review-1","review_output":{output}}}}}"#
+            ),
+        ]
+    };
+    let record = |event: &str| {
+        format!(
+            r#"{{"timestamp":"2025-01-03T12:00:00Z","ordinal":275,"type":"event_msg","payload":{event}}}"#
+        )
+    };
+    let expected = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Review finding".to_string(),
+            body: "Finding evidence".to_string(),
+            confidence_score: 0.75,
+            priority: 2,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: PathBuf::from("/tmp/review.rs"),
+                line_range: ReviewLineRange { start: 3, end: 5 },
+            },
+        }],
+        overall_correctness: "patch is incorrect".to_string(),
+        overall_explanation: "Review evidence".to_string(),
+        overall_confidence_score: 0.75,
+    };
+    for spelling in [
+        "0.75",
+        "7.5e-1",
+        "75e-2",
+        "0.75000000000000000000000000000001",
+    ] {
+        for event in events(&output(spelling, spelling)) {
+            let direct: EventMsg =
+                serde_json::from_str(&event).expect("decode tagged review output");
+            let canonical = RolloutRecorder::parse_rollout_line_bytes(record(&event).as_bytes())
+                .expect("decode canonical review output")
+                .expect("review output retained");
+            assert_eq!(canonical.ordinal, Some(275));
+            let RolloutItem::EventMsg(canonical) = canonical.item else {
+                panic!("review output changed rollout variant");
+            };
+            assert_eq!(
+                serde_json::to_value(&direct).expect("serialize direct event"),
+                serde_json::to_value(&canonical).expect("serialize canonical event")
+            );
+            for decoded in [direct, canonical] {
+                let output = match decoded {
+                    EventMsg::ExitedReviewMode(event) => event.review_output,
+                    EventMsg::ItemCompleted(event) => {
+                        let TurnItem::ExitedReviewMode(item) = event.item else {
+                            panic!("review output changed item variant");
+                        };
+                        item.review_output
+                    }
+                    _ => panic!("review output changed event variant"),
+                };
+                assert_eq!(output, Some(expected.clone()), "{spelling}");
+            }
+        }
+    }
+    for invalid in [r#""0.75""#, "null", "{}", "1e100", "1e10000"] {
+        for output in [output(invalid, "0.75"), output("0.75", invalid)] {
+            for event in events(&output) {
+                assert!(
+                    serde_json::from_str::<EventMsg>(&event).is_err(),
+                    "reject direct review confidence {invalid}"
+                );
+                assert!(
+                    RolloutRecorder::parse_rollout_line_bytes(record(&event).as_bytes()).is_err(),
+                    "reject canonical review confidence {invalid}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn append_rollout_item_preserves_ordinal_of_unknown_event() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+    let record = serde_json::json!({
+        "timestamp": "2026-08-18T21:03:49.690Z",
+        "ordinal": 5,
+        "type": "event_msg",
+        "payload": { "type": "future_event", "future_field": { "value": 12.5 } }
+    });
+    let record = serde_json::to_string(&record)?;
+    assert!(
+        RolloutRecorder::parse_rollout_line_bytes(record.as_bytes()).is_err(),
+        "the fixture must exercise a payload this binary cannot decode"
+    );
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    writeln!(file, "{record}")?;
+    drop(file);
+    let before_append = fs::read(&rollout_path)?;
+
+    append_rollout_item_to_path(&rollout_path, &agent_message_item("offline")).await?;
+
+    let source = fs::read_to_string(&rollout_path)?;
+    assert!(source.as_bytes().starts_with(&before_append));
+    let final_line =
+        crate::parse_rollout_line(source.lines().next_back().expect("appended rollout record"))?;
+    assert_eq!(final_line.ordinal, Some(6));
+    Ok(())
+}
+
+#[tokio::test]
+async fn append_rollout_item_uses_ordinal_from_arbitrary_precision_token_count()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+    let token_count = serde_json::json!({
+        "timestamp": "2026-08-18T21:03:49.690Z",
+        "ordinal": 5,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 319590193,
+                    "cached_input_tokens": 312717039,
+                    "cache_write_input_tokens": 6711808,
+                    "output_tokens": 364803,
+                    "reasoning_output_tokens": 57778,
+                    "total_tokens": 319954996
+                },
+                "last_token_usage": {
+                    "input_tokens": 203881,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 203740,
+                    "output_tokens": 280,
+                    "reasoning_output_tokens": 184,
+                    "total_tokens": 204161
+                },
+                "model_context_window": 258400
+            },
+            "rate_limits": {
+                "limit_id": "codex",
+                "limit_name": null,
+                "primary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 1,
+                    "resets_at": 1787087041
+                },
+                "secondary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 300,
+                    "resets_at": 1787102386
+                },
+                "credits": {
+                    "has_credits": true,
+                    "unlimited": true,
+                    "balance": null
+                },
+                "individual_limit": null,
+                "spend_control_reached": null,
+                "plan_type": "business",
+                "rate_limit_reached_type": null
+            }
+        }
+    });
+    let token_count = serde_json::to_string(&token_count)?;
+    let decoded = crate::parse_rollout_line(&token_count)?;
+    assert_eq!(decoded.ordinal, Some(5));
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    writeln!(file, "{token_count}")?;
+    drop(file);
+
+    append_rollout_item_to_path(&rollout_path, &agent_message_item("offline")).await?;
+    let source = fs::read_to_string(&rollout_path)?;
+    let final_line =
+        crate::parse_rollout_line(source.lines().next_back().expect("appended rollout record"))?;
+    assert_eq!(final_line.ordinal, Some(6));
     Ok(())
 }
 

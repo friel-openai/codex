@@ -411,6 +411,9 @@ impl LocalAgentControl {
                     | RolloutItem::ResponseItem(_)
                     | RolloutItem::InterAgentCommunication(_)
                     | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TokenUsageRecord(_)
+                    | RolloutItem::RetainedContext(_)
+                    | RolloutItem::RealtimeItem(_)
                     | RolloutItem::Compacted(_)
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
@@ -799,6 +802,9 @@ pub(super) async fn persisted_thread_workspace_roots(
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::RetainedContext(_)
+                | RolloutItem::RealtimeItem(_)
                 | RolloutItem::Compacted(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
