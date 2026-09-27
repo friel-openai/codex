@@ -12645,7 +12645,7 @@ index c661aa0ed8f38d7c37ed386c50b898f748524de4..491b39a7770f7601651041c4a7d49cfa
      "schemars",
      "server",
 diff --git a/codex-rs/rmcp-client/src/bin/test_stdio_server.rs b/codex-rs/rmcp-client/src/bin/test_stdio_server.rs
-index 79a2e1c066c849aa3fd1cd91090e6c1ef11730a5..c20090c6e8d3ae44159b05184d2fe6e293ab5e02 100644
+index 8bf0845d1a321d2890e71a6c63029c58fa1f575c..b23c926b6ce108f635dd5ef05fc104dde7a843b6 100644
 --- a/codex-rs/rmcp-client/src/bin/test_stdio_server.rs
 +++ b/codex-rs/rmcp-client/src/bin/test_stdio_server.rs
 @@ -5,14 +5,19 @@ use std::collections::hash_map::Entry;
