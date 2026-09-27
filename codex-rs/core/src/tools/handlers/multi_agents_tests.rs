@@ -230,12 +230,17 @@ where
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
     agents: Vec<ListedAgentResult>,
+    next_cursor: Option<String>,
+    total_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
+    agent_id: ThreadId,
+    parent_agent_id: Option<ThreadId>,
     agent_name: String,
     agent_status: serde_json::Value,
+    last_task_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1713,6 +1718,11 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
         .await
         .get_agent_path()
         .expect("goal supervisor helper should have an agent path");
+    let helper_control = &helper.session.services.agent_control;
+    assert!(helper_control.get_agent_metadata(root.thread_id).is_some());
+    helper_control.unregister_goal_supervisor_parent_for_test(root.thread_id);
+    assert!(helper_control.get_agent_metadata(root.thread_id).is_none());
+    assert!(manager.get_thread(root.thread_id).await.is_ok());
     let output = FollowupTaskHandlerV2
         .handle(invocation(
             Arc::clone(&helper.session),
@@ -1731,7 +1741,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
         *thread_id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == helper_path
                         && communication.recipient == AgentPath::root()
                         && communication.trigger_turn
@@ -1775,13 +1785,13 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
 async fn multi_agent_v2_list_agents_returns_completed_status() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
+    let mut config = (*turn.config).clone();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
     set_turn_config(&mut turn, config);
 
@@ -1794,7 +1804,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "worker"
+                "task_name": "worker",
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -1846,13 +1857,18 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .map(|agent| agent.agent_name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(agent_names, vec!["/root", "/root/worker"]);
+    assert_eq!(agent_names, vec!["/root/worker"]);
     let worker = result
         .agents
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert_eq!(worker.agent_id, agent_id);
+    assert_eq!(worker.parent_agent_id, Some(root.thread_id));
+    assert_eq!(worker.last_task_message, None);
+    assert_eq!(result.next_cursor, None);
+    assert_eq!(result.total_count, 1);
     assert_eq!(success, Some(true));
 }
 
@@ -1944,13 +1960,13 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
 async fn multi_agent_v2_list_agents_omits_closed_agents() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
+    let mut config = (*turn.config).clone();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
     set_turn_config(&mut turn, config);
 
@@ -1963,7 +1979,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "worker"
+                "task_name": "worker",
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -1996,21 +2013,22 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.agents.len(), 1);
-    assert_eq!(result.agents[0].agent_name, "/root");
+    assert!(result.agents.is_empty());
+    assert_eq!(result.next_cursor, None);
+    assert_eq!(result.total_count, 0);
 }
 
 #[tokio::test]
 async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
+    let mut config = (*turn.config).clone();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
     set_turn_config(&mut turn, config);
 
@@ -2023,7 +2041,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "worker"
+                "task_name": "worker",
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -2067,9 +2086,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.agents.len(), 2);
-    assert_eq!(result.agents[0].agent_name, "/root");
-    assert_eq!(result.agents[1].agent_name, agent_path.as_str());
+    assert_eq!(result.agents.len(), 1);
+    assert_eq!(result.agents[0].agent_name, agent_path.as_str());
 }
 
 #[tokio::test]
@@ -3716,6 +3734,363 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
 }
 
 #[tokio::test]
+async fn wait_agent_returns_retained_terminal_status_for_unloaded_agents() {
+    for expected in [
+        AgentStatus::Completed(Some("completed before eviction".to_string())),
+        AgentStatus::Completed(None),
+        AgentStatus::Errored("failed before eviction".to_string()),
+        AgentStatus::Interrupted,
+        AgentStatus::Shutdown,
+    ] {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager(&turn);
+        set_agent_control(&mut session, manager.agent_control());
+        let agent_id = ThreadId::new();
+        let missing_id = ThreadId::new();
+        // Root registration supplies a cold identity for this status-only fixture; ownership
+        // and root resume are not involved in the wait handler's status lookup.
+        session
+            .services
+            .agent_control
+            .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+        session
+            .services
+            .agent_control
+            .registered_agent_lifecycle(agent_id)
+            .expect("registered agent lifecycle")
+            .remember_cold_terminal_status(expected.clone(), /*visible_when_cold*/ true);
+        let subscription_error = session
+            .services
+            .agent_control
+            .subscribe_status(agent_id)
+            .await
+            .err()
+            .expect("unloaded agent has no public status stream");
+        assert!(matches!(
+            subscription_error.details(),
+            codex_protocol::error::CodexErrorDetails::ThreadNotFound(id) if *id == agent_id
+        ));
+
+        let output = WaitAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "wait_agent",
+                function_payload(json!({
+                    "targets": [agent_id.to_string(), missing_id.to_string()],
+                    "timeout_ms": 10_000
+                })),
+            ))
+            .await
+            .expect("wait_agent should return retained terminal status");
+        let (content, success) = expect_text_output(output);
+        let result: wait::WaitAgentResult =
+            serde_json::from_str(&content).expect("wait_agent result should be json");
+        assert_eq!(
+            result,
+            wait::WaitAgentResult {
+                status: HashMap::from([
+                    (AgentPath::root().to_string(), expected),
+                    (missing_id.to_string(), AgentStatus::NotFound),
+                ]),
+                timed_out: false,
+            }
+        );
+        assert_eq!(success, None);
+        assert!(manager.get_thread(agent_id).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn wait_agent_returns_retained_interruption_without_another_terminal_target() {
+    use futures::FutureExt;
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager(&turn);
+    set_agent_control(&mut session, manager.agent_control());
+    let agent_id = ThreadId::new();
+    session
+        .services
+        .agent_control
+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+    session
+        .services
+        .agent_control
+        .registered_agent_lifecycle(agent_id)
+        .expect("registered agent lifecycle")
+        .remember_cold_terminal_status(AgentStatus::Interrupted, /*visible_when_cold*/ true);
+
+    let subscription = wait::subscribe_status_for_wait(
+        || session.services.agent_control.subscribe_status(agent_id),
+        || session.services.agent_control.get_status(agent_id),
+    )
+    .now_or_never()
+    .expect("retained interruption must not retry until the wait deadline")
+    .expect("retained status should resolve without loading the agent");
+    assert_eq!(subscription.0, AgentStatus::Interrupted);
+    assert!(subscription.1.is_none());
+    assert!(manager.get_thread(agent_id).await.is_err());
+}
+
+#[tokio::test]
+async fn wait_agent_keeps_subscription_for_live_interrupted_status() {
+    use crate::agent::api::AgentInfo;
+    use futures::StreamExt;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager(&turn);
+    set_agent_control(&mut session, manager.agent_control());
+    let thread = manager
+        .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
+        .await
+        .expect("start thread");
+    let mut real_updates = session
+        .services
+        .agent_control
+        .subscribe_status(thread.thread_id)
+        .await
+        .expect("loaded agent has a status stream");
+    let initial = real_updates.next().await.unwrap().unwrap();
+    let snapshots = [
+        AgentStatus::Interrupted,
+        AgentStatus::Running,
+        AgentStatus::Completed(Some("resumed turn completed".to_string())),
+    ]
+    .map(|status| {
+        let mut snapshot = initial.clone();
+        let AgentInfo::Loaded { agent, .. } = &mut snapshot else {
+            panic!("started agent must have a loaded snapshot");
+        };
+        agent.status = status;
+        snapshot
+    });
+    for missing_before_resume in [false, true] {
+        let subscriptions = AtomicUsize::new(0);
+        let (status, updates) = wait::subscribe_status_for_wait(
+            || async {
+                if subscriptions.fetch_add(1, Ordering::SeqCst) == 0 && missing_before_resume {
+                    return Err(codex_protocol::error::CodexErr::ThreadNotFound(
+                        thread.thread_id,
+                    ));
+                }
+                Ok(futures::stream::iter(snapshots.clone().map(Ok)).boxed())
+            },
+            || async {
+                assert!(
+                    missing_before_resume,
+                    "live subscription bypasses the fallback"
+                );
+                AgentStatus::Interrupted
+            },
+        )
+        .await
+        .expect("live interruption should retain its status stream");
+        assert_eq!(
+            subscriptions.load(Ordering::SeqCst),
+            if missing_before_resume { 2 } else { 1 }
+        );
+        assert_eq!(status, AgentStatus::Interrupted);
+        assert!(!crate::agent::status::is_final(&status));
+        let mut updates = updates.expect("live Interrupted can resume and must remain subscribed");
+        assert_eq!(
+            updates.next().await.unwrap().unwrap().status(),
+            Some(&AgentStatus::Running)
+        );
+        assert_eq!(
+            updates.next().await.unwrap().unwrap().status(),
+            Some(&AgentStatus::Completed(Some(
+                "resumed turn completed".to_string()
+            )))
+        );
+    }
+    thread.thread.submit(Op::Shutdown {}).await.unwrap();
+}
+
+#[tokio::test]
+async fn wait_agent_subscribes_again_when_missing_runtime_resumes_before_status_lookup() {
+    use futures::FutureExt;
+    use futures::StreamExt;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager(&turn);
+    set_agent_control(&mut session, manager.agent_control());
+    let thread = manager
+        .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let subscriptions = AtomicUsize::new(0);
+    let (initial, updates) = wait::subscribe_status_for_wait(
+        || async {
+            if subscriptions.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Simulate absence at subscription followed by a loaded runtime at get_status.
+                return Err(codex_protocol::error::CodexErr::ThreadNotFound(agent_id));
+            }
+            session
+                .services
+                .agent_control
+                .subscribe_status(agent_id)
+                .await
+        },
+        || session.services.agent_control.get_status(agent_id),
+    )
+    .await
+    .expect("resumed agent should be subscribed without reporting a terminal result");
+    assert_eq!(subscriptions.load(Ordering::SeqCst), 2);
+    assert!(!crate::agent::status::is_final(&initial));
+    let mut updates = updates.expect("non-final status requires a real public subscription");
+    assert!(updates.next().now_or_never().is_none());
+
+    thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    let completed = timeout(Duration::from_secs(5), updates.next())
+        .await
+        .expect("shutdown status should arrive")
+        .expect("subscription should remain open until shutdown")
+        .expect("shutdown snapshot should succeed");
+    assert_eq!(completed.status(), Some(&AgentStatus::Shutdown));
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_agent_deadline_bounds_non_final_status_without_runtime() {
+    use futures::FutureExt;
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager(&turn);
+    set_agent_control(&mut session, manager.agent_control());
+    let agent_id = ThreadId::new();
+    session
+        .services
+        .agent_control
+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+    // Model repeated resume races or an inconsistent non-final cache without a runtime.
+    session
+        .services
+        .agent_control
+        .registered_agent_lifecycle(agent_id)
+        .expect("registered agent lifecycle")
+        .remember_cold_terminal_status(AgentStatus::Running, /*visible_when_cold*/ true);
+    let handler = WaitAgentHandler::default();
+    let wait = handler.handle(invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "wait_agent",
+        function_payload(json!({
+            "targets": [agent_id.to_string()],
+            "timeout_ms": MIN_WAIT_TIMEOUT_MS
+        })),
+    ));
+    tokio::pin!(wait);
+    assert!(wait.as_mut().now_or_never().is_none());
+    // A cooperative retry remains runnable, so advance paused time explicitly.
+    tokio::time::advance(Duration::from_millis(MIN_WAIT_TIMEOUT_MS as u64)).await;
+    let output = wait
+        .await
+        .expect("subscription retries should time out normally");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::new(),
+            timed_out: true,
+        }
+    );
+    assert_eq!(success, None);
+    assert!(manager.get_thread(agent_id).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_agent_returns_terminal_result_while_another_target_retries_subscription() {
+    for terminal_first in [false, true] {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager(&turn);
+        set_agent_control(&mut session, manager.agent_control());
+        let retrying_id = ThreadId::new();
+        session
+            .services
+            .agent_control
+            .register_session_root(retrying_id, /*current_parent_thread_id*/ None);
+        session
+            .services
+            .agent_control
+            .registered_agent_lifecycle(retrying_id)
+            .expect("registered retrying agent lifecycle")
+            .remember_cold_terminal_status(AgentStatus::Running, /*visible_when_cold*/ true);
+        let terminal = manager
+            .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
+            .await
+            .expect("start terminal target");
+        let mut status_rx = terminal.thread.subscribe_status();
+        terminal
+            .thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("shutdown should submit");
+        timeout(Duration::from_secs(1), status_rx.changed())
+            .await
+            .expect("shutdown status should arrive")
+            .expect("shutdown status channel should remain open");
+        assert_eq!(*status_rx.borrow(), AgentStatus::Shutdown);
+
+        let terminal_target = session
+            .services
+            .agent_control
+            .get_agent_metadata(terminal.thread_id)
+            .and_then(|metadata| metadata.agent_path)
+            .map(|path| path.to_string())
+            .unwrap_or_else(|| terminal.thread_id.to_string());
+        let targets = if terminal_first {
+            [terminal.thread_id.to_string(), retrying_id.to_string()]
+        } else {
+            [retrying_id.to_string(), terminal.thread_id.to_string()]
+        };
+        let handler = WaitAgentHandler::default();
+        let wait = handler.handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({
+                "targets": targets,
+                "timeout_ms": MIN_WAIT_TIMEOUT_MS
+            })),
+        ));
+        let (output, ()) = tokio::join!(
+            biased;
+            timeout(Duration::from_millis(1), wait),
+            async {
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_millis(1)).await;
+            },
+        );
+        let (content, success) = expect_text_output(
+            output
+                .expect("a retrying target must not delay another target's terminal result")
+                .expect("wait_agent should succeed"),
+        );
+        let result: wait::WaitAgentResult =
+            serde_json::from_str(&content).expect("wait_agent result should be json");
+        assert_eq!(
+            result,
+            wait::WaitAgentResult {
+                status: HashMap::from([(terminal_target, AgentStatus::Shutdown)]),
+                timed_out: false,
+            }
+        );
+        assert_eq!(success, None);
+        assert!(manager.get_thread(retrying_id).await.is_err());
+    }
+}
+
+#[tokio::test]
 async fn wait_agent_times_out_when_status_is_not_final() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
@@ -4420,8 +4795,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
     let (content, _) = expect_text_output(output);
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
-    assert_eq!(result.agents.len(), 1);
-    assert_eq!(result.agents[0].agent_name, "/root");
+    assert!(result.agents.is_empty());
 }
 
 #[tokio::test]

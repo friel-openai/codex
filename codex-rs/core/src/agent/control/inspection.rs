@@ -3,12 +3,33 @@
 
 use super::LocalAgentControl;
 use crate::agent::api::AgentInfo;
+use crate::agent::api::AgentTarget;
 use crate::agent::types::LiveAgent;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 
 impl LocalAgentControl {
+    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
+        self.upgrade()
+            .is_ok_and(|manager| manager.is_saved_target(thread_id))
+    }
+
+    pub(crate) async fn inspect(
+        &self,
+        caller: ThreadId,
+        target: AgentTarget,
+    ) -> CodexResult<AgentInfo> {
+        let target = self.resolve_target(caller, &target).await?;
+        match self.inspect_agent(target).await {
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                self.ensure_open_agent_known_by_id(caller, target).await?;
+                self.inspect_agent(target).await
+            }
+            result => result,
+        }
+    }
+
     pub(super) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {
         let manager = self.upgrade()?;
         let thread = match manager.get_thread(thread_id).await {

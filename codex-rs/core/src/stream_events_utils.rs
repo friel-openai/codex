@@ -121,7 +121,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
             .await;
     }
     mark_thread_memory_mode_polluted_if_external_context(sess, turn_context, item).await;
-    let memory_usage_db = match sess.services.state_db.as_ref() {
+    let memory_usage_db = match sess.state_db().as_ref() {
         Some(db) => db
             .memories_for_version(turn_context.config.memories.version)
             .await
@@ -163,7 +163,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
         return;
     }
     state_db::mark_thread_memory_mode_polluted(
-        sess.services.state_db.as_deref(),
+        sess.state_db().as_deref(),
         sess.thread_id,
         "record_completed_response_item",
     )
