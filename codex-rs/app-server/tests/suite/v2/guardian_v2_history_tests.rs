@@ -33,6 +33,10 @@ use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
 use codex_rollout::RolloutItem;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::LocalThreadStore;
+use codex_thread_store::LocalThreadStoreConfig;
+use codex_thread_store::ThreadStore;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -81,12 +85,15 @@ enum ReviewCheckpoint {
     Valid,
     EmptyContent,
     DifferentReviewerHash,
+    // Exercise the fixed Sol reviewer with a checkpoint from another model.
+    UltrafastDifferentReviewerHash,
     UnknownReviewer,
     EmptyReviewerHash,
 }
 
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "different sync hash preserves retained evidence")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UltrafastDifferentReviewerHash; "ultrafast Sol preserves retained evidence with different parent hash")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync hash preserves retained evidence")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync hash preserves retained evidence")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "legacy sync compatibility is unchanged")]
@@ -126,8 +133,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
     let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
     let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
+    let use_ultrafast = matches!(
+        review_checkpoint,
+        ReviewCheckpoint::UltrafastDifferentReviewerHash
+    );
     let reviewer_hash = match review_checkpoint {
-        ReviewCheckpoint::DifferentReviewerHash => Some("different-reviewer"),
+        ReviewCheckpoint::DifferentReviewerHash
+        | ReviewCheckpoint::UltrafastDifferentReviewerHash => Some("different-reviewer"),
         ReviewCheckpoint::UnknownReviewer => None,
         ReviewCheckpoint::EmptyReviewerHash => Some(""),
         ReviewCheckpoint::Valid | ReviewCheckpoint::EmptyContent => Some("matching"),
@@ -159,6 +171,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         ReviewCheckpoint::EmptyContent => checkpoint["encrypted_content"] = json!(""),
         ReviewCheckpoint::Valid
         | ReviewCheckpoint::DifferentReviewerHash
+        | ReviewCheckpoint::UltrafastDifferentReviewerHash
         | ReviewCheckpoint::UnknownReviewer
         | ReviewCheckpoint::EmptyReviewerHash => {}
     }
@@ -288,6 +301,9 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     if matches!(context_path, ContextPath::ThreadOwned) {
         mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
     }
+    if use_ultrafast {
+        mock_config = mock_config.with_extra_config("[auto_review]\nuse_ultrafast = true");
+    }
     mock_config.write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
     let models = [
@@ -297,6 +313,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         ("resumed-parent", Some("matching")),
     ]
     .into_iter()
+    .chain(use_ultrafast.then_some(("gpt-5.6-sol", reviewer_hash)))
     .map(|(model, hash)| {
         let mut info = codex_core::test_support::construct_model_info_offline(model, &config);
         info.comp_hash = hash.map(str::to_owned);
@@ -431,6 +448,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         let completed: TurnCompletedNotification =
             timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
         assert_eq!(completed.turn.status, TurnStatus::Completed);
+        if use_ultrafast {
+            let reviews = review_requests.lock().expect("request log lock");
+            assert_eq!(reviews.len(), index + 1);
+            let review = &reviews[index];
+            assert_eq!(review["model"], "gpt-5.6-sol");
+            assert_eq!(review["service_tier"], "ultrafast");
+        }
         if reject_sync_checkpoint && index > 0 {
             // The first review established a cached session before compaction. Neither
             // that session nor a new one may review unusable evidence, including after resume.
@@ -746,20 +770,27 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             }
         }
     }
-    let items = rollout
-        .lines()
-        .map(codex_rollout::parse_rollout_line)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Compaction can rotate the active rollout; include persisted predecessor segments.
+    let items = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&config),
+        /*state_db*/ None,
+    )
+    .load_history(LoadThreadHistoryParams {
+        thread_id: codex_protocol::ThreadId::from_string(&thread_id)?,
+        include_archived: false,
+    })
+    .await?
+    .items;
     assert_eq!(
         items
             .iter()
-            .filter(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
+            .filter(|item| matches!(item, RolloutItem::RetainedContext(_)))
             .count(),
         usize::from(matches!(context_path, ContextPath::ThreadOwned)),
         "only the enabled path may persist a retained-answer event",
     );
-    for line in &items {
-        if let RolloutItem::Compacted(checkpoint) = &line.item {
+    for item in &items {
+        if let RolloutItem::Compacted(checkpoint) = item {
             for envelope in checkpoint.replacement_history.iter().flatten() {
                 if matches!(
                     envelope.item,
@@ -778,8 +809,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         }
     }
     if matches!(context_path, ContextPath::Legacy) {
-        for line in &items {
-            if let RolloutItem::Compacted(checkpoint) = &line.item {
+        for item in &items {
+            if let RolloutItem::Compacted(checkpoint) = item {
                 assert_eq!(
                     checkpoint
                         .retained_context
