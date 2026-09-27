@@ -31,6 +31,17 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ToolResultMetadata;
 
+/// A terminal tool may finish its turn without adding a model-visible response.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "ordinary tool results retain their by-value envelope without an extra allocation"
+)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum ToolCallResponse {
+    Response(ResponseItemEnvelope),
+    TerminalNoResponse,
+}
+
 struct ToolCallTimingGuard {
     started_at: Option<Instant>,
     execution_started_at: Arc<OnceLock<Instant>>,
@@ -77,7 +88,7 @@ impl ToolCallRuntime {
         self,
         call: ToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResponse, CodexErr>> {
         let error_call = call.clone();
         let source = call.direct_source();
         let recorder = self.session.services.executed_tool_calls.clone();
@@ -102,20 +113,22 @@ impl ToolCallRuntime {
                     {
                         call.set_tool_result_metadata(ToolResultMetadata::new(metadata));
                     }
-                    result.into_response()
+                    Self::response_for_tool_result(result)
                 }
                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
-                Err(other) => {
-                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into())
-                }
+                Err(other) => ToolCallResponse::Response(ResponseItemEnvelope::new(
+                    Self::failure_response(error_call, other).into(),
+                )),
             };
-            if let Some(text) = call_state.delivered_assistant_message.get() {
-                response
-                    .metadata
-                    .get_or_insert_default()
-                    .delivered_assistant_message = Some(text.clone());
+            if let ToolCallResponse::Response(response) = &mut response {
+                if let Some(text) = call_state.delivered_assistant_message.get() {
+                    response
+                        .metadata
+                        .get_or_insert_default()
+                        .delivered_assistant_message = Some(text.clone());
+                }
+                recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
             }
-            recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
             Ok(response)
         }
     }
@@ -282,6 +295,14 @@ impl ToolCallRuntime {
 }
 
 impl ToolCallRuntime {
+    fn response_for_tool_result(response: AnyToolResult) -> ToolCallResponse {
+        if response.result.terminal_no_response() {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(response.into_response())
+        }
+    }
+
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
     }
@@ -537,6 +558,7 @@ mod tests {
         let tool_name = codex_tools::ToolName::plain("test_tool");
         let handler = Arc::new(ImmediateHandler {
             tool_name: tool_name.clone(),
+            terminal_no_response: false,
         }) as Arc<dyn CoreToolRuntime>;
         let step_context = StepContext::for_test(Arc::clone(&turn_context));
         let router = Arc::new(ToolRouter::from_parts(
@@ -640,6 +662,7 @@ mod tests {
 
     struct ImmediateHandler {
         tool_name: codex_tools::ToolName,
+        terminal_no_response: bool,
     }
 
     impl ToolExecutor<ToolInvocation> for ImmediateHandler {
@@ -663,10 +686,13 @@ mod tests {
             ToolInvocation: 'a,
         {
             Box::pin(async {
-                Ok(
-                    Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
-                        as Box<dyn crate::tools::context::ToolOutput>,
-                )
+                let output = FunctionToolOutput::from_text("ok".to_string(), Some(true));
+                let output = if self.terminal_no_response {
+                    output.into_terminal_no_response()
+                } else {
+                    output
+                };
+                Ok(Box::new(output) as Box<dyn crate::tools::context::ToolOutput>)
             })
         }
     }
@@ -705,9 +731,12 @@ mod tests {
         }
     }
 
+    #[test_case::test_case(false; "ordinary response")]
+    #[test_case::test_case(true; "terminal response")]
     #[tokio::test]
-    async fn cancellation_after_handler_finishes_preserves_completed_lifecycle()
-    -> anyhow::Result<()> {
+    async fn cancellation_after_handler_finishes_preserves_completed_lifecycle(
+        terminal_no_response: bool,
+    ) -> anyhow::Result<()> {
         let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
         let records = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (finish_started_tx, finish_started_rx) = oneshot::channel();
@@ -726,6 +755,7 @@ mod tests {
         let tool_name = codex_tools::ToolName::plain("test_tool");
         let handler = Arc::new(ImmediateHandler {
             tool_name: tool_name.clone(),
+            terminal_no_response,
         }) as Arc<dyn CoreToolRuntime>;
         let step_context = StepContext::for_test(Arc::clone(&turn_context));
         let router = Arc::new(ToolRouter::from_parts(
@@ -770,10 +800,12 @@ mod tests {
                 success: Some(true),
             },
         };
-        assert_eq!(
-            ResponseItemEnvelope::new(expected_response.into()),
-            response
-        );
+        let expected = if terminal_no_response {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(ResponseItemEnvelope::new(expected_response.into()))
+        };
+        assert_eq!(expected, response);
 
         let actual = records
             .lock()
@@ -783,5 +815,25 @@ mod tests {
         assert_eq!(vec![ToolCallOutcome::Completed { success: true }], actual);
 
         Ok(())
+    }
+
+    #[test]
+    fn terminal_tool_result_does_not_create_response_item() {
+        let result = AnyToolResult {
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            result: Box::new(
+                FunctionToolOutput::from_text(String::new(), Some(true))
+                    .into_terminal_no_response(),
+            ),
+            post_tool_use_payload: None,
+        };
+
+        assert_eq!(
+            ToolCallResponse::TerminalNoResponse,
+            ToolCallRuntime::response_for_tool_result(result)
+        );
     }
 }
