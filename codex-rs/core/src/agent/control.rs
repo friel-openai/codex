@@ -25,6 +25,7 @@ use codex_extension_api::ThreadInstructionsProvider;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
+use codex_mcp::McpConnectionPool;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -250,6 +251,10 @@ impl LocalAgentControl {
                 .set(Arc::clone(provider));
         }
         provider
+    }
+
+    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
+        &self.runtime.mcp_connection_pool
     }
 
     /// Send rich user input items to an existing agent thread.
