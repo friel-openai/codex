@@ -472,7 +472,7 @@ index c386e29799bda49d92eb19202c9c6c070fd18ad0..96dc0af48f3f2113757dc92286cddad6
                  self.thread_processor
                      .thread_archive(request_id.clone(), params)
 diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
-index 41d843c743abf671b82983e3bcec118ea5df99d2..6023dcc76e4c40fffaffe9482587c0738800976f 100644
+index be77c1bdab751aa2fcb55439a88f11c5991aed03..317e2b78b2efc59d6388f356c6254836e5647a64 100644
 --- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
 +++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
 @@ -18,6 +18,8 @@ use codex_app_server_protocol::InitializeParams;
@@ -492,7 +492,7 @@ index 41d843c743abf671b82983e3bcec118ea5df99d2..6023dcc76e4c40fffaffe9482587c073
  use opentelemetry::global;
  use opentelemetry::trace::SpanId;
  use opentelemetry::trace::SpanKind;
-@@ -437,6 +440,75 @@ fn assert_has_internal_descendant_at_min_depth(
+@@ -480,6 +483,75 @@ fn assert_has_internal_descendant_at_min_depth(
      );
  }
 
@@ -569,7 +569,7 @@ index 41d843c743abf671b82983e3bcec118ea5df99d2..6023dcc76e4c40fffaffe9482587c073
      outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
      request_id: i64,
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index ce8ace0c798aa55bad3ca2e50cd369777f7673bf..364a377837b0be4807b42a02a42ef41971bdd710 100644
+index ac6b3bdf30a7966ef219cba2adaf28dd98a703a9..1489e09832ed3dbac7761f8d65ef4f9cc4d5a1d6 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -563,6 +563,7 @@ mod search;
@@ -595,10 +595,10 @@ index b7ca46ec0702e3fcbecbfb0e353d600c49f9c5d8..7d21d97e78da0fae4db112662eae2868
      pub(super) approvals_reviewer: Option<ApprovalsReviewer>,
 diff --git a/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..30cab360ee2e1440031f8598913595e6c07aae11
+index 0000000000000000000000000000000000000000..c6006968c667fda3a178c8f7ddfb778a72baf587
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,475 @@
 +//! Source-owned, one-shot fork transfer. Preparing a pane never starts a temporary runtime.
 +
 +use super::persisted_resume_settings::PersistedResumeSettings;
@@ -713,11 +713,13 @@ index 0000000000000000000000000000000000000000..30cab360ee2e1440031f8598913595e6
 +            validate_handoff_params(&params)?;
 +            let source = ThreadId::from_string(&params.thread_id)
 +                .map_err(|error| invalid_request(error.to_string()))?;
-+            let parent = self.thread_manager.get_thread(source).await.map_err(|_| {
-+                invalid_request(
-+                    "fork preparation must be requested from the app-server owning the source",
-+                )
-+            })?;
++            let parent = get_loaded_thread_for_persistence(&self.thread_manager, source)
++                .await?
++                .ok_or_else(|| {
++                    invalid_request(
++                        "fork preparation must be requested from the app-server owning the source",
++                    )
++                })?;
 +            let permit = Arc::clone(&self.fork_handoff_slots)
 +                .try_acquire_owned()
 +                .map_err(|_| {
@@ -1187,7 +1189,7 @@ index 0000000000000000000000000000000000000000..47b3b03fdfae15efeb1a9141fb626a75
 +    }
 +}
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f569342d08ce2d 100644
+index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09b3161525 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -8,6 +8,7 @@ use super::persisted_resume_settings::PersistedResumeSettings;
@@ -1222,7 +1224,15 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
          ))
          .await
          .map(|()| None)
-@@ -6698,14 +6702,42 @@ impl ThreadRequestProcessor {
+@@ -6592,6 +6596,7 @@ impl ThreadRequestProcessor {
+         thread_id: ThreadId,
+         include_history: bool,
+     ) -> Result<StoredThread, JSONRPCErrorError> {
++        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         self.thread_store
+             .read_thread(StoreReadThreadParams {
+                 thread_id,
+@@ -6728,14 +6733,42 @@ impl ThreadRequestProcessor {
          }
      }
 
@@ -1230,12 +1240,12 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
 +    // Keep the large fork future out of the prepare/import caller's poll frame. Nested
 +    // unoptimized frames otherwise exhaust the embedded app-server's worker stack at startup.
 +    pub(super) fn thread_fork_inner(
-         &self,
-         request_id: ConnectionRequestId,
-         params: ThreadForkParams,
-         app_server_client_name: Option<String>,
-         app_server_client_version: Option<String>,
-         client_mcp_extensions: ClientMcpExtensions,
++        &self,
++        request_id: ConnectionRequestId,
++        params: ThreadForkParams,
++        app_server_client_name: Option<String>,
++        app_server_client_version: Option<String>,
++        client_mcp_extensions: ClientMcpExtensions,
 +        handoff: ForkHandoff,
 +    ) -> impl std::future::Future<Output = Result<(), JSONRPCErrorError>> + Send + '_ {
 +        Box::pin(self.thread_fork_inner_impl(
@@ -1249,12 +1259,12 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
 +    }
 +
 +    async fn thread_fork_inner_impl(
-+        &self,
-+        request_id: ConnectionRequestId,
-+        params: ThreadForkParams,
-+        app_server_client_name: Option<String>,
-+        app_server_client_version: Option<String>,
-+        client_mcp_extensions: ClientMcpExtensions,
+         &self,
+         request_id: ConnectionRequestId,
+         params: ThreadForkParams,
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
+         client_mcp_extensions: ClientMcpExtensions,
 +        handoff: ForkHandoff,
      ) -> Result<(), JSONRPCErrorError> {
 +        let (imported, export) = match handoff {
@@ -1266,7 +1276,7 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
          let ThreadForkParams {
              thread_id,
              last_turn_id,
-@@ -6743,15 +6775,20 @@ impl ThreadRequestProcessor {
+@@ -6773,15 +6806,20 @@ impl ThreadRequestProcessor {
                  "`permissions` cannot be combined with `sandbox`",
              ));
          }
@@ -1295,7 +1305,7 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
          if last_turn_id.is_some() && before_turn_id.is_some() {
              return Err(invalid_request(
                  "`beforeTurnId` cannot be combined with `lastTurnId`",
-@@ -6781,7 +6818,9 @@ impl ThreadRequestProcessor {
+@@ -6811,7 +6849,9 @@ impl ThreadRequestProcessor {
              .and_then(codex_core::util::normalize_thread_name);
          let mut source_approvals_reviewer = None;
          let mut source_token_usage_info = None;
@@ -1306,7 +1316,18 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
              let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                  (Some(turn_id), None) => {
                      codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
-@@ -6931,9 +6970,21 @@ impl ThreadRequestProcessor {
+@@ -6848,7 +6888,9 @@ impl ThreadRequestProcessor {
+             let model_context =
+                 if matches!(&params.boundary, codex_thread_store::ForkBoundary::Latest)
+                     && let Some(local_store) = local_store
+-                    && let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await
++                    && let Some(parent) =
++                        get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id)
++                            .await?
+                     && !matches!(parent.agent_status().await, AgentStatus::Running)
+                     && parent.flush_rollout().await.is_ok()
+                     && let Ok(Some(expected_position)) = local_store
+@@ -6983,9 +7025,21 @@ impl ThreadRequestProcessor {
                  }
              }
              Some(prepared)
@@ -1328,11 +1349,14 @@ index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f56934
          let projected_response_turns = prepared_fork
              .as_ref()
              .and_then(|prepared| prepared.projected_response_turns.clone());
-@@ -7047,7 +7098,9 @@ impl ThreadRequestProcessor {
+@@ -7098,8 +7152,11 @@ impl ThreadRequestProcessor {
+             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
          let needs_latest_settings =
              restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
-         let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
+-        let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
 -        let loaded_parent_settings = if paginated_source && needs_latest_settings {
++        let loaded_parent =
++            get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id).await?;
 +        let loaded_parent_settings = if let Some(settings) = imported_settings {
 +            Some(settings)
 +        } else if paginated_source && needs_latest_settings {
@@ -1668,10 +1692,10 @@ index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index c877ce9ec216f5b5af7d64e3fc8c41b4d52fbff9..17927e3f772d0581751a1e8d20ba249e430f0254 100644
+index 60b319a8701c4a242088676acf25d6b80ea843d4..da0e9d21e5aeed0b0070540cd7c5616c31b11897 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1818,7 +1818,9 @@ impl ThreadManager {
+@@ -1829,7 +1829,9 @@ impl ThreadManager {
          };
          model_history_override.extend_from_slice(synthesized_suffix);
          let shared_model_response_items = prepared.shared_model_response_items.clone();
@@ -1682,7 +1706,7 @@ index c877ce9ec216f5b5af7d64e3fc8c41b4d52fbff9..17927e3f772d0581751a1e8d20ba249e
              if let Ok(source) = self.state.get_thread(source_thread_id).await {
                  Some(
                      source
-@@ -1863,7 +1865,7 @@ impl ThreadManager {
+@@ -1874,7 +1876,7 @@ impl ThreadManager {
                  ForkHistory {
                      snapshot: None,
                      initial_history: history,
@@ -1691,7 +1715,7 @@ index c877ce9ec216f5b5af7d64e3fc8c41b4d52fbff9..17927e3f772d0581751a1e8d20ba249e
                      model_history_override: Some(model_history_override),
                      settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                      shared_model_response_items,
-@@ -2367,7 +2369,7 @@ impl ThreadManagerState {
+@@ -2386,7 +2388,7 @@ impl ThreadManagerState {
                          "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                      ))
                  })?;
@@ -2353,7 +2377,7 @@ index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index a98a5e05c11a4c28c1441317abaf73d52b0e5031..497001298dd9f1d0f55fcb54556a86ae3e25211e 100644
+index 5d8e2a9b5f7933ee3bca0b23467c9e2c80266184..16f8885e4d53324397e890f57aa1c0d18050e26e 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -2383,7 +2407,7 @@ index a98a5e05c11a4c28c1441317abaf73d52b0e5031..497001298dd9f1d0f55fcb54556a86ae
  struct LiveRecorderEntry {
      recorder: RolloutRecorder,
      /// Reopens the committed stable rollout before the next live operation.
-@@ -813,6 +826,68 @@ impl LocalThreadStore {
+@@ -864,6 +877,68 @@ impl LocalThreadStore {
          )
      }
 
@@ -2452,7 +2476,7 @@ index a98a5e05c11a4c28c1441317abaf73d52b0e5031..497001298dd9f1d0f55fcb54556a86ae
      pub(crate) async fn live_persistence_mode(
          &self,
          thread_id: ThreadId,
-@@ -840,17 +915,7 @@ impl LocalThreadStore {
+@@ -891,17 +966,7 @@ impl LocalThreadStore {
          self.writer_lock_coordinator
              .acquire(thread_id)
              .map(Arc::new)
@@ -2471,7 +2495,7 @@ index a98a5e05c11a4c28c1441317abaf73d52b0e5031..497001298dd9f1d0f55fcb54556a86ae
      }
 
      async fn acquire_writer_locks(
-@@ -867,6 +932,58 @@ impl LocalThreadStore {
+@@ -918,6 +983,58 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 

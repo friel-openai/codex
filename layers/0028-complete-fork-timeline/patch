@@ -258,7 +258,7 @@ index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad446983
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-index 6edda4a0e42176a90c5a00202b0b86ad0d6a9ac6..d3affe4df19f9210af05b12c7883705dfa4ffa60 100644
+index 219dc76d5bcd33e1a2807d8f36c03eb30c9f201b..0e611b519bee16bbdadac339047da8fd7cda917d 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 +++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 @@ -1929,6 +1929,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
@@ -372,10 +372,10 @@ index 19d1749c64835bd3ed221ba9d2045b6a360d13db..f56966640995bc7c372097d69ac3cd5e
          malformed_lineage(
              end.thread_id,
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 476c010ec4cf10137c8633e32957b609e0bc1c78..20e8f793948ece0f49f3088f9f07eeb6e118bc12 100644
+index c5a9b31c9f02a4e3f19390ceb2f17c9fa37cb147..6f66da3f8f698ed4afc49257e43b36d77ee786ad 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
-@@ -119,6 +119,51 @@ WHERE next_rollout_byte_offset >= 0
+@@ -120,6 +120,51 @@ WHERE next_rollout_byte_offset >= 0
          .await
          .map_err(thread_history_error)?;
      }
@@ -427,7 +427,7 @@ index 476c010ec4cf10137c8633e32957b609e0bc1c78..20e8f793948ece0f49f3088f9f07eeb6
      for statement in [
          r#"
  CREATE TRIGGER IF NOT EXISTS frodex_thread_turns_projection_insert
-@@ -204,6 +249,61 @@ BEGIN
+@@ -205,6 +250,61 @@ BEGIN
          ELSE next_rollout_byte_offset
      END
      WHERE thread_id = OLD.thread_id;
@@ -489,7 +489,7 @@ index 476c010ec4cf10137c8633e32957b609e0bc1c78..20e8f793948ece0f49f3088f9f07eeb6
  END
          "#,
      ] {
-@@ -386,9 +486,11 @@ pub(super) async fn publish_staged_projection(
+@@ -387,9 +487,11 @@ pub(super) async fn publish_staged_projection(
              ),
          });
      }

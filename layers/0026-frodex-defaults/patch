@@ -221,10 +221,10 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 
      match &turn_context.session_source {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 5828bad38aa2bc1114cb370ebfdd71190bd3c159..414539480ab1f2d0442c6d2791044c1bd6e28ebd 100644
+index 07179a737bb7653c7138beb16f75eb20cce15f8c..1060504505cec1414b960bb87cfcd76cad747eef 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -12600,6 +12600,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+@@ -12604,6 +12604,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
          |config| {
              if enable_multi_agent_v2 {
                  let _ = config.features.enable(Feature::MultiAgentV2);
@@ -236,7 +236,7 @@ index 5828bad38aa2bc1114cb370ebfdd71190bd3c159..414539480ab1f2d0442c6d2791044c1b
              }
              config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
              config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
-@@ -15424,16 +15429,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -15428,16 +15433,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
  async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
      let mut config = build_test_config(codex_home.path()).await;

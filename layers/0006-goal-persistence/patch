@@ -60,6 +60,75 @@ index 0760cb15d4ac94cddc58c765d70961e7c46d931c..b5ca554b6953cdab0e8b0ed751d1a183
 +        None
 +    }
  }
+diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+index 6d52f5b52f460608937c4c45b868db98a57aba77..bedc13a576d20f0705bd514e64b4a849b95994d4 100644
+--- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+@@ -150,17 +150,19 @@ impl ThreadGoalRequestProcessor {
+             .map(ThreadGoalStatus::to_core)
+             .or_else(|| existing_goal.as_ref().map(|goal| goal.status))
+             .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
++        let loaded_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         if resulting_status == codex_protocol::protocol::ThreadGoalStatus::Active
+-            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
++            && let Some(thread) = loaded_thread.as_ref()
+         {
+             self.config_manager
+                 .check_thread_model_provider(thread.config().await.as_ref())
+                 .await
+                 .map_err(|error| config_load_error(&error))?;
+         }
+-        let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
+-            Ok(thread) => thread.config().await.max_goal_token_budget,
+-            Err(_) => self.config.max_goal_token_budget,
++        let max_goal_token_budget = match loaded_thread.as_ref() {
++            Some(thread) => thread.config().await.max_goal_token_budget,
++            None => self.config.max_goal_token_budget,
+         };
+
+         let listener_command_tx = {
+@@ -192,8 +194,8 @@ impl ThreadGoalRequestProcessor {
+             .map_err(goal_service_error)?;
+         let goal = ThreadGoal::from(outcome.goal.clone());
+
+-        let persist_result = match self.thread_manager.get_thread(thread_id).await {
+-            Ok(thread) => match thread.rollout_path() {
++        let persist_result = match loaded_thread.as_ref() {
++            Some(thread) => match thread.rollout_path() {
+                 Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
+                     // Goal-first threads need their settings captured when the goal creates the
+                     // rollout. Once materialized, normal settings updates own this event.
+@@ -226,7 +228,7 @@ impl ThreadGoalRequestProcessor {
+                         .await
+                 }
+             },
+-            Err(_) => Ok(()),
++            None => Ok(()),
+         };
+         if let Err(err) = persist_result {
+             warn!("failed to persist goal update for live thread {thread_id}: {err}");
+@@ -307,7 +309,9 @@ impl ThreadGoalRequestProcessor {
+         thread_id: ThreadId,
+         access: GoalAccess,
+     ) -> Result<StateDbHandle, JSONRPCErrorError> {
+-        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
++        if let Some(thread) =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?
++        {
+             if matches!(access, GoalAccess::Mutate) {
+                 ensure_direct_input_allowed(thread.as_ref()).await?;
+             }
+@@ -374,7 +378,8 @@ impl ThreadGoalRequestProcessor {
+         thread_id: ThreadId,
+         state_db: &StateDbHandle,
+     ) -> Result<(), JSONRPCErrorError> {
+-        let running_thread = self.thread_manager.get_thread(thread_id).await.ok();
++        let running_thread =
++            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
+         let rollout_path = match running_thread.as_ref() {
+             Some(thread) => thread.rollout_path().ok_or_else(|| {
+                 invalid_request(format!(
 diff --git a/codex-rs/core/BUILD.bazel b/codex-rs/core/BUILD.bazel
 index cb35952df0f8ffea93caab6fa0dc00bc6ec46fa3..87d8ed5d2ece756951c52fa934f33f927cc06fba 100644
 --- a/codex-rs/core/BUILD.bazel
@@ -5620,7 +5689,7 @@ index 0000000000000000000000000000000000000000..08c815cbf577a2b34aca16419db0e723
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index ed79f1b0d927a65642b9be538ccae5b2c361e49b..a5deafc3ca11b88b2d890f215a332e2b82671bc3 100644
+index 312e205cd7a2619535e8ec18ffadf253a03141c4..afd0abb690d486b08824789ee9d4da60cc1d2e97 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -119,6 +119,7 @@ use crate::ThreadStoreError;
@@ -5631,7 +5700,7 @@ index ed79f1b0d927a65642b9be538ccae5b2c361e49b..a5deafc3ca11b88b2d890f215a332e2b
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -1085,6 +1086,27 @@ impl ThreadStore for LocalThreadStore {
+@@ -1103,6 +1104,27 @@ impl ThreadStore for LocalThreadStore {
          })
      }
 
@@ -5659,7 +5728,7 @@ index ed79f1b0d927a65642b9be538ccae5b2c361e49b..a5deafc3ca11b88b2d890f215a332e2b
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1358,6 +1380,114 @@ mod tests {
+@@ -1376,6 +1398,114 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -5774,7 +5843,7 @@ index ed79f1b0d927a65642b9be538ccae5b2c361e49b..a5deafc3ca11b88b2d890f215a332e2b
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -2835,6 +2965,21 @@ mod tests {
+@@ -2853,6 +2983,21 @@ mod tests {
          }))
      }
 

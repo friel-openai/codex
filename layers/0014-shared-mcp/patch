@@ -10588,10 +10588,10 @@ index 6cb5b50a94f3fdd6173e61627238803187508345..894479065ec5c666db799f1b09fca667
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e2c7fc50b 100644
+index 21290e1e9b1e8594c62752771b6c7ffa64f99ef0..f7cf15f29043b10da94b9b7bf45fd757f1c67080 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1151,6 +1151,7 @@ impl ThreadManager {
+@@ -1162,6 +1162,7 @@ impl ThreadManager {
          Box::pin(self.start_thread_inner(
              options,
              /*forked_from_thread_id*/ None,
@@ -10599,7 +10599,7 @@ index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e
              /*startup*/ None,
              ForkStartupItems::default(),
          ))
-@@ -1228,12 +1229,19 @@ impl ThreadManager {
+@@ -1239,12 +1240,19 @@ impl ThreadManager {
          &self,
          mut options: StartThreadOptions,
          forked_from_thread_id: Option<ThreadId>,
@@ -10622,7 +10622,7 @@ index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e
          let (resumed_session_source, resumed_thread_source) = options
              .initial_history
              .get_resumed_session_sources()
-@@ -1284,6 +1292,7 @@ impl ThreadManager {
+@@ -1295,6 +1303,7 @@ impl ThreadManager {
          mut options: StartThreadOptions,
      ) -> CodexResult<NewThread> {
          let fork_source = self.get_thread(forked_from_thread_id).await?;
@@ -10630,7 +10630,7 @@ index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e
          let inherited_multi_agent_version = fork_source
              .multi_agent_version()
              .unwrap_or(MultiAgentVersion::V1);
-@@ -1314,6 +1323,7 @@ impl ThreadManager {
+@@ -1325,6 +1334,7 @@ impl ThreadManager {
                  .start_thread_inner(
                      options,
                      Some(forked_from_thread_id),
@@ -10638,7 +10638,7 @@ index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e
                      /*startup*/ None,
                      ForkStartupItems::default(),
                  )
-@@ -1340,6 +1350,7 @@ impl ThreadManager {
+@@ -1351,6 +1361,7 @@ impl ThreadManager {
              .start_thread_inner(
                  options,
                  Some(forked_from_thread_id),

@@ -655,7 +655,7 @@ index b0fa49b4babcc5802a9968ea26bc230add7cba17..51a191f4d5c8d3ae5a41e7325f7a6eb6
      mut active_turn: Turn,
      params: &codex_app_server_protocol::ThreadResumeInitialTurnsPageParams,
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1b1e4ad9c 100644
+index 57c10fe833cb800440e48c3cfaad1246d1d91a97..afda713531df5af12ae47e45cb585887ef8f8df4 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -28,14 +28,140 @@ use codex_protocol::SanitizedGitUrl;
@@ -2506,7 +2506,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let mut prepared_fork = if paginated_source {
              let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                  (Some(turn_id), None) => {
-@@ -4892,31 +6123,151 @@ impl ThreadRequestProcessor {
+@@ -4892,31 +6123,172 @@ impl ThreadRequestProcessor {
                  (None, None) => codex_thread_store::ForkBoundary::Latest,
                  (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
              };
@@ -2598,9 +2598,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
 +                                    expected_rollout_id,
 +                                )
 +                                .await
-                         }
--                        ThreadStoreError::Unsupported { .. } => {
--                            method_not_found("paginated_threads is not supported yet")
++                        }
 +                        (Some((model_context, expected_position)), false) => local_store
 +                            .prepare_fork_without_response_history_with_model_context_for_rollout(
 +                                params,
@@ -2617,18 +2615,41 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
 +                                )
 +                                .await
                          }
--                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
--                    })?,
--            )
+-                        ThreadStoreError::Unsupported { .. } => {
+-                            method_not_found("paginated_threads is not supported yet")
 +                        (None, true) => {
 +                            local_store
 +                                .prepare_fork_for_rollout(params, expected_rollout_id)
 +                                .await
-+                        }
+                         }
+-                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
+-                    })?,
+-            )
 +                    }
 +                } else {
 +                    self.thread_store.prepare_fork(params).await
 +                };
++            let prepared = match (prepared, local_store, expected_rollout_id) {
++                (
++                    Err(ThreadStoreError::Conflict { message }),
++                    Some(local_store),
++                    Some(rollout_id),
++                ) if latest
++                    && message
++                        == format!("thread {source_thread_id} already has an active writer") =>
++                {
++                    // Publishing a source segment requires its writer, but a Latest child can
++                    // own a verified finite copy without changing the externally written source.
++                    local_store
++                        .capture_external_paginated_fork(
++                            source_thread_id,
++                            rollout_id,
++                            include_turns,
++                        )
++                        .await
++                }
++                (prepared, _, _) => prepared,
++            };
 +            let mut prepared = prepared.map_err(|err| match err {
 +                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
 +                ThreadStoreError::ThreadNotFound { thread_id } => {
@@ -2676,7 +2697,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
                  .read_stored_thread_for_resume(
                      &thread_id,
                      path.as_ref(),
-@@ -4924,7 +6275,7 @@ impl ThreadRequestProcessor {
+@@ -4924,7 +6296,7 @@ impl ThreadRequestProcessor {
                  )
                  .await?;
              Arc::new(
@@ -2685,7 +2706,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
                      .history
                      .take()
                      .map(|history| history.items)
-@@ -4935,6 +6286,26 @@ impl ThreadRequestProcessor {
+@@ -4935,6 +6307,26 @@ impl ThreadRequestProcessor {
                      })?,
              )
          };
@@ -2712,7 +2733,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let history_cwd = Some(source_thread.cwd.clone());
 
          // Persist Windows sandbox mode.
-@@ -4974,6 +6345,14 @@ impl ThreadRequestProcessor {
+@@ -4974,6 +6366,14 @@ impl ThreadRequestProcessor {
              /*personality*/ None,
          );
          typesafe_overrides.ephemeral = ephemeral.then_some(true);
@@ -2727,7 +2748,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let restore_approval_policy = typesafe_overrides.approval_policy.is_none();
          let restore_approvals_reviewer = typesafe_overrides.approvals_reviewer.is_none()
              && !request_overrides
-@@ -5016,19 +6395,25 @@ impl ThreadRequestProcessor {
+@@ -5016,19 +6416,25 @@ impl ThreadRequestProcessor {
          } else {
              None
          };
@@ -2766,7 +2787,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let persisted_settings = loaded_parent_settings.or_else(|| {
              latest_persisted_resume_settings(
                  latest_context
-@@ -5061,57 +6446,20 @@ impl ThreadRequestProcessor {
+@@ -5061,57 +6467,20 @@ impl ThreadRequestProcessor {
          let parent_trace = self.request_trace_context(&request_id).await;
          let thread_source = thread_source.map(Into::into);
 
@@ -2826,7 +2847,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let inherited_project_id = source_thread.project_id.clone();
          let reserved_thread_id = if config.ephemeral {
              None
-@@ -5137,21 +6485,37 @@ impl ThreadRequestProcessor {
+@@ -5137,21 +6506,37 @@ impl ThreadRequestProcessor {
              ..StartThreadOptions::new(config)
          };
          let new_thread = if let Some(prepared_fork) = prepared_fork {
@@ -2869,7 +2890,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          };
          let NewThread {
              thread_id,
-@@ -5179,20 +6543,33 @@ impl ThreadRequestProcessor {
+@@ -5179,20 +6564,33 @@ impl ThreadRequestProcessor {
              app_server_client_version,
          )
          .await?;
@@ -2917,7 +2938,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          }
          let inherited_goal = if defer_goal_continuation
              && session_configured.rollout_path.is_some()
-@@ -5223,6 +6600,8 @@ impl ThreadRequestProcessor {
+@@ -5223,6 +6621,8 @@ impl ThreadRequestProcessor {
          }
 
          let instruction_sources = forked_thread.legacy_instruction_sources().await;
@@ -2926,7 +2947,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
 
          // Auto-attach a conversation listener when forking a thread.
          log_listener_attach_result(
-@@ -5239,8 +6618,8 @@ impl ThreadRequestProcessor {
+@@ -5239,8 +6639,8 @@ impl ThreadRequestProcessor {
 
          let config_snapshot = forked_thread.config_snapshot().await;
 
@@ -2937,7 +2958,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          let (mut thread, mut token_usage_turn_id) = if session_configured.rollout_path.is_some() {
              let stored_thread = self
                  .read_stored_thread_for_new_fork(thread_id, include_turns && !paginated_source)
-@@ -5276,17 +6655,84 @@ impl ThreadRequestProcessor {
+@@ -5276,17 +6676,84 @@ impl ThreadRequestProcessor {
                  &config_snapshot,
                  /*path*/ None,
              );
@@ -3027,7 +3048,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
                  thread.turns.as_slice(),
              ));
          }
-@@ -5337,6 +6783,16 @@ impl ThreadRequestProcessor {
+@@ -5337,6 +6804,16 @@ impl ThreadRequestProcessor {
 
          let notif = thread_started_notification(thread);
          let connection_id = request_id.connection_id;
@@ -3044,7 +3065,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
          self.outgoing
              .send_response_with_thread_originator(request_id, response, thread_originator)
              .await;
-@@ -5525,6 +6981,28 @@ impl ThreadRequestProcessor {
+@@ -5525,6 +7002,28 @@ impl ThreadRequestProcessor {
      }
  }
 
@@ -3073,7 +3094,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  fn xcode_26_4_mcp_elicitations_auto_deny(
      client_name: Option<&str>,
      client_version: Option<&str>,
-@@ -5584,6 +7062,22 @@ struct ThreadTurnsPage {
+@@ -5584,6 +7083,22 @@ struct ThreadTurnsPage {
      pub(super) backwards_cursor: Option<String>,
  }
 
@@ -3096,7 +3117,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  #[derive(serde::Serialize, serde::Deserialize)]
  #[serde(rename_all = "camelCase")]
  struct ThreadTurnsCursor {
-@@ -5591,11 +7085,82 @@ struct ThreadTurnsCursor {
+@@ -5591,11 +7106,82 @@ struct ThreadTurnsCursor {
      include_anchor: bool,
  }
 
@@ -3179,7 +3200,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  ) -> Result<ThreadTurnsPage, JSONRPCErrorError> {
      if turns.is_empty() {
          return Ok(ThreadTurnsPage {
-@@ -5647,7 +7212,8 @@ fn paginate_thread_turns(
+@@ -5647,7 +7233,8 @@ fn paginate_thread_turns(
          }
      }
 
@@ -3189,7 +3210,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
      keyed_turns.truncate(page_size);
      let backwards_cursor = keyed_turns
          .first()
-@@ -5690,6 +7256,7 @@ struct ThreadTurnsPageOptions<'a> {
+@@ -5690,6 +7277,7 @@ struct ThreadTurnsPageOptions<'a> {
      limit: Option<u32>,
      sort_direction: SortDirection,
      items_view: TurnItemsView,
@@ -3197,7 +3218,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  }
 
  fn build_thread_turns_page_response(
-@@ -5699,19 +7266,122 @@ fn build_thread_turns_page_response(
+@@ -5699,19 +7287,122 @@ fn build_thread_turns_page_response(
      active_turn: Option<Turn>,
      options: ThreadTurnsPageOptions<'_>,
  ) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
@@ -3328,7 +3349,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  }
 
  pub(super) fn build_thread_resume_initial_turns_page(
-@@ -5720,6 +7390,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
+@@ -5720,6 +7411,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
      has_live_running_thread: bool,
      active_turn: Option<Turn>,
      params: &ThreadResumeInitialTurnsPageParams,
@@ -3336,7 +3357,7 @@ index 57c10fe833cb800440e48c3cfaad1246d1d91a97..cc09d50e43ee0204c142379d5a1b61c1
  ) -> Result<codex_app_server_protocol::TurnsPage, JSONRPCErrorError> {
      build_thread_turns_page_response(
          items,
-@@ -5731,6 +7402,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
+@@ -5731,6 +7423,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
              limit: params.limit,
              sort_direction: params.sort_direction.unwrap_or(SortDirection::Desc),
              items_view: params.items_view.unwrap_or(TurnItemsView::Summary),
@@ -14378,7 +14399,7 @@ index 71843ce373e435ec3237aade28d0bdad78b2e5de..ee88d315a490091cf505c5aace9bf271
              forked_from_ordinal_exclusive: None,
              parent_thread_id: None,
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 6bcbf57fde3b524a6e09aef1719d5fd22a617998..1cc4abdeffe0b3eb938965b5a2892bc40abadb57 100644
+index 6bcbf57fde3b524a6e09aef1719d5fd22a617998..e204b20f09854d9acb06f0a0d2fd1854f15fdabe 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -16,6 +16,7 @@ mod ordinal;
@@ -14422,7 +14443,7 @@ index 6bcbf57fde3b524a6e09aef1719d5fd22a617998..1cc4abdeffe0b3eb938965b5a2892bc4
  pub use model_context::ModelContextScan;
  pub use model_context::ModelContextScanProgress;
  pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
-@@ -150,6 +156,20 @@ pub use policy::should_persist_response_item_for_memories;
+@@ -150,6 +156,21 @@ pub use policy::should_persist_response_item_for_memories;
  pub use recorder::RolloutRecorder;
  pub use recorder::RolloutRecorderParams;
  pub use recorder::append_rollout_item_to_path;
@@ -14430,6 +14451,7 @@ index 6bcbf57fde3b524a6e09aef1719d5fd22a617998..1cc4abdeffe0b3eb938965b5a2892bc4
 +pub use reference::BoundedRolloutMaterializer;
 +pub use reference::MAX_ROLLOUT_REFERENCE_DEPTH;
 +pub use reference::capture_external_legacy_rollout_lines;
++pub use reference::capture_external_paginated_rollout_lines;
 +pub use reference::compose_compacted_replacement_history_filter_texts;
 +pub use reference::materialize_bounded_rollout_lines;
 +pub use reference::materialize_model_context_rollout_items_from;
@@ -17406,10 +17428,10 @@ index 319a5622c125eb947255682ad98c3cb146ab139e..a5010469dd134934d09eb345fc7a02a8
 +}
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d16dee1bbeea87c497f8d17511501ea76c0dcbd
+index 0000000000000000000000000000000000000000..ea24d77f2bc94dbd7985877d51235e3b7a6b06cb
 --- /dev/null
 +++ b/codex-rs/rollout/src/reference.rs
-@@ -0,0 +1,1221 @@
+@@ -0,0 +1,1222 @@
 +//! Strict resolution and materialization of rollout-reference graphs.
 +
 +use std::collections::HashMap;
@@ -17446,6 +17468,7 @@ index 0000000000000000000000000000000000000000..6d16dee1bbeea87c497f8d17511501ea
 +
 +mod external_legacy_capture;
 +pub use external_legacy_capture::capture_external_legacy_rollout_lines;
++pub use external_legacy_capture::capture_external_paginated_rollout_lines;
 +
 +/// Bounds cross-thread and nth-user-message fork nesting during rollout expansion.
 +pub const MAX_ROLLOUT_REFERENCE_DEPTH: usize = 256;
@@ -18633,11 +18656,11 @@ index 0000000000000000000000000000000000000000..6d16dee1bbeea87c497f8d17511501ea
 +mod tests;
 diff --git a/codex-rs/rollout/src/reference/external_legacy_capture.rs b/codex-rs/rollout/src/reference/external_legacy_capture.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e8bf57cbd
+index 0000000000000000000000000000000000000000..e6324134920e06c1f7a069368ab4687b7e158158
 --- /dev/null
 +++ b/codex-rs/rollout/src/reference/external_legacy_capture.rs
-@@ -0,0 +1,298 @@
-+//! Captures an externally written Legacy fork without reserving or modifying its source.
+@@ -0,0 +1,382 @@
++//! Captures an externally written fork without reserving or modifying its source.
 +
 +use std::collections::HashMap;
 +use std::collections::HashSet;
@@ -18648,6 +18671,8 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +use std::path::PathBuf;
 +use std::sync::Arc;
 +
++use crate::ReverseJsonlScanner;
++use crate::ScanOutcome;
 +use codex_protocol::ThreadId;
 +use codex_protocol::protocol::HistoryPosition;
 +use codex_protocol::protocol::ThreadHistoryMode;
@@ -18673,14 +18698,49 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +    path: &Path,
 +    thread_id: ThreadId,
 +) -> io::Result<Vec<RolloutLine>> {
++    capture_external_rollout_lines(codex_home, path, thread_id, ThreadHistoryMode::Legacy)
++        .await
++        .map(|(lines, _)| lines)
++}
++
++/// Copies complete visible history and the physical root cutoff without taking its writer.
++///
++/// This exceptional external-writer operation reads every selected finite lineage prefix. Normal
++/// indexed fork preparation does not use it. The cutoff includes records omitted by payload
++/// compatibility decoding and root metadata omitted from expanded ancestry.
++pub async fn capture_external_paginated_rollout_lines(
++    codex_home: &Path,
++    path: &Path,
++    thread_id: ThreadId,
++) -> io::Result<(Vec<RolloutLine>, u64)> {
++    let (lines, next_ordinal) =
++        capture_external_rollout_lines(codex_home, path, thread_id, ThreadHistoryMode::Paginated)
++            .await?;
++    Ok((
++        lines,
++        next_ordinal.expect("paginated capture has a physical cutoff"),
++    ))
++}
++
++async fn capture_external_rollout_lines(
++    codex_home: &Path,
++    path: &Path,
++    thread_id: ThreadId,
++    history_mode: ThreadHistoryMode,
++) -> io::Result<(Vec<RolloutLine>, Option<u64>)> {
 +    let mut prefixes = CapturedPrefixes::default();
 +    let lines = prefixes.load(path, None, /*strict*/ false).await?;
 +    let metadata = canonical_session_meta(&lines)?;
-+    if metadata.meta.id != thread_id || metadata.meta.history_mode != ThreadHistoryMode::Legacy {
++    if metadata.meta.id != thread_id || metadata.meta.history_mode != history_mode {
 +        return Err(conflict(
-+            "selected external fork source is not the expected Legacy thread",
++            "selected external fork source is not the expected thread and history mode",
 +        ));
 +    }
++    let next_ordinal = if history_mode == ThreadHistoryMode::Paginated {
++        Some(prefixes.next_paginated_ordinal(path).await?)
++    } else {
++        None
++    };
 +    let mut materialized = vec![lines[0].clone()];
 +    let mut state = ExpansionState {
 +        retain_source_metadata: false,
@@ -18707,7 +18767,7 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +        .await?,
 +    );
 +    prefixes.verify().await?;
-+    Ok(materialized)
++    Ok((materialized, next_ordinal))
 +}
 +
 +/// Retains one opened handle and one finite physical prefix for each visited rollout file.
@@ -18728,6 +18788,48 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +}
 +
 +impl CapturedPrefixes {
++    async fn next_paginated_ordinal(&self, selected_path: &Path) -> io::Result<u64> {
++        let path = self.selected_paths[selected_path].clone();
++        let bytes = Arc::clone(&self.files[&path].bytes);
++        tokio::task::spawn_blocking(move || {
++            let bytes = decoded_prefix(&path, &bytes, None)?;
++            let mut scanner = ReverseJsonlScanner::new(io::Cursor::new(bytes))?;
++            let mut next = None;
++            let mut previous = None;
++            while let Some(record) = scanner.scan_next::<serde_json::Value>()? {
++                let value = match record {
++                    ScanOutcome::Parsed(value) => value,
++                    ScanOutcome::Rejected(error) if previous.is_none() && error.is_eof() => {
++                        continue;
++                    }
++                    ScanOutcome::Rejected(error) => {
++                        return Err(io::Error::new(io::ErrorKind::InvalidData, error));
++                    }
++                };
++                let ordinal = value
++                    .get("ordinal")
++                    .and_then(serde_json::Value::as_u64)
++                    .ok_or_else(|| conflict("captured paginated record is missing an ordinal"))?;
++                if previous.is_some_and(|previous| ordinal >= previous) {
++                    return Err(conflict(
++                        "captured paginated ordinals are not strictly increasing",
++                    ));
++                }
++                if next.is_none() {
++                    next = Some(
++                        ordinal
++                            .checked_add(1)
++                            .ok_or_else(|| conflict("captured paginated ordinal overflow"))?,
++                    );
++                }
++                previous = Some(ordinal);
++            }
++            next.ok_or_else(|| conflict("captured paginated source has no physical records"))
++        })
++        .await
++        .map_err(io::Error::other)?
++    }
++
 +    pub(super) async fn load(
 +        &mut self,
 +        path: &Path,
@@ -18866,17 +18968,7 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +    end: Option<u64>,
 +    strict: bool,
 +) -> io::Result<Vec<RolloutLine>> {
-+    let decoded;
-+    let bytes = if compression::plain_rollout_path(path) != path {
-+        let mut reader =
-+            zstd::stream::read::Decoder::new(physical_bytes)?.take(end.unwrap_or(u64::MAX));
-+        let mut bytes = Vec::new();
-+        reader.read_to_end(&mut bytes)?;
-+        decoded = bytes;
-+        decoded.as_slice()
-+    } else {
-+        physical_bytes
-+    };
++    let bytes = decoded_prefix(path, physical_bytes, end)?;
 +    let prefix = match end {
 +        Some(end) => {
 +            let end = usize::try_from(end)
@@ -18886,7 +18978,7 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +                .filter(|prefix| prefix.ends_with(b"\n"))
 +                .ok_or_else(|| conflict("external fork cutoff is not a complete record boundary"))?
 +        }
-+        None => bytes,
++        None => bytes.as_ref(),
 +    };
 +    let (records, _, mut parse_errors) =
 +        RolloutRecorder::load_rollout_lines_from_bytes(path, prefix)?;
@@ -18928,6 +19020,21 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +    Ok(lines)
 +}
 +
++fn decoded_prefix<'a>(
++    path: &Path,
++    physical_bytes: &'a [u8],
++    end: Option<u64>,
++) -> io::Result<std::borrow::Cow<'a, [u8]>> {
++    if compression::plain_rollout_path(path) == path {
++        return Ok(std::borrow::Cow::Borrowed(physical_bytes));
++    }
++    let mut reader =
++        zstd::stream::read::Decoder::new(physical_bytes)?.take(end.unwrap_or(u64::MAX));
++    let mut bytes = Vec::new();
++    reader.read_to_end(&mut bytes)?;
++    Ok(std::borrow::Cow::Owned(bytes))
++}
++
 +fn conflict(message: &str) -> io::Error {
 +    io::Error::new(io::ErrorKind::WouldBlock, message)
 +}
@@ -18937,10 +19044,10 @@ index 0000000000000000000000000000000000000000..14b0a9bca3846216ecef353d1aeffb4e
 +mod tests;
 diff --git a/codex-rs/rollout/src/reference/external_legacy_capture_tests.rs b/codex-rs/rollout/src/reference/external_legacy_capture_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6ab193f123
+index 0000000000000000000000000000000000000000..e2338b4a8b65849a8ce54901ec26494cb7afe0c1
 --- /dev/null
 +++ b/codex-rs/rollout/src/reference/external_legacy_capture_tests.rs
-@@ -0,0 +1,728 @@
+@@ -0,0 +1,946 @@
 +use std::fs;
 +use std::io;
 +use std::io::Write as _;
@@ -18965,7 +19072,16 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +
 +use super::CapturedPrefixes;
 +use super::capture_external_legacy_rollout_lines;
++use super::capture_external_paginated_rollout_lines;
 +use crate::materialize_rollout_lines;
++
++#[track_caller]
++fn assert_rollout_lines_eq(actual: &[RolloutLine], expected: &[RolloutLine]) {
++    assert_eq!(
++        serde_json::to_value(actual).expect("serialize actual rollout lines"),
++        serde_json::to_value(expected).expect("serialize expected rollout lines")
++    );
++}
 +
 +fn line(item: RolloutItem, ordinal: Option<u64>) -> RolloutLine {
 +    RolloutLine {
@@ -19117,152 +19233,222 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +
 +#[tokio::test]
 +async fn captured_prefix_excludes_complete_records_appended_after_capture() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    let expected = vec![legacy_meta_line(thread_id), agent_line("captured", 1)];
-+    write_rollout(&path, &expected)?;
-+    let mut prefixes = CapturedPrefixes::default();
-+    assert_eq!(prefixes.load(&path, None, false).await?, expected);
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let expected = vec![
++            meta_line(
++                thread_id,
++                history_mode,
++                (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++                None,
++            ),
++            agent_line("captured", 1),
++        ];
++        write_rollout(&path, &expected)?;
++        let mut prefixes = CapturedPrefixes::default();
++        assert_rollout_lines_eq(&prefixes.load(&path, None, false).await?, &expected);
 +
-+    append_line(&path, &agent_line("appended later", 2))?;
++        append_line(&path, &agent_line("appended later", 2))?;
 +
-+    assert_eq!(prefixes.load(&path, None, false).await?, expected);
-+    prefixes.verify().await?;
-+    assert_eq!(
-+        capture_external_legacy_rollout_lines(home.path(), &path, thread_id)
-+            .await?
-+            .len(),
-+        3
-+    );
++        assert_rollout_lines_eq(&prefixes.load(&path, None, false).await?, &expected);
++        prefixes.verify().await?;
++        if history_mode == ThreadHistoryMode::Paginated {
++            assert_eq!(prefixes.next_paginated_ordinal(&path).await?, 2);
++            let (captured, next) =
++                capture_external_paginated_rollout_lines(home.path(), &path, thread_id).await?;
++            let mut extended = expected;
++            extended.push(agent_line("appended later", 2));
++            assert_rollout_lines_eq(&captured, &extended);
++            assert_eq!(next, 3);
++        } else {
++            assert_eq!(
++                capture_external_legacy_rollout_lines(home.path(), &path, thread_id)
++                    .await?
++                    .len(),
++                3
++            );
++        }
++    }
 +    Ok(())
 +}
 +
 +#[tokio::test]
 +async fn captured_prefix_excludes_a_trailing_record_completed_after_capture() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    let expected = vec![legacy_meta_line(thread_id), agent_line("complete", 1)];
-+    write_rollout(&path, &expected)?;
-+    let trailing = serde_json::to_vec(&agent_line("initially incomplete", 2))?;
-+    let split = trailing.len() / 2;
-+    let mut writer = fs::OpenOptions::new().append(true).open(&path)?;
-+    writer.write_all(&trailing[..split])?;
-+    let mut prefixes = CapturedPrefixes::default();
-+    assert_eq!(prefixes.load(&path, None, false).await?, expected);
-+    assert_eq!(
-+        capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
-+        expected
-+    );
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let expected = vec![
++            meta_line(
++                thread_id,
++                history_mode,
++                (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++                None,
++            ),
++            agent_line("complete", 1),
++        ];
++        write_rollout(&path, &expected)?;
++        let trailing = serde_json::to_vec(&agent_line("initially incomplete", 2))?;
++        let split = trailing.len() / 2;
++        let mut writer = fs::OpenOptions::new().append(true).open(&path)?;
++        writer.write_all(&trailing[..split])?;
++        let mut prefixes = CapturedPrefixes::default();
++        assert_rollout_lines_eq(&prefixes.load(&path, None, false).await?, &expected);
++        if history_mode == ThreadHistoryMode::Paginated {
++            let (captured, next) =
++                capture_external_paginated_rollout_lines(home.path(), &path, thread_id).await?;
++            assert_rollout_lines_eq(&captured, &expected);
++            assert_eq!(next, 2);
++        } else {
++            assert_rollout_lines_eq(
++                &capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
++                &expected,
++            );
++        }
 +
-+    writer.write_all(&trailing[split..])?;
-+    writer.write_all(b"\n")?;
++        writer.write_all(&trailing[split..])?;
++        writer.write_all(b"\n")?;
 +
-+    assert_eq!(prefixes.load(&path, None, false).await?, expected);
-+    prefixes.verify().await?;
++        assert_rollout_lines_eq(&prefixes.load(&path, None, false).await?, &expected);
++        prefixes.verify().await?;
++        if history_mode == ThreadHistoryMode::Paginated {
++            assert_eq!(prefixes.next_paginated_ordinal(&path).await?, 2);
++        }
++    }
 +    Ok(())
 +}
 +
 +#[tokio::test]
 +async fn capture_verification_rejects_a_replacement_with_changed_prefix() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    let lines = vec![legacy_meta_line(thread_id), agent_line("captured", 1)];
-+    write_rollout(&path, &lines)?;
-+    let mut prefixes = CapturedPrefixes::default();
-+    prefixes.load(&path, None, false).await?;
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let metadata = meta_line(
++            thread_id,
++            history_mode,
++            (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++            None,
++        );
++        let lines = vec![metadata.clone(), agent_line("captured", 1)];
++        write_rollout(&path, &lines)?;
++        let mut prefixes = CapturedPrefixes::default();
++        prefixes.load(&path, None, false).await?;
 +
-+    fs::rename(&path, path.with_extension("previous"))?;
-+    write_rollout(
-+        &path,
-+        &[legacy_meta_line(thread_id), agent_line("replaced", 1)],
-+    )?;
++        fs::rename(&path, path.with_extension("previous"))?;
++        write_rollout(&path, &[metadata, agent_line("replaced", 1)])?;
 +
-+    assert_eq!(
-+        prefixes
-+            .verify()
-+            .await
-+            .expect_err("changed replacement prefix must fail")
-+            .kind(),
-+        io::ErrorKind::WouldBlock
-+    );
++        assert_eq!(
++            prefixes
++                .verify()
++                .await
++                .expect_err("changed replacement prefix must fail")
++                .kind(),
++            io::ErrorKind::WouldBlock
++        );
++    }
 +    Ok(())
 +}
 +
 +#[tokio::test]
 +async fn capture_verification_accepts_a_replacement_with_identical_prefix() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    let lines = vec![legacy_meta_line(thread_id), agent_line("captured", 1)];
-+    write_rollout(&path, &lines)?;
-+    let mut prefixes = CapturedPrefixes::default();
-+    prefixes.load(&path, None, false).await?;
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let lines = vec![
++            meta_line(
++                thread_id,
++                history_mode,
++                (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++                None,
++            ),
++            agent_line("captured", 1),
++        ];
++        write_rollout(&path, &lines)?;
++        let mut prefixes = CapturedPrefixes::default();
++        prefixes.load(&path, None, false).await?;
 +
-+    fs::rename(&path, path.with_extension("previous"))?;
-+    write_rollout(&path, &lines)?;
-+    append_line(&path, &agent_line("replacement append", 2))?;
++        fs::rename(&path, path.with_extension("previous"))?;
++        write_rollout(&path, &lines)?;
++        append_line(&path, &agent_line("replacement append", 2))?;
 +
-+    prefixes.verify().await?;
-+    assert_eq!(prefixes.load(&path, None, false).await?, lines);
++        prefixes.verify().await?;
++        assert_rollout_lines_eq(&prefixes.load(&path, None, false).await?, &lines);
++        if history_mode == ThreadHistoryMode::Paginated {
++            assert_eq!(prefixes.next_paginated_ordinal(&path).await?, 2);
++        }
++    }
 +    Ok(())
 +}
 +
 +#[tokio::test]
 +async fn capture_verification_rejects_a_truncated_file() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    write_rollout(
-+        &path,
-+        &[legacy_meta_line(thread_id), agent_line("captured", 1)],
-+    )?;
-+    let mut prefixes = CapturedPrefixes::default();
-+    prefixes.load(&path, None, false).await?;
-+    let writer = fs::OpenOptions::new().write(true).open(&path)?;
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        write_rollout(
++            &path,
++            &[
++                meta_line(
++                    thread_id,
++                    history_mode,
++                    (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++                    None,
++                ),
++                agent_line("captured", 1),
++            ],
++        )?;
++        let mut prefixes = CapturedPrefixes::default();
++        prefixes.load(&path, None, false).await?;
++        let writer = fs::OpenOptions::new().write(true).open(&path)?;
 +
-+    writer.set_len(writer.metadata()?.len() - 1)?;
++        writer.set_len(writer.metadata()?.len() - 1)?;
 +
-+    assert_eq!(
-+        prefixes
-+            .verify()
-+            .await
-+            .expect_err("truncation must fail")
-+            .kind(),
-+        io::ErrorKind::WouldBlock
-+    );
++        assert_eq!(
++            prefixes
++                .verify()
++                .await
++                .expect_err("truncation must fail")
++                .kind(),
++            io::ErrorKind::WouldBlock
++        );
++    }
 +    Ok(())
 +}
 +
 +#[tokio::test]
 +async fn capture_verification_rejects_a_same_length_prefix_mutation() -> io::Result<()> {
-+    let home = TempDir::new()?;
-+    let thread_id = ThreadId::new();
-+    let path = active_path(home.path(), thread_id);
-+    write_rollout(
-+        &path,
-+        &[legacy_meta_line(thread_id), agent_line("before", 1)],
-+    )?;
-+    let original_len = fs::metadata(&path)?.len();
-+    let mut prefixes = CapturedPrefixes::default();
-+    prefixes.load(&path, None, false).await?;
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let metadata = meta_line(
++            thread_id,
++            history_mode,
++            (history_mode == ThreadHistoryMode::Paginated).then_some(0),
++            None,
++        );
++        write_rollout(&path, &[metadata.clone(), agent_line("before", 1)])?;
++        let original_len = fs::metadata(&path)?.len();
++        let mut prefixes = CapturedPrefixes::default();
++        prefixes.load(&path, None, false).await?;
 +
-+    write_rollout(
-+        &path,
-+        &[legacy_meta_line(thread_id), agent_line("after!", 1)],
-+    )?;
++        write_rollout(&path, &[metadata, agent_line("after!", 1)])?;
 +
-+    assert_eq!(fs::metadata(&path)?.len(), original_len);
-+    assert_eq!(
-+        prefixes
-+            .verify()
-+            .await
-+            .expect_err("mutation must fail")
-+            .kind(),
-+        io::ErrorKind::WouldBlock
-+    );
++        assert_eq!(fs::metadata(&path)?.len(), original_len);
++        assert_eq!(
++            prefixes
++                .verify()
++                .await
++                .expect_err("mutation must fail")
++                .kind(),
++            io::ErrorKind::WouldBlock
++        );
++    }
 +    Ok(())
 +}
 +
@@ -19285,13 +19471,13 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +
 +    let captured = capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?;
 +
-+    assert_eq!(
-+        captured,
-+        vec![metadata, recovered_first, recovered_second, complete]
++    assert_rollout_lines_eq(
++        &captured,
++        &[metadata, recovered_first, recovered_second, complete],
 +    );
-+    assert_eq!(
-+        captured,
-+        materialize_rollout_lines(home.path(), &path).await?
++    assert_rollout_lines_eq(
++        &captured,
++        &materialize_rollout_lines(home.path(), &path).await?,
 +    );
 +    Ok(())
 +}
@@ -19309,9 +19495,9 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    let writer = fs::OpenOptions::new().write(true).open(&path)?;
 +    writer.set_len(writer.metadata()?.len() - 1)?;
 +
-+    assert_eq!(
-+        capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
-+        expected
++    assert_rollout_lines_eq(
++        &capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
++        &expected,
 +    );
 +    Ok(())
 +}
@@ -19330,9 +19516,9 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    let incomplete = serde_json::to_vec(&agent_line("incomplete tail", 2))?;
 +    writer.write_all(&incomplete[..incomplete.len() / 2])?;
 +
-+    assert_eq!(
-+        capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
-+        vec![metadata, complete]
++    assert_rollout_lines_eq(
++        &capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
++        &[metadata, complete],
 +    );
 +    Ok(())
 +}
@@ -19354,9 +19540,9 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    let incomplete = serde_json::to_vec(&agent_line("incomplete tail", 3))?;
 +    writer.write_all(&incomplete[..incomplete.len() / 2])?;
 +
-+    assert_eq!(
-+        capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
-+        vec![metadata, first, second]
++    assert_rollout_lines_eq(
++        &capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?,
++        &[metadata, first, second],
 +    );
 +    Ok(())
 +}
@@ -19406,7 +19592,7 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +
 +    let captured = capture_external_legacy_rollout_lines(home.path(), &path, thread_id).await?;
 +
-+    assert_eq!(captured, vec![metadata, expected]);
++    assert_rollout_lines_eq(&captured, &[metadata, expected]);
 +    let RolloutItem::EventMsg(EventMsg::TokenCount(event)) = &captured[1].item else {
 +        panic!("expected token count");
 +    };
@@ -19416,9 +19602,9 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +        info.total_token_usage.codex_rollout_budget_units.as_ref(),
 +        Some(&budget_units)
 +    );
-+    assert_eq!(
-+        captured,
-+        materialize_rollout_lines(home.path(), &path).await?
++    assert_rollout_lines_eq(
++        &captured,
++        &materialize_rollout_lines(home.path(), &path).await?,
 +    );
 +    Ok(())
 +}
@@ -19447,9 +19633,9 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    fs::remove_file(&path)?;
 +    let mut prefixes = CapturedPrefixes::default();
 +
-+    assert_eq!(
-+        prefixes.load_history_base(home.path(), position).await?,
-+        expected
++    assert_rollout_lines_eq(
++        &prefixes.load_history_base(home.path(), position).await?,
++        &expected,
 +    );
 +    prefixes.verify().await?;
 +    Ok(())
@@ -19468,7 +19654,7 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    let end = fs::metadata(&path)?.len();
 +    append_line(&path, &agent_line("unselected original tail", 2))?;
 +    let mut prefixes = CapturedPrefixes::default();
-+    assert_eq!(prefixes.load(&path, Some(end), true).await?, expected);
++    assert_rollout_lines_eq(&prefixes.load(&path, Some(end), true).await?, &expected);
 +    let canonical = fs::canonicalize(&path)?;
 +    assert_eq!(
 +        prefixes.files[&canonical].bytes.len(),
@@ -19485,7 +19671,7 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +        .set_len(end)?;
 +    prefixes.verify().await?;
 +
-+    assert_eq!(prefixes.load(&path, Some(end), true).await?, expected);
++    assert_rollout_lines_eq(&prefixes.load(&path, Some(end), true).await?, &expected);
 +    assert_eq!(
 +        prefixes.files[&canonical].bytes.len(),
 +        usize::try_from(end).expect("test cutoff fits usize")
@@ -19508,13 +19694,13 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    append_line(&path, &original_tail)?;
 +    let original_len = fs::metadata(&path)?.len();
 +    let mut prefixes = CapturedPrefixes::default();
-+    assert_eq!(prefixes.load(&path, Some(end), true).await?, prefix);
++    assert_rollout_lines_eq(&prefixes.load(&path, Some(end), true).await?, &prefix);
 +
 +    append_line(&path, &agent_line("appended after capture", 3))?;
 +
 +    let mut expected = prefix;
 +    expected.push(original_tail);
-+    assert_eq!(prefixes.load(&path, None, true).await?, expected);
++    assert_rollout_lines_eq(&prefixes.load(&path, None, true).await?, &expected);
 +    let canonical = fs::canonicalize(&path)?;
 +    let captured = &prefixes.files[&canonical];
 +    assert_eq!(captured.metadata.len(), original_len);
@@ -19602,20 +19788,20 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +    let captured =
 +        capture_external_legacy_rollout_lines(home.path(), &root_path, root_thread).await?;
 +
-+    assert_eq!(
-+        captured,
-+        vec![
++    assert_rollout_lines_eq(
++        &captured,
++        &[
 +            root_metadata,
 +            message_line("developer", "retained instructions", 3),
 +            compacted_line(&["retained instructions"], 4),
 +            message_line("user", "retained user", 5),
 +            agent_line("retained answer", 6),
 +            agent_line("root suffix", 11),
-+        ]
++        ],
 +    );
-+    assert_eq!(
-+        captured,
-+        materialize_rollout_lines(home.path(), &root_path).await?
++    assert_rollout_lines_eq(
++        &captured,
++        &materialize_rollout_lines(home.path(), &root_path).await?,
 +    );
 +    Ok(())
 +}
@@ -19661,12 +19847,151 @@ index 0000000000000000000000000000000000000000..47ffe7e819d0bdf967416bf95e4ccd6a
 +            )],
 +        )?;
 +
-+        let error = capture_external_legacy_rollout_lines(home.path(), &root_path, root_thread)
-+            .await
-+            .expect_err("native cutoff must be authenticated");
++        let Err(error) =
++            capture_external_legacy_rollout_lines(home.path(), &root_path, root_thread).await
++        else {
++            panic!("native cutoff must be authenticated");
++        };
 +
 +        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 +    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn paginated_capture_uses_metadata_only_root_cutoff_and_bounds_all_ancestors()
++-> io::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let oldest_id = ThreadId::new();
++    let oldest_path = native_segment_path(home.path(), thread_id, oldest_id);
++    let oldest_message = message_line("user", "oldest inherited message", 1);
++    write_rollout(
++        &oldest_path,
++        &[
++            meta_line(thread_id, ThreadHistoryMode::Paginated, Some(0), None),
++            oldest_message.clone(),
++        ],
++    )?;
++    let oldest_position = HistoryPosition {
++        thread_id: oldest_id,
++        end_ordinal_exclusive: 2,
++        end_byte_offset: fs::metadata(&oldest_path)?.len(),
++    };
++    append_line(&oldest_path, &agent_line("outside oldest cutoff", 2))?;
++
++    let predecessor_id = ThreadId::new();
++    let predecessor_path = native_segment_path(home.path(), thread_id, predecessor_id);
++    let predecessor_message = message_line("user", "immediate inherited message", 3);
++    write_rollout(
++        &predecessor_path,
++        &[
++            meta_line(
++                thread_id,
++                ThreadHistoryMode::Paginated,
++                Some(2),
++                Some(oldest_position),
++            ),
++            predecessor_message.clone(),
++        ],
++    )?;
++    let predecessor_position = HistoryPosition {
++        thread_id: predecessor_id,
++        end_ordinal_exclusive: 4,
++        end_byte_offset: fs::metadata(&predecessor_path)?.len(),
++    };
++    append_line(
++        &predecessor_path,
++        &agent_line("outside immediate cutoff", 4),
++    )?;
++
++    let root_path = active_path(home.path(), thread_id);
++    let root_metadata = meta_line(
++        thread_id,
++        ThreadHistoryMode::Paginated,
++        Some(4),
++        Some(predecessor_position),
++    );
++    write_rollout(&root_path, std::slice::from_ref(&root_metadata))?;
++
++    let (captured, source_end_ordinal_exclusive) =
++        capture_external_paginated_rollout_lines(home.path(), &root_path, thread_id).await?;
++
++    assert_eq!(source_end_ordinal_exclusive, 5);
++    assert_rollout_lines_eq(
++        &captured,
++        &[root_metadata, oldest_message, predecessor_message],
++    );
++    assert_rollout_lines_eq(
++        &captured,
++        &materialize_rollout_lines(home.path(), &root_path).await?,
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn paginated_capture_counts_a_skipped_final_record_in_the_physical_root_cutoff()
++-> io::Result<()> {
++    for trailing_newline in [false, true] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = active_path(home.path(), thread_id);
++        let expected = vec![
++            meta_line(thread_id, ThreadHistoryMode::Paginated, Some(0), None),
++            agent_line("retained record", 1),
++        ];
++        write_rollout(&path, &expected)?;
++        let skipped = serde_json::json!({
++            "timestamp": "2026-07-13T00:00:00Z",
++            "ordinal": 2,
++            "type": "response_item",
++            "payload": {
++                "type": "ghost_snapshot",
++                "ghost_commit": {
++                    "id": "deadbeef",
++                    "preexisting_untracked_dirs": [],
++                    "preexisting_untracked_files": [],
++                },
++            },
++        });
++        let mut writer = fs::OpenOptions::new().append(true).open(&path)?;
++        serde_json::to_writer(&mut writer, &skipped)?;
++        if trailing_newline {
++            writer.write_all(b"\n")?;
++        }
++        let (decoded, _, parse_errors) = crate::RolloutRecorder::load_rollout_lines(&path).await?;
++        assert_eq!(parse_errors, 0);
++        assert_rollout_lines_eq(&decoded, &expected);
++
++        let (captured, source_end_ordinal_exclusive) =
++            capture_external_paginated_rollout_lines(home.path(), &path, thread_id).await?;
++
++        assert_eq!(source_end_ordinal_exclusive, 3);
++        assert_rollout_lines_eq(&captured, &expected);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn paginated_capture_excludes_an_incomplete_final_record_from_the_root_cutoff()
++-> io::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let path = active_path(home.path(), thread_id);
++    let expected = vec![
++        meta_line(thread_id, ThreadHistoryMode::Paginated, Some(0), None),
++        agent_line("complete record", 1),
++    ];
++    write_rollout(&path, &expected)?;
++    let incomplete = serde_json::to_vec(&agent_line("incomplete record", 2))?;
++    let mut writer = fs::OpenOptions::new().append(true).open(&path)?;
++    writer.write_all(&incomplete[..incomplete.len() - 1])?;
++
++    let (captured, source_end_ordinal_exclusive) =
++        capture_external_paginated_rollout_lines(home.path(), &path, thread_id).await?;
++
++    assert_eq!(source_end_ordinal_exclusive, 2);
++    assert_rollout_lines_eq(&captured, &expected);
 +    Ok(())
 +}
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
@@ -25972,7 +26297,7 @@ index 6a2d95f2b06813fe823b80cc1e22c68c88e2efc1..7f9e93a677a69be26fdb9b89b828cd72
      match write {
          RolloutWriteOp::AppendItems(items) => {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2c361e49b 100644
+index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..312e205cd7a2619535e8ec18ffadf253a03141c4 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -16,6 +16,7 @@ mod rollout_migration;
@@ -26149,7 +26474,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
          if self.state_db.is_none() {
              return Err(ThreadStoreError::Unsupported {
-@@ -317,6 +422,179 @@ impl LocalThreadStore {
+@@ -317,6 +422,197 @@ impl LocalThreadStore {
          live_writer::rollout_path(self, thread_id).await
      }
 
@@ -26305,6 +26630,24 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
 +        segment::capture_external_legacy_fork(self, thread_id, expected_rollout_id).await
 +    }
 +
++    /// Copies a Latest Paginated fork after the caller observes the selected source's writer
++    /// conflict. Unlike normal fork preparation, this reads every selected finite lineage prefix
++    /// without repairing, publishing, or acquiring writer ownership for the source.
++    pub async fn capture_external_paginated_fork(
++        &self,
++        thread_id: ThreadId,
++        expected_rollout_id: codex_protocol::RolloutId,
++        include_turns: bool,
++    ) -> ThreadStoreResult<PreparedFork> {
++        segment::capture_external_paginated_fork(
++            self,
++            thread_id,
++            expected_rollout_id,
++            include_turns,
++        )
++        .await
++    }
++
 +    /// Prevents deletion, archive, and unarchive while a new child reference is initialized.
 +    pub async fn reserve_thread_lifecycle(
 +        &self,
@@ -26329,7 +26672,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      pub(super) async fn ensure_live_recorder_absent(
          &self,
          thread_id: ThreadId,
-@@ -360,6 +638,25 @@ impl LocalThreadStore {
+@@ -360,6 +656,25 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 
@@ -26355,7 +26698,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      async fn insert_live_recorder(
          &self,
          thread_id: ThreadId,
-@@ -367,6 +664,7 @@ impl LocalThreadStore {
+@@ -367,6 +682,7 @@ impl LocalThreadStore {
          rollout_id: ThreadId,
          history_mode: ThreadHistoryMode,
          writer_lock: WriterLockGuard,
@@ -26363,7 +26706,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      ) -> ThreadStoreResult<()> {
          match self.live_recorders.lock().await.entry(thread_id) {
              Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
-@@ -375,9 +673,14 @@ impl LocalThreadStore {
+@@ -375,9 +691,14 @@ impl LocalThreadStore {
              Entry::Vacant(entry) => {
                  entry.insert(LiveRecorderEntry {
                      recorder,
@@ -26378,7 +26721,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
                  });
                  Ok(())
              }
-@@ -445,6 +748,30 @@ impl LocalThreadStore {
+@@ -445,6 +766,30 @@ impl LocalThreadStore {
          thread_history::list_turns(self, params).await
      }
 
@@ -26409,7 +26752,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      /// Lists projection-backed items without enabling app-server routing yet.
      pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
          thread_history::list_items(self, params).await
-@@ -458,6 +785,14 @@ impl LocalThreadStore {
+@@ -458,6 +803,14 @@ impl LocalThreadStore {
          thread_history::list_timeline(self, params).await
      }
 
@@ -26424,7 +26767,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      /// Searches projection-backed visible messages within one paginated thread.
      pub async fn search_thread_occurrences(
          &self,
-@@ -524,6 +859,14 @@ impl ThreadStore for LocalThreadStore {
+@@ -524,6 +877,14 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(async move { live_writer::append_items(self, params).await })
      }
 
@@ -26439,7 +26782,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      fn persist_thread(
          &self,
          thread_id: ThreadId,
-@@ -794,6 +1137,7 @@ mod tests {
+@@ -794,6 +1155,7 @@ mod tests {
      use codex_protocol::items::TurnItem;
      use codex_protocol::items::UserMessageItem;
      use codex_protocol::models::BaseInstructions;
@@ -26447,7 +26790,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      use codex_protocol::models::FunctionCallOutputPayload;
      use codex_protocol::models::MessagePhase;
      use codex_protocol::models::ResponseItem;
-@@ -869,6 +1213,79 @@ mod tests {
+@@ -869,6 +1231,79 @@ mod tests {
          );
      }
 
@@ -26527,7 +26870,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      #[tokio::test]
      async fn raw_append_items_does_not_update_sqlite_metadata() {
          // This pins the ThreadStore contract: raw appends are history-only. Callers that need
-@@ -942,7 +1359,7 @@ mod tests {
+@@ -942,7 +1377,7 @@ mod tests {
      }
 
      #[tokio::test]
@@ -26536,7 +26879,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
          let home = TempDir::new().expect("temp dir");
          let config = test_config(home.path());
          let runtime = codex_state::StateRuntime::init(
-@@ -982,7 +1399,7 @@ mod tests {
+@@ -982,7 +1417,7 @@ mod tests {
              .await
              .expect("update stale sqlite rollout path");
 
@@ -26545,7 +26888,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
              store,
              ThreadHistoryMode::Paginated,
              ResumeThreadParams {
-@@ -998,12 +1415,15 @@ mod tests {
+@@ -998,12 +1433,15 @@ mod tests {
              },
          )
          .await
@@ -26566,7 +26909,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
 
          let metadata = runtime
              .get_thread(thread_id)
-@@ -1104,6 +1524,149 @@ mod tests {
+@@ -1104,6 +1542,149 @@ mod tests {
          assert_eq!(child_metadata.approval_mode, "on-request");
      }
 
@@ -26716,7 +27059,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      #[tokio::test]
      async fn live_thread_output_advances_updated_at_but_not_recency_at() {
          let home = TempDir::new().expect("temp dir");
-@@ -1520,6 +2083,50 @@ mod tests {
+@@ -1520,6 +2101,50 @@ mod tests {
          }
      }
 
@@ -26767,7 +27110,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      #[tokio::test]
      async fn resume_thread_reopens_live_writer_and_appends() {
          let home = TempDir::new().expect("temp dir");
-@@ -1582,6 +2189,97 @@ mod tests {
+@@ -1582,6 +2207,97 @@ mod tests {
          assert_rollout_contains_message(rollout_path.as_path(), "after resume").await;
      }
 
@@ -26865,7 +27208,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      #[tokio::test]
      async fn live_writers_reject_cross_process_create_and_resume() {
          let home = TempDir::new().expect("temp dir");
-@@ -1823,7 +2521,10 @@ mod tests {
+@@ -1823,7 +2539,10 @@ mod tests {
              })
              .await
              .expect_err("external rollouts cannot be referenced by thread id");
@@ -26877,7 +27220,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      }
 
      #[tokio::test]
-@@ -1941,7 +2642,7 @@ mod tests {
+@@ -1941,7 +2660,7 @@ mod tests {
      }
 
      #[tokio::test]
@@ -26886,7 +27229,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
          let home = TempDir::new().expect("temp dir");
          let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
          let uuid = uuid::Uuid::from_u128(408);
-@@ -1976,35 +2677,37 @@ mod tests {
+@@ -1976,35 +2695,37 @@ mod tests {
          assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
          assert!(thread.history.is_none());
 
@@ -26953,7 +27296,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
          store
              .resume_thread(ResumeThreadParams {
                  thread_id,
-@@ -2070,6 +2773,20 @@ mod tests {
+@@ -2070,6 +2791,20 @@ mod tests {
                      if event.message == "legacy event should not persist"
              )
          }));
@@ -26974,7 +27317,7 @@ index e7e1ba8bd4ab2b66612e49ffd612ddbb3933b190..ed79f1b0d927a65642b9be538ccae5b2
      }
 
      fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
-@@ -2091,21 +2808,14 @@ mod tests {
+@@ -2091,21 +2826,14 @@ mod tests {
              history_mode: ThreadHistoryMode::Legacy,
              history_base: None,
              subagent_history_start_ordinal: None,
@@ -37183,10 +37526,10 @@ index 0000000000000000000000000000000000000000..911ef7644607f8e4541a3071a667234b
 +}
 diff --git a/codex-rs/thread-store/src/local/tests/external_legacy_fork_tests.rs b/codex-rs/thread-store/src/local/tests/external_legacy_fork_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f05390187207b1363d3160158ad36da87853d33
+index 0000000000000000000000000000000000000000..072f63be0e2d49b596dbae47febd25fbb87e4afb
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/tests/external_legacy_fork_tests.rs
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,260 @@
 +//! External Legacy capture preserves source persistence and writer ownership.
 +
 +use codex_protocol::ThreadId;
@@ -37377,8 +37720,16 @@ index 0000000000000000000000000000000000000000..7f05390187207b1363d3160158ad36da
 +        .copied_history
 +        .as_ref()
 +        .expect("external fork owns copied history");
-+    assert_eq!(copied.as_ref(), &items_before);
-+    assert_eq!(prepared.response_history.as_ref(), &items_before);
++    let expected_history = serde_json::to_value(&items_before).expect("serialize source history");
++    assert_eq!(
++        serde_json::to_value(copied.as_ref()).expect("serialize copied history"),
++        expected_history
++    );
++    assert_eq!(
++        serde_json::to_value(prepared.response_history.as_ref())
++            .expect("serialize response history"),
++        expected_history
++    );
 +
 +    let resume_params = ResumeThreadParams {
 +        thread_id,
@@ -37404,7 +37755,10 @@ index 0000000000000000000000000000000000000000..7f05390187207b1363d3160158ad36da
 +        .await
 +        .expect("flush primary write after capture");
 +    assert_rollout_contains_message(&rollout_path, "primary write after capture").await;
-+    assert_eq!(copied.as_ref(), &items_before);
++    assert_eq!(
++        serde_json::to_value(copied.as_ref()).expect("serialize copied history"),
++        expected_history
++    );
 +
 +    // Prove this missing-row fixture would detect the ordinary finder's read repair.
 +    let found = codex_rollout::find_thread_path_by_id_str(

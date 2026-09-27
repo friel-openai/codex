@@ -733,8 +733,408 @@ index 6d94cdd78bf340f9a9ddeb84110efb9bc6d8477a..edc189f4d497f91ca40fa3c4af6dd0be
              path: thread.path,
              cwd: thread.cwd,
              cli_version: thread.cli_version,
+diff --git a/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f51367bd9d75dd50c9519526f505de51aa528ff5
+--- /dev/null
++++ b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
+@@ -0,0 +1,289 @@
++use super::*;
++use codex_app_server_protocol::ThreadItem;
++use codex_app_server_protocol::ThreadItemsListParams;
++use codex_app_server_protocol::ThreadItemsListResponse;
++use codex_app_server_protocol::ThreadReadParams;
++use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadResumeParams;
++use codex_app_server_protocol::ThreadResumeResponse;
++use codex_app_server_protocol::ThreadTurnsListParams;
++use codex_app_server_protocol::ThreadTurnsListResponse;
++use codex_app_server_protocol::TurnItemsView;
++use codex_core::StartThreadOptions;
++use codex_protocol::ResponseItemId;
++use codex_protocol::mcp::ClientMcpExtensions;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::MessagePhase;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_protocol::protocol::ThreadMemoryMode;
++use codex_rollout::RolloutItem;
++use codex_thread_store::LiveThread;
++use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::ResumeThreadParams;
++use codex_thread_store::ThreadPersistenceMetadata;
++use pretty_assertions::assert_eq;
++
++const LIVE_MESSAGE: &str = "message accepted only by the writerless saved runtime";
++
++fn marker(text: &str, turn_id: &str) -> ResponseItem {
++    let mut item = ResponseItem::Message {
++        id: Some(ResponseItemId::with_suffix("msg", text)),
++        role: "assistant".to_string(),
++        content: vec![ContentItem::OutputText {
++            text: text.to_string(),
++        }],
++        phase: Some(MessagePhase::FinalAnswer),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    item.set_turn_id_if_missing(turn_id);
++    item
++}
++
++fn assert_live_message_once<'a>(items: impl Iterator<Item = &'a ThreadItem>) {
++    assert_eq!(
++        items
++            .filter_map(|item| match item {
++                ThreadItem::AgentMessage { text, .. } if text == LIVE_MESSAGE =>
++                    Some(text.as_str()),
++                _ => None,
++            })
++            .collect::<Vec<_>>(),
++        vec![LIVE_MESSAGE],
++    );
++}
++
++#[test]
++#[serial(app_server_tracing)]
++fn saved_thread_read_repairs_live_runtime_and_rejects_stale_fallback() -> Result<()> {
++    run_current_thread_test_with_stack("saved-thread-api-repair", async {
++        let mut harness = TracingHarness::new_with_sqlite().await?;
++        // The outer transport registers the connection after writing Initialize's
++        // response. Running-thread resume does not reply to a closed connection.
++        harness
++            .processor
++            .connection_initialized(TEST_CONNECTION_ID, harness.session.request_attestation())
++            .await;
++        let (manager, store) = harness
++            .processor
++            .thread_processor
++            .saved_thread_persistence_test_resources();
++        let config = ConfigBuilder::default()
++            .codex_home(harness._codex_home.path().to_path_buf())
++            .build()
++            .await?;
++        let auth_manager =
++            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await?;
++
++        for (case, block_writer) in [false, true].into_iter().enumerate() {
++            let mut options = StartThreadOptions::new(config.clone());
++            options.history_mode = Some(ThreadHistoryMode::Paginated);
++            let saved = manager.start_thread(options).await?;
++            let thread_id = saved.thread_id;
++            saved
++                .thread
++                .inject_response_items(vec![marker("already saved", "saved-api-turn")])
++                .await?;
++            saved.thread.ensure_rollout_materialized().await;
++            saved.thread.flush_rollout().await?;
++            let rollout_path = saved.thread.rollout_path().expect("saved rollout");
++            saved.thread.shutdown_and_wait().await?;
++            assert!(manager.remove_thread(&thread_id).await.is_some());
++            drop(saved);
++
++            // Bypass the fixed agent loader to reproduce the old runtime's bad config.
++            let mut broken_config = config.clone();
++            broken_config.ephemeral = true;
++            let broken = manager
++                .resume_thread_from_rollout(
++                    broken_config,
++                    rollout_path.clone(),
++                    Arc::clone(&auth_manager),
++                    /*parent_trace*/ None,
++                    ClientMcpExtensions::default(),
++                )
++                .await?
++                .thread;
++            assert!(!broken.has_persistence());
++            let live_marker = marker(LIVE_MESSAGE, "live-api-turn");
++            broken
++                .inject_response_items(vec![live_marker.clone()])
++                .await?;
++            let stored_before = store
++                .load_history(LoadThreadHistoryParams {
++                    thread_id,
++                    include_archived: true,
++                })
++                .await?;
++            assert!(!stored_before.items.iter().any(|item| matches!(
++                item,
++                RolloutItem::ResponseItem(response)
++                    if response.item.id() == live_marker.id()
++            )));
++
++            let request_id = 10 + case as i64 * 10;
++            if block_writer {
++                let blocker = LiveThread::resume(
++                    Arc::clone(&store),
++                    ThreadHistoryMode::Paginated,
++                    ResumeThreadParams {
++                        thread_id,
++                        rollout_path: Some(rollout_path),
++                        history: None,
++                        include_archived: true,
++                        metadata: ThreadPersistenceMetadata {
++                            cwd: Some(config.cwd.to_path_buf()),
++                            model_provider: config.model_provider_id.clone(),
++                            memory_mode: ThreadMemoryMode::Disabled,
++                        },
++                    },
++                )
++                .await?;
++                for request in [
++                    ClientRequest::ThreadRead {
++                        request_id: RequestId::Integer(request_id),
++                        params: ThreadReadParams {
++                            thread_id: thread_id.to_string(),
++                            include_turns: true,
++                        },
++                    },
++                    ClientRequest::ThreadForkPrepare {
++                        request_id: RequestId::Integer(request_id + 1),
++                        params: ThreadForkParams {
++                            thread_id: thread_id.to_string(),
++                            exclude_turns: true,
++                            ..Default::default()
++                        },
++                    },
++                ] {
++                    let id = request.id().clone();
++                    harness
++                        .processor
++                        .process_request(
++                            TEST_CONNECTION_ID,
++                            request_from_client_request(request),
++                            &AppServerTransport::Stdio,
++                            Arc::clone(&harness.session),
++                        )
++                        .await;
++                    let error = read_repair_error(&mut harness.outgoing_rx, id).await?;
++                    assert_eq!(error.code, crate::error_code::INTERNAL_ERROR_CODE);
++                    assert!(error.message.contains("failed to access loaded thread"));
++                    assert!(
++                        error
++                            .message
++                            .contains("failed to restore saved thread persistence")
++                    );
++                    assert!(!broken.has_persistence());
++                }
++                blocker.shutdown().await?;
++            }
++
++            let read: ThreadReadResponse = harness
++                .request(
++                    ClientRequest::ThreadRead {
++                        request_id: RequestId::Integer(request_id + 2),
++                        params: ThreadReadParams {
++                            thread_id: thread_id.to_string(),
++                            include_turns: true,
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert!(!read.thread.ephemeral);
++            assert!(broken.has_persistence());
++            assert_live_message_once(read.thread.turns.iter().flat_map(|turn| &turn.items));
++
++            let turns: ThreadTurnsListResponse = harness
++                .request(
++                    ClientRequest::ThreadTurnsList {
++                        request_id: RequestId::Integer(request_id + 3),
++                        params: ThreadTurnsListParams {
++                            thread_id: thread_id.to_string(),
++                            cursor: None,
++                            limit: Some(10),
++                            sort_direction: None,
++                            items_view: Some(TurnItemsView::Full),
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(turns.data.iter().flat_map(|turn| &turn.items));
++
++            let items: ThreadItemsListResponse = harness
++                .request(
++                    ClientRequest::ThreadItemsList {
++                        request_id: RequestId::Integer(request_id + 4),
++                        params: ThreadItemsListParams {
++                            thread_id: thread_id.to_string(),
++                            turn_id: None,
++                            cursor: None,
++                            limit: Some(100),
++                            sort_direction: None,
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(items.data.iter().map(|entry| &entry.item));
++
++            let resumed: ThreadResumeResponse = harness
++                .request(
++                    ClientRequest::ThreadResume {
++                        request_id: RequestId::Integer(request_id + 5),
++                        params: ThreadResumeParams {
++                            thread_id: thread_id.to_string(),
++                            ..Default::default()
++                        },
++                    },
++                    /*trace*/ None,
++                )
++                .await;
++            assert_live_message_once(resumed.thread.turns.iter().flat_map(|turn| &turn.items));
++            assert!(Arc::ptr_eq(&broken, &manager.get_thread(thread_id).await?));
++            broken.shutdown_and_wait().await?;
++            assert!(manager.remove_thread(&thread_id).await.is_some());
++        }
++        harness.shutdown().await;
++        Ok(())
++    })
++}
++
++async fn read_repair_error(
++    outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++    request_id: RequestId,
++) -> Result<codex_app_server_protocol::JSONRPCErrorError> {
++    tokio::time::timeout(std::time::Duration::from_secs(5), async {
++        loop {
++            let envelope = outgoing_rx.recv().await.expect("outgoing channel");
++            let crate::outgoing_message::OutgoingEnvelope::ToConnection {
++                connection_id,
++                message,
++                ..
++            } = envelope
++            else {
++                continue;
++            };
++            if connection_id != TEST_CONNECTION_ID {
++                continue;
++            }
++            match message {
++                crate::outgoing_message::OutgoingMessage::Error(error)
++                    if error.id == request_id =>
++                {
++                    return error.error;
++                }
++                crate::outgoing_message::OutgoingMessage::Response(response)
++                    if response.id == request_id =>
++                {
++                    panic!("repair error returned stale data: {response:?}");
++                }
++                _ => {}
++            }
++        }
++    })
++    .await
++    .map_err(Into::into)
++}
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index 41d843c743abf671b82983e3bcec118ea5df99d2..be77c1bdab751aa2fcb55439a88f11c5991aed03 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -57,6 +57,9 @@ use wiremock::MockServer;
+
+ pub(super) const TEST_CONNECTION_ID: ConnectionId = ConnectionId(7);
+
++#[path = "message_processor_saved_thread_persistence_tests.rs"]
++mod saved_thread_persistence_tests;
++
+ struct TestTracing {
+     exporter: InMemorySpanExporter,
+     provider: SdkTracerProvider,
+@@ -127,6 +130,35 @@ impl TracingHarness {
+         )
+         .await?;
+         let (processor, outgoing_rx) = build_test_processor(config, auth_manager).await;
++        Self::from_processor(server, codex_home, processor, outgoing_rx).await
++    }
++
++    async fn new_with_sqlite() -> Result<Self> {
++        let server = create_mock_responses_server_repeating_assistant("Done").await;
++        let codex_home = TempDir::new()?;
++        let config = Arc::new(build_test_config(codex_home.path(), &server.uri()).await?);
++        let auth_manager = AuthManager::shared_from_config(
++            config.as_ref(),
++            /*enable_codex_api_key_env*/ false,
++        )
++        .await?;
++        // Saved-thread repair reads the SQLite history projection, as production does.
++        // Existing tracing-only fixtures intentionally leave this database unavailable.
++        let state_db = crate::init_sqlite_state_db_with_fresh_start_on_corruption(&config)
++            .await?
++            .state_db
++            .expect("initialized isolated SQLite state");
++        let (processor, outgoing_rx) =
++            build_test_processor_with_state_db(config, auth_manager, Some(state_db)).await;
++        Self::from_processor(server, codex_home, processor, outgoing_rx).await
++    }
++
++    async fn from_processor(
++        server: MockServer,
++        codex_home: TempDir,
++        processor: Arc<MessageProcessor>,
++        outgoing_rx: mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++    ) -> Result<Self> {
+         let tracing = init_test_tracing();
+         tracing.exporter.reset();
+         tracing::callsite::rebuild_interest_cache();
+@@ -241,6 +273,17 @@ pub(super) async fn build_test_processor(
+ ) -> (
+     Arc<MessageProcessor>,
+     mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
++) {
++    build_test_processor_with_state_db(config, auth_manager, /*state_db*/ None).await
++}
++
++async fn build_test_processor_with_state_db(
++    config: Arc<Config>,
++    auth_manager: Arc<AuthManager>,
++    state_db: Option<crate::rollout_state_db::StateDbHandle>,
++) -> (
++    Arc<MessageProcessor>,
++    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+ ) {
+     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
+     let config_manager = ConfigManager::new(
+@@ -269,7 +312,7 @@ pub(super) async fn build_test_processor(
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         feedback: CodexFeedback::new(),
+         log_db: None,
+-        state_db: None,
++        state_db,
+         config_warnings: Vec::new(),
+         session_source: SessionSource::VSCode,
+         user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+@@ -452,7 +495,9 @@ pub(super) async fn read_response_from<T: serde::de::DeserializeOwned>(
+     loop {
+         let envelope = tokio::time::timeout(Duration::from_secs(/*secs*/ 30), outgoing_rx.recv())
+             .await
+-            .expect("timed out waiting for response")
++            .unwrap_or_else(|error| {
++                panic!("timed out waiting for response to request {request_id}: {error}")
++            })
+             .expect("outgoing channel closed");
+         let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+             connection_id,
+@@ -465,8 +510,14 @@ pub(super) async fn read_response_from<T: serde::de::DeserializeOwned>(
+         if connection_id != expected_connection_id {
+             continue;
+         }
+-        let crate::outgoing_message::OutgoingMessage::Response(response) = message else {
+-            continue;
++        let response = match message {
++            crate::outgoing_message::OutgoingMessage::Response(response) => response,
++            crate::outgoing_message::OutgoingMessage::Error(error)
++                if error.id == RequestId::Integer(request_id) =>
++            {
++                panic!("request {request_id} failed: {error:?}");
++            }
++            _ => continue,
+         };
+         if response.id != RequestId::Integer(request_id) {
+             continue;
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 378b327a6b5cbfb11afcd7e68fe38242dab62640..744bc48b64bd1bf4f107bf5aff3a60a865a6e1e8 100644
+index 378b327a6b5cbfb11afcd7e68fe38242dab62640..2696f77fa5bf8e57551dfab2e31c8a3ee0041335 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -492,6 +492,7 @@ use codex_thread_store::LoadThreadHistoryParams as StoreLoadThreadHistoryParams;
@@ -745,6 +1145,35 @@ index 378b327a6b5cbfb11afcd7e68fe38242dab62640..744bc48b64bd1bf4f107bf5aff3a60a8
  use codex_thread_store::SearchThreadOccurrencesParams as StoreSearchThreadOccurrencesParams;
  use codex_thread_store::SearchThreadsParams as StoreSearchThreadsParams;
  use codex_thread_store::SortDirection as StoreSortDirection;
+@@ -609,6 +610,28 @@ use crate::thread_state::ThreadStateManager;
+ use token_usage_replay::restored_token_usage_turn_id;
+ use token_usage_replay::send_thread_token_usage_update_to_connection;
+
++/// Repairs loaded saved threads before callers read storage. Only a missing runtime permits
++/// a stored-thread fallback; repair failures must not return stale stored history.
++async fn get_loaded_thread_for_persistence(
++    thread_manager: &ThreadManager,
++    thread_id: ThreadId,
++) -> Result<Option<Arc<CodexThread>>, JSONRPCErrorError> {
++    match thread_manager.get_thread(thread_id).await {
++        Ok(thread) => Ok(Some(thread)),
++        Err(error)
++            if matches!(
++                error.details(),
++                codex_protocol::error::CodexErrorDetails::ThreadNotFound(_)
++            ) =>
++        {
++            Ok(None)
++        }
++        Err(error) => Err(internal_error(format!(
++            "failed to access loaded thread {thread_id}: {error}"
++        ))),
++    }
++}
++
+ pub(crate) fn apply_live_thread_settings(
+     thread: &mut Thread,
+     config_snapshot: &ThreadConfigSnapshot,
 diff --git a/codex-rs/app-server/src/request_processors/thread_delete.rs b/codex-rs/app-server/src/request_processors/thread_delete.rs
 index 7b014daa21f2f899420150fefd3235114644c563..56b2cef383331e1829ad6493bd5ebb6a354bab45 100644
 --- a/codex-rs/app-server/src/request_processors/thread_delete.rs
@@ -871,7 +1300,7 @@ index 7b014daa21f2f899420150fefd3235114644c563..56b2cef383331e1829ad6493bd5ebb6a
      }
 
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97fcb07792b 100644
+index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2b3d8b459 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -13,6 +13,7 @@ use super::thread_input::ensure_direct_input_allowed;
@@ -1267,7 +1696,7 @@ index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97f
              thread.ephemeral = fallback_thread.ephemeral;
              thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
              thread
-@@ -4608,7 +4781,7 @@ impl ThreadRequestProcessor {
+@@ -4611,7 +4784,7 @@ impl ThreadRequestProcessor {
                  Err(error) => Err(error),
              }
          };
@@ -1276,7 +1705,7 @@ index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97f
          if let InitialHistory::Resumed(resumed) = &thread_history
              && self
                  .pending_thread_unloads
-@@ -4621,6 +4794,33 @@ impl ThreadRequestProcessor {
+@@ -4624,6 +4797,33 @@ impl ThreadRequestProcessor {
                  resumed.conversation_id
              )));
          }
@@ -1310,7 +1739,89 @@ index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97f
          let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
              matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
          });
-@@ -7737,6 +7937,7 @@ pub(crate) fn thread_from_stored_thread(
+@@ -5262,11 +5462,9 @@ impl ThreadRequestProcessor {
+     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
+         let running_thread = if params.history.is_some() {
+             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
+-                && self
+-                    .thread_manager
+-                    .get_thread(existing_thread_id)
+-                    .await
+-                    .is_ok()
++                && get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
++                    .await?
++                    .is_some()
+             {
+                 return Err(invalid_request(format!(
+                     "cannot resume thread {existing_thread_id} with history while it is already running"
+@@ -5274,7 +5472,8 @@ impl ThreadRequestProcessor {
+             }
+             None
+         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
+-            && let Ok(existing_thread) = self.thread_manager.get_thread(existing_thread_id).await
++            && let Some(existing_thread) =
++                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?
+         {
+             let source_thread = self
+                 .read_stored_thread_for_resume(
+@@ -5293,9 +5492,11 @@ impl ThreadRequestProcessor {
+                 )
+                 .await?;
+             let existing_thread_id = source_thread.thread_id;
+-            match self.thread_manager.get_thread(existing_thread_id).await {
+-                Ok(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
+-                Err(_) => {
++            match get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
++                .await?
++            {
++                Some(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
++                None => {
+                     return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
+                         source_thread,
+                     ))));
+@@ -5762,13 +5963,31 @@ impl ThreadRequestProcessor {
+         include_history: bool,
+     ) -> Result<StoredThread, JSONRPCErrorError> {
+         let result = if let Some(path) = path {
+-            self.thread_store
++            // Explicit paths determine the source ID. Read only metadata until any loaded
++            // source has been repaired, then reread the requested path to retain its selection.
++            let stored_thread = self
++                .thread_store
+                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
+                     rollout_path: path.clone(),
+                     include_archived: true,
+-                    include_history,
++                    include_history: false,
+                 })
+                 .await
++                .map_err(thread_store_resume_read_error)?;
++            let loaded_thread =
++                get_loaded_thread_for_persistence(&self.thread_manager, stored_thread.thread_id)
++                    .await?;
++            if loaded_thread.is_some() || include_history {
++                self.thread_store
++                    .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
++                        rollout_path: path.clone(),
++                        include_archived: true,
++                        include_history,
++                    })
++                    .await
++            } else {
++                Ok(stored_thread)
++            }
+         } else {
+             let existing_thread_id = match ThreadId::from_string(thread_id) {
+                 Ok(id) => id,
+@@ -5776,6 +5995,7 @@ impl ThreadRequestProcessor {
+                     return Err(invalid_request(format!("invalid session id: {err}")));
+                 }
+             };
++            get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?;
+             let params = StoreReadThreadParams {
+                 thread_id: existing_thread_id,
+                 include_archived: true,
+@@ -7761,6 +7981,7 @@ pub(crate) fn thread_from_stored_thread(
          updated_at: thread.updated_at.timestamp(),
          recency_at: Some(thread.recency_at.timestamp()),
          status: ThreadStatus::NotLoaded,
@@ -1318,7 +1829,7 @@ index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97f
          path,
          cwd,
          cli_version: thread.cli_version,
-@@ -7919,6 +8120,7 @@ fn build_thread_from_snapshot(
+@@ -7943,6 +8164,7 @@ fn build_thread_from_snapshot(
          updated_at: now,
          recency_at: Some(now),
          status: ThreadStatus::NotLoaded,
@@ -2146,6 +2657,30 @@ index 0000000000000000000000000000000000000000..c3e88450aee5fd8136a6c40edb518a08
 +    assert_eq!(agent_nickname.as_deref(), Some("Robie"));
 +    assert_eq!(agent_role.as_deref(), Some("explorer"));
 +}
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index e1b63a2ad7073d5fea030da75e19d70c0b28dd80..dd5671068b932d4d960ddb87a3e57df89e9174e1 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -1,3 +1,19 @@
++impl super::ThreadRequestProcessor {
++    /// Shares the actual dispatcher's manager and store so API tests can reproduce a
++    /// writerless saved runtime without adding production mutation APIs.
++    pub(crate) fn saved_thread_persistence_test_resources(
++        &self,
++    ) -> (
++        std::sync::Arc<codex_core::ThreadManager>,
++        std::sync::Arc<dyn codex_thread_store::ThreadStore>,
++    ) {
++        (
++            std::sync::Arc::clone(&self.thread_manager),
++            std::sync::Arc::clone(&self.thread_store),
++        )
++    }
++}
++
+ mod thread_list_cwd_filter_tests {
+     use super::super::normalize_thread_list_cwd_filters;
+     use codex_app_server_protocol::ThreadListCwdFilter;
 diff --git a/codex-rs/app-server/src/request_processors/thread_resume_redaction.rs b/codex-rs/app-server/src/request_processors/thread_resume_redaction.rs
 index 62b10cf0b95839f705d1412210316abe7f37d5b6..73ea96c38e8ada0dc61cbcab54aaebaaa74badf7 100644
 --- a/codex-rs/app-server/src/request_processors/thread_resume_redaction.rs
@@ -8175,10 +8710,10 @@ index 1429d8cc4151c9226c05af596a0b7ebb9b38bf28..95b22e7335f7242adf95fa290e02d2a6
                  let mut receiver = match registered_receiver {
                      Some(receiver) => receiver,
 diff --git a/codex-rs/core/src/agent/control/inspection.rs b/codex-rs/core/src/agent/control/inspection.rs
-index 115037166a3e507f5a24f9484832ff934622bd57..e105c8db9554dfa365944d2444ded339eaec813f 100644
+index 115037166a3e507f5a24f9484832ff934622bd57..a9ba012e5d56f5872d5a0ce49a5365f8239da5b4 100644
 --- a/codex-rs/core/src/agent/control/inspection.rs
 +++ b/codex-rs/core/src/agent/control/inspection.rs
-@@ -3,12 +3,28 @@
+@@ -3,12 +3,33 @@
 
  use super::LocalAgentControl;
  use crate::agent::api::AgentInfo;
@@ -8189,6 +8724,11 @@ index 115037166a3e507f5a24f9484832ff934622bd57..e105c8db9554dfa365944d2444ded339
  use codex_protocol::error::Result as CodexResult;
 
  impl LocalAgentControl {
++    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
++        self.upgrade()
++            .is_ok_and(|manager| manager.is_saved_target(thread_id))
++    }
++
 +    pub(crate) async fn inspect(
 +        &self,
 +        caller: ThreadId,
@@ -8714,7 +9254,7 @@ index 7c98ebf91b00d053b772882946481516d8812c7f..8233f66aa0c29a843a5c74e32ed6267e
              if !descendant.was_loaded
                  && let Some(instructions) = &descendant.original_instructions
 diff --git a/codex-rs/core/src/agent/control/residency.rs b/codex-rs/core/src/agent/control/residency.rs
-index bc6c57b3ff6b1c849c43af206bb3acf9d9cbe4c2..55e2404c9723cc12ae8db99a102250d1a239d9d0 100644
+index bc6c57b3ff6b1c849c43af206bb3acf9d9cbe4c2..ac30f5f4d2409a4ceb7302e26bc3babaf77cf0aa 100644
 --- a/codex-rs/core/src/agent/control/residency.rs
 +++ b/codex-rs/core/src/agent/control/residency.rs
 @@ -80,7 +80,7 @@ impl LocalAgentControl {
@@ -8726,15 +9266,16 @@ index bc6c57b3ff6b1c849c43af206bb3acf9d9cbe4c2..55e2404c9723cc12ae8db99a102250d1
          self.runtime.agent_residency.remove(thread_id);
      }
  }
-@@ -226,6 +226,7 @@ impl AgentResidency {
+@@ -226,6 +226,8 @@ impl AgentResidency {
                      return false;
                  }
                  let environments = candidate_thread.environment_selections().await;
++                let ephemeral = candidate_thread.config_snapshot().await.ephemeral;
 +                let status = candidate_thread.agent_status().await;
                  if let Err(err) = candidate_thread.shutdown_and_wait().await {
                      warn!(
                          "failed to shut down resident thread before unloading {candidate_thread_id}: {err}"
-@@ -239,6 +240,18 @@ impl AgentResidency {
+@@ -239,12 +241,24 @@ impl AgentResidency {
                  {
                      return false;
                  }
@@ -8753,6 +9294,29 @@ index bc6c57b3ff6b1c849c43af206bb3acf9d9cbe4c2..55e2404c9723cc12ae8db99a102250d1
                  candidate_thread
                      .session
                      .services
+                     .local_agent_runtime
+                     .registry
+-                    .save_evicted_environments(candidate_thread_id, environments);
++                    .save_evicted_runtime_settings(candidate_thread_id, environments, ephemeral);
+                 // Keep publication excluded until both entries have been removed.
+                 threads.remove(&candidate_thread_id);
+                 residency.remove(candidate_thread_id);
+@@ -343,13 +357,14 @@ impl LocalAgentControl {
+         thread.ensure_rollout_materialized().await;
+         thread.flush_rollout().await?;
+         let environments = thread.environment_selections().await;
++        let ephemeral = thread.config_snapshot().await.ephemeral;
+         thread.shutdown_and_wait().await?;
+         thread
+             .session
+             .services
+             .local_agent_runtime
+             .registry
+-            .save_evicted_environments(thread_id, environments);
++            .save_evicted_runtime_settings(thread_id, environments, ephemeral);
+         Ok(manager.remove_thread(&thread_id).await.is_some())
+     }
+ }
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
 index ceef1f20d627bd4c01be046e1d2cbbdaac52cca6..1993699de3cc57ad5491dfe1490c12e89b6e11fd 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
@@ -8767,10 +9331,38 @@ index ceef1f20d627bd4c01be046e1d2cbbdaac52cca6..1993699de3cc57ad5491dfe1490c12e8
  use crate::config::Config;
  use crate::config::test_config;
 diff --git a/codex-rs/core/src/agent/control/resume.rs b/codex-rs/core/src/agent/control/resume.rs
-index a398c7ae505145ac0f5c59a3b605920b6c904125..303bf3b014eafcf1d878cfda73617e105f4feadd 100644
+index a398c7ae505145ac0f5c59a3b605920b6c904125..ffec3c68f1ff6219b97903f7fa912ce0050c4006 100644
 --- a/codex-rs/core/src/agent/control/resume.rs
 +++ b/codex-rs/core/src/agent/control/resume.rs
-@@ -130,6 +130,11 @@ impl LocalAgentControl {
+@@ -8,6 +8,7 @@ use crate::agent::registry::AgentLifecycle;
+ use crate::agents_md_manager::SessionInstructions;
+ use crate::codex_thread::ThreadConfigSnapshot;
+ use codex_protocol::error::CodexErrorDetails;
++use codex_thread_store::StoredThread;
+ use codex_thread_store::ThreadMetadataPatch;
+
+ pub(super) async fn load_agent_model_context(
+@@ -38,6 +39,19 @@ pub(super) async fn load_agent_model_context(
+ }
+
+ impl LocalAgentControl {
++    fn resumed_agent_is_ephemeral(&self, stored_thread: &StoredThread) -> bool {
++        self.runtime
++            .registry
++            .evicted_ephemeral(stored_thread.thread_id)
++            .unwrap_or_else(|| {
++                crate::goal_supervisor::is_goal_supervisor_helper_source(&stored_thread.source)
++                    || matches!(
++                        stored_thread.thread_source.as_ref(),
++                        Some(ThreadSource::Feature(feature)) if feature == "system"
++                    )
++            })
++    }
++
+     pub(crate) async fn resume_agent(
+         &self,
+         config: Config,
+@@ -130,6 +144,11 @@ impl LocalAgentControl {
              .registry
              .agent_metadata_for_thread(thread_id)
              .ok_or(CodexErr::ThreadNotFound(thread_id))?;
@@ -8782,8 +9374,13 @@ index a398c7ae505145ac0f5c59a3b605920b6c904125..303bf3b014eafcf1d878cfda73617e10
 
          let stored_thread = state
              .read_stored_thread(ReadThreadParams {
-@@ -203,17 +208,19 @@ impl LocalAgentControl {
+@@ -201,19 +220,24 @@ impl LocalAgentControl {
+                 .map_err(CodexErr::InvalidRequest)?;
+         }
          config.approvals_reviewer = runtime_approvals_reviewer;
++        // Agent delivery inherits the sender's config, not the target's persistence policy.
++        // Retain the target's own setting across eviction, including debug-materialized helpers.
++        config.ephemeral = self.resumed_agent_is_ephemeral(&stored_thread);
          // Role configuration supplies the agent-specific defaults. Persisted execution settings
          // remain authoritative when a cold agent is loaded into a later root session.
 -        config.model_provider = config
@@ -8813,23 +9410,33 @@ index a398c7ae505145ac0f5c59a3b605920b6c904125..303bf3b014eafcf1d878cfda73617e10
          if let Some(model) = &stored_thread.model {
              config.model = Some(model.clone());
          }
-@@ -286,6 +293,7 @@ impl LocalAgentControl {
+@@ -284,8 +308,11 @@ impl LocalAgentControl {
+             .await
+         {
              Ok(reloaded_thread) => {
-                 self.runtime.registry.clear_evicted_environments(thread_id);
+-                self.runtime.registry.clear_evicted_environments(thread_id);
++                self.runtime
++                    .registry
++                    .clear_evicted_runtime_settings(thread_id);
                  self.runtime.registry.clear_evicted_instructions(thread_id);
 +                lifecycle.clear_cold_terminal_status();
                  if let Some(residency_slot) = residency_slot {
                      residency_slot.commit(reloaded_thread.thread_id);
                  }
-@@ -296,6 +304,7 @@ impl LocalAgentControl {
+@@ -294,8 +321,11 @@ impl LocalAgentControl {
+             }
+             Err(err) => {
                  if state.get_thread(thread_id).await.is_ok() {
-                     self.runtime.registry.clear_evicted_environments(thread_id);
+-                    self.runtime.registry.clear_evicted_environments(thread_id);
++                    self.runtime
++                        .registry
++                        .clear_evicted_runtime_settings(thread_id);
                      self.runtime.registry.clear_evicted_instructions(thread_id);
 +                    lifecycle.clear_cold_terminal_status();
                      drop(residency_slot);
                      self.touch_loaded_agent_residency(state, thread_id).await;
                      return Ok(state
-@@ -352,171 +361,16 @@ impl LocalAgentControl {
+@@ -352,171 +382,16 @@ impl LocalAgentControl {
          inherited_instructions: Option<SessionInstructions>,
          lifecycle: Option<Arc<AgentLifecycle>>,
      ) -> CodexResult<ThreadId> {
@@ -9010,6 +9617,15 @@ index a398c7ae505145ac0f5c59a3b605920b6c904125..303bf3b014eafcf1d878cfda73617e10
      }
 
      async fn resume_single_agent_from_rollout(
+@@ -536,6 +411,8 @@ impl LocalAgentControl {
+                 include_history: false,
+             })
+             .await?;
++        let mut config = config;
++        config.ephemeral = self.resumed_agent_is_ephemeral(&stored_thread);
+         let resumed_agent_path = stored_thread
+             .agent_path
+             .as_deref()
 diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
 index fbdc7b76e6b38e3421dba059dbfceb19174c989f..482885522a5945efb68b0be307fc2540b172367e 100644
 --- a/codex-rs/core/src/agent/control/runtime.rs
@@ -9024,7 +9640,7 @@ index fbdc7b76e6b38e3421dba059dbfceb19174c989f..482885522a5945efb68b0be307fc2540
      pub(super) agent_residency: Arc<AgentResidency>,
  }
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index aac86625ae4b06b6b128c49054e6c79282b4ac19..fec6f9bcc6dc526701206b89e38368562c16a165 100644
+index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6eea15c135 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -31,8 +31,6 @@ use codex_protocol::intersect_effective_permission_profiles;
@@ -9221,23 +9837,33 @@ index aac86625ae4b06b6b128c49054e6c79282b4ac19..fec6f9bcc6dc526701206b89e3836856
      /// Spawn a new agent thread and submit the initial prompt.
      #[cfg(test)]
      pub(crate) async fn spawn_agent(
-@@ -723,6 +543,7 @@ impl LocalAgentControl {
+@@ -721,8 +541,11 @@ impl LocalAgentControl {
+                 if let Some(parent_thread_id) = owner_thread_id {
+                     self.validate_loaded_v2_child(&reloaded_thread.thread, parent_thread_id)?;
                  }
-                 self.runtime.registry.clear_evicted_environments(thread_id);
+-                self.runtime.registry.clear_evicted_environments(thread_id);
++                self.runtime
++                    .registry
++                    .clear_evicted_runtime_settings(thread_id);
                  self.runtime.registry.clear_evicted_instructions(thread_id);
 +                lifecycle.clear_cold_terminal_status();
                  residency_slot.commit(reloaded_thread.thread_id);
                  state.notify_thread_created(reloaded_thread.thread_id);
                  Ok(())
-@@ -734,6 +555,7 @@ impl LocalAgentControl {
+@@ -732,8 +555,11 @@ impl LocalAgentControl {
+                     if let Some(parent_thread_id) = owner_thread_id {
+                         self.validate_loaded_v2_child(&thread, parent_thread_id)?;
                      }
-                     self.runtime.registry.clear_evicted_environments(thread_id);
+-                    self.runtime.registry.clear_evicted_environments(thread_id);
++                    self.runtime
++                        .registry
++                        .clear_evicted_runtime_settings(thread_id);
                      self.runtime.registry.clear_evicted_instructions(thread_id);
 +                    lifecycle.clear_cold_terminal_status();
                      drop(residency_slot);
                      self.touch_loaded_agent_residency(&state, thread_id).await;
                      return Ok(());
-@@ -751,6 +573,19 @@ impl LocalAgentControl {
+@@ -751,6 +577,19 @@ impl LocalAgentControl {
          options: SpawnAgentOptions,
      ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
          let state = self.upgrade()?;
@@ -9257,7 +9883,7 @@ index aac86625ae4b06b6b128c49054e6c79282b4ac19..fec6f9bcc6dc526701206b89e3836856
          let multi_agent_version = state
              .effective_multi_agent_version_for_spawn(
                  &InitialHistory::New,
-@@ -832,6 +667,8 @@ impl LocalAgentControl {
+@@ -832,6 +671,8 @@ impl LocalAgentControl {
                  agent_role,
                  ..
              })) => {
@@ -9266,7 +9892,7 @@ index aac86625ae4b06b6b128c49054e6c79282b4ac19..fec6f9bcc6dc526701206b89e3836856
                  let (session_source, agent_metadata) = self.prepare_thread_spawn(
                      &mut reservation,
                      &config,
-@@ -1514,11 +1351,16 @@ impl LocalAgentControl {
+@@ -1514,11 +1355,16 @@ impl LocalAgentControl {
              Err(_) => SessionSource::Cli,
          };
          self.register_session_root(owner_thread_id, owner_source.parent_thread_id());
@@ -9682,10 +10308,26 @@ index 0000000000000000000000000000000000000000..2d43c9dc8331e94f6b1f536cff366c2c
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169ae2175c2 100644
+index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4946e6e65 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1226,7 +1226,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
+@@ -68,6 +68,7 @@ use codex_protocol::mcp::McpAttributionErrorReason;
+ use codex_protocol::mcp::McpAttributionSource;
+ use codex_protocol::mcp::McpAttributionStatus;
+ use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
++use codex_protocol::models::AgentMessageInputContent;
+ use codex_protocol::models::BaseInstructions;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::ContentItemKind;
+@@ -875,6 +876,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+         .get_thread(resumed_helper_id)
+         .await
+         .expect("cold-resumed goal supervisor helper should be registered");
++    assert!(resumed_helper.config_snapshot().await.ephemeral);
+     let resumed_history = resumed_helper.session.clone_history().await;
+     assert_goal_supervisor_boot_history(
+         resumed_history.raw_items(),
+@@ -1226,7 +1228,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
  }
 
  #[tokio::test]
@@ -9694,7 +10336,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      let harness = AgentControlHarness::new().await;
      let (parent_thread_id, _) = harness.start_thread().await;
      let state_db = harness
-@@ -1307,8 +1307,20 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1307,8 +1309,20 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 
      harness
          .control
@@ -9717,7 +10359,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
 
      let indexed_metadata = harness
          .control
-@@ -1323,6 +1335,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1323,6 +1337,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
          Some("indexed-name")
      );
 
@@ -9729,7 +10371,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      let anonymous_metadata = harness
          .control
          .runtime
-@@ -1366,6 +1383,144 @@ async fn get_status_returns_not_found_without_manager() {
+@@ -1366,6 +1385,144 @@ async fn get_status_returns_not_found_without_manager() {
      assert_eq!(got, AgentStatus::NotFound);
  }
 
@@ -9874,7 +10516,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
  #[tokio::test]
  async fn on_event_updates_status_from_task_started() {
      let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
-@@ -1512,6 +1667,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
+@@ -1512,6 +1669,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
      assert_eq!(status, AgentStatus::NotFound);
  }
 
@@ -9917,7 +10559,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
  #[tokio::test]
  async fn get_status_returns_pending_init_for_new_thread() {
      let harness = AgentControlHarness::new().await;
-@@ -1810,6 +2001,19 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1810,8 +2003,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          },
          Ok(_) => panic!("expected thread to be removed"),
      }
@@ -9936,8 +10578,33 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
 +    );
 
      let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
      sender_config.model_provider_id = "ollama".to_string();
-@@ -1869,6 +2073,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     sender_config.model_provider = sender_config
+         .model_providers
+@@ -1822,7 +2029,11 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     let mut parent_turn = parent_thread.session.new_default_turn().await;
+     match route {
+         V2ReloadRoute::Sender => control
+-            .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id, /*parent*/ None)
++            .ensure_v2_agent_loaded(
++                sender_config.clone(),
++                spawned_agent.thread_id,
++                /*parent*/ None,
++            )
+             .await
+             .expect("known v2 agent should reload"),
+         V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => {
+@@ -1860,7 +2071,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+                     .await
+                     .expect("known child should reload through its parent"),
+                 V2ReloadRoute::Generic => control
+-                    .ensure_agent_loaded(sender_config, spawned_agent.thread_id)
++                    .ensure_agent_loaded(sender_config.clone(), spawned_agent.thread_id)
+                     .await
+                     .expect("generic delivery should reload through the captured parent"),
+                 V2ReloadRoute::Sender => unreachable!(),
+@@ -1869,11 +2080,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
              assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
          }
      }
@@ -9945,7 +10612,969 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      let reloaded_child = harness
          .manager
          .get_thread(spawned_agent.thread_id)
-@@ -2360,6 +2565,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+         .await
+         .expect("reloaded child thread should exist");
++    assert!(sender_config.ephemeral);
++    assert!(!reloaded_child.config_snapshot().await.ephemeral);
++    assert!(reloaded_child.session.services.live_thread.is_some());
++    assert!(reloaded_child.state_db().is_some());
+     let reloaded_instructions = reloaded_child.session.inherited_instructions().await;
+     assert_eq!(
+         (reloaded_instructions.user, reloaded_instructions.thread),
+@@ -1955,141 +2171,779 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+         .into_iter()
+         .find(|entry| captured_op_matches(entry, &expected));
+     assert!(captured.is_some());
++    let mut persisted_marker = assistant_message("persisted after ephemeral sender reload", None);
++    // Recording fills missing identity fields; fix them so the disk comparison stays exact.
++    persisted_marker.set_id(Some(ResponseItemId::with_suffix(
++        "msg",
++        "persisted-after-reload",
++    )));
++    persisted_marker.set_turn_id_if_missing("persisted-after-reload");
++    persisted_marker.set_create_time_if_missing(123.into());
++    // History classifies unannotated message content as unknown.
++    let content = codex_context_fragments::to_annotated_content(&mut persisted_marker)
++        .expect("message content");
++    codex_context_fragments::set_annotated_content(&mut persisted_marker, content)
++        .expect("classified message content");
++    reloaded_child
++        .inject_response_items(vec![persisted_marker.clone()])
++        .await
++        .expect("resumed child should accept a durable message");
++    reloaded_child
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown child");
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: spawned_agent.thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store should reopen resumed history");
++    let persisted_responses = persisted
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response) => Some(&response.item),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    let persisted_markers = persisted_responses
++        .iter()
++        .copied()
++        .filter(|item| history_contains_text([*item], "persisted after ephemeral sender reload"))
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&persisted_marker]);
+ }
+
+-#[test_case::test_case(false; "concrete")]
+-#[test_case::test_case(true; "trait_send")]
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
+-    trait_send: bool,
+-) -> anyhow::Result<()> {
+-    let server = start_mock_server().await;
+-    let responses = mount_sse_sequence(
+-        &server,
+-        vec![
+-            sse(vec![
+-                ev_response_created("resp-v1-initial"),
+-                ev_completed("resp-v1-initial"),
+-            ]),
+-            sse(vec![
+-                ev_response_created("resp-v1-cold"),
+-                ev_completed("resp-v1-cold"),
+-            ]),
+-        ],
+-    )
+-    .await;
++#[tokio::test]
++async fn read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::Single).await;
++}
++
++#[tokio::test]
++async fn concurrent_saved_thread_reads_preserve_active_turn_and_messages() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::ConcurrentWithActiveTurn).await;
++}
++
++#[tokio::test]
++async fn saved_thread_read_retries_after_writer_acquisition_conflict() {
++    check_saved_thread_read_repair(SavedThreadRepairRead::WriterAcquisitionRetry).await;
++}
++
++/// Exercises saved/live divergence under ordinary reads, concurrency or writer conflict.
++enum SavedThreadRepairRead {
++    Single,
++    ConcurrentWithActiveTurn,
++    WriterAcquisitionRetry,
++}
++
++async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
+     let (home, mut config) = test_config().await;
+-    config
+-        .features
+-        .disable(Feature::MultiAgentV2)
+-        .expect("test config should allow feature update");
+-    config
+-        .features
+-        .enable(Feature::Sqlite)
+-        .expect("test config should allow feature update");
+-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+-    config.model_provider.supports_websockets = false;
+-    config.model_reasoning_effort = Some(ReasoningEffort::High);
+-    config.model_providers.insert(
+-        config.model_provider_id.clone(),
+-        config.model_provider.clone(),
+-    );
++    let _ = config.features.enable(Feature::Sqlite);
+     let harness = AgentControlHarness::new_with_config(home, config).await;
+-    let parent = harness
+-        .manager
+-        .start_thread(StartThreadOptions {
+-            thread_instructions_provider: Some(Arc::new(TestThreadInstructionsProvider {
+-                text: "preserve these inherited cold-delivery instructions".into(),
+-                shared: true,
+-            })),
+-            ..StartThreadOptions::new(harness.config.clone())
+-        })
+-        .await?;
+-    let parent_thread_id = parent.thread_id;
+-    let child_agent_path = trait_send.then(|| {
+-        AgentPath::root()
+-            .join("cold_v1_child")
+-            .expect("named message recipient")
++    let (thread_id, saved_thread) = harness.start_paginated_thread().await;
++    let [
++        saved_marker,
++        live_marker,
++        concurrent_marker,
++        repaired_marker,
++    ] = [
++        "saved before accidental ephemeral resume",
++        "accepted only in the accidentally ephemeral runtime",
++        "accepted while saved-thread readers repair persistence",
++        "accepted after saved-thread read repairs persistence",
++    ]
++    .map(|text| {
++        let mut marker = assistant_message(text, Some(MessagePhase::FinalAnswer));
++        marker.set_id(Some(ResponseItemId::with_suffix("msg", text)));
++        marker.set_turn_id_if_missing(&format!("saved-thread-recovery-{text}"));
++        marker.set_create_time_if_missing(123.into());
++        let content =
++            codex_context_fragments::to_annotated_content(&mut marker).expect("marker content");
++        codex_context_fragments::set_annotated_content(&mut marker, content)
++            .expect("classified marker content");
++        marker
+     });
+-    let child_thread_id =
+-        make_cold_multi_agent_v1_child(&harness, parent_thread_id, child_agent_path.clone()).await;
+-
+-    let parent_turn_id = "parent-turn-v1-cold";
+-    let root_turn_id = "root-turn-v1-cold";
+-    if trait_send {
+-        // Trait dispatch must retain the concrete controller's lazy reload and delivery mode.
+-        let control: &dyn AgentControl = &harness.control;
+-        let mut resume_config = harness.config.clone();
+-        resume_config.model = Some("sender-model-must-not-replace-child".to_string());
+-        resume_config.model_reasoning_effort = Some(ReasoningEffort::Low);
+-        control
+-            .send(crate::SendRequest {
+-                caller: parent_thread_id,
+-                target: AgentTarget::Id(child_thread_id),
+-                resume_config: resume_config.clone(),
+-                input: AgentInput::Message {
+-                    message: AgentMessage::Plaintext("queued while cold".to_string()),
+-                    mode: MessageDeliveryMode::QueueOnly,
++    saved_thread
++        .inject_response_items(vec![saved_marker.clone()])
++        .await
++        .expect("persist initial message");
++    if matches!(&read, SavedThreadRepairRead::Single) {
++        // .157 reconstruction requires resolving the selected checkpoint's review input.
++        // The normal ephemeral resume resolves it too, but repair reads fresh stored records.
++        let segment_id = ThreadId::new();
++        let segment_path =
++            codex_rollout::review_input_segment_path(&harness.config.codex_home, segment_id);
++        std::fs::create_dir_all(segment_path.parent().expect("review segment directory"))
++            .expect("create review segment directory");
++        let mut bytes = serde_json::to_vec(&codex_rollout::RolloutLine {
++            timestamp: "2026-09-26T00:00:00Z".to_owned(),
++            ordinal: Some(0),
++            item: RolloutItem::SessionMeta(codex_protocol::protocol::SessionMetaLine {
++                meta: codex_rollout::SessionMeta {
++                    id: segment_id,
++                    session_id: segment_id.into(),
++                    segment_id: Some(
++                        codex_protocol::SegmentId::from_string(&segment_id.to_string())
++                            .expect("review segment ID"),
++                    ),
++                    history_mode: ThreadHistoryMode::Paginated,
++                    ..Default::default()
+                 },
+-                start_options: TurnStartOptions::default(),
+-            })
+-            .await?;
+-        let reloaded = harness.manager.get_thread(child_thread_id).await?;
+-        let reloaded_turn = reloaded.session.new_default_turn().await;
+-        assert_eq!(
+-            reloaded_turn.model_info().slug,
+-            harness.config.model.as_deref().unwrap()
+-        );
+-        assert_eq!(
+-            reloaded_turn.reasoning_effort(),
+-            Some(&ReasoningEffort::High)
++                git: None,
++            }),
++        })
++        .expect("serialize review segment header");
++        bytes.push(b'\n');
++        // Finite review prefixes end after rollback of an actual transcript boundary.
++        let removed_boundary = user_message("review-only boundary removed before checkpoint");
++        let records = [
++            codex_history::ReviewInputRecord::Baseline {
++                applicability: codex_history::ReviewTranscriptApplicability::Both,
++                history: codex_history::GuardianHistoryCheckpoint(vec![saved_marker.clone()]),
++            },
++            codex_history::ReviewInputRecord::ResponseItem {
++                response: removed_boundary.clone().into(),
++            },
++            codex_history::ReviewInputRecord::Rollback {
++                boundary: removed_boundary,
++            },
++        ];
++        for (index, record) in records.iter().enumerate() {
++            serde_json::to_writer(
++                &mut bytes,
++                &serde_json::json!({"ordinal": index + 1, "record": record}),
++            )
++            .expect("serialize review input");
++            bytes.push(b'\n');
++        }
++        std::fs::write(segment_path, &bytes).expect("persist referenced review input");
++        let history = saved_thread.session.clone_history().await;
++        assert!(
++            saved_thread
++                .session
++                .persist_rollout_items(&[RolloutItem::Compacted(CompactedItem {
++                    message: String::new(),
++                    replacement_history: Some(history.annotated_items().to_vec()),
++                    guardian_history: history.guardian_history_checkpoint(),
++                    retained_context: Some(history.retained_context().clone()),
++                    retained_context_replay: Some(codex_history::RetainedContextReplay {
++                        legacy: history.retained_context().clone(),
++                        thread_owned_worker: history.retained_context().clone(),
++                        thread_owned_root: history.retained_context().clone(),
++                        review_input: Some(HistoryPosition {
++                            thread_id: segment_id,
++                            end_ordinal_exclusive: u64::try_from(records.len() + 1)
++                                .expect("review input ordinal endpoint"),
++                            end_byte_offset: u64::try_from(bytes.len()).expect("review input size"),
++                        }),
++                        resolved_review_input: None,
++                    }),
++                    mcp_resource_origins: None,
++                    window_number: None,
++                    first_window_id: None,
++                    previous_window_id: None,
++                    window_id: None,
++                    compaction_response_id: None,
++                    latest_token_usage_record: None,
++                    resume_metadata: None,
++                    segment_state_checkpoint: None,
++                })])
++                .await,
+         );
++    }
++    saved_thread.ensure_rollout_materialized().await;
++    saved_thread
++        .flush_rollout()
++        .await
++        .expect("flush saved task");
++    let rollout_path = saved_thread.rollout_path().expect("selected saved rollout");
++    saved_thread
++        .shutdown_and_wait()
++        .await
++        .expect("stop original saved runtime");
++    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
++    drop(saved_thread);
++
++    // Bypass agent delivery's prevention fix to reproduce a runtime loaded by an old daemon.
++    let mut broken_config = harness.config.clone();
++    broken_config.ephemeral = true;
++    let broken_thread = harness
++        .manager
++        .resume_thread_from_rollout(
++            broken_config,
++            rollout_path.clone(),
++            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
++            /*parent_trace*/ None,
++            ClientMcpExtensions::default(),
++        )
++        .await
++        .expect("direct resume reproduces the accidentally ephemeral saved task")
++        .thread;
++    assert_eq!(broken_thread.session.thread_id, thread_id);
++    assert!(broken_thread.config_snapshot().await.ephemeral);
++    assert!(broken_thread.session.services.live_thread.is_none());
++    assert!(broken_thread.state_db().is_none());
++    broken_thread
++        .inject_response_items(vec![live_marker.clone()])
++        .await
++        .expect("broken runtime accepts a newer message without persisting it");
++    let live_history_before_read = broken_thread.session.clone_history().await;
++    for marker in [&saved_marker, &live_marker] {
+         assert_eq!(
+-            reloaded.session.inherited_instructions().await.thread,
+-            parent.thread.session.inherited_instructions().await.thread,
+-        );
+-        assert_eq!(responses.requests().len(), 1);
+-        assert!(reloaded.session.active_turn.lock().await.is_none());
+-        let expected_communication = InterAgentCommunication::new(
+-            AgentPath::root(),
+-            child_agent_path.expect("trait delivery uses a named recipient"),
+-            Vec::new(),
+-            "Message Type: MESSAGE\nTask name: /root/cold_v1_child\nSender: /root\nPayload:\nqueued while cold"
+-                .to_string(),
+-            /*trigger_turn*/ false,
+-        );
+-        assert!(
+-            harness
+-                .manager
+-                .captured_ops()
+-                .iter()
+-                .any(|(thread_id, op)| {
+-                    *thread_id == child_thread_id
+-                        && matches!(op, Op::InterAgentCommunication { communication, .. }
+-                    if communication == &expected_communication)
+-                })
++            live_history_before_read
++                .raw_items()
++                .filter(|item| *item == marker)
++                .count(),
++            1,
+         );
+-        control
+-            .send(crate::SendRequest {
+-                caller: parent_thread_id,
+-                target: AgentTarget::Id(child_thread_id),
+-                resume_config,
+-                input: AgentInput::Message {
+-                    message: AgentMessage::Plaintext("cold v1 delivery".to_string()),
+-                    mode: MessageDeliveryMode::TriggerTurn,
+-                },
+-                start_options: TurnStartOptions {
+-                    parent_turn_id: Some(parent_turn_id.to_string()),
+-                    root_turn_id: Some(root_turn_id.to_string()),
+-                    ..Default::default()
+-                },
+-            })
++    }
++
++    let disk_before_read = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let selected = disk_before_read
++        .read_thread(ReadThreadParams {
++            thread_id,
++            include_archived: true,
++            include_history: false,
++        })
++        .await
++        .expect("independent store reads the valid selected saved task");
++    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
++    assert_eq!(selected.rollout_path, Some(rollout_path));
++    let saved_history = disk_before_read
++        .load_history(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store reopens saved history");
++    if matches!(&read, SavedThreadRepairRead::Single) {
++        assert!(saved_history.items.iter().any(|item| matches!(
++            item,
++            RolloutItem::Compacted(compacted)
++                if compacted.retained_context_replay.as_ref().is_some_and(|replay|
++                    replay.review_input.is_some() && replay.resolved_review_input.is_none())
++        )));
++    }
++    let persisted_markers = saved_history
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response)
++                if response.item == saved_marker || response.item == live_marker =>
++            {
++                Some(&response.item)
++            }
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&saved_marker]);
++    drop(disk_before_read);
++
++    let mut expected_live = live_history_before_read
++        .raw_items()
++        .cloned()
++        .collect::<Vec<_>>();
++    let mut expected_persisted = vec![&saved_marker, &live_marker];
++    // Recovery must act on the still-loaded runtime, not reload its older saved history.
++    match read {
++        SavedThreadRepairRead::Single => {
++            broken_thread
++                .read_thread(
++                    /*include_archived*/ true, /*include_history*/ false,
++                )
++                .await
++                .expect("reading a saved thread repairs accidental ephemerality");
++        }
++        SavedThreadRepairRead::WriterAcquisitionRetry => {
++            // Reserve the writer through the same production store without attaching it to
++            // the broken Session. Recovery must not steal or close this owner's writer.
++            let competing_writer = codex_thread_store::LiveThread::resume(
++                Arc::clone(&broken_thread.session.services.thread_store),
++                ThreadHistoryMode::Paginated,
++                codex_thread_store::ResumeThreadParams {
++                    thread_id,
++                    rollout_path: selected.rollout_path.clone(),
++                    history: None,
++                    include_archived: true,
++                    metadata: ThreadPersistenceMetadata {
++                        cwd: Some(harness.config.cwd.to_path_buf()),
++                        model_provider: harness.config.model_provider_id.clone(),
++                        memory_mode: if harness.config.memories.generate_memories {
++                            ThreadMemoryMode::Enabled
++                        } else {
++                            ThreadMemoryMode::Disabled
++                        },
++                    },
++                },
++            )
++            .await
++            .expect("reserve competing writer before recovery acquisition");
++            let error = broken_thread
++                .read_thread(
++                    /*include_archived*/ true, /*include_history*/ false,
++                )
++                .await
++                .expect_err("recovery must fail at duplicate writer acquisition");
++            assert!(
++                error.to_string().contains(&format!(
++                    "thread {thread_id} already has a live local writer"
++                )),
++                "unexpected recovery failure: {error}"
++            );
++            assert!(!broken_thread.has_persistence());
++            assert!(broken_thread.state_db().is_none());
++            assert!(broken_thread.config_snapshot().await.ephemeral);
++            assert_eq!(
++                broken_thread
++                    .session
++                    .clone_history()
++                    .await
++                    .raw_items()
++                    .collect::<Vec<_>>(),
++                expected_live.iter().collect::<Vec<_>>(),
++                "failed acquisition must preserve the newer live conversation",
++            );
++            competing_writer
++                .flush()
++                .await
++                .expect("failed recovery must leave the competing writer owned and usable");
++            competing_writer
++                .shutdown()
++                .await
++                .expect("release the competing writer before retry");
++            let retried = harness
++                .manager
++                .get_thread(thread_id)
++                .await
++                .expect("automatic recovery succeeds after writer ownership is released");
++            assert!(Arc::ptr_eq(&retried, &broken_thread));
++            assert!(Arc::ptr_eq(&retried.session, &broken_thread.session));
++        }
++        SavedThreadRepairRead::ConcurrentWithActiveTurn => {
++            let active_turn = ActiveTurn::default();
++            let turn_state = Arc::clone(&active_turn.turn_state);
++            let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
++            turn_state
++                .lock()
++                .await
++                .insert_pending_approval("pending during recovery".to_owned(), approval_tx);
++            *broken_thread.session.active_turn.lock().await = Some(active_turn);
++            let recording_context = broken_thread.session.new_inject_items_context().await;
++            let recording_items = [concurrent_marker.clone()];
++            let (read_result, lookup_result, ()) =
++                tokio::time::timeout(std::time::Duration::from_secs(10), async {
++                    tokio::join!(
++                        broken_thread.read_thread(
++                            /*include_archived*/ true, /*include_history*/ true,
++                        ),
++                        harness.manager.get_thread(thread_id),
++                        broken_thread.session.record_conversation_items(
++                            &recording_context,
++                            recording_context.model_info(),
++                            &recording_items,
++                        ),
++                    )
++                })
++                .await
++                .expect("concurrent repair must not deadlock");
++            read_result.expect("direct read repairs persistence");
++            let looked_up = lookup_result.expect("manager lookup repairs persistence");
++            assert!(Arc::ptr_eq(&looked_up, &broken_thread));
++            let active = broken_thread.session.active_turn.lock().await;
++            assert!(Arc::ptr_eq(
++                &active.as_ref().expect("active turn preserved").turn_state,
++                &turn_state,
++            ));
++            drop(active);
++            assert!(matches!(
++                approval_rx.try_recv(),
++                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
++            ));
++            assert!(
++                turn_state
++                    .lock()
++                    .await
++                    .remove_pending_approval("pending during recovery")
++                    .is_some()
++            );
++            *broken_thread.session.active_turn.lock().await = None;
++            expected_live.push(concurrent_marker.clone());
++            expected_persisted.push(&concurrent_marker);
++        }
++    }
++    assert!(!broken_thread.config_snapshot().await.ephemeral);
++    assert!(broken_thread.state_db().is_some());
++    broken_thread
++        .read_thread(
++            /*include_archived*/ true, /*include_history*/ true,
++        )
++        .await
++        .expect("repeated full read uses the repaired writer");
++    assert_eq!(
++        broken_thread
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .collect::<Vec<_>>(),
++        expected_live.iter().collect::<Vec<_>>(),
++        "reading the saved task must preserve its newer in-memory conversation",
++    );
++    broken_thread
++        .inject_response_items(vec![repaired_marker.clone()])
++        .await
++        .expect("repaired task accepts another durable message");
++    broken_thread
++        .flush_rollout()
++        .await
++        .expect("repaired writer flushes without replacing the runtime");
++    let history_before_shutdown = broken_thread.session.clone_history().await;
++    broken_thread
++        .shutdown_and_wait()
++        .await
++        .expect("release repaired writer before independent cold read");
++    let disk_after_read = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let recovered_history = disk_after_read
++        .load_history(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store reopens repaired history");
++    let recovered_markers = recovered_history
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response)
++                if response.item == saved_marker
++                    || response.item == live_marker
++                    || response.item == concurrent_marker
++                    || response.item == repaired_marker =>
++            {
++                Some(&response.item)
++            }
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    expected_persisted.push(&repaired_marker);
++    assert_eq!(
++        recovered_markers, expected_persisted,
++        "repair persists the missing live message and new messages exactly once",
++    );
++    let mut desktop_history = codex_app_server_protocol::ThreadHistoryBuilder::new();
++    for item in &recovered_history.items {
++        desktop_history.handle_paginated_rollout_item(item);
++    }
++    let visible_message = |item: &codex_app_server_protocol::ThreadItem| match item {
++        codex_app_server_protocol::ThreadItem::AgentMessage { id, text, .. }
++            if Some(id.as_str()) == live_marker.id().map(|id| id.as_ref()) =>
++        {
++            Some(text.clone())
++        }
++        _ => None,
++    };
++    assert_eq!(
++        desktop_history
++            .finish()
++            .iter()
++            .flat_map(|turn| &turn.items)
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "the recovered message must be visible in the full Desktop history",
++    );
++    let page = disk_after_read
++        .list_items(codex_thread_store::ListItemsParams {
++            thread_id,
++            turn_id: None,
++            include_archived: true,
++            cursor: None,
++            page_size: 100,
++            sort_direction: codex_thread_store::SortDirection::Asc,
++            sort_key: codex_thread_store::ItemSortKey::CreatedAtOrdinal,
++            after_updated_at_ordinal: None,
++        })
++        .await
++        .expect("page repaired native history");
++    assert!(page.next_cursor.is_none());
++    let visible_items = page
++        .items
++        .iter()
++        .map(|item| {
++            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
++                .expect("stored Desktop item")
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        visible_items
++            .iter()
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "the same recovered message must be visible through paginated history",
++    );
++    let turn_page = disk_after_read
++        .list_turns(codex_thread_store::ListTurnsParams {
++            thread_id,
++            include_archived: true,
++            cursor: None,
++            page_size: 100,
++            sort_direction: codex_thread_store::SortDirection::Asc,
++            items_view: codex_thread_store::StoredTurnItemsView::Summary,
++        })
++        .await
++        .expect("page repaired turns");
++    assert!(turn_page.next_cursor.is_none());
++    let visible_turn_items = turn_page
++        .turns
++        .iter()
++        .flat_map(|turn| &turn.items)
++        .map(|item| {
++            serde_json::from_slice::<codex_app_server_protocol::ThreadItem>(&item.item_json)
++                .expect("stored turn's Desktop item")
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        visible_turn_items
++            .iter()
++            .filter_map(visible_message)
++            .collect::<Vec<_>>(),
++        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
++        "turn pagination must not drop an item whose original lifecycle event was unsaved",
++    );
++    drop(disk_after_read);
++    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
++    let resumed = harness
++        .manager
++        .resume_thread_from_rollout(
++            harness.config.clone(),
++            broken_thread.rollout_path().expect("repaired rollout path"),
++            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
++            /*parent_trace*/ None,
++            ClientMcpExtensions::default(),
++        )
++        .await
++        .expect("cold resume reopens the repaired checkpoint")
++        .thread;
++    assert!(!resumed.config_snapshot().await.ephemeral);
++    assert_eq!(
++        resumed
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .collect::<Vec<_>>(),
++        history_before_shutdown.raw_items().collect::<Vec<_>>(),
++        "cold resume preserves the entire surviving model history",
++    );
++    resumed
++        .shutdown_and_wait()
++        .await
++        .expect("stop cold resumed task");
++}
++
++#[tokio::test]
++async fn ensure_agent_loaded_preserves_materialized_ephemeral_target() {
++    let harness = AgentControlHarness::new().await;
++    let mut ephemeral_config = harness.config.clone();
++    ephemeral_config.ephemeral = true;
++    let thread_id = harness
++        .control
++        .spawn_agent(
++            ephemeral_config,
++            text_input("temporary task"),
++            /*session_source*/ None,
++        )
++        .await
++        .expect("spawn temporary agent");
++    let thread = harness
++        .manager
++        .get_thread(thread_id)
++        .await
++        .expect("temporary agent");
++    persist_thread_for_tree_resume(&thread, "temporary context").await;
++    thread
++        .session
++        .services
++        .live_thread
++        .as_ref()
++        .expect("ephemeral new thread retains a deferred writer")
++        .persist(PersistContext::Standard)
++        .await
++        .expect("materialize temporary context for debugging");
++    let manager = harness.control.upgrade().expect("manager");
++    assert!(
++        harness
++            .control
++            .unload_agent_thread(&manager, thread_id)
++            .await
++            .expect("unload agent")
++    );
++    harness
++        .control
++        .ensure_agent_loaded(harness.config.clone(), thread_id)
++        .await
++        .expect("reload explicitly ephemeral target from persistent caller");
++    let reloaded = harness
++        .manager
++        .get_thread(thread_id)
++        .await
++        .expect("reloaded temporary agent");
++    assert!(!harness.config.ephemeral);
++    assert!(reloaded.config_snapshot().await.ephemeral);
++    assert!(reloaded.state_db().is_none());
++    reloaded
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown temporary agent");
++}
++
++#[test_case::test_case(false; "concrete")]
++#[test_case::test_case(true; "trait_send")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
++    trait_send: bool,
++) -> anyhow::Result<()> {
++    let server = start_mock_server().await;
++    let responses = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_response_created("resp-v1-initial"),
++                ev_completed("resp-v1-initial"),
++            ]),
++            sse(vec![
++                ev_response_created("resp-v1-cold"),
++                ev_completed("resp-v1-cold"),
++            ]),
++        ],
++    )
++    .await;
++    let (home, mut config) = test_config().await;
++    config
++        .features
++        .disable(Feature::MultiAgentV2)
++        .expect("test config should allow feature update");
++    config
++        .features
++        .enable(Feature::Sqlite)
++        .expect("test config should allow feature update");
++    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
++    config.model_provider.supports_websockets = false;
++    config.model_reasoning_effort = Some(ReasoningEffort::High);
++    config.model_providers.insert(
++        config.model_provider_id.clone(),
++        config.model_provider.clone(),
++    );
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let parent = harness
++        .manager
++        .start_thread(StartThreadOptions {
++            thread_instructions_provider: Some(Arc::new(TestThreadInstructionsProvider {
++                text: "preserve these inherited cold-delivery instructions".into(),
++                shared: true,
++            })),
++            ..StartThreadOptions::new(harness.config.clone())
++        })
++        .await?;
++    let parent_thread_id = parent.thread_id;
++    let child_agent_path = trait_send.then(|| {
++        AgentPath::root()
++            .join("cold_v1_child")
++            .expect("named message recipient")
++    });
++    let child_thread_id =
++        make_cold_multi_agent_v1_child(&harness, parent_thread_id, child_agent_path.clone()).await;
++
++    let parent_turn_id = "parent-turn-v1-cold";
++    let root_turn_id = "root-turn-v1-cold";
++    let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
++    if trait_send {
++        // Trait dispatch must retain the concrete controller's lazy reload and delivery mode.
++        let control: &dyn AgentControl = &harness.control;
++        let mut resume_config = sender_config.clone();
++        resume_config.model = Some("sender-model-must-not-replace-child".to_string());
++        resume_config.model_reasoning_effort = Some(ReasoningEffort::Low);
++        control
++            .send(crate::SendRequest {
++                caller: parent_thread_id,
++                target: AgentTarget::Id(child_thread_id),
++                resume_config: resume_config.clone(),
++                input: AgentInput::Message {
++                    message: AgentMessage::Plaintext("queued while cold".to_string()),
++                    mode: MessageDeliveryMode::QueueOnly,
++                },
++                start_options: TurnStartOptions::default(),
++            })
++            .await?;
++        let reloaded = harness.manager.get_thread(child_thread_id).await?;
++        let reloaded_turn = reloaded.session.new_default_turn().await;
++        assert_eq!(
++            reloaded_turn.model_info().slug,
++            harness.config.model.as_deref().unwrap()
++        );
++        assert_eq!(
++            reloaded_turn.reasoning_effort(),
++            Some(&ReasoningEffort::High)
++        );
++        assert_eq!(
++            reloaded.session.inherited_instructions().await.thread,
++            parent.thread.session.inherited_instructions().await.thread,
++        );
++        assert_eq!(responses.requests().len(), 1);
++        assert!(reloaded.session.active_turn.lock().await.is_none());
++        let expected_communication = InterAgentCommunication::new(
++            AgentPath::root(),
++            child_agent_path.expect("trait delivery uses a named recipient"),
++            Vec::new(),
++            "Message Type: MESSAGE\nTask name: /root/cold_v1_child\nSender: /root\nPayload:\nqueued while cold"
++                .to_string(),
++            /*trigger_turn*/ false,
++        );
++        assert!(
++            harness
++                .manager
++                .captured_ops()
++                .iter()
++                .any(|(thread_id, op)| {
++                    *thread_id == child_thread_id
++                        && matches!(op, Op::InterAgentCommunication { communication, .. }
++                    if communication == &expected_communication)
++                })
++        );
++        control
++            .send(crate::SendRequest {
++                caller: parent_thread_id,
++                target: AgentTarget::Id(child_thread_id),
++                resume_config,
++                input: AgentInput::Message {
++                    message: AgentMessage::Plaintext("cold v1 delivery".to_string()),
++                    mode: MessageDeliveryMode::TriggerTurn,
++                },
++                start_options: TurnStartOptions {
++                    parent_turn_id: Some(parent_turn_id.to_string()),
++                    root_turn_id: Some(root_turn_id.to_string()),
++                    ..Default::default()
++                },
++            })
+             .await?;
+     } else {
+         harness
+             .control
+             .deliver_input_to_agent(
+-                harness.config.clone(),
++                sender_config.clone(),
+                 child_thread_id,
+                 text_input("cold v1 delivery"),
+                 AgentInputDelivery::Queue,
+@@ -2138,12 +2992,46 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
+         matches!(status, AgentStatus::Completed(_))
+     })
+     .await;
+-    harness
+-        .manager
+-        .get_thread(child_thread_id)
+-        .await?
+-        .shutdown_and_wait()
++    let reloaded_child = harness.manager.get_thread(child_thread_id).await?;
++    assert!(sender_config.ephemeral);
++    assert!(!reloaded_child.config_snapshot().await.ephemeral);
++    assert!(reloaded_child.session.services.live_thread.is_some());
++    assert!(reloaded_child.state_db().is_some());
++    reloaded_child.shutdown_and_wait().await?;
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: child_thread_id,
++            include_archived: true,
++        })
+         .await?;
++    if trait_send {
++        // Trait delivery persists AgentMessage, not Message or a user-message event.
++        let expected = "Message Type: NEW_TASK\nTask name: /root/cold_v1_child\nSender: /root\nPayload:\ncold v1 delivery";
++        let persisted_deliveries = persisted
++            .items
++            .iter()
++            .filter(|item| {
++                let RolloutItem::ResponseItem(response) = item else {
++                    return false;
++                };
++                let ResponseItem::AgentMessage { content, .. } = &response.item else {
++                    return false;
++                };
++                matches!(content.as_slice(), [AgentMessageInputContent::InputText { text }] if text == expected)
++            })
++            .count();
++        assert_eq!(persisted_deliveries, 1);
++    } else {
++        assert!(persisted.items.iter().any(|item| matches!(
++            item,
++            RolloutItem::EventMsg(EventMsg::UserMessage(message))
++                if message.message.contains("cold v1 delivery")
++        )));
++    }
+     Ok(())
+ }
+
+@@ -2360,6 +3248,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
          .await
          .expect("v2 root resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -9953,7 +11582,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      assert_ne!(
          resumed_control.get_status(parent_thread_id).await,
          AgentStatus::NotFound
-@@ -2367,11 +2573,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2367,11 +3256,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
@@ -9969,7 +11598,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      }
 
      resumed_control
-@@ -2543,6 +2749,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+@@ -2543,6 +3432,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
 
      if nested {
          let turn = resumed_parent.thread.session.new_default_turn().await;
@@ -9983,7 +11612,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
          resumed_parent
              .thread
              .session
-@@ -7469,18 +7682,17 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -7469,18 +8365,17 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -10012,7 +11641,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8928,6 +9140,12 @@ while True:
+@@ -8928,6 +9823,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -10025,10 +11654,91 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -9044,194 +9262,6 @@ while True:
-     Ok(())
- }
-
+@@ -8963,273 +9864,85 @@ while True:
+                             .as_str()
+                             .is_some_and(|text| text.contains("You are also a **goal supervisor**"))
+                     })
+-                })
+-        }),
+-        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
+-    );
+-    for unexpected_child_context in [
+-        "# AGENTS.md instructions",
+-        "<permissions instructions>",
+-        "<apps_instructions>",
+-        "<skills_instructions>",
+-        "<plugins_instructions>",
+-    ] {
+-        assert!(
+-            child_suffix.iter().all(|item| {
+-                item["content"]
+-                    .as_array()
+-                    .into_iter()
+-                    .flatten()
+-                    .all(|content_item| {
+-                        content_item["text"]
+-                            .as_str()
+-                            .is_none_or(|text| !text.contains(unexpected_child_context))
+-                    })
+-            }),
+-            "goal supervisor helpers must not append fresh child startup context after forking: found {unexpected_child_context} in suffix={child_suffix:#?}"
+-        );
+-    }
+-    assert_eq!(
+-        child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
+-        "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
+-    );
+-    let parent_tool_signatures = request_tool_signatures(&parent_body);
+-    let child_tool_signatures = request_tool_signatures(&child_body);
+-    let supervisor_tool_signatures = std::collections::BTreeSet::from([
+-        "supervisor.close_self".to_string(),
+-        "supervisor.snooze".to_string(),
+-        "supervisor.compact_parent_context".to_string(),
+-    ]);
+-    assert_eq!(
+-        child_tool_signatures
+-            .difference(&supervisor_tool_signatures)
+-            .cloned()
+-            .collect::<std::collections::BTreeSet<_>>(),
+-        parent_tool_signatures,
+-        "goal supervisor helpers must inherit every non-supervisor tool from their parent"
+-    );
+-    assert!(
+-        parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
+-        "supervisor tools must not be exposed to the parent request: tools={parent_tool_signatures:#?}"
+-    );
+-    assert!(
+-        supervisor_tool_signatures.is_subset(&child_tool_signatures),
+-        "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
+-    );
+-    for expected_tool in [
+-        "collaboration.spawn_agent",
+-        "collaboration.send_message",
+-        "collaboration.followup_task",
+-        "collaboration.wait_agent",
+-        "collaboration.list_agents",
+-        "collaboration.interrupt_agent",
+-        "supervisor.close_self",
+-        "supervisor.snooze",
+-        "supervisor.compact_parent_context",
+-    ] {
+-        assert!(
+-            child_tool_signatures.contains(expected_tool),
+-            "expected forked child request to expose `{expected_tool}`; tools={child_tool_signatures:#?}"
+-        );
+-    }
+-    assert!(
+-        child_body["tools"].as_array().is_some_and(|tools| {
+-            tools
+-                .iter()
+-                .any(|tool| tool["type"].as_str() == Some("tool_search"))
+-        }),
+-        "the inherited MCP snapshot should be discoverable through tool_search: {child_body:#}"
+-    );
+-
+-    Ok(())
+-}
+-
 -#[tokio::test]
 -async fn resume_closed_child_reopens_open_descendants() {
 -    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
@@ -10100,7 +11810,29 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
 -                agent_path: None,
 -                agent_nickname: None,
 -                agent_role: None,
--            }),
++                })
++        }),
++        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
++    );
++    for unexpected_child_context in [
++        "# AGENTS.md instructions",
++        "<permissions instructions>",
++        "<apps_instructions>",
++        "<skills_instructions>",
++        "<plugins_instructions>",
++    ] {
++        assert!(
++            child_suffix.iter().all(|item| {
++                item["content"]
++                    .as_array()
++                    .into_iter()
++                    .flatten()
++                    .all(|content_item| {
++                        content_item["text"]
++                            .as_str()
++                            .is_none_or(|text| !text.contains(unexpected_child_context))
++                    })
+             }),
 -        )
 -        .await
 -        .expect("child resume should succeed");
@@ -10108,11 +11840,31 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
 -    assert_ne!(
 -        harness.control.get_status(child_thread_id).await,
 -        AgentStatus::NotFound
--    );
++            "goal supervisor helpers must not append fresh child startup context after forking: found {unexpected_child_context} in suffix={child_suffix:#?}"
++        );
++    }
++    assert_eq!(
++        child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
++        "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
+     );
 -    assert_ne!(
 -        harness.control.get_status(grandchild_thread_id).await,
 -        AgentStatus::NotFound
--    );
++    let parent_tool_signatures = request_tool_signatures(&parent_body);
++    let child_tool_signatures = request_tool_signatures(&child_body);
++    let supervisor_tool_signatures = std::collections::BTreeSet::from([
++        "supervisor.close_self".to_string(),
++        "supervisor.snooze".to_string(),
++        "supervisor.compact_parent_context".to_string(),
++    ]);
++    assert_eq!(
++        child_tool_signatures
++            .difference(&supervisor_tool_signatures)
++            .cloned()
++            .collect::<std::collections::BTreeSet<_>>(),
++        parent_tool_signatures,
++        "goal supervisor helpers must inherit every non-supervisor tool from their parent"
+     );
 -
 -    let _ = harness
 -        .control
@@ -10200,27 +11952,55 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
 -    assert_ne!(
 -        harness.control.get_status(parent_thread_id).await,
 -        AgentStatus::NotFound
--    );
++    assert!(
++        parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
++        "supervisor tools must not be exposed to the parent request: tools={parent_tool_signatures:#?}"
+     );
 -    assert_ne!(
 -        harness.control.get_status(child_thread_id).await,
 -        AgentStatus::NotFound
--    );
++    assert!(
++        supervisor_tool_signatures.is_subset(&child_tool_signatures),
++        "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
+     );
 -    assert_ne!(
 -        harness.control.get_status(grandchild_thread_id).await,
 -        AgentStatus::NotFound
--    );
--
++    for expected_tool in [
++        "collaboration.spawn_agent",
++        "collaboration.send_message",
++        "collaboration.followup_task",
++        "collaboration.wait_agent",
++        "collaboration.list_agents",
++        "collaboration.interrupt_agent",
++        "supervisor.close_self",
++        "supervisor.snooze",
++        "supervisor.compact_parent_context",
++    ] {
++        assert!(
++            child_tool_signatures.contains(expected_tool),
++            "expected forked child request to expose `{expected_tool}`; tools={child_tool_signatures:#?}"
++        );
++    }
++    assert!(
++        child_body["tools"].as_array().is_some_and(|tools| {
++            tools
++                .iter()
++                .any(|tool| tool["type"].as_str() == Some("tool_search"))
++        }),
++        "the inherited MCP snapshot should be discoverable through tool_search: {child_body:#}"
+     );
+
 -    let _ = harness
 -        .control
 -        .shutdown_agent_tree(parent_thread_id)
 -        .await
 -        .expect("tree shutdown after subtree resume should succeed");
--}
--
++    Ok(())
+ }
+
  #[tokio::test]
- async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
-     let harness = AgentControlHarness::new_with_multi_agent_v1().await;
-@@ -9315,8 +9345,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9315,8 +10028,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -10238,7 +12018,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -9325,21 +9362,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9325,21 +10045,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10324,7 +12104,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -9356,8 +9450,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9356,8 +10133,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -10334,7 +12114,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9512,13 +9605,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9512,13 +10288,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10403,7 +12183,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9614,6 +9759,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9614,6 +10442,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -10435,7 +12215,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9648,3 +9818,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9648,3 +10501,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }
@@ -10948,7 +12728,7 @@ index 0000000000000000000000000000000000000000..051dd9e6f84edcc79331e9944ef8be49
 +        .ok()
 +}
 diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
-index 237bc5ceaee6c3b55851c57cd7932848f37b8420..25507f847418f7046138055aa7e3998ea9453d7b 100644
+index 237bc5ceaee6c3b55851c57cd7932848f37b8420..23ffea25b5726c4b5a8d87093516e058b5a84bf5 100644
 --- a/codex-rs/core/src/agent/registry.rs
 +++ b/codex-rs/core/src/agent/registry.rs
 @@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
@@ -10959,7 +12739,24 @@ index 237bc5ceaee6c3b55851c57cd7932848f37b8420..25507f847418f7046138055aa7e3998e
  use codex_protocol::protocol::SessionSource;
  use codex_protocol::protocol::SubAgentSource;
  use codex_protocol::protocol::TurnEnvironmentSelection;
-@@ -69,6 +70,8 @@ pub(crate) struct AgentLifecycle {
+@@ -47,6 +48,8 @@ struct RegisteredAgent {
+     /// Serializes loaded/cold transitions without exposing runtime state in public metadata.
+     lifecycle: Arc<AgentLifecycle>,
+     evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
++    /// Keeps intentional ephemerality when a debug-materialized agent is unloaded.
++    evicted_ephemeral: Option<bool>,
+     /// Retains a transferred descendant's applied instructions until its first successful reload.
+     evicted_instructions: Option<SessionInstructions>,
+ }
+@@ -57,6 +60,7 @@ impl RegisteredAgent {
+             path,
+             lifecycle: Arc::new(AgentLifecycle::default()),
+             evicted_environments: None,
++            evicted_ephemeral: None,
+             evicted_instructions: None,
+         }
+     }
+@@ -69,6 +73,8 @@ pub(crate) struct AgentLifecycle {
      transition: Arc<AsyncMutex<()>>,
      /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
      visible_when_cold: AtomicBool,
@@ -10968,7 +12765,7 @@ index 237bc5ceaee6c3b55851c57cd7932848f37b8420..25507f847418f7046138055aa7e3998e
      /// Prevents duplicate completion watchers for one registered agent.
      completion_watcher_active: AtomicBool,
      /// Wakes input delivery after the active completion watcher finishes its transition.
-@@ -106,6 +109,34 @@ impl AgentLifecycle {
+@@ -106,6 +112,34 @@ impl AgentLifecycle {
          self.visible_when_cold.load(Ordering::Acquire)
      }
 
@@ -11003,7 +12800,7 @@ index 237bc5ceaee6c3b55851c57cd7932848f37b8420..25507f847418f7046138055aa7e3998e
      pub(crate) fn try_start_completion_watcher(
          self: &Arc<Self>,
      ) -> Option<CompletionWatcherRegistration> {
-@@ -181,6 +212,36 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+@@ -181,6 +215,36 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
  }
 
  impl AgentRegistry {
@@ -11040,11 +12837,90 @@ index 237bc5ceaee6c3b55851c57cd7932848f37b8420..25507f847418f7046138055aa7e3998e
      pub(crate) fn reserve_spawn_slot(
          self: &Arc<Self>,
          max_threads: Option<usize>,
+@@ -301,10 +365,11 @@ impl AgentRegistry {
+         }
+     }
+
+-    pub(crate) fn save_evicted_environments(
++    pub(crate) fn save_evicted_runtime_settings(
+         &self,
+         thread_id: ThreadId,
+         environments: Vec<TurnEnvironmentSelection>,
++        ephemeral: bool,
+     ) {
+         let mut active_agents = self
+             .active_agents
+@@ -312,9 +377,19 @@ impl AgentRegistry {
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+             agent.evicted_environments = Some(environments);
++            agent.evicted_ephemeral = Some(ephemeral);
+         }
+     }
+
++    pub(crate) fn evicted_ephemeral(&self, thread_id: ThreadId) -> Option<bool> {
++        self.active_agents
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .thread_paths
++            .get(&thread_id)
++            .and_then(|agent| agent.evicted_ephemeral)
++    }
++
+     pub(crate) fn evicted_environments(
+         &self,
+         thread_id: ThreadId,
+@@ -329,13 +404,14 @@ impl AgentRegistry {
+             .and_then(|agent| agent.evicted_environments.clone())
+     }
+
+-    pub(crate) fn clear_evicted_environments(&self, thread_id: ThreadId) {
++    pub(crate) fn clear_evicted_runtime_settings(&self, thread_id: ThreadId) {
+         let mut active_agents = self
+             .active_agents
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+             agent.evicted_environments = None;
++            agent.evicted_ephemeral = None;
+         }
+     }
+
 diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
-index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c821f795da 100644
+index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..583a052257f584acd0b86c8d00a989179a7c8734 100644
 --- a/codex-rs/core/src/agent/registry_tests.rs
 +++ b/codex-rs/core/src/agent/registry_tests.rs
-@@ -511,6 +511,9 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -422,6 +422,29 @@ fn repeated_resets_advance_the_ordinal_suffix() {
+     assert_eq!(active_agents.nickname_reset_count, 2);
+ }
+
++#[test]
++fn evicted_runtime_settings_retain_and_clear_ephemerality() {
++    let registry = AgentRegistry::default();
++    let thread_id = ThreadId::new();
++    registry.register_root_thread(thread_id);
++    assert_eq!(registry.evicted_ephemeral(thread_id), None);
++
++    registry.save_evicted_runtime_settings(thread_id, Vec::new(), /*ephemeral*/ true);
++    assert_eq!(registry.evicted_ephemeral(thread_id), Some(true));
++    assert!(
++        registry
++            .evicted_environments(thread_id)
++            .is_some_and(|environments| environments.is_empty())
++    );
++
++    registry.clear_evicted_runtime_settings(thread_id);
++    assert_eq!(registry.evicted_ephemeral(thread_id), None);
++    assert!(registry.evicted_environments(thread_id).is_none());
++
++    registry.save_evicted_runtime_settings(thread_id, Vec::new(), /*ephemeral*/ false);
++    assert_eq!(registry.evicted_ephemeral(thread_id), Some(false));
++}
++
+ #[test]
+ fn register_root_thread_indexes_root_path() {
+     let registry = Arc::new(AgentRegistry::default());
+@@ -511,6 +534,9 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
      let registration = lifecycle
          .try_start_completion_watcher()
          .expect("watcher starts");
@@ -11054,7 +12930,7 @@ index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c8
 
      destination_registry
          .reserve_spawn_slot(/*max_threads*/ None)
-@@ -521,6 +524,10 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -521,6 +547,10 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
          .expect("transferred agent has a lifecycle");
      assert!(Arc::ptr_eq(&lifecycle, &transferred));
      assert!(transferred.completion_watcher_active());
@@ -11065,7 +12941,7 @@ index 8bd37f9577939bcaf85dced916d8b57965e3e0ff..1b4e5e9f8f7bb4ff7a733aed129078c8
 
      transferred.mark_visible_when_cold();
      destination_registry.release_spawned_thread(thread_id);
-@@ -541,11 +548,56 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
+@@ -541,11 +571,56 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
      assert!(Arc::ptr_eq(&lifecycle, &restored));
      assert!(!restored.is_visible_when_cold());
      assert!(restored.completion_watcher_active());
@@ -11137,6 +13013,82 @@ index 782087f9167765b504919930a9d740812279dbb3..3e4acc9bc7c8bdb74ddd9a1d88fee521
      pub agent_path: Option<AgentPath>,
      pub agent_nickname: Option<String>,
      pub agent_role: Option<String>,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a9b38b79c 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -795,7 +795,38 @@ impl CodexThread {
+     }
+
+     pub fn rollout_path(&self) -> Option<PathBuf> {
+-        self.rollout_path.clone()
++        self.rollout_path
++            .clone()
++            .or_else(|| self.session.repaired_rollout_path())
++    }
++
++    /// Restores persistence after the caller verifies that this is a saved target, not
++    /// an intentionally ephemeral task. Keeps the Session, active turn and mailbox intact.
++    pub async fn restore_saved_thread_persistence(&self) -> ThreadStoreResult<()> {
++        self.session
++            .restore_saved_thread_persistence()
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to restore saved thread persistence: {error:#}"),
++            })
++    }
++
++    /// Whether this runtime has a writer, including one restored after loading.
++    pub fn has_persistence(&self) -> bool {
++        self.session.live_thread().is_some()
++    }
++
++    async fn ensure_saved_target_persistence(&self) -> ThreadStoreResult<()> {
++        if !self.has_persistence()
++            && self
++                .session
++                .services
++                .agent_control
++                .is_saved_target(self.session.thread_id)
++        {
++            self.restore_saved_thread_persistence().await?;
++        }
++        Ok(())
+     }
+
+     /// Returns startup metadata without the one-time initial message replay.
+@@ -820,6 +851,7 @@ impl CodexThread {
+         &self,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThreadHistory> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("load history")
+@@ -834,6 +866,7 @@ impl CodexThread {
+         include_archived: bool,
+         include_history: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("read thread")
+@@ -850,6 +883,7 @@ impl CodexThread {
+         patch: ThreadMetadataPatch,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("update thread metadata")
+@@ -861,6 +895,7 @@ impl CodexThread {
+
+     /// Appends rollout items through the live thread so derived metadata stays in sync.
+     pub async fn append_rollout_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
++        self.ensure_saved_target_persistence().await?;
+         let live_thread = self
+             .session
+             .live_thread_for_persistence("append rollout items")
 diff --git a/codex-rs/core/src/context/world_state/environment.rs b/codex-rs/core/src/context/world_state/environment.rs
 index c1656865cb8b46d9f0ed80300a3ae21848c7ef8c..af60706e9b09eac8274235a2e729c73ba16f2c1a 100644
 --- a/codex-rs/core/src/context/world_state/environment.rs
@@ -11426,6 +13378,19 @@ index 6bda9b79b65b2b5a3ff134e0a9f1920f016dce80..de42e04df9595cb39c5c0eb0aa01b72e
  #[test]
  fn legacy_single_environment_snapshot_does_not_change() -> Result<()> {
      let environment = EnvironmentsState {
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index 7808d695b0142cbfca816545f2da46c4667ec631..67479784abf921d5eaa10ecf365427d81fd3a2b4 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -910,7 +910,7 @@ pub(crate) async fn emit_hook_completed_events(
+         })
+     {
+         state_db::mark_thread_memory_mode_polluted(
+-            sess.services.state_db.as_deref(),
++            sess.state_db().as_deref(),
+             sess.thread_id,
+             "mcp_tool_hook",
+         )
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
 index d3be4b19102cda5d53ca8c82b9673780168d2e56..f642137fec25df21f2534a2dd4baf972f3889a2a 100644
 --- a/codex-rs/core/src/lib.rs
@@ -11447,6 +13412,531 @@ index d3be4b19102cda5d53ca8c82b9673780168d2e56..f642137fec25df21f2534a2dd4baf972
  pub use thread_manager::ForkSnapshot;
  pub use thread_manager::InternalSessionParent;
  pub use thread_manager::NewThread;
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index 0112be0b4001e3ca47cc68d3f04b85fb32dd7728..a76d4ded55a3e2e33911f7c0ec6e88b06c235d6b 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -916,7 +916,7 @@ async fn maybe_mark_thread_memory_mode_polluted(
+         return;
+     }
+     state_db::mark_thread_memory_mode_polluted(
+-        sess.services.state_db.as_deref(),
++        sess.state_db().as_deref(),
+         sess.thread_id,
+         "mcp_tool_call",
+     )
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 8ab59644272ec87d673f9133a99f3cc67228412d..4d2b207302eecf6b6f53b6f4994b5e2ad28f1953 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -284,6 +284,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
+ }
+
+ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
++    sess.close_persistence_repair().await;
+     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
+         startup_prewarm.abort().await;
+     }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3eca909925f 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -259,6 +259,7 @@ mod mcp_runtime;
+ mod model_alias_refresh;
+ mod model_routing;
+ pub(crate) mod multi_agents;
++mod persistence_repair;
+ mod plugin_selection;
+ mod realtime_history;
+ mod retained_context;
+@@ -1679,7 +1680,11 @@ impl Session {
+     }
+
+     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
+-        self.services.state_db.clone()
++        self.services.state_db.clone().or_else(|| {
++            self.repaired_persistence
++                .get()
++                .and_then(|persistence| persistence.state_db.clone())
++        })
+     }
+
+     pub(crate) fn live_thread_for_persistence(
+@@ -1691,7 +1696,11 @@ impl Session {
+     }
+
+     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
+-        self.services.live_thread.as_ref()
++        self.services.live_thread.as_ref().or_else(|| {
++            self.repaired_persistence
++                .get()
++                .map(|persistence| &persistence.live_thread)
++        })
+     }
+
+     pub(crate) async fn set_thread_memory_mode(
+@@ -4292,8 +4301,9 @@ impl Session {
+             .iter()
+             .map(|envelope| envelope.item.clone())
+             .collect::<Vec<_>>();
+-        {
++        let persistence = {
+             let mut state = self.state.lock().await;
++            let persistence = self.persistence_repair_lock.lock().await;
+             state
+                 .current_time_reminder
+                 .note_recorded_items(&response_items);
+@@ -4316,7 +4326,8 @@ impl Session {
+             state
+                 .history
+                 .record_annotated_items(&items, model_info.truncation_policy.into());
+-        }
++            persistence
++        };
+         for image in image_preparations {
+             self.services
+                 .analytics_events_client
+@@ -4327,13 +4338,14 @@ impl Session {
+         }
+         let rollout_items: Vec<RolloutItem> =
+             items.into_iter().map(RolloutItem::ResponseItem).collect();
+-        if self.persist_rollout_items(&rollout_items).await
++        if self.persist_rollout_items_locked(&rollout_items).await
+             && let Some(revision) = mcp_revision
+         {
+             self.services
+                 .executed_tool_calls
+                 .mark_mcp_attribution_persisted(revision);
+         }
++        drop(persistence);
+         if turn_context.config.memories.disable_on_external_context
+             && let Some(item) = response_items
+                 .iter()
+@@ -4613,18 +4625,21 @@ impl Session {
+             .await;
+         let items = items.as_ref();
+         let response_item = items[0].clone();
+-        {
++        let persistence = {
+             let mut state = self.state.lock().await;
++            let persistence = self.persistence_repair_lock.lock().await;
+             state.current_time_reminder.note_recorded_items(items);
+             state.record_items(items.iter(), model_info.truncation_policy.into());
+-        }
+-        self.persist_rollout_items(&[
++            persistence
++        };
++        self.persist_rollout_items_locked(&[
+             RolloutItem::InterAgentCommunicationMetadata {
+                 trigger_turn: communication.trigger_turn,
+             },
+             RolloutItem::ResponseItem(response_item.into()),
+         ])
+         .await;
++        drop(persistence);
+         self.send_raw_response_items(turn_context, items).await;
+     }
+
+@@ -5196,6 +5211,11 @@ impl Session {
+
+     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
+     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
++        let _persistence = self.persistence_repair_lock.lock().await;
++        self.persist_rollout_items_locked(items).await
++    }
++
++    async fn persist_rollout_items_locked(&self, items: &[RolloutItem]) -> bool {
+         if self.persistence_restart_required() {
+             error!("failed to record rollout items: thread persistence requires a restart");
+             return false;
+@@ -5472,12 +5492,14 @@ impl Session {
+         // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
+         // durable baseline. This normally records one item per user turn; a tool that changes the
+         // active context may record another item before the next model step in that turn.
+-        self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
++        // Recovery must not checkpoint the previous reference after this append.
++        let mut state = self.state.lock().await;
++        let _persistence = self.persistence_repair_lock.lock().await;
++        self.persist_rollout_items_locked(&[RolloutItem::TurnContext(turn_context_item.clone())])
+             .await;
+
+         // Advance the persisted-settings baseline even when this turn emitted no model-visible
+         // context items.
+-        let mut state = self.state.lock().await;
+         state.set_reference_context_item(Some(turn_context_item));
+         Ok(world_state)
+     }
+diff --git a/codex-rs/core/src/session/persistence_repair.rs b/codex-rs/core/src/session/persistence_repair.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9119e9c3683349635bf272df4a84657585f722f9
+--- /dev/null
++++ b/codex-rs/core/src/session/persistence_repair.rs
+@@ -0,0 +1,365 @@
++use super::*;
++use codex_protocol::items::FunctionCallOutputItem;
++use codex_protocol::protocol::ItemCompletedEvent;
++use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::ReadThreadParams;
++
++/// Teardown closes writer attachment before it observes the current live writer.
++#[derive(Default)]
++pub(super) enum PersistenceRepairState {
++    #[default]
++    Active,
++    ShuttingDown,
++}
++
++/// Persistence attached to an existing Session after its saved-task intent is established.
++/// Publishing one bundle keeps writer, database, and local rollout selection consistent.
++pub(super) struct RepairedPersistence {
++    pub(super) live_thread: LiveThread,
++    pub(super) state_db: Option<state_db::StateDbHandle>,
++    pub(super) rollout_path: Option<PathBuf>,
++}
++
++impl Session {
++    pub(super) async fn close_persistence_repair(&self) {
++        *self.persistence_repair_lock.lock().await = PersistenceRepairState::ShuttingDown;
++    }
++
++    pub(crate) fn repaired_rollout_path(&self) -> Option<PathBuf> {
++        self.repaired_persistence
++            .get()
++            .and_then(|persistence| persistence.rollout_path.clone())
++    }
++
++    /// Restores a saved target's writer without replacing its live Session.
++    /// The caller must establish target persistence intent independently of Config.ephemeral.
++    pub(crate) async fn restore_saved_thread_persistence(&self) -> anyhow::Result<()> {
++        if self.live_thread().is_some() {
++            return Ok(());
++        }
++        let turn_context = self.new_inject_items_context().await;
++        let _admission = self
++            .lock_checkpoint_admission("restore saved thread persistence")
++            .await?;
++        let _settings = self.thread_settings_persistence.acquire().await?;
++        let mut state = self.state.lock().await;
++        let _persistence = self.persistence_repair_lock.lock().await;
++        anyhow::ensure!(
++            matches!(*_persistence, PersistenceRepairState::Active),
++            "cannot restore saved thread persistence during shutdown"
++        );
++        if self.live_thread().is_some() {
++            return Ok(());
++        }
++        anyhow::ensure!(
++            !state.session_configuration.is_system_ephemeral()
++                && !crate::goal_supervisor::is_goal_supervisor_helper_source(
++                    &state.session_configuration.session_source
++                ),
++            "temporary system agents cannot be converted to saved tasks"
++        );
++        let store = &self.services.thread_store;
++        let stored = store
++            .read_thread(ReadThreadParams {
++                thread_id: self.thread_id,
++                include_archived: true,
++                include_history: false,
++            })
++            .await?;
++        anyhow::ensure!(
++            stored.history_mode == state.session_configuration.history_mode,
++            "saved thread history mode differs from the live session"
++        );
++        let config = &state.session_configuration.original_config_do_not_use;
++        let params = ResumeThreadParams {
++            thread_id: self.thread_id,
++            rollout_path: stored.rollout_path,
++            history: None,
++            include_archived: true,
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(state.session_configuration.cwd().to_path_buf()),
++                model_provider: config.model_provider_id.clone(),
++                memory_mode: if config.memories.generate_memories {
++                    ThreadMemoryMode::Enabled
++                } else {
++                    ThreadMemoryMode::Disabled
++                },
++            },
++        };
++        let mut guard = LiveThreadInitGuard::default();
++        let live_thread = guard
++            .acquire(LiveThread::resume(
++                Arc::clone(store),
++                stored.history_mode,
++                params,
++            ))
++            .await?;
++        let result: anyhow::Result<RepairedPersistence> = async {
++            // Read after reserving the writer: another process cannot append between the
++            // comparison and recovery. Paginated histories read only their current context.
++            let history_params = LoadThreadHistoryParams {
++                thread_id: self.thread_id,
++                include_archived: true,
++            };
++            let mut saved = match stored.history_mode {
++                ThreadHistoryMode::Paginated => {
++                    store.load_latest_model_context(history_params).await?.items
++                }
++                ThreadHistoryMode::Legacy => store.load_history(history_params).await?.items,
++            };
++            // Reconstruction requires resolved review input. Use the captured configuration
++            // instead of the Session wrapper, which would acquire `state` again.
++            rollout_reconstruction::resolve_review_input_for_reconstruction(
++                state.session_configuration.codex_home(),
++                &mut saved,
++            )
++            .await?;
++            let reconstructed = self
++                .reconstruct_history_from_rollout(&turn_context, &saved)
++                .await;
++            let mut saved_counts = HashMap::<Vec<u8>, usize>::new();
++            for envelope in &reconstructed.history {
++                *saved_counts
++                    .entry(recovery_item_key(&envelope.item)?)
++                    .or_default() += 1;
++            }
++            let mut recovered = Vec::new();
++            let mut presentations = Vec::new();
++            let mut occurrences = HashMap::<Vec<u8>, usize>::new();
++            let mut tool_calls = HashMap::new();
++            for envelope in state.history.annotated_items() {
++                match &envelope.item {
++                    ResponseItem::FunctionCall { call_id, .. }
++                    | ResponseItem::CustomToolCall { call_id, .. } => {
++                        tool_calls.insert(call_id.as_str(), &envelope.item);
++                    }
++                    _ => {}
++                }
++            }
++            for envelope in state.history.annotated_items() {
++                let key = recovery_item_key(&envelope.item)?;
++                let occurrence = occurrences.entry(key.clone()).or_default();
++                let item_id = envelope
++                    .item
++                    .id()
++                    .map(ToString::to_string)
++                    .unwrap_or_else(|| {
++                        let seed = format!("{}:{occurrence}:", self.thread_id);
++                        let mut bytes = seed.into_bytes();
++                        bytes.extend_from_slice(&key);
++                        format!(
++                            "recovered-{}",
++                            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes)
++                        )
++                    });
++                *occurrence += 1;
++                if let Some(count) = saved_counts.get_mut(&key)
++                    && *count > 0
++                {
++                    *count -= 1;
++                } else {
++                    if let Some(item) = recovery_turn_item(&envelope.item, item_id, &tool_calls) {
++                        let turn_id = if stored.history_mode == ThreadHistoryMode::Legacy {
++                            format!("recovered-{}", self.thread_id)
++                        } else {
++                            envelope
++                                .item
++                                .turn_id()
++                                .map(str::to_owned)
++                                .unwrap_or_else(|| format!("recovered-{}", self.thread_id))
++                        };
++                        presentations.push((turn_id, item));
++                    }
++                    recovered.push(RolloutItem::ResponseItem(envelope.clone()));
++                }
++            }
++            let turn_ids: Vec<String> = presentations
++                .iter()
++                .map(|(turn_id, _)| turn_id.clone())
++                .collect::<HashSet<_>>()
++                .into_iter()
++                .collect();
++            let mut existing_turns = match stored.history_mode {
++                ThreadHistoryMode::Paginated if !turn_ids.is_empty() => {
++                    let local_store = store
++                        .as_any()
++                        .downcast_ref::<LocalThreadStore>()
++                        .ok_or_else(|| {
++                            anyhow::anyhow!("saved history turn lookup is unavailable")
++                        })?;
++                    local_store
++                        .existing_history_turns(self.thread_id, &turn_ids)
++                        .await?
++                }
++                ThreadHistoryMode::Legacy | ThreadHistoryMode::Paginated => saved
++                    .iter()
++                    .filter_map(|item| match item {
++                        RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
++                            Some(event.turn_id.clone())
++                        }
++                        _ => None,
++                    })
++                    .collect(),
++            };
++            let mut presentation_items = Vec::new();
++            // The old runtime did not retain item completion times. Record recovery
++            // publication time rather than pretending these items completed at the epoch.
++            let recovered_at_ms = chrono::Utc::now().timestamp_millis();
++            for (turn_id, item) in presentations {
++                if existing_turns.insert(turn_id.clone()) {
++                    presentation_items.push(RolloutItem::EventMsg(EventMsg::TurnStarted(
++                        TurnStartedEvent {
++                            turn_id: turn_id.clone(),
++                            root_turn_id: None,
++                            trace_id: None,
++                            started_at: None,
++                            model_context_window: None,
++                            collaboration_mode_kind: Default::default(),
++                        },
++                    )));
++                }
++                if stored.history_mode == ThreadHistoryMode::Legacy {
++                    presentation_items.extend(
++                        item.as_legacy_events(/*show_raw_agent_reasoning*/ false)
++                            .into_iter()
++                            .map(RolloutItem::EventMsg),
++                    );
++                }
++                presentation_items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
++                    ItemCompletedEvent {
++                        thread_id: self.thread_id,
++                        turn_id,
++                        item,
++                        started_at_ms: None,
++                        completed_at_ms: recovered_at_ms,
++                    },
++                )));
++            }
++            // Presentation precedes raw responses so a partially persisted batch cannot make
++            // the next attempt skip a response whose UI item has not yet been saved.
++            presentation_items.append(&mut recovered);
++            recovered = presentation_items;
++            // Keep saved UI history and append surviving unsaved items. The checkpoint
++            // separately preserves exact current model state, including prior compaction.
++            // Neither operation claims to reconstruct records the old runtime discarded.
++            recovered.extend(
++                self.segment_state_checkpoint_from_state(&state)
++                    .into_items(),
++            );
++            live_thread.append_items(&recovered).await?;
++            live_thread.flush().await?;
++            let rollout_path = live_thread.local_rollout_path().await?;
++            let state_db = match store.as_any().downcast_ref::<LocalThreadStore>() {
++                Some(local_store) => local_store.state_db().await,
++                None => None,
++            };
++            Ok(RepairedPersistence {
++                live_thread,
++                state_db,
++                rollout_path,
++            })
++        }
++        .await;
++        let restored = match result {
++            Ok(restored) => restored,
++            Err(error) => {
++                // Any durable prefix remains available for comparison on the next attempt.
++                // Transfer the only cleanup owner before awaiting: discard takes its handle
++                // before it awaits, so cancelling this read must not cancel writer cleanup.
++                let cleanup = tokio::spawn(async move { guard.discard().await });
++                if let Err(cleanup_error) = cleanup.await {
++                    warn!("saved thread persistence cleanup task failed: {cleanup_error}");
++                }
++                return Err(error);
++            }
++        };
++        anyhow::ensure!(
++            self.repaired_persistence.set(restored).is_ok(),
++            "saved thread persistence was attached concurrently"
++        );
++        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral =
++            false;
++        guard.commit();
++        Ok(())
++    }
++}
++
++// Compare payloads as well as IDs: a surviving revision must update the UI item, not
++// disappear behind an older saved version with the same ID. Preserve multiplicity.
++fn recovery_item_key(item: &ResponseItem) -> serde_json::Result<Vec<u8>> {
++    serde_json::to_vec(item)
++}
++
++/// Reuses native presentation items without inferring turn completion or tool success.
++fn recovery_turn_item(
++    response: &ResponseItem,
++    id: String,
++    tool_calls: &HashMap<&str, &ResponseItem>,
++) -> Option<TurnItem> {
++    if let Some(mut item) = parse_turn_item(response) {
++        match &mut item {
++            TurnItem::UserMessage(item) => item.id = id,
++            TurnItem::AgentMessage(item) => item.id = id,
++            TurnItem::Reasoning(item) => item.id = id,
++            TurnItem::WebSearch(item) => item.id = id,
++            TurnItem::ImageGeneration(item) => item.id = id,
++            TurnItem::HookPrompt(item) => item.id = id,
++            _ => return None,
++        }
++        return Some(item);
++    }
++    let (call_id, name, namespace, output) = match response {
++        ResponseItem::FunctionCallOutput {
++            call_id,
++            name,
++            namespace,
++            output,
++            ..
++        } => (
++            call_id.as_deref(),
++            name.clone(),
++            namespace.clone(),
++            output.body.clone(),
++        ),
++        ResponseItem::CustomToolCallOutput {
++            call_id,
++            name,
++            output,
++            ..
++        } => (
++            Some(call_id.as_str()),
++            name.clone(),
++            None,
++            output.body.clone(),
++        ),
++        _ => return None,
++    };
++    let (name, namespace) = match (name, call_id.and_then(|id| tool_calls.get(id))) {
++        (Some(name), _) => (name, namespace),
++        (
++            None,
++            Some(
++                ResponseItem::FunctionCall {
++                    name, namespace, ..
++                }
++                | ResponseItem::CustomToolCall {
++                    name, namespace, ..
++                },
++            ),
++        ) => (name.clone(), namespace.clone()),
++        (None, _) => (
++            "Recovered tool output (name unavailable)".to_owned(),
++            namespace,
++        ),
++    };
++    Some(TurnItem::FunctionCallOutput(FunctionCallOutputItem {
++        id,
++        name,
++        namespace,
++        output,
++    }))
++}
++
++#[cfg(test)]
++#[path = "persistence_repair_tests.rs"]
++mod tests;
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
 index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb84463bdf7 100644
 --- a/codex-rs/core/src/session/world_state.rs
@@ -11460,8 +13950,30 @@ index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb8
              );
          }
          world_state.add_section(EnvironmentsInstructionsState::new(
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 6a4faeffa08f4e53baa2242f7e0bd125058f015c..02348046238282a4e2ba2f7855171d1e1acb77d1 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -121,7 +121,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+             .await;
+     }
+     mark_thread_memory_mode_polluted_if_external_context(sess, turn_context, item).await;
+-    let memory_usage_db = match sess.services.state_db.as_ref() {
++    let memory_usage_db = match sess.state_db().as_ref() {
+         Some(db) => db
+             .memories_for_version(turn_context.config.memories.version)
+             .await
+@@ -163,7 +163,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
+         return;
+     }
+     state_db::mark_thread_memory_mode_polluted(
+-        sess.services.state_db.as_deref(),
++        sess.state_db().as_deref(),
+         sess.thread_id,
+         "record_completed_response_item",
+     )
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31fbf9cfec 100644
+index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa64f99ef0 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -2,6 +2,8 @@ mod managed;
@@ -11500,9 +14012,12 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
  /// Test-only override for enabling thread-manager behaviors used by integration
  /// tests.
  ///
-@@ -486,6 +494,12 @@ pub(crate) struct ThreadManagerState {
+@@ -485,7 +493,15 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
+ pub(crate) struct ThreadManagerState {
      // Eviction updates this registry and residency together, locking the registry first.
      pub(crate) threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
++    /// The target's first published persistence setting survives eviction and caller-config drift.
++    thread_ephemeral_intent: std::sync::Mutex<HashMap<ThreadId, bool>>,
      shared_thread_instructions: shared_instructions::SharedThreadInstructionsProviders,
 +    /// Serializes ownership changes and registry commits across every root in this manager.
 +    lifecycle_mutation: Arc<AsyncMutex<()>>,
@@ -11513,9 +14028,11 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
      thread_created_tx: broadcast::Sender<ThreadId>,
      thread_id_generator: ThreadIdGenerator,
      auth_manager: Arc<AuthManager>,
-@@ -649,6 +663,9 @@ impl ThreadManager {
+@@ -648,7 +664,11 @@ impl ThreadManager {
+         Self {
              state: Arc::new(ThreadManagerState {
                  threads: Arc::new(RwLock::new(HashMap::new())),
++                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
                  shared_thread_instructions: Default::default(),
 +                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
 +                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
@@ -11523,9 +14040,11 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
                  thread_created_tx,
                  thread_id_generator: default_thread_id_generator(),
                  models_manager,
-@@ -798,6 +815,9 @@ impl ThreadManager {
+@@ -797,7 +817,11 @@ impl ThreadManager {
+         Self {
              state: Arc::new(ThreadManagerState {
                  threads: Arc::new(RwLock::new(HashMap::new())),
++                thread_ephemeral_intent: std::sync::Mutex::new(HashMap::new()),
                  shared_thread_instructions: Default::default(),
 +                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
 +                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
@@ -11533,7 +14052,23 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
                  thread_created_tx,
                  thread_id_generator: default_thread_id_generator(),
                  models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-@@ -1069,6 +1089,64 @@ impl ThreadManager {
+@@ -983,7 +1007,14 @@ impl ThreadManager {
+     }
+
+     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
+-        self.state.get_thread(thread_id).await
++        let thread = self.state.get_thread(thread_id).await?;
++        if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
++            thread
++                .restore_saved_thread_persistence()
++                .await
++                .map_err(thread_store_rollout_read_error)?;
++        }
++        Ok(thread)
+     }
+
+     /// Updates metadata for loaded and cold threads through one entrypoint.
+@@ -1069,6 +1100,64 @@ impl ThreadManager {
          Ok(subtree_thread_ids)
      }
 
@@ -11598,7 +14133,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
      pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
          Box::pin(self.start_thread_inner(
              options,
-@@ -1153,6 +1231,9 @@ impl ThreadManager {
+@@ -1153,6 +1242,9 @@ impl ThreadManager {
          startup: Option<Arc<crate::session::startup::SessionStartup>>,
          fork_startup_items: ForkStartupItems,
      ) -> CodexResult<NewThread> {
@@ -11608,7 +14143,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
          let (resumed_session_source, resumed_thread_source) = options
              .initial_history
              .get_resumed_session_sources()
-@@ -1182,7 +1263,6 @@ impl ThreadManager {
+@@ -1182,7 +1274,6 @@ impl ThreadManager {
              request.forked_from_thread_id = request.options.initial_history.forked_from_id();
              request
          } else {
@@ -11616,7 +14151,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
              let mut request = ThreadSpawnRequest::new(
                  options,
                  Arc::clone(&self.state.auth_manager),
-@@ -1323,6 +1403,15 @@ impl ThreadManager {
+@@ -1323,6 +1414,15 @@ impl ThreadManager {
              .services
              .local_agent_runtime
              .control(parent.session.session_id());
@@ -11632,7 +14167,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
          agent_control
              .ensure_v2_agent_loaded(config, child_thread_id, Some(parent))
              .await
-@@ -1337,7 +1426,9 @@ impl ThreadManager {
+@@ -1337,7 +1437,9 @@ impl ThreadManager {
          parent_trace: Option<W3cTraceContext>,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
@@ -11643,7 +14178,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
          let (session_source, thread_source) = initial_history
              .get_resumed_session_sources()
              .unwrap_or_else(|| (self.state.session_source.clone(), None));
-@@ -1382,8 +1473,10 @@ impl ThreadManager {
+@@ -1382,8 +1484,10 @@ impl ThreadManager {
          user_shell_override: crate::shell::Shell,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
@@ -11655,7 +14190,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
          let (session_source, thread_source) = initial_history
              .get_resumed_session_sources()
              .unwrap_or_else(|| (self.state.session_source.clone(), None));
-@@ -1858,6 +1951,37 @@ impl ThreadManager {
+@@ -1858,6 +1962,37 @@ impl ThreadManager {
          )
      }
 
@@ -11693,7 +14228,22 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
      #[cfg(test)]
      pub(crate) fn captured_ops(&self) -> Vec<(ThreadId, Op)> {
          self.state
-@@ -1886,6 +2010,10 @@ impl ThreadManagerState {
+@@ -1877,6 +2012,14 @@ impl ThreadManager {
+ }
+
+ impl ThreadManagerState {
++    pub(crate) fn is_saved_target(&self, thread_id: ThreadId) -> bool {
++        self.thread_ephemeral_intent
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(&thread_id)
++            == Some(&false)
++    }
++
+     pub(crate) fn shared_thread_instructions_provider(
+         &self,
+         root_thread_id: ThreadId,
+@@ -1886,6 +2029,10 @@ impl ThreadManagerState {
              .for_root(root_thread_id, provider)
      }
 
@@ -11704,7 +14254,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
      /// Updates metadata without requiring a public `ThreadManager` handle.
      ///
      /// Agent ownership transitions hold only the shared manager state while they move loaded and
-@@ -1940,6 +2068,14 @@ impl ThreadManagerState {
+@@ -1940,6 +2087,14 @@ impl ThreadManagerState {
          self.agent_graph_store.clone()
      }
 
@@ -11719,7 +14269,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
      pub(crate) async fn indexed_thread_metadata(
          &self,
          thread_id: ThreadId,
-@@ -2947,15 +3083,6 @@ impl ThreadManagerState {
+@@ -2947,15 +3102,6 @@ impl ThreadManagerState {
                  threads.remove(&resumed.conversation_id);
              }
          }
@@ -11735,6 +14285,27 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31
          let (instructions, inherited_exec_policy, extensions, mcp_manager, multi_agent_version) =
              if isolation == codex_extension_api::SessionIsolation::Isolated {
                  (
+@@ -3141,6 +3287,7 @@ impl ThreadManagerState {
+         model_history_complete: bool,
+     ) -> CodexResult<NewThread> {
+         let thread_id = session.thread_id();
++        let ephemeral = session.get_config().await.ephemeral;
+         let event = io.next_event().await?;
+         let session_configured = match event {
+             Event {
+@@ -3155,6 +3302,12 @@ impl ThreadManagerState {
+         {
+             let mut threads = self.threads.write().await;
+             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
++                // A later reload must not replace the target's intent with its sender's config.
++                self.thread_ephemeral_intent
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .entry(thread_id)
++                    .or_insert(ephemeral);
+                 let thread = Arc::new(CodexThread::new(
+                     session,
+                     io,
 diff --git a/codex-rs/core/src/thread_manager/current_membership.rs b/codex-rs/core/src/thread_manager/current_membership.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..e250b8154e2439f0f0ae81c26bae4642f6918b3d
@@ -13809,6 +16380,19 @@ index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080
  }
 
  impl ToolOutput for ListAgentsResult {
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 8051ab1a3608888b7feb826b1d0b2b3d22d4de4b..2c52dda81e2aace30e8122f61518f5576b398691 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -816,7 +816,7 @@ async fn handle_any_tool(
+         && invocation.turn.config.memories.disable_on_external_context
+     {
+         state_db::mark_thread_memory_mode_polluted(
+-            invocation.session.services.state_db.as_deref(),
++            invocation.session.state_db().as_deref(),
+             invocation.session.thread_id,
+             "tool_output",
+         )
 diff --git a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs b/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
 index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25ccf70b977a 100644
 --- a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
@@ -15225,7 +17809,7 @@ index 3e8a5eff37bdc4f3f9e01b5ab471a34f6c6faa6f..da69eeee1c464dae5fac85a9d2ea5d1b
 
      #[cfg(unix)]
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index a5deafc3ca11b88b2d890f215a332e2b82671bc3..acead56f3d4cadbe54e3de8534e4144344dbb9b7 100644
+index afd0abb690d486b08824789ee9d4da60cc1d2e97..a96201c82016f54d5a60e861549cd00ad02758eb 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -70,6 +70,7 @@ use crate::CreateThreadSectionParams;
@@ -15244,7 +17828,47 @@ index a5deafc3ca11b88b2d890f215a332e2b82671bc3..acead56f3d4cadbe54e3de8534e41443
  use crate::RemoveThreadAttachmentOutcome;
  use crate::RemoveThreadAttachmentParams;
  use crate::RenameThreadSectionParams;
-@@ -923,6 +925,10 @@ impl ThreadStore for LocalThreadStore {
+@@ -334,6 +336,39 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+
++    /// Finds existing turns for saved-runtime recovery without loading their items.
++    /// An incomplete projection cannot prove absence, so repair it once before querying.
++    pub async fn existing_history_turns(
++        &self,
++        thread_id: ThreadId,
++        turn_ids: &[String],
++    ) -> ThreadStoreResult<HashSet<String>> {
++        if !self.has_history_projection(thread_id).await?
++            && !self.rebuild_history_projection(thread_id).await?
++        {
++            return Err(ThreadStoreError::Unsupported {
++                operation: "existing_history_turns",
++            });
++        }
++        let lineage = match thread_history::indexed_same_thread_lineage(self, thread_id).await? {
++            Some(lineage) => lineage,
++            None => self.resolve_rollout_lineage(thread_id).await?,
++        };
++        let pool = self.thread_history_db().await?;
++        let mut existing = HashSet::new();
++        for turn_id in turn_ids {
++            match thread_history::find_visible_turn(pool, &lineage, turn_id).await {
++                Ok(_) => {
++                    existing.insert(turn_id.clone());
++                }
++                Err(ThreadStoreError::InvalidRequest { message })
++                    if message == format!("turn not found: {turn_id}") => {}
++                Err(error) => return Err(error),
++            }
++        }
++        Ok(existing)
++    }
++
+     /// Returns whether the projected visible history can satisfy paginated reads.
+     pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
+         let Some(resolved) =
+@@ -941,6 +976,10 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(async move { read_thread::read_thread(self, params).await })
      }
 
@@ -15255,7 +17879,7 @@ index a5deafc3ca11b88b2d890f215a332e2b82671bc3..acead56f3d4cadbe54e3de8534e41443
      fn read_thread_by_rollout_path(
          &self,
          params: ReadThreadByRolloutPathParams,
-@@ -1146,6 +1152,13 @@ impl ThreadStore for LocalThreadStore {
+@@ -1164,6 +1203,13 @@ impl ThreadStore for LocalThreadStore {
      fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move { delete_thread::delete_threads(self, params).await })
      }

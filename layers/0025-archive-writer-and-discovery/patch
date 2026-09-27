@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 82a2d5ada3091b30b50da8b0a44797adf9caebcc..ef6c47ea763496d183048a2b3465e9104f576256 100644
+index 8c577a06bad4253a79ace87ff4686501f91836d2..b07f51e9945ad16d2428b20630fbfc3ef250cc3c 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
@@ -11,7 +11,7 @@ index 82a2d5ada3091b30b50da8b0a44797adf9caebcc..ef6c47ea763496d183048a2b3465e910
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6506,6 +6506,28 @@ impl ThreadRequestProcessor {
+@@ -6536,6 +6536,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -913,10 +913,10 @@ index cf2bc92ace3e7d26aadcd69e4daccdb9c896118e..89fd8672059aa56a7faee29f2a6e0ef6
      selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
  }
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 2a690ca1f0f92d6d4851cce78b51c812145da266..a13212f29493791e4e3d8b743071f3905625d73b 100644
+index 3503485fe0fe75835f9080614754d57ec7063a22..5f2514284d2c05ac741f240d764c5dcf30042127 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -339,6 +339,11 @@ async fn reserve_segment_writers(
+@@ -416,6 +416,11 @@ async fn reserve_segment_writers(
          };
          let (source_path, live_recorder, allow_missing_source) = match live_source {
              Some((source_path, recorder, allow_missing_source)) => {

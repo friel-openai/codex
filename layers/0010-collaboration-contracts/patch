@@ -2916,10 +2916,10 @@ index 0000000000000000000000000000000000000000..f2b914c028cc901790390483f7a7eae8
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..09da6e40eaaebe2ad4830dedfb2f213a3f555c06 100644
+index 802e94e242eebeee256ac0ab5574f3eca909925f..600e2311a772e6c8f60ca803c57fcb5a18616da4 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1027,13 +1027,20 @@ impl Session {
+@@ -1028,13 +1028,20 @@ impl Session {
          }
          let configured_config = Arc::clone(&config);
          let configured_multi_agent_version = config.multi_agent_version_override();

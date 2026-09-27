@@ -1362,10 +1362,22 @@ index 51a191f4d5c8d3ae5a41e7325f7a6eb63088e1d8..15796f42bdd7c70f612f0b97cbe02821
                      }
                      let subscribed_connection_ids = thread_state_manager
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index cc09d50e43ee0204c142379d5a1b61c1b1e4ad9c..bed7b46c3261b5d8986b9d2993a7be2a1429d2ea 100644
+index afda713531df5af12ae47e45cb585887ef8f8df4..d1bdbb976aa85da68f5c6053d61350f04b91d9f0 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -7981,6 +7981,8 @@ fn build_thread_from_loaded_snapshot(
+@@ -4545,7 +4545,10 @@ impl ThreadRequestProcessor {
+                 let thread_id = ThreadId::from_string(&params.thread_id)
+                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+                 // Recheck under the same permit as client resume, including after config loading.
+-                if self.thread_manager.get_thread(thread_id).await.is_ok() {
++                if get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
++                    .await?
++                    .is_some()
++                {
+                     if let Some(saved) = saved {
+                         self.continue_daemon_turn(&params.thread_id, saved.clone())
+                             .await;
+@@ -8002,6 +8005,8 @@ fn build_thread_from_loaded_snapshot(
      )
  }
 
@@ -7656,7 +7668,7 @@ index 6af364239628644fa355564f6656ac5c42c8b7cb..fbdc7b76e6b38e3421dba059dbfceb19
              rollout_budget: Arc::default(),
              root_service_tier: Arc::new(ArcSwapOption::from(None)),
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 79f493b37cc13d025804d5903e4a484d4a93b404..aac86625ae4b06b6b128c49054e6c79282b4ac19 100644
+index 79f493b37cc13d025804d5903e4a484d4a93b404..cf0e165a5af527a82e3394ef294f5845ca917d09 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -1,4 +1,4 @@
@@ -8345,7 +8357,7 @@ index 79f493b37cc13d025804d5903e4a484d4a93b404..aac86625ae4b06b6b128c49054e6c792
 +                    role_prompt_item(role_prompt).into(),
 +                ));
 +            }
-+            if let Some(state_db) = parent_thread.session.services.state_db.as_ref()
++            if let Some(state_db) = parent_thread.session.state_db().as_ref()
 +                && let Ok(Some(parent_goal)) = state_db
 +                    .thread_goals()
 +                    .get_thread_goal(parent_thread_id)
@@ -13115,7 +13127,7 @@ index ea3d31931bf381e5369a1cda11b8f0ef3b805c23..56415a60db3d834c5375db79e76c0902
                  .refresh_readiness()
 diff --git a/codex-rs/core/src/goal_supervisor.rs b/codex-rs/core/src/goal_supervisor.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c12b1dfe34
+index 0000000000000000000000000000000000000000..4f2ef576b033baa0720c7a607f19c5b0cace6bab
 --- /dev/null
 +++ b/codex-rs/core/src/goal_supervisor.rs
 @@ -0,0 +1,1256 @@
@@ -13311,7 +13323,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +    session: Arc<Session>,
 +) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
 +    Box::pin(async move {
-+        let Some(state_db) = session.services.state_db.as_ref() else {
++        let Some(state_db) = session.state_db() else {
 +            return;
 +        };
 +        let goal = match state_db
@@ -13462,7 +13474,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +    invalidate_supervisor_wakeup(session).await;
 +    *session.goal_supervisor_runtime.snoozed_until.lock().await = None;
 +    reset_failure_backoff(session).await;
-+    if let Some(state_db) = session.services.state_db.as_ref() {
++    if let Some(state_db) = session.state_db().as_ref() {
 +        state_db
 +            .thread_goals()
 +            .set_thread_goal_supervisor_snoozed_until_ms(
@@ -13526,7 +13538,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +    goal_id: &str,
 +    failure: &str,
 +) {
-+    let retry_active_goal = if let Some(state_db) = session.services.state_db.as_ref() {
++    let retry_active_goal = if let Some(state_db) = session.state_db().as_ref() {
 +        match state_db
 +            .thread_goals()
 +            .get_thread_goal(session.thread_id)
@@ -13558,7 +13570,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +    let retry = next_failure_retry(session, goal_id).await;
 +    let retry_delay_ms = i64::try_from(retry.delay.as_millis()).unwrap_or(i64::MAX);
 +    let persisted_deadline_ms = Utc::now().timestamp_millis().saturating_add(retry_delay_ms);
-+    if let Some(state_db) = session.services.state_db.as_ref()
++    if let Some(state_db) = session.state_db().as_ref()
 +        && let Err(err) = state_db
 +            .thread_goals()
 +            .set_thread_goal_supervisor_snoozed_until_ms(
@@ -13784,7 +13796,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +        return Ok(None);
 +    };
 +    let delay_seconds = delay_seconds.max(MIN_SUPERVISOR_SNOOZE_SECONDS);
-+    if let Some(state_db) = session.services.state_db.as_ref()
++    if let Some(state_db) = session.state_db().as_ref()
 +        && let Some(goal) = state_db
 +            .thread_goals()
 +            .get_thread_goal(session.thread_id)
@@ -13961,7 +13973,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +        let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
 +        return Ok(None);
 +    };
-+    let Some(state_db) = session.services.state_db.as_ref() else {
++    let Some(state_db) = session.state_db() else {
 +        return Ok(None);
 +    };
 +    let updated = state_db
@@ -14156,7 +14168,7 @@ index 0000000000000000000000000000000000000000..f1060a9a4513e903cb8c755e4aba73c1
 +    session: &Arc<Session>,
 +    goal_id: &str,
 +) -> anyhow::Result<Option<Duration>> {
-+    let Some(state_db) = session.services.state_db.as_ref() else {
++    let Some(state_db) = session.state_db() else {
 +        return Ok(None);
 +    };
 +    let Some(snoozed_until_ms) = state_db

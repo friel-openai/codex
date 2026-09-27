@@ -649,10 +649,10 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb162e4f8ae7 100644
+index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1f045de50 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -452,6 +452,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -453,6 +453,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
          .get_thread(helper_thread_id)
          .await
          .expect("supervisor helper should be registered");
@@ -660,7 +660,7 @@ index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb16
      assert_eq!(
          helper_thread.session.prompt_cache_key(),
          parent.thread.session.prompt_cache_key(),
-@@ -507,31 +508,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -508,31 +509,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
              if name == "list_agents" && call_id == SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID
      )));
 
@@ -700,7 +700,7 @@ index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb16
  }
 
  fn spawn_agent_call(call_id: &str) -> ResponseItem {
-@@ -789,6 +773,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -790,6 +774,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          .get_thread(helper_thread_id)
          .await
          .expect("goal supervisor helper should be registered");
@@ -708,7 +708,7 @@ index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb16
      let helper_snapshot = helper_thread.config_snapshot().await;
      let helper_source = helper_snapshot.session_source.clone();
      let expected_path = AgentPath::root()
-@@ -819,32 +804,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -820,32 +805,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          &supervisor_prompt,
          GENERIC_SUBAGENT_HINT,
      );
@@ -750,7 +750,79 @@ index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb16
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -9213,18 +9182,52 @@ while True:
+@@ -7772,18 +7741,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+         .await
+         .expect("child thread should archive");
+
++    let mut sender_config = harness.config.clone();
++    sender_config.ephemeral = true;
+     let resumed_thread_id = harness
+         .control
+-        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, SessionSource::Exec)
++        .resume_agent_from_rollout(sender_config.clone(), child_thread_id, SessionSource::Exec)
+         .await
+         .expect("resume should find archived rollout");
+     assert_eq!(resumed_thread_id, child_thread_id);
++    let resumed_child = harness
++        .manager
++        .get_thread(child_thread_id)
++        .await
++        .expect("resumed child should be loaded");
++    assert!(sender_config.ephemeral);
++    assert!(!resumed_child.config_snapshot().await.ephemeral);
++    assert!(resumed_child.session.services.live_thread.is_some());
++    let mut persisted_marker = user_message("persist after ephemeral archived resume");
++    // Recording fills missing identity fields; fix them so the disk comparison stays exact.
++    persisted_marker.set_id(Some(ResponseItemId::with_suffix(
++        "msg",
++        "persisted-after-archive",
++    )));
++    persisted_marker.set_turn_id_if_missing("persisted-after-archive");
++    persisted_marker.set_create_time_if_missing(123.into());
++    // History classifies unannotated message content as unknown.
++    let content = codex_context_fragments::to_annotated_content(&mut persisted_marker)
++        .expect("message content");
++    codex_context_fragments::set_annotated_content(&mut persisted_marker, content)
++        .expect("classified message content");
++    resumed_child
++        .inject_response_items(vec![persisted_marker.clone()])
++        .await
++        .expect("resumed archived history should remain writable");
+
+     let _ = harness
+         .control
+         .shutdown_live_agent(child_thread_id)
+         .await
+         .expect("resumed child shutdown should succeed");
++    let reopened_store = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    );
++    let persisted = reopened_store
++        .load_history(LoadThreadHistoryParams {
++            thread_id: child_thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("independent store should reopen archived history");
++    let persisted_responses = persisted
++        .items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::ResponseItem(response) => Some(&response.item),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    let persisted_markers = persisted_responses
++        .iter()
++        .copied()
++        .filter(|item| history_contains_text([*item], "persist after ephemeral archived resume"))
++        .collect::<Vec<_>>();
++    assert_eq!(persisted_markers, vec![&persisted_marker]);
+ }
+
+ #[tokio::test]
+@@ -9896,18 +9917,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -805,7 +877,7 @@ index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb16
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -9235,13 +9238,8 @@ while True:
+@@ -9918,13 +9973,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -5371,7 +5443,7 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
          .metadata
          .cwd
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c6671d967b9 100644
+index a96201c82016f54d5a60e861549cd00ad02758eb..347c59814c80f098e46300c362f3f6847d6ded4f 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5412,7 +5484,7 @@ index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c66
  }
 
  #[derive(Default)]
-@@ -425,13 +438,59 @@ impl LocalThreadStore {
+@@ -458,13 +471,59 @@ impl LocalThreadStore {
          live_writer::rollout_path(self, thread_id).await
      }
 
@@ -5473,7 +5545,7 @@ index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c66
      }
 
      /// Freezes a thread only while the expected physical rollout remains selected.
-@@ -441,13 +500,50 @@ impl LocalThreadStore {
+@@ -474,13 +533,50 @@ impl LocalThreadStore {
          expected_rollout_id: codex_protocol::RolloutId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
@@ -5528,7 +5600,7 @@ index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c66
      }
 
      /// Freezes a paginated fork without reading history excluded from its response.
-@@ -650,13 +746,20 @@ impl LocalThreadStore {
+@@ -701,13 +797,20 @@ impl LocalThreadStore {
          thread_ids.dedup();
          let mut in_process_guards = Vec::with_capacity(thread_ids.len());
          for &thread_id in &thread_ids {
@@ -5552,7 +5624,7 @@ index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c66
          })
      }
 
-@@ -1292,7 +1395,7 @@ mod tests {
+@@ -1343,7 +1446,7 @@ mod tests {
              .expect("recover recorder");
          drop(store);
 
@@ -5561,7 +5633,7 @@ index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c66
          assert!(
              matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
          );
-@@ -2259,7 +2362,7 @@ mod tests {
+@@ -2310,7 +2413,7 @@ mod tests {
              drop(recorder);
 
              // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
@@ -6560,10 +6632,10 @@ index db6b7191f8306e77a035416ba9a53c31678667ca..ecfb007156bba76ac3328c6ac83911cf
      HistoryPosition {
          thread_id,
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d339674c0 100644
+index ef2be6068da82dd03c81ebefd144769eaf1282ee..be44adad0ce8457dcecacd243e8b190455d6c117 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -47,6 +47,77 @@ use crate::ThreadPersistenceMode;
+@@ -47,6 +47,154 @@ use crate::ThreadPersistenceMode;
  use crate::ThreadStoreError;
  use crate::ThreadStoreResult;
 
@@ -6577,6 +6649,39 @@ index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d
 +    thread_id: ThreadId,
 +    expected_rollout_id: Option<RolloutId>,
 +) -> ThreadStoreResult<PreparedFork> {
++    capture_external_fork(
++        store,
++        thread_id,
++        expected_rollout_id,
++        ThreadHistoryMode::Legacy,
++        /*include_turns*/ true,
++    )
++    .await
++}
++
++pub(super) async fn capture_external_paginated_fork(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    expected_rollout_id: RolloutId,
++    include_turns: bool,
++) -> ThreadStoreResult<PreparedFork> {
++    capture_external_fork(
++        store,
++        thread_id,
++        Some(expected_rollout_id),
++        ThreadHistoryMode::Paginated,
++        include_turns,
++    )
++    .await
++}
++
++async fn capture_external_fork(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    expected_rollout_id: Option<RolloutId>,
++    history_mode: ThreadHistoryMode,
++    include_turns: bool,
++) -> ThreadStoreResult<PreparedFork> {
 +    let reservation = store.reserve_thread_lifecycle(thread_id).await;
 +    let selected = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
 +        store, thread_id,
@@ -6588,18 +6693,28 @@ index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d
 +            message: format!("external fork source selection changed for thread {thread_id}"),
 +        });
 +    }
-+    let lines = codex_rollout::capture_external_legacy_rollout_lines(
-+        &store.config.codex_home,
-+        &selected.path,
-+        thread_id,
-+    )
-+    .await
-+    .map_err(|error| match error.kind() {
++    let captured = match history_mode {
++        ThreadHistoryMode::Legacy => codex_rollout::capture_external_legacy_rollout_lines(
++            &store.config.codex_home,
++            &selected.path,
++            thread_id,
++        )
++        .await
++        .map(|lines| (lines, None)),
++        ThreadHistoryMode::Paginated => codex_rollout::capture_external_paginated_rollout_lines(
++            &store.config.codex_home,
++            &selected.path,
++            thread_id,
++        )
++        .await
++        .map(|(lines, next)| (lines, Some(next))),
++    };
++    let (mut lines, next_ordinal) = captured.map_err(|error| match error.kind() {
 +        io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => ThreadStoreError::Conflict {
 +            message: format!("external fork source changed for thread {thread_id}: {error}"),
 +        },
 +        _ => ThreadStoreError::InvalidRequest {
-+            message: format!("cannot capture external Legacy source {thread_id}: {error}"),
++            message: format!("cannot capture external fork source {thread_id}: {error}"),
 +        },
 +    })?;
 +    let current = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
@@ -6614,6 +6729,34 @@ index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d
 +            message: format!("external fork source selection changed for thread {thread_id}"),
 +        });
 +    }
++    let model_context = if history_mode == ThreadHistoryMode::Paginated {
++        if let Some(RolloutLine {
++            item: RolloutItem::SessionMeta(meta),
++            ..
++        }) = lines.first_mut()
++        {
++            // Complete expansion already copied the inherited records. Neither reconstruction nor
++            // child persistence may follow the mutable source ancestry again.
++            meta.meta.history_base = None;
++        }
++        let items = lines
++            .iter()
++            .map(|line| line.item.clone())
++            .collect::<Vec<_>>();
++        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(&items)?;
++        Some(Arc::new(
++            codex_rollout::materialize_model_context_rollout_items_from(
++                &store.config.codex_home,
++                lines.clone(),
++            )
++            .await
++            .map_err(|error| ThreadStoreError::InvalidRequest {
++                message: format!("cannot reconstruct external fork source {thread_id}: {error}"),
++            })?,
++        ))
++    } else {
++        None
++    };
 +    let (content_id, items) = tokio::task::spawn_blocking(move || {
 +        let content_id = snapshot_segment_id(&lines)?;
 +        let items = Arc::new(lines.into_iter().map(|line| line.item).collect::<Vec<_>>());
@@ -6621,17 +6764,23 @@ index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d
 +    })
 +    .await
 +    .map_err(|error| ThreadStoreError::Internal {
-+        message: format!("failed to seal external Legacy source {thread_id}: {error}"),
++        message: format!("failed to seal external fork source {thread_id}: {error}"),
 +    })??;
++    let model_context = model_context.unwrap_or_else(|| Arc::clone(&items));
++    let response_history = if include_turns {
++        Arc::clone(&items)
++    } else {
++        Arc::clone(&model_context)
++    };
 +    let mut prepared = PreparedFork::new(
 +        thread_id,
-+        /*source_end_ordinal_exclusive*/ None,
++        next_ordinal,
 +        /*history_base*/ None,
 +        /*frozen_segment*/ None,
-+        Arc::clone(&items),
-+        Arc::clone(&items),
-+        Arc::clone(&items),
-+        /*interrupt_if_open*/ false,
++        Arc::clone(&model_context),
++        model_context,
++        response_history,
++        /*interrupt_if_open*/ history_mode == ThreadHistoryMode::Paginated,
 +        (reservation, selected.rollout_id, content_id),
 +    );
 +    prepared.copied_history = Some(items);

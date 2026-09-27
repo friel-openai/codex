@@ -13730,10 +13730,10 @@ index 1257a40c0f9fa66af0efe5a35733138479643c16..6fd978318a12eb1dc7c94c9a84edb524
      )
      .await?;
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 414539480ab1f2d0442c6d2791044c1bd6e28ebd..b309c835a40180af53ff5d9e9c15d97e7606e840 100644
+index 1060504505cec1414b960bb87cfcd76cad747eef..5ae8cab99a22729814b74af929547f5cd9d636ee 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -15318,6 +15318,7 @@ async fn session_start_hooks_only_load_from_trusted_project_layers() -> std::io:
+@@ -15322,6 +15322,7 @@ async fn session_start_hooks_only_load_from_trusted_project_layers() -> std::io:
      let config = ConfigBuilder::default()
          .codex_home(codex_home)
          .fallback_cwd(Some(nested))
@@ -13741,7 +13741,7 @@ index 414539480ab1f2d0442c6d2791044c1bd6e28ebd..b309c835a40180af53ff5d9e9c15d97e
          .build()
          .await?;
 
-@@ -15378,6 +15379,7 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
+@@ -15382,6 +15383,7 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
          let config = ConfigBuilder::default()
              .codex_home(codex_home)
              .fallback_cwd(Some(nested.clone()))

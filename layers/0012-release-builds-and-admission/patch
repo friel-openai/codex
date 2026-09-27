@@ -741,6 +741,17 @@ index 510f9e3380fa825dd6be0e003553ffba60eb008a..9c773d73a6a85d90f1662a073e76908f
  mod fs;
  #[path = "gateway_oauth_tests.rs"]
  mod gateway_oauth;
+diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
+index 7a5c42f6946604911e3ffd827a4f6185bb14a392..40b63f67f29c53b5ef08c0359e9568099b3f0f01 100644
+--- a/codex-rs/cli/src/main.rs
++++ b/codex-rs/cli/src/main.rs
+@@ -1,3 +1,6 @@
++// Match the app-server and TUI limits when laying out their nested async futures.
++#![recursion_limit = "256"]
++
+ use clap::Args;
+ use clap::CommandFactory;
+ use clap::Parser;
 diff --git a/scripts/frodex_admission.py b/scripts/frodex_admission.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220a27291b3

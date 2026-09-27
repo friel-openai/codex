@@ -903,10 +903,10 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
                      .auto_review()
                      .policy_template,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index d5e7ae05f2f5d0c88afdfe4fc81e1186d509bf28..dca77078963ada8b5815102570af065f9ac64986 100644
+index 56b50683c832a9e622e908b659cda7a50bd587ac..78494318eace76802035b3491b7fea096ec5db20 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2828,6 +2828,7 @@ impl Session {
+@@ -2837,6 +2837,7 @@ impl Session {
                  .with_user_layer_from(&next_config.config_layer_stack);
              config.tool_suggest =
                  resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
@@ -1270,7 +1270,7 @@ index 43c0b59bdcd56560e0359fee6461632967a8d92e..9dd3b50dadf78d14eaffe3a4e53a666c
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index d7ec9986794dc9be6bd6e4b03573b91d6ecc18e3..c4c7747bb2666745107edddd3acc6b0b0c04bd45 100644
+index 41e940011574b62372b6c29158e3b06886ba0ca8..7c51ca56618517898abdb3d2c2b823d66ada5a3a 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -5746,6 +5746,7 @@ async fn turn_context_with_model_updates_model_fields() {

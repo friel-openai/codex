@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 782470c3a8b7197540ac2f8e967de97fcb07792b..2c9dddf6317538ea1b47b472806340a4177309dc 100644
+index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8fab2632e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -43,7 +43,9 @@ use std::sync::LazyLock;
@@ -189,7 +189,7 @@ index 782470c3a8b7197540ac2f8e967de97fcb07792b..2c9dddf6317538ea1b47b472806340a4
          }
      }
 
-@@ -5345,6 +5431,15 @@ impl ThreadRequestProcessor {
+@@ -5348,6 +5434,15 @@ impl ThreadRequestProcessor {
                          restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
                      })
                      .filter(|turn_id| !turn_id.is_empty());
@@ -1691,7 +1691,7 @@ index af45e4978ead93d990ed2627927e95a550585c9c..c2c31a831dc662fed1382ccd9b23a554
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 1cc4abdeffe0b3eb938965b5a2892bc40abadb57..392240e5f57e804f1679481f4a1f171cc42fd8f1 100644
+index e204b20f09854d9acb06f0a0d2fd1854f15fdabe..ac679a344efa016168d8878de3603bd0bda253bd 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -158,6 +158,7 @@ pub use recorder::RolloutRecorderParams;
@@ -1701,12 +1701,12 @@ index 1cc4abdeffe0b3eb938965b5a2892bc40abadb57..392240e5f57e804f1679481f4a1f171c
 +pub use reference::FRODEX_RECENT_ROLLOUT_SEGMENTS;
  pub use reference::MAX_ROLLOUT_REFERENCE_DEPTH;
  pub use reference::capture_external_legacy_rollout_lines;
- pub use reference::compose_compacted_replacement_history_filter_texts;
+ pub use reference::capture_external_paginated_rollout_lines;
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index 6d16dee1bbeea87c497f8d17511501ea76c0dcbd..109948a264c48cafc624154128d54e3715a6bd18 100644
+index ea24d77f2bc94dbd7985877d51235e3b7a6b06cb..b02abede65cad1acc839c5ef08822f5780331b0c 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
-@@ -38,6 +38,14 @@ pub use external_legacy_capture::capture_external_legacy_rollout_lines;
+@@ -39,6 +39,14 @@ pub use external_legacy_capture::capture_external_paginated_rollout_lines;
  /// Bounds cross-thread and nth-user-message fork nesting during rollout expansion.
  pub const MAX_ROLLOUT_REFERENCE_DEPTH: usize = 256;
 
@@ -1721,7 +1721,7 @@ index 6d16dee1bbeea87c497f8d17511501ea76c0dcbd..109948a264c48cafc624154128d54e37
  /// Composes inherited and local compaction filters in their application order.
  ///
  /// An outer reference constrains every segment below it. A nested reference adds its own
-@@ -119,7 +127,7 @@ impl MaterializationPolicy {
+@@ -120,7 +128,7 @@ impl MaterializationPolicy {
          }
          match self {
              Self::Complete => None,
