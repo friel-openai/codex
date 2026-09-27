@@ -5,7 +5,6 @@ use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_request_user_input_sse_response;
-use app_test_support::write_models_cache_with_models;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
@@ -37,6 +36,7 @@ use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -63,7 +63,21 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
     let config = load_default_config_for_test(&codex_home).await;
     let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
-    write_models_cache_with_models(codex_home.path(), vec![model]).await?;
+    let catalog_path = codex_home.path().join("revert-models.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec(&ModelsResponse {
+            models: vec![model],
+        })?,
+    )?;
+    // Revert must preserve the catalog-selected version independently of cache eligibility.
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::MultiAgentV2)
+        .with_root_config(&format!(
+            "model_catalog_json = {:?}",
+            catalog_path.display()
+        ))
+        .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build()
