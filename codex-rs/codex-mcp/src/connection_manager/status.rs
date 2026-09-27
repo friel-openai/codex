@@ -17,11 +17,10 @@ impl McpConnectionSet {
             .collect::<HashMap<_, _>>();
         for (name, view) in &self.servers {
             let connection = &view.connection;
-            let client = &connection.client;
-            let status = if connection.startup_is_dormant() && !client.cancel_token.is_cancelled() {
+            let status = if view.startup_is_dormant() && !connection.is_connection_cancelled() {
                 Status::NotStarted
             } else {
-                client.connection_status().await
+                connection.connection_status().await
             };
             statuses.insert(name.clone(), status);
         }
