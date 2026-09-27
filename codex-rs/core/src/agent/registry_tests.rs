@@ -1,8 +1,11 @@
 use super::*;
+use codex_extension_api::Instructions;
 use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
+use std::time::Duration;
+use tokio::time::timeout;
 
 fn agent_path(path: &str) -> AgentPath {
     AgentPath::try_from(path).expect("valid agent path")
@@ -13,6 +16,40 @@ fn agent_metadata(thread_id: ThreadId) -> AgentMetadata {
         agent_id: Some(thread_id),
         ..Default::default()
     }
+}
+
+fn goal_supervisor_agent_metadata(thread_id: ThreadId) -> AgentMetadata {
+    AgentMetadata {
+        agent_id: Some(thread_id),
+        agent_role: Some("goal_supervisor".to_string()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn completion_watcher_finish_wakes_all_waiters() {
+    let lifecycle = Arc::new(AgentLifecycle::default());
+    let registration = lifecycle
+        .try_start_completion_watcher()
+        .expect("completion watcher should register");
+    let first_waiter = tokio::spawn({
+        let lifecycle = Arc::clone(&lifecycle);
+        async move { lifecycle.wait_for_completion_watcher().await }
+    });
+    let second_waiter = tokio::spawn({
+        let lifecycle = Arc::clone(&lifecycle);
+        async move { lifecycle.wait_for_completion_watcher().await }
+    });
+    tokio::task::yield_now().await;
+
+    drop(registration);
+
+    timeout(Duration::from_secs(1), async {
+        first_waiter.await.expect("first waiter should finish");
+        second_waiter.await.expect("second waiter should finish");
+    })
+    .await
+    .expect("completion watcher should wake every waiter");
 }
 
 #[test]
@@ -134,6 +171,69 @@ fn releasing_one_spawned_thread_preserves_sibling_identity() {
             .and_then(|metadata| metadata.agent_id),
         Some(second_id)
     );
+}
+
+#[test]
+fn uncounted_spawn_reservation_does_not_count_against_thread_limit() {
+    let registry = Arc::new(AgentRegistry::default());
+    let reservation = registry.reserve_uncounted_spawn_slot();
+    let supervisor_id = ThreadId::new();
+    reservation.commit(goal_supervisor_agent_metadata(supervisor_id));
+
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("uncounted reservation should not consume a counted slot");
+    let worker_id = ThreadId::new();
+    reservation.commit(agent_metadata(worker_id));
+
+    let err = match registry.reserve_spawn_slot(Some(1)) {
+        Ok(_) => panic!("worker should consume the counted slot"),
+        Err(err) => err,
+    };
+    let CodexErrorDetails::AgentLimitReached { max_threads } = err.details() else {
+        panic!("expected AgentLimitReached");
+    };
+    assert_eq!(*max_threads, 1);
+
+    registry.release_spawned_thread(supervisor_id);
+    registry.release_spawned_thread(worker_id);
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("counted slot should be available");
+    drop(reservation);
+}
+
+#[test]
+fn released_goal_supervisor_helper_does_not_decrement_counted_thread_total() {
+    let registry = Arc::new(AgentRegistry::default());
+    let reservation = registry.reserve_uncounted_spawn_slot();
+    let supervisor_id = ThreadId::new();
+    reservation.commit(goal_supervisor_agent_metadata(supervisor_id));
+
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("uncounted goal supervisor helper should not consume the counted slot");
+    let worker_id = ThreadId::new();
+    reservation.commit(agent_metadata(worker_id));
+
+    registry.release_spawned_thread(supervisor_id);
+
+    let err = match registry.reserve_spawn_slot(Some(1)) {
+        Ok(_) => {
+            panic!("releasing an uncounted goal supervisor helper must not free a counted slot")
+        }
+        Err(err) => err,
+    };
+    let CodexErrorDetails::AgentLimitReached { max_threads } = err.details() else {
+        panic!("expected AgentLimitReached");
+    };
+    assert_eq!(*max_threads, 1);
+
+    registry.release_spawned_thread(worker_id);
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("counted slot should be available after releasing worker");
+    drop(reservation);
 }
 
 #[test]
@@ -367,6 +467,116 @@ fn register_root_thread_indexes_root_path() {
         .reserve_spawn_slot(Some(1))
         .expect("releasing the uncounted root should not consume a spawn slot");
     drop(reservation);
+}
+
+#[test]
+fn lifecycle_survives_reregistering_thread_identity() {
+    let registry = AgentRegistry::default();
+    let thread_id = ThreadId::new();
+    registry.register_root_thread(thread_id);
+    let lifecycle = registry
+        .agent_lifecycle(thread_id)
+        .expect("root has a lifecycle");
+
+    registry.register_root_thread(thread_id);
+    assert!(Arc::ptr_eq(
+        &lifecycle,
+        &registry
+            .agent_lifecycle(thread_id)
+            .expect("root remains registered")
+    ));
+
+    registry.register_spawned_thread(AgentMetadata {
+        agent_id: Some(thread_id),
+        agent_path: Some(agent_path("/root/adopted")),
+        ..Default::default()
+    });
+    assert!(Arc::ptr_eq(
+        &lifecycle,
+        &registry
+            .agent_lifecycle(thread_id)
+            .expect("agent remains registered")
+    ));
+}
+
+#[test]
+fn transferred_lifecycle_preserves_completion_watcher_registration() {
+    let original_registry = Arc::new(AgentRegistry::default());
+    let destination_registry = Arc::new(AgentRegistry::default());
+    let thread_id = ThreadId::new();
+    original_registry.register_root_thread(thread_id);
+    let lifecycle = original_registry
+        .agent_lifecycle(thread_id)
+        .expect("root has a lifecycle");
+    let registration = lifecycle
+        .try_start_completion_watcher()
+        .expect("watcher starts");
+
+    destination_registry
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("destination has capacity")
+        .commit_with_lifecycle(agent_metadata(thread_id), Arc::clone(&lifecycle));
+    let transferred = destination_registry
+        .agent_lifecycle(thread_id)
+        .expect("transferred agent has a lifecycle");
+    assert!(Arc::ptr_eq(&lifecycle, &transferred));
+    assert!(transferred.completion_watcher_active());
+
+    transferred.mark_visible_when_cold();
+    destination_registry.release_spawned_thread(thread_id);
+    original_registry
+        .reserve_uncounted_spawn_slot()
+        .commit_with_lifecycle(
+            AgentMetadata {
+                agent_id: Some(thread_id),
+                agent_path: Some(AgentPath::root()),
+                ..Default::default()
+            },
+            Arc::clone(&transferred),
+        );
+    let restored = original_registry
+        .agent_lifecycle(thread_id)
+        .expect("rollback restores original ownership");
+    restored.clear_visible_when_cold();
+    assert!(Arc::ptr_eq(&lifecycle, &restored));
+    assert!(!restored.is_visible_when_cold());
+    assert!(restored.completion_watcher_active());
+
+    drop(registration);
+    assert!(!transferred.completion_watcher_active());
+}
+
+#[test]
+fn transferred_instructions_remain_available_until_reload_succeeds() {
+    let registry = Arc::new(AgentRegistry::default());
+    let thread_id = ThreadId::new();
+    registry.register_spawned_thread(agent_metadata(thread_id));
+    let instructions = SessionInstructions {
+        user: Some(Instructions {
+            text: "original user instructions".to_string(),
+            source: None,
+        }),
+        thread: Some(Instructions {
+            text: "original thread instructions".to_string(),
+            source: None,
+        }),
+        ..Default::default()
+    };
+    registry.remember_evicted_instructions(thread_id, instructions.clone());
+    registry.register_spawned_thread(agent_metadata(thread_id));
+
+    for _ in 0..2 {
+        let retained = registry
+            .evicted_instructions(thread_id)
+            .expect("failed reloads must retain the original instructions");
+        assert_eq!(
+            (retained.user, retained.thread),
+            (instructions.user.clone(), instructions.thread.clone())
+        );
+    }
+
+    registry.clear_evicted_instructions(thread_id);
+    assert!(registry.evicted_instructions(thread_id).is_none());
 }
 
 #[test]

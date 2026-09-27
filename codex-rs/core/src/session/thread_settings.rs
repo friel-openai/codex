@@ -6,6 +6,7 @@ use super::session::SessionSettingsUpdate;
 use super::step_settings::StepSettingsUpdate;
 use crate::config::ConstraintResult;
 use codex_history::RolloutItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -39,12 +40,23 @@ pub(super) async fn update(
     overrides: ThreadSettingsOverrides,
 ) {
     let updates = prepare_update(overrides);
-    let _settings_guard = acquire_persistence_lock(session).await;
+    let settings_guard = acquire_persistence_lock(session).await;
+    let previous_execution_settings = execution_settings(session).await;
     match session.update_settings(updates).await {
         Ok(commit) => {
             // Standalone settings changes supersede a pending automatic continuation.
             session.state.lock().await.last_started_turn_id = None;
             emit_applied(session, submission_id, commit.snapshot).await;
+            let execution_settings_changed =
+                execution_settings(session).await != previous_execution_settings;
+            drop(settings_guard);
+            if execution_settings_changed {
+                // Helper startup can persist settings, so release the permit before restarting it.
+                crate::goal_supervisor::restart_active_helper_for_execution_settings_change(
+                    session,
+                )
+                .await;
+            }
         }
         Err(error) => {
             session
@@ -59,6 +71,17 @@ pub(super) async fn update(
                 .await;
         }
     }
+}
+
+async fn execution_settings(
+    session: &Session,
+) -> (String, Option<ReasoningEffort>, Option<String>) {
+    let snapshot = session.thread_config_snapshot().await;
+    (
+        snapshot.model,
+        snapshot.reasoning_effort,
+        snapshot.service_tier,
+    )
 }
 
 /// Converts protocol overrides into the internal settings update shape.
