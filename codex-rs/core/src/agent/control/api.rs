@@ -14,6 +14,7 @@ use crate::agent::api::SendRequest;
 use crate::agent::api::SpawnRequest;
 use crate::agent::api::StatusSubscription;
 use crate::agent::types::AgentExecutionGuard;
+use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent::types::MessageDeliveryMode;
 use crate::agent_communication::AgentCommunicationContext;
@@ -88,7 +89,7 @@ impl AgentControl for LocalAgentControl {
         source: SessionSource,
     ) -> BoxFuture<'_, Result<(LiveAgent, ThreadConfigSnapshot)>> {
         Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
+            let target = self.resolve_target(caller, &target).await?;
             self.resume_agent(config, target, source).await
         })
     }
@@ -105,7 +106,7 @@ impl AgentControl for LocalAgentControl {
         version: MultiAgentVersion,
     ) -> BoxFuture<'_, Result<AgentInfo>> {
         Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
+            let target = self.resolve_target(caller, &target).await?;
             match version {
                 MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
                     let snapshot = self.inspect_agent(target).await?;
@@ -119,16 +120,13 @@ impl AgentControl for LocalAgentControl {
 
     fn close(&self, caller: ThreadId, target: AgentTarget) -> BoxFuture<'_, Result<AgentInfo>> {
         Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
+            let target = self.resolve_target(caller, &target).await?;
             self.close_agent(target).await
         })
     }
 
     fn inspect(&self, caller: ThreadId, target: AgentTarget) -> BoxFuture<'_, Result<AgentInfo>> {
-        Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
-            self.inspect_agent(target).await
-        })
+        Box::pin(LocalAgentControl::inspect(self, caller, target))
     }
 
     fn list<'a>(
@@ -136,7 +134,23 @@ impl AgentControl for LocalAgentControl {
         source: &'a SessionSource,
         path_prefix: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<LiveAgent>>> {
-        Box::pin(self.list_agents(source, path_prefix))
+        Box::pin(async move {
+            Ok(self
+                .list_agents(source, path_prefix)
+                .await?
+                .into_iter()
+                .map(|agent| LiveAgent {
+                    thread_id: agent.agent_id,
+                    metadata: self
+                        .get_agent_metadata(agent.agent_id)
+                        .unwrap_or(AgentMetadata {
+                            agent_id: Some(agent.agent_id),
+                            ..Default::default()
+                        }),
+                    status: agent.agent_status,
+                })
+                .collect())
+        })
     }
 
     fn watch(
@@ -145,7 +159,7 @@ impl AgentControl for LocalAgentControl {
         target: AgentTarget,
     ) -> BoxFuture<'_, Result<StatusSubscription>> {
         Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
+            let target = self.resolve_target(caller, &target).await?;
             self.subscribe_status(target).await
         })
     }

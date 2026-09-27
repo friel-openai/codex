@@ -100,6 +100,7 @@ impl Handler {
             ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
         };
 
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
         session
             .emit_turn_item_started(
                 &turn,
@@ -118,88 +119,81 @@ impl Handler {
             )
             .await;
 
-        let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-        let mut initial_final_statuses = Vec::new();
+        // Retrying an unloaded target must not delay another target's terminal status.
+        // The same deadline covers subscription, resume races, and status updates.
+        let mut futures = FuturesUnordered::new();
         for id in &receiver_thread_ids {
-            let subscription = async {
-                let mut updates = session.services.agent_control.subscribe_status(*id).await?;
-                let initial = updates
-                    .next()
-                    .await
-                    .transpose()?
-                    .ok_or(CodexErr::InternalAgentDied)?;
-                Ok::<_, CodexErr>((initial, updates))
-            }
-            .await;
-            match subscription {
-                Ok((initial, updates)) => {
-                    let status = initial.status().cloned().unwrap_or(AgentStatus::NotFound);
-                    if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
+            let session = Arc::clone(&session);
+            let turn = Arc::clone(&turn);
+            let call_id = call_id.clone();
+            let receiver_agents = &receiver_agents;
+            futures.push(async move {
+                let subscription = subscribe_status_for_wait(
+                    || session.services.agent_control.subscribe_status(*id),
+                    || session.services.agent_control.get_status(*id),
+                )
+                .await;
+                let updates = match subscription {
+                    Ok((status, updates)) => {
+                        if is_final(&status) || updates.is_none() {
+                            return Ok(Some((*id, status)));
+                        }
+                        updates
+                            .ok_or_else(|| collab_agent_error(*id, CodexErr::InternalAgentDied))?
                     }
-                    status_rxs.push((*id, updates));
+                    Err(err) => {
+                        let mut statuses = HashMap::with_capacity(1);
+                        statuses.insert(*id, session.services.agent_control.get_status(*id).await);
+                        session
+                            .emit_turn_item_completed(
+                                &turn,
+                                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                                    id: call_id.clone(),
+                                    tool: CollabAgentTool::Wait,
+                                    status: wait_tool_call_status(&statuses),
+                                    sender_thread_id: session.thread_id,
+                                    receiver_thread_ids: statuses.keys().copied().collect(),
+                                    receiver_agents: wait_receiver_agents(
+                                        &statuses,
+                                        receiver_agents,
+                                    ),
+                                    prompt: None,
+                                    model: None,
+                                    reasoning_effort: None,
+                                    agents_states: statuses,
+                                }),
+                            )
+                            .await;
+                        return Err(collab_agent_error(*id, err));
+                    }
+                };
+                wait_for_final_status(Arc::clone(&session), *id, updates).await
+            });
+        }
+
+        let mut statuses = Vec::new();
+        loop {
+            match timeout_at(deadline, futures.next()).await {
+                Ok(Some(Ok(Some(result)))) => {
+                    statuses.push(result);
+                    break;
                 }
-                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
-                }
-                Err(err) => {
-                    let mut statuses = HashMap::with_capacity(1);
-                    statuses.insert(*id, session.services.agent_control.get_status(*id).await);
-                    session
-                        .emit_turn_item_completed(
-                            &turn,
-                            TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                                id: call_id.clone(),
-                                tool: CollabAgentTool::Wait,
-                                status: wait_tool_call_status(&statuses),
-                                sender_thread_id: session.thread_id,
-                                receiver_thread_ids: statuses.keys().copied().collect(),
-                                receiver_agents: wait_receiver_agents(&statuses, &receiver_agents),
-                                prompt: None,
-                                model: None,
-                                reasoning_effort: None,
-                                agents_states: statuses,
-                            }),
-                        )
-                        .await;
-                    return Err(collab_agent_error(*id, err));
+                Ok(Some(Ok(None))) => continue,
+                Ok(Some(Err(err))) => return Err(err),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        if !statuses.is_empty() {
+            loop {
+                match futures.next().now_or_never() {
+                    Some(Some(Ok(Some(result)))) => statuses.push(result),
+                    Some(Some(Ok(None))) => continue,
+                    Some(Some(Err(err))) => return Err(err),
+                    Some(None) | None => break,
                 }
             }
         }
-
-        let statuses = if !initial_final_statuses.is_empty() {
-            initial_final_statuses
-        } else {
-            let mut futures = FuturesUnordered::new();
-            for (id, rx) in status_rxs.into_iter() {
-                let session = session.clone();
-                futures.push(wait_for_final_status(session, id, rx));
-            }
-            let mut results = Vec::new();
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            loop {
-                match timeout_at(deadline, futures.next()).await {
-                    Ok(Some(Ok(Some(result)))) => {
-                        results.push(result);
-                        break;
-                    }
-                    Ok(Some(Ok(None))) => continue,
-                    Ok(Some(Err(err))) => return Err(err),
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            if !results.is_empty() {
-                loop {
-                    match futures.next().now_or_never() {
-                        Some(Some(Ok(Some(result)))) => results.push(result),
-                        Some(Some(Ok(None))) => continue,
-                        Some(Some(Err(err))) => return Err(err),
-                        Some(None) | None => break,
-                    }
-                }
-            }
-            results
-        };
+        drop(futures);
 
         let timed_out = statuses.is_empty();
         let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
@@ -235,6 +229,55 @@ impl Handler {
             .await;
 
         Ok(boxed_tool_output(result))
+    }
+}
+
+/// Resolves retained terminal status without inventing a stream for an unloaded agent.
+/// A retained interruption completes a wait only when no runtime supplies a stream.
+/// Other non-final fallbacks mean subscription raced a resume and must be retried.
+pub(super) async fn subscribe_status_for_wait<Subscribe, SubscribeFuture, GetStatus, StatusFuture>(
+    mut subscribe: Subscribe,
+    mut get_status: GetStatus,
+) -> Result<(AgentStatus, Option<StatusSubscription>), CodexErr>
+where
+    Subscribe: FnMut() -> SubscribeFuture,
+    SubscribeFuture: std::future::Future<Output = Result<StatusSubscription, CodexErr>>,
+    GetStatus: FnMut() -> StatusFuture,
+    StatusFuture: std::future::Future<Output = AgentStatus>,
+{
+    let mut retained_interruption = false;
+    loop {
+        let subscription = async {
+            let mut updates = subscribe().await?;
+            let initial = updates
+                .next()
+                .await
+                .transpose()?
+                .ok_or(CodexErr::InternalAgentDied)?;
+            let status = initial.status().cloned().unwrap_or(AgentStatus::NotFound);
+            Ok::<_, CodexErr>((status, updates))
+        }
+        .await;
+        match subscription {
+            Ok((status, updates)) => return Ok((status, Some(updates))),
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                if retained_interruption {
+                    return Ok((AgentStatus::Interrupted, None));
+                }
+                let status = get_status().await;
+                if is_final(&status) {
+                    return Ok((status, None));
+                }
+                if matches!(status, AgentStatus::Interrupted) {
+                    // A resume may have supplied this status after the failed subscription.
+                    // Confirm the runtime is still absent before treating it as retained.
+                    retained_interruption = true;
+                    continue;
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
