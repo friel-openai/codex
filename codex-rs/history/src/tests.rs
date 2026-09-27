@@ -3,6 +3,7 @@ use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 
 use super::*;
@@ -457,6 +458,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     };
 
     let serialized = serde_json::to_value(item)?;
@@ -514,6 +516,7 @@ fn compacted_resume_metadata_presence_round_trips_empty_values() -> Result<()> {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: Some(resume_metadata.clone()),
+        segment_state_checkpoint: None,
     };
 
     let serialized = serde_json::to_value(&item)?;
@@ -601,6 +604,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
             last_started_turn_id: Some("turn-1".to_string()),
             previous_turn_settings: None,
         }),
+        segment_state_checkpoint: None,
     }))?;
 
     let restored: RolloutItem = serde_json::from_value(compacted_line.clone())?;
@@ -843,6 +847,7 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     };
 
     assert_eq!(
@@ -857,6 +862,70 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
             "latest_token_usage_record": null,
         })
     );
+    Ok(())
+}
+
+#[test]
+fn compacted_item_round_trips_segment_state_checkpoint() -> Result<()> {
+    let value = json!({
+        "message": "summary",
+        "replacement_history": [response_message("developer"), response_message("user")],
+        "replacement_history_metadata": [
+            { "client_authored": true },
+            { "client_authored": false },
+        ],
+        "window_number": 3,
+        "first_window_id": "019b3f6e-0000-7000-8000-000000000001",
+        "window_id": "019b3f6e-7a10-7cc3-8b6e-1d09e2f7a001",
+        "segment_state_checkpoint": {
+            "version": 1,
+            "previous_turn_settings": {
+                "model": "gpt-test",
+                "comp_hash": "settings-hash",
+                "realtime_active": false,
+            },
+            "world_state": "established",
+            "reference_context": "cleared",
+        },
+    });
+
+    let item = serde_json::from_value::<CompactedItem>(value.clone())?;
+    assert_eq!(
+        item.replacement_history,
+        Some(vec![
+            ResponseItemEnvelope {
+                item: response_message("developer"),
+                metadata: Some(CodexHarnessMetadata {
+                    client_authored: true,
+                    ..Default::default()
+                }),
+            },
+            ResponseItemEnvelope {
+                item: response_message("user"),
+                metadata: Some(CodexHarnessMetadata::default()),
+            },
+        ])
+    );
+    let mut expected = value;
+    expected["compaction_response_id"] = Value::Null;
+    expected["latest_token_usage_record"] = Value::Null;
+    assert_eq!(serde_json::to_value(item)?, expected);
+
+    expected["resume_metadata"] = json!({
+        "multi_agent_version": "v2",
+        "last_started_turn_id": "turn-3",
+        "previous_turn_settings": null,
+    });
+    let combined = serde_json::from_value::<CompactedItem>(expected.clone())?;
+    assert_eq!(
+        combined.resume_metadata,
+        Some(CompactionResumeMetadata {
+            multi_agent_version: Some(MultiAgentVersion::V2),
+            last_started_turn_id: Some("turn-3".to_string()),
+            previous_turn_settings: None,
+        })
+    );
+    assert_eq!(serde_json::to_value(combined)?, expected);
     Ok(())
 }
 
@@ -883,6 +952,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
             compaction_response_id: None,
             latest_token_usage_record: None,
             resume_metadata: None,
+            segment_state_checkpoint: None,
         }
     );
     Ok(())
@@ -978,5 +1048,45 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
         InitialHistory::Forked(vec![RolloutItem::Compacted(compacted)]).get_multi_agent_version(),
         Some(MultiAgentVersion::V2)
     );
+    Ok(())
+}
+
+#[test]
+fn multi_agent_version_respects_explicit_empty_compaction_metadata() -> Result<()> {
+    let compacted =
+        |payload| serde_json::from_value::<CompactedItem>(payload).map(RolloutItem::Compacted);
+    let v2 = compacted(json!({
+        "message": "v2 checkpoint",
+        "resume_metadata": {"multi_agent_version": "v2"},
+    }))?;
+    let cleared = compacted(json!({
+        "message": "checkpoint with no selected runtime",
+        "resume_metadata": {},
+    }))?;
+    let legacy = compacted(json!({"message": "legacy checkpoint"}))?;
+    let thread_id = ThreadId::new();
+    let canonical_meta = RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            session_id: thread_id.into(),
+            id: thread_id,
+            multi_agent_version: Some(MultiAgentVersion::V1),
+            ..SessionMeta::default()
+        },
+        git: None,
+    });
+    for (items, expected) in [
+        (vec![v2.clone(), cleared.clone()], None),
+        (vec![v2.clone(), legacy], Some(MultiAgentVersion::V2)),
+        (
+            vec![canonical_meta, cleared.clone()],
+            Some(MultiAgentVersion::V1),
+        ),
+        (vec![cleared, v2], Some(MultiAgentVersion::V2)),
+    ] {
+        assert_eq!(
+            multi_agent_version_from_items(&items, Some(thread_id)),
+            expected
+        );
+    }
     Ok(())
 }
