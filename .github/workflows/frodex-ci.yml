@@ -208,7 +208,8 @@ jobs:
                 --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
                 -p codex-app-server-daemon --lib --locked --no-tests fail \
                 -E 'test(=backend::pid::tests::start_retries_stale_empty_pid_file_under_its_own_lock) | test(=backend::pid::tests::legacy_launch_clears_recovery_best_effort) | test(=backend::pid::tests::pid_record_captures_the_resolved_launch_binary)'
-              just test --cargo-profile ci-test \
+              # Unoptimized persistence futures need the package tests' 32 MiB stack.
+              just --set rust_min_stack 33554432 test --cargo-profile ci-test \
                 --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
                 -p codex-core -p codex-app-server --test all --locked --no-tests fail \
                 -E 'test(suite::mcp_optional_startup_grace::) | test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart) | test(guardians_retain_evidence_after_compaction_and_resume)'
