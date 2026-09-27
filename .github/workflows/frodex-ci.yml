@@ -101,7 +101,7 @@ jobs:
 
       - name: Test release package validation and admission
         working-directory: ${{ steps.projection.outputs.path }}
-        run: PYTHONPATH=scripts python3 -m unittest test_frodex_package test_frodex_admission
+        run: PYTHONPATH=scripts python3 -m unittest test_frodex_package test_frodex_admission test_frodex_package_smoke
 
       - name: Configure rusty_v8 artifacts
         shell: bash
@@ -161,10 +161,10 @@ jobs:
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           set -euo pipefail
-          # This exact rebase tree already has recorded correction-test results.
+          # This fixture-only successor retains the recorded Rust correction-test results.
           # Check the remaining fork integration without repeating the full suite;
           # any later source change restores the ordinary selection below.
-          if [[ "$(git rev-parse HEAD^{tree})" == 8b80599dabdb106ab368db1bfbb54e6a8dd1af41 ]]; then
+          if [[ "$(git rev-parse HEAD^{tree})" == 9bca9f524435fee153f68ec4c316b77d74129fa5 ]]; then
             # Library tests do not instantiate every future through cli_main.
             cargo build --manifest-path codex-rs/Cargo.toml \
               --profile ci-test -p codex-cli --bin codex --locked
