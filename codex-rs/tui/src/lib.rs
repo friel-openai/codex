@@ -622,10 +622,7 @@ pub(crate) async fn start_app_server_for_picker(
         embedded_network_policy,
     )
     .await?;
-    Ok(
-        AppServerSession::new(app_server, target.thread_params_mode())
-            .with_local_codex_home(&config.codex_home),
-    )
+    Ok(AppServerSession::new(app_server, target.thread_params_mode()).with_startup_config(config))
 }
 
 #[cfg(test)]
@@ -649,10 +646,7 @@ pub(crate) async fn start_embedded_app_server_for_picker(
         Default::default(),
     )
     .await?;
-    Ok(
-        AppServerSession::new(app_server, target.thread_params_mode())
-            .with_local_codex_home(&config.codex_home),
-    )
+    Ok(AppServerSession::new(app_server, target.thread_params_mode()).with_startup_config(config))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1249,7 +1243,7 @@ async fn run_ratatui_app(
     let app_server_session = match startup_app_server {
         Ok(Ok(app_server)) => {
             AppServerSession::new(app_server, app_server_target.thread_params_mode())
-                .with_local_codex_home(&initial_config.codex_home)
+                .with_startup_config(&initial_config)
         }
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
@@ -1837,7 +1831,7 @@ async fn run_ratatui_app(
                 // A picker can replace the server; account reads belong to their original session.
                 startup_account = None;
                 AppServerSession::new(app_server, app_server_target.thread_params_mode())
-                    .with_local_codex_home(&config.codex_home)
+                    .with_startup_config(&config)
                     .with_remote_cwd_override(remote_cwd_override.clone())
             }
             Ok(Err(err)) => {
@@ -1919,7 +1913,7 @@ async fn run_ratatui_app(
                 )
                 .await?;
                 app_server = AppServerSession::new(client, app_server_target.thread_params_mode())
-                    .with_local_codex_home(&config.codex_home);
+                    .with_startup_config(&config);
             }
             #[cfg(target_os = "windows")]
             {

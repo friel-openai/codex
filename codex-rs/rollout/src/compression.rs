@@ -70,11 +70,26 @@ pub(crate) async fn file_modified_time(path: &Path) -> io::Result<Option<time::O
 /// If the requested path disappears during a representation transition, this briefly retries
 /// resolution so callers do not need to know which representation is on disk.
 pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineReader> {
+    open_rollout_line_reader_with_capacity(path, /*capacity*/ 8 * 1024).await
+}
+
+/// Opens a rollout with explicit read-ahead for callers that consume the complete file.
+/// Small metadata reads should use [`open_rollout_line_reader`] instead.
+pub async fn open_rollout_line_reader_with_capacity(
+    path: &Path,
+    capacity: usize,
+) -> io::Result<RolloutLineReader> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "rollout reader capacity must be positive",
+        ));
+    }
     let started_at = Instant::now();
     let mut metrics = ReadMetrics::default();
     let result = async {
         for _ in 0..MAX_NOT_FOUND_RETRIES {
-            match reader::open_once(path, &mut metrics).await {
+            match reader::open_once(path, capacity, &mut metrics).await {
                 Ok(reader) => return Ok(reader),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     tokio::time::sleep(OPEN_ROLLOUT_LINE_READER_RETRY_DELAY).await;
@@ -82,7 +97,7 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
                 Err(err) => return Err(err),
             }
         }
-        reader::open_once(path, &mut metrics).await
+        reader::open_once(path, capacity, &mut metrics).await
     }
     .await;
     metrics.duration = started_at.elapsed();
@@ -99,7 +114,7 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
 pub(crate) async fn open_rollout_line_reader_exact(path: &Path) -> io::Result<RolloutLineReader> {
     let started_at = Instant::now();
     let mut metrics = ReadMetrics::default();
-    let result = reader::open_exact(path.to_path_buf(), &mut metrics).await;
+    let result = reader::open_exact(path.to_path_buf(), /*capacity*/ 8 * 1024, &mut metrics).await;
     metrics.duration = started_at.elapsed();
     match result {
         Ok(inner) => Ok(RolloutLineReader { inner, metrics }),
@@ -351,6 +366,26 @@ mod worker {
     const MAX_CONCURRENT_COMPRESSION_JOBS: usize = 2;
     const MAX_METADATA_WARNINGS_PER_RUN: usize = 5;
 
+    #[cfg(test)]
+    type EncodingPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+    #[cfg(test)]
+    static ENCODING_PAUSES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, EncodingPause>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    #[cfg(test)]
+    pub(super) fn pause_encoding(
+        path: &Path,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        ENCODING_PAUSES
+            .lock()
+            .expect("encoding pauses")
+            .insert(path.to_path_buf(), (started_tx, resume_rx));
+        (started_rx, resume_tx)
+    }
+
     #[derive(Default)]
     struct CompressionStats {
         scanned: usize,
@@ -442,8 +477,8 @@ mod worker {
         codex_home: PathBuf,
         trigger: RolloutCompressionTrigger,
     ) -> io::Result<()> {
-        let Some(_maintenance_guard) =
-            crate::try_acquire_rollout_maintenance_lock(codex_home.as_path())
+        let Some(maintenance) =
+            crate::maintenance::try_acquire_compression_maintenance(codex_home.as_path())
                 .inspect_err(|err| FailureMetric::Run(trigger).record("maintenance_lock", err))?
         else {
             metrics::run(trigger, "skipped_maintenance");
@@ -453,6 +488,7 @@ mod worker {
             );
             return Ok(());
         };
+        let maintenance = Arc::new(maintenance);
         let marker = match CompressionRunMarker::try_claim(codex_home.as_path()) {
             Ok(Some(marker)) => marker,
             Ok(None) => {
@@ -475,7 +511,8 @@ mod worker {
         let mut stage = "temp_cleanup";
         let result = async {
             let mut stats = CompressionStats {
-                cleanup_errors: cleanup_stale_temps(codex_home.as_path(), trigger).await?,
+                cleanup_errors: cleanup_stale_temps(codex_home.as_path(), &maintenance, trigger)
+                    .await?,
                 ..Default::default()
             };
             stage = "scan";
@@ -487,11 +524,15 @@ mod worker {
                     stats.time_budget_exhausted = true;
                     break;
                 }
+                if maintenance.should_yield()? {
+                    break;
+                }
                 compress_rollouts_in_root(
                     root.as_path(),
                     started_at,
                     &mut stats,
                     &writer_locks,
+                    &maintenance,
                     trigger,
                 )
                 .await?;
@@ -517,7 +558,10 @@ mod worker {
         );
         // Keep the existing completed outcome: it means the pass returned, not
         // that every directory was scanned or every file was compressed.
-        let completion = if stats.time_budget_exhausted {
+        let yielded = maintenance.should_yield()?;
+        let completion = if yielded {
+            "foreground_maintenance"
+        } else if stats.time_budget_exhausted {
             "time_budget"
         } else {
             "scan_finished"
@@ -545,7 +589,9 @@ mod worker {
         ];
         metrics::counter(metrics::RUN_COUNTER, &tags);
         metrics::duration_histogram(metrics::RUN_DURATION_HISTOGRAM, started_at.elapsed(), &tags);
-        marker.persist();
+        if !yielded {
+            marker.persist();
+        }
         Ok(())
     }
 
@@ -568,6 +614,7 @@ mod worker {
         started_at: Instant,
         stats: &mut CompressionStats,
         writer_locks: &Arc<crate::WriterLockCoordinator>,
+        maintenance: &Arc<crate::maintenance::RolloutCompressionMaintenanceGuard>,
         trigger: RolloutCompressionTrigger,
     ) -> io::Result<()> {
         if !tokio::fs::try_exists(root)
@@ -585,6 +632,9 @@ mod worker {
         while let Some(dir) = stack.pop() {
             if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                 stats.time_budget_exhausted = true;
+                break;
+            }
+            if maintenance.should_yield()? {
                 break;
             }
             let mut read_dir = match tokio::fs::read_dir(dir.as_path()).await {
@@ -610,6 +660,9 @@ mod worker {
                 };
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     stats.time_budget_exhausted = true;
+                    break;
+                }
+                if maintenance.should_yield()? {
                     break;
                 }
                 let path = entry.path();
@@ -697,12 +750,15 @@ mod worker {
                     collect_next_compression_job(&mut jobs, stats, trigger).await;
                 }
                 let writer_locks = Arc::clone(writer_locks);
+                let maintenance = Arc::clone(maintenance);
                 jobs.spawn_blocking(move || {
                     let started_at = Instant::now();
+                    // Blocking work retains maintenance ownership even if the async worker exits.
                     let result = compress_rollout_if_cold_blocking(
                         path.as_path(),
                         &writer_locks,
                         thread_id,
+                        &maintenance,
                         trigger,
                     );
                     let duration = started_at.elapsed();
@@ -723,6 +779,7 @@ mod worker {
         SkippedBusy,
         SkippedChanged,
         SkippedAlreadyCompressed,
+        SkippedMaintenance,
     }
 
     impl CompressionOutcome {
@@ -733,6 +790,7 @@ mod worker {
                 CompressionOutcome::SkippedBusy => "skipped_busy",
                 CompressionOutcome::SkippedChanged => "skipped_changed",
                 CompressionOutcome::SkippedAlreadyCompressed => "skipped_already_compressed",
+                CompressionOutcome::SkippedMaintenance => "skipped_maintenance",
             }
         }
     }
@@ -790,7 +848,8 @@ mod worker {
                     CompressionOutcome::SkippedNotCold
                     | CompressionOutcome::SkippedBusy
                     | CompressionOutcome::SkippedChanged
-                    | CompressionOutcome::SkippedAlreadyCompressed => {
+                    | CompressionOutcome::SkippedAlreadyCompressed
+                    | CompressionOutcome::SkippedMaintenance => {
                         stats.skipped = stats.skipped.saturating_add(1);
                     }
                 }
@@ -829,8 +888,16 @@ mod worker {
         path: &Path,
         writer_locks: &Arc<crate::WriterLockCoordinator>,
         thread_id: codex_protocol::ThreadId,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
         trigger: RolloutCompressionTrigger,
     ) -> io::Result<CompressionMeasurement> {
+        if maintenance.should_yield()? {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedMaintenance,
+                /*source_bytes*/ None,
+                /*compressed_bytes*/ None,
+            ));
+        }
         let before = match cold_file_state(path)
             .inspect_err(|err| FailureMetric::File(trigger).record("read_metadata", err))?
         {
@@ -864,14 +931,28 @@ mod worker {
             .suffix(TEMP_SUFFIX)
             .tempfile_in(temp_dir)
             .inspect_err(|err| FailureMetric::File(trigger).record("create_temp", err))?;
-        encode_zstd_to_writer(path, temp_file.as_file_mut())
-            .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?;
+        if !encode_zstd_to_writer(path, temp_file.as_file_mut(), maintenance)
+            .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?
+        {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedMaintenance,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        }
         temp_file
             .as_file_mut()
             .flush()
             .inspect_err(|err| FailureMetric::File(trigger).record("flush", err))?;
-        verify_zstd(temp_file.path())
-            .inspect_err(|err| FailureMetric::File(trigger).record("verify", err))?;
+        if !verify_zstd(temp_file.path(), maintenance)
+            .inspect_err(|err| FailureMetric::File(trigger).record("verify", err))?
+        {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedMaintenance,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        }
         if !same_file_state(path, &before)
             .inspect_err(|err| FailureMetric::File(trigger).record("recheck_source", err))?
         {
@@ -914,7 +995,14 @@ mod worker {
                 /*compressed_bytes*/ None,
             ));
         }
-
+        if maintenance.should_yield()? {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedMaintenance,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        }
+        // Once publication starts, finish the representation switch before releasing either lock.
         match temp_file.persist_noclobber(compressed_path.as_path()) {
             Ok(_) => {}
             Err(err) if err.error.kind() == io::ErrorKind::AlreadyExists => {
@@ -990,22 +1078,59 @@ mod worker {
         }
     }
 
-    fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
+    fn encode_zstd_to_writer(
+        source: &Path,
+        output: impl Write,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+    ) -> io::Result<bool> {
         let mut input = File::open(source)?;
         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
         // Preserve fast byte-bound checks for paginated history without decoding the whole file.
         encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
-        io::copy(&mut input, &mut encoder)?;
+        #[cfg(test)]
+        {
+            let pause = ENCODING_PAUSES
+                .lock()
+                .expect("encoding pauses")
+                .remove(source);
+            if let Some((started, resume)) = pause {
+                let _ = started.send(());
+                let _ = resume.recv();
+            }
+        }
+        if !copy_until_foreground(&mut input, &mut encoder, maintenance)? {
+            return Ok(false);
+        }
         encoder.finish()?;
-        Ok(())
+        Ok(true)
     }
 
-    fn verify_zstd(path: &Path) -> io::Result<()> {
+    fn verify_zstd(
+        path: &Path,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+    ) -> io::Result<bool> {
         let input = File::open(path)?;
         let mut decoder = zstd::stream::read::Decoder::new(input)?;
         let mut sink = io::sink();
-        io::copy(&mut decoder, &mut sink)?;
-        Ok(())
+        copy_until_foreground(&mut decoder, &mut sink, maintenance)
+    }
+
+    fn copy_until_foreground(
+        input: &mut impl io::Read,
+        output: &mut impl Write,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+    ) -> io::Result<bool> {
+        let mut buffer = vec![0; 256 * 1024];
+        loop {
+            if maintenance.should_yield()? {
+                return Ok(false);
+            }
+            let count = input.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(true);
+            }
+            output.write_all(&buffer[..count])?;
+        }
     }
 
     fn set_file_metadata(
@@ -1019,6 +1144,7 @@ mod worker {
 
     async fn cleanup_stale_temps(
         codex_home: &Path,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
         trigger: RolloutCompressionTrigger,
     ) -> io::Result<bool> {
         let mut errors = false;
@@ -1026,13 +1152,17 @@ mod worker {
             codex_home.join(SESSIONS_SUBDIR),
             codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
         ] {
-            errors |= cleanup_stale_temps_in_root(root.as_path(), trigger).await?;
+            if maintenance.should_yield()? {
+                break;
+            }
+            errors |= cleanup_stale_temps_in_root(root.as_path(), maintenance, trigger).await?;
         }
         Ok(errors)
     }
 
     async fn cleanup_stale_temps_in_root(
         root: &Path,
+        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
         trigger: RolloutCompressionTrigger,
     ) -> io::Result<bool> {
         let mut errors = false;
@@ -1048,6 +1178,9 @@ mod worker {
         }
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
+            if maintenance.should_yield()? {
+                return Ok(errors);
+            }
             let mut read_dir = match tokio::fs::read_dir(dir.as_path()).await {
                 Ok(read_dir) => read_dir,
                 Err(err) => {
@@ -1061,6 +1194,9 @@ mod worker {
                 }
             };
             while let Some(entry) = read_dir.next_entry().await? {
+                if maintenance.should_yield()? {
+                    return Ok(errors);
+                }
                 let path = entry.path();
                 let file_type = match entry.file_type().await {
                     Ok(file_type) => file_type,
@@ -1357,16 +1493,18 @@ mod reader {
 
     pub(super) async fn open_once(
         path: &Path,
+        capacity: usize,
         metrics: &mut ReadMetrics,
     ) -> io::Result<RolloutLineReaderInner> {
         let path = path::existing_rollout_path(path)
             .await
             .unwrap_or_else(|| path.to_path_buf());
-        open_exact(path, metrics).await
+        open_exact(path, capacity, metrics).await
     }
 
     pub(super) async fn open_exact(
         path: std::path::PathBuf,
+        capacity: usize,
         metrics: &mut ReadMetrics,
     ) -> io::Result<RolloutLineReaderInner> {
         if *super::HISTORY_IO_OBSERVATION_ENABLED {
@@ -1384,7 +1522,11 @@ mod reader {
                 let input = File::open(path.as_path())?;
                 let decoder = zstd::stream::read::Decoder::new(input)?;
                 Ok::<_, io::Error>(
-                    io::BufReader::new(Box::new(decoder) as Box<dyn Read + Send>).lines(),
+                    io::BufReader::with_capacity(
+                        capacity,
+                        Box::new(decoder) as Box<dyn Read + Send>,
+                    )
+                    .lines(),
                 )
             })
             .await
@@ -1394,7 +1536,7 @@ mod reader {
         metrics.format = "plain";
         let file = tokio::fs::File::open(path).await?;
         Ok(RolloutLineReaderInner::Plain(
-            tokio::io::BufReader::new(file).lines(),
+            tokio::io::BufReader::with_capacity(capacity, file).lines(),
         ))
     }
 }
