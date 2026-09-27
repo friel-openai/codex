@@ -16,6 +16,14 @@ pub(crate) enum LineWrapPolicy {
     Hard,
 }
 
+/// Shared display geometry for one user-message bubble, recomputed when its width changes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UserMessageLayout {
+    /// Synthetic spaces before the bubble, excluded from source text and wrapping gutters.
+    pub(crate) alignment_prefix_bytes: usize,
+    pub(crate) style: Style,
+}
+
 /// A displayed line's contiguous fragment of one original logical line.
 ///
 /// Wrapped fragments share `text`. `prefix_bytes` counts synthetic display bytes before
@@ -35,6 +43,8 @@ pub(crate) struct LogicalLineSource {
     pub(crate) continuation_indent: Line<'static>,
     /// Blank columns after wrapped content; they remain outside the copied source text.
     pub(crate) right_reserve: u16,
+    /// Shared identity groups the bubble's body and empty padding rows during transcript resize.
+    pub(crate) user_message: Option<Arc<UserMessageLayout>>,
 }
 
 impl LogicalLineSource {
@@ -50,6 +60,7 @@ impl LogicalLineSource {
             wrap_policy: LineWrapPolicy::Word,
             continuation_indent: Line::default(),
             right_reserve: 0,
+            user_message: None,
         }
     }
 
@@ -108,6 +119,7 @@ impl LogicalLineSource {
             wrap_policy: self.wrap_policy,
             continuation_indent: self.continuation_indent.clone(),
             right_reserve: self.right_reserve,
+            user_message: self.user_message.clone(),
         }
     }
 }

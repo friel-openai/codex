@@ -9,6 +9,8 @@ mod math_interruption_tests;
 mod advanced_reasoning_tests;
 #[path = "tests/agents_navigation_tests.rs"]
 mod agents_navigation_tests;
+#[path = "tests/approval_routing_tests.rs"]
+mod approval_routing;
 #[path = "tests/approvals_reviewer_error_tests.rs"]
 mod approvals_reviewer_error_tests;
 #[path = "tests/backend_banner_fallback_tests.rs"]
@@ -6049,6 +6051,7 @@ async fn make_test_app() -> Box<App> {
         temporary_structured_requests: HashMap::new(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
+        pending_thread_approval_labels: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         pending_server_profiles: HashMap::new(),
         agents_overview: Default::default(),
@@ -6155,6 +6158,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             temporary_structured_requests: HashMap::new(),
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
+            pending_thread_approval_labels: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             pending_server_profiles: HashMap::new(),
             agents_overview: Default::default(),
