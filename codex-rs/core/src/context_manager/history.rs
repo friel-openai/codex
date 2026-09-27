@@ -34,9 +34,10 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContext;
-use codex_history::RetainedContextEntry;
 use codex_history::RetainedContextEvent;
 use codex_history::RetainedInputSource;
+use codex_history::checkpoint_requires_parent_context;
+use codex_history::is_api_message;
 use codex_prompts::render_model_instructions;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::items::TurnItem;
@@ -257,39 +258,10 @@ impl ContextManager {
         // Keep requiring parent context in that case; a compatibility failure must not turn
         // a partial model window into a legacy fallback. Migrating checkpoints keep a backup
         // and can expose retained facts independently of which transcript review uses.
-        let requires_parent_context = checkpoint.is_none()
-            && retained_context.is_some_and(|context| {
-                !context.verified_answers_complete()
-                    || context.ordered_entries().any(|(_, entry)| match entry {
-                        RetainedContextEntry::VerifiedAnswer(_) => true,
-                        RetainedContextEntry::UserMessage(message) => {
-                            !self.raw_items().any(|item| {
-                                if item.id().map(codex_protocol::ResponseItemId::as_str)
-                                    != message.message_id.as_deref()
-                                    || item.turn_id().unwrap_or_default() != message.turn_id
-                                {
-                                    return false;
-                                }
-                                let ResponseItem::Message { role, content, .. } = item else {
-                                    return false;
-                                };
-                                if role != "user" || is_contextual_user_message_content(content) {
-                                    return false;
-                                }
-                                let text = content
-                                    .iter()
-                                    .filter_map(|content| match content {
-                                        ContentItem::InputText { text }
-                                        | ContentItem::OutputText { text } => Some(text.as_str()),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0
-                                    == message.text
-                            })
-                        }
-                    })
+        let requires_parent_context =
+            checkpoint_requires_parent_context(retained_context, checkpoint, &self.items, |item| {
+                matches!(item, ResponseItem::Message { role, content, .. }
+                if role == "user" && is_contextual_user_message_content(content))
             });
         self.guardian_review_mode = if requires_parent_context {
             self.guardian_context_mode
@@ -340,6 +312,33 @@ impl ContextManager {
             }));
         }
         self.review_history = Some(history);
+    }
+
+    /// Migration replay already applied adoption, delivery capture, and excerpt recovery.
+    /// Repeating those steps could resurrect evidence evicted before a historical rollback.
+    pub(crate) fn restore_replayed_review_context(
+        &mut self,
+        retained_context: &RetainedContext,
+        checkpoint: Option<&GuardianHistoryCheckpoint>,
+        reviewer_compaction_hash: Option<&str>,
+    ) {
+        let retain_inherited_user_messages = self.retain_inherited_user_messages;
+        self.retain_inherited_user_messages = false;
+        self.restore_review_context(Some(retained_context), checkpoint, reviewer_compaction_hash);
+        self.retain_inherited_user_messages = retain_inherited_user_messages;
+        Arc::make_mut(&mut self.retained_context).restore(Some(retained_context), &[]);
+    }
+
+    /// Historical rollback does not reselect the reviewer when it removes an opaque checkpoint.
+    /// Keep its active transcript through suffix replay; session installation checks the live hash.
+    pub(crate) fn restore_replayed_guardian_history(&mut self, history: Option<TranscriptHistory>) {
+        self.guardian_review_mode = if history.is_some() {
+            GuardianContextMode::Legacy
+        } else {
+            // A later opaque item cannot activate a transcript absent at the original checkpoint.
+            self.guardian_context_mode
+        };
+        self.review_history = history;
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -423,6 +422,26 @@ impl ContextManager {
         );
     }
 
+    /// Deferred reviewer replay must use the same current policy and persisted override as history.
+    pub(crate) fn process_response_item_for_history(
+        item: &ResponseItem,
+        metadata: Option<&CodexHarnessMetadata>,
+        policy: TruncationPolicy,
+    ) -> ResponseItem {
+        let mut processed = item.clone();
+        if let ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed
+        {
+            // The override already includes the tool's serialization allowance.
+            let policy = metadata
+                .and_then(|metadata| metadata.history_truncation_token_limit)
+                .map(TruncationPolicy::Tokens)
+                .unwrap_or_else(|| with_serialization_allowance(policy));
+            truncate_function_output_payload(output, policy, estimate_audio_token_count);
+        }
+        processed
+    }
+
     fn record_items_with_metadata<'a, I, T>(&mut self, items: I, policy: TruncationPolicy)
     where
         I: IntoIterator<Item = (T, Option<&'a CodexHarnessMetadata>)>,
@@ -434,20 +453,10 @@ impl ContextManager {
                 continue;
             }
 
-            let mut processed = ResponseItemEnvelope {
-                item: item.clone(),
+            let processed = ResponseItemEnvelope {
+                item: Self::process_response_item_for_history(item, metadata, policy),
                 metadata: metadata.cloned(),
             };
-            if let ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
-            {
-                // The override already includes the tool's serialization allowance.
-                let policy = metadata
-                    .and_then(|metadata| metadata.history_truncation_token_limit)
-                    .map(TruncationPolicy::Tokens)
-                    .unwrap_or_else(|| with_serialization_allowance(policy));
-                truncate_function_output_payload(output, policy, estimate_audio_token_count);
-            }
             if let Some(review_history) = &mut self.review_history
                 && !matches!(item, ResponseItem::Message { role, content, .. }
                 if role == "user" && is_contextual_user_message_content(content))
@@ -929,32 +938,6 @@ impl ContextManager {
             }
         }
         cut_idx
-    }
-}
-
-/// Configuration updates require harness provenance; raw system messages are never retained.
-fn is_api_message(message: &ResponseItem, metadata: Option<&CodexHarnessMetadata>) -> bool {
-    match message {
-        ResponseItem::Message { role, .. } => role.as_str() != "system",
-        ResponseItem::ConfigurationUpdate { .. } => {
-            metadata.is_some_and(|metadata| metadata.harness_authored_configuration)
-        }
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::FunctionCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger { .. } => false,
-        ResponseItem::Other => false,
     }
 }
 
