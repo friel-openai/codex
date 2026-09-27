@@ -10,6 +10,7 @@ use crate::session::turn_context::TurnContext;
 use crate::shell::ShellType;
 use codex_features::Feature;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,6 +26,12 @@ use tokio::sync::Mutex;
 static POWERSHELL_VERSIONS: LazyLock<Mutex<BTreeMap<PathBuf, Option<String>>>> =
     LazyLock::new(Mutex::default);
 
+// This includes the XML wrapper and escaped text. Keeping the complete element below 1,000 bytes
+// also keeps it below the model-context manual-review threshold of 1,000 tokens.
+const MAX_RENDERED_SUBAGENTS_BYTES: usize = 960;
+const OMITTED_SUBAGENTS_LINE: &str =
+    "    [additional current subagents omitted; use list_agents to inspect them]\n";
+
 /// Environment values visible to the model.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EnvironmentsState {
@@ -35,6 +42,7 @@ pub(crate) struct EnvironmentsState {
     network: Option<NetworkContext>,
     filesystem: Option<FileSystemContext>,
     subagents: Option<String>,
+    subagents_format: EnvironmentSubagentsFormat,
 }
 
 impl EnvironmentsState {
@@ -68,14 +76,35 @@ impl EnvironmentsState {
                 )
             }),
             subagents: None,
+            subagents_format: EnvironmentSubagentsFormat::default(),
         }
     }
 
     pub(crate) fn with_subagents(mut self, subagents: String) -> Self {
+        self.set_subagents(subagents, EnvironmentSubagentsFormat::EscapedText);
+        self
+    }
+
+    pub(crate) fn with_versioned_subagents(
+        mut self,
+        subagents: String,
+        multi_agent_version: MultiAgentVersion,
+    ) -> Self {
+        let format = match multi_agent_version {
+            MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
+                EnvironmentSubagentsFormat::EscapedText
+            }
+            MultiAgentVersion::V2 => EnvironmentSubagentsFormat::TrustedAgentXml,
+        };
+        self.set_subagents(subagents, format);
+        self
+    }
+
+    fn set_subagents(&mut self, subagents: String, format: EnvironmentSubagentsFormat) {
         if !subagents.is_empty() {
             self.subagents = Some(subagents);
+            self.subagents_format = format;
         }
-        self
     }
 
     fn rendered_full(&self) -> RenderedEnvironments {
@@ -97,6 +126,8 @@ impl EnvironmentsState {
             network: self.network.clone(),
             filesystem: self.filesystem.clone(),
             subagents: self.subagents.clone(),
+            subagents_format: self.subagents_format,
+            include_subagents: self.subagents.is_some(),
         }
     }
 }
@@ -129,6 +160,7 @@ impl WorldStateSection for EnvironmentsState {
             network: self.network.as_ref().map(NetworkContext::render),
             filesystem: self.filesystem.as_ref().map(FileSystemContext::render),
             subagents: self.subagents.clone(),
+            subagents_format: self.subagents_format,
         }
     }
 
@@ -149,6 +181,8 @@ impl WorldStateSection for EnvironmentsState {
             || current.timezone != previous.timezone
             || current.network != previous.network
             || current.filesystem != previous.filesystem;
+        let subagents_changed = current.subagents != previous.subagents
+            || current.subagents_format != previous.subagents_format;
         let multiple_environments = self.environments.len() > 1;
         let previous_multiple_environments = previous.environments.len() > 1;
         let mut updates = self
@@ -175,7 +209,7 @@ impl WorldStateSection for EnvironmentsState {
             && updates
                 .values()
                 .all(|update| matches!(update, EnvironmentUpdate::Current(_)));
-        (!updates.is_empty() || turn_context_values_changed).then(|| {
+        (!updates.is_empty() || turn_context_values_changed || subagents_changed).then(|| {
             Box::new(RenderedEnvironments {
                 updates,
                 legacy_single,
@@ -190,6 +224,8 @@ impl WorldStateSection for EnvironmentsState {
                 network: self.network.clone(),
                 filesystem: self.filesystem.clone(),
                 subagents: self.subagents.clone(),
+                subagents_format: self.subagents_format,
+                include_subagents: subagents_changed,
             }) as Box<dyn ContextualUserFragment>
         })
     }
@@ -229,6 +265,9 @@ struct RenderedEnvironments {
     network: Option<NetworkContext>,
     filesystem: Option<FileSystemContext>,
     subagents: Option<String>,
+    subagents_format: EnvironmentSubagentsFormat,
+    /// Whether this fragment carries a current subagent value or an explicit empty tombstone.
+    include_subagents: bool,
 }
 
 enum EnvironmentUpdate {
@@ -309,14 +348,47 @@ impl ContextualUserFragment for RenderedEnvironments {
             rendered.push_str(&filesystem.render());
             rendered.push('\n');
         }
-        if let Some(subagents) = &self.subagents {
-            rendered.push_str("  <subagents>\n");
-            for line in subagents.lines() {
-                rendered.push_str("    ");
-                rendered.push_str(line);
-                rendered.push('\n');
+        if self.include_subagents {
+            if let Some(subagents) = &self.subagents {
+                let mut rendered_subagents = "  <subagents>\n".to_string();
+                match self.subagents_format {
+                    EnvironmentSubagentsFormat::EscapedText => {
+                        for line in subagents.lines() {
+                            let mut escaped_line = "    ".to_string();
+                            push_xml_escaped_text(&mut escaped_line, line);
+                            escaped_line.push('\n');
+                            if rendered_subagents
+                                .len()
+                                .saturating_add(escaped_line.len())
+                                .saturating_add("  </subagents>\n".len())
+                                > MAX_RENDERED_SUBAGENTS_BYTES
+                            {
+                                if rendered_subagents
+                                    .len()
+                                    .saturating_add(OMITTED_SUBAGENTS_LINE.len())
+                                    .saturating_add("  </subagents>\n".len())
+                                    <= MAX_RENDERED_SUBAGENTS_BYTES
+                                {
+                                    rendered_subagents.push_str(OMITTED_SUBAGENTS_LINE);
+                                }
+                                break;
+                            }
+                            rendered_subagents.push_str(&escaped_line);
+                        }
+                    }
+                    EnvironmentSubagentsFormat::TrustedAgentXml => {
+                        for line in subagents.lines() {
+                            rendered_subagents.push_str("    ");
+                            rendered_subagents.push_str(line);
+                            rendered_subagents.push('\n');
+                        }
+                    }
+                }
+                rendered_subagents.push_str("  </subagents>\n");
+                rendered.push_str(&rendered_subagents);
+            } else {
+                rendered.push_str("  <subagents />\n");
             }
-            rendered.push_str("  </subagents>\n");
         }
         rendered
     }
@@ -381,6 +453,30 @@ pub(crate) struct EnvironmentsSnapshot {
     network: Option<String>,
     filesystem: Option<String>,
     subagents: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "EnvironmentSubagentsFormat::is_escaped_text"
+    )]
+    subagents_format: EnvironmentSubagentsFormat,
+}
+
+/// Controls how current-agent records are serialized inside the `subagents` XML element.
+///
+/// V1 records are model-facing text and must be escaped and bounded here. V2 records are XML
+/// generated from validated `AgentPath` values and are already bounded before they reach this
+/// renderer.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EnvironmentSubagentsFormat {
+    #[default]
+    EscapedText,
+    TrustedAgentXml,
+}
+
+impl EnvironmentSubagentsFormat {
+    fn is_escaped_text(&self) -> bool {
+        *self == Self::EscapedText
+    }
 }
 
 #[derive(Deserialize, Serialize)]
