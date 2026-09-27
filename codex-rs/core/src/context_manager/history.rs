@@ -496,6 +496,19 @@ impl ContextManager {
         &self.items
     }
 
+    /// Shares the current immutable annotated history without copying the parent transcript.
+    pub(crate) fn shared_annotated_items(&self) -> Arc<Vec<ResponseItemEnvelope>> {
+        Arc::clone(&self.items)
+    }
+
+    /// Appends child-only fork items while retaining inherited history metadata.
+    pub(crate) fn append_fork_items(
+        &mut self,
+        items: impl IntoIterator<Item = ResponseItemEnvelope>,
+    ) {
+        Arc::make_mut(&mut self.items).extend(items);
+    }
+
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
         Arc::unwrap_or_clone(self.into_shared_annotated_items())
@@ -557,6 +570,11 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.replace_shared_annotated(Arc::new(items));
+    }
+
+    /// Installs an immutable parent snapshot while preserving copy-on-write mutation behavior.
+    pub(crate) fn replace_shared_annotated(&mut self, items: Arc<Vec<ResponseItemEnvelope>>) {
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
@@ -565,7 +583,7 @@ impl ContextManager {
                     if role == "user" && is_contextual_user_message_content(content))
             }));
         }
-        self.items = Arc::new(items);
+        self.items = items;
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
         self.world_state_baseline = None;
@@ -605,6 +623,58 @@ impl ContextManager {
         }
         self.world_state_baseline = None;
         promoted
+    }
+
+    /// Preserves parent model state while retaining the child's history generation.
+    pub(crate) fn replace_shared_snapshot(&mut self, source: &Self) {
+        let history_version = self.history_version.saturating_add(1);
+        *self = source.clone();
+        self.history_version = history_version;
+        // Guardian compares reset identities across asynchronous context capture. A parent
+        // reset identity could equal the child's next reset and hide that intervening reset.
+        self.reset_version = history_version;
+    }
+
+    /// Detects any parent model-state change between optimistic fork snapshot checks.
+    pub(crate) fn has_same_fork_metadata(&self, other: &Self) -> bool {
+        // Keep this exhaustive so new state must participate in fork validation. Shared
+        // payload identities avoid comparing the full transcript at every fork checkpoint.
+        let Self {
+            items,
+            review_history,
+            retained_context,
+            guardian_context_mode,
+            guardian_review_mode,
+            retain_inherited_user_messages,
+            history_version,
+            reset_version,
+            user_message_revision,
+            token_info,
+            reference_context_item,
+            world_state_baseline,
+        } = self;
+        Arc::ptr_eq(items, &other.items)
+            && Arc::ptr_eq(retained_context, &other.retained_context)
+            && match (review_history, &other.review_history) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.generation() == right.generation()
+                        && left
+                            .items()
+                            .map(std::ptr::from_ref)
+                            .eq(right.items().map(std::ptr::from_ref))
+                }
+                _ => false,
+            }
+            && guardian_context_mode == &other.guardian_context_mode
+            && guardian_review_mode == &other.guardian_review_mode
+            && retain_inherited_user_messages == &other.retain_inherited_user_messages
+            && history_version == &other.history_version
+            && reset_version == &other.reset_version
+            && user_message_revision == &other.user_message_revision
+            && token_info == &other.token_info
+            && reference_context_item == &other.reference_context_item
+            && world_state_baseline == &other.world_state_baseline
     }
 
     /// Drop the last `num_turns` instruction turns from this history.

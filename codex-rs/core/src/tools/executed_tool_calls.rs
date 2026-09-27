@@ -20,6 +20,8 @@ use codex_code_mode::CellId;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_history::InitialHistory;
+use codex_history::ResponseItemEnvelope;
+use codex_history::RolloutItem;
 use codex_protocol::mcp::McpAttribution;
 use codex_protocol::mcp::McpAttributionSource;
 use codex_protocol::models::ExecutedToolCall;
@@ -239,6 +241,27 @@ impl ExecutedToolCalls {
 
     pub(crate) fn mcp_attribution_snapshot(&self) -> McpAttribution {
         self.mcp_attribution.snapshot()
+    }
+
+    /// Restores the selected live parent's attribution before startup history is recorded.
+    /// Other execution trackers and all clones of this recorder retain their identity.
+    pub(crate) fn restore_mcp_attribution_from_snapshot(&self, snapshot: &McpAttribution) {
+        self.mcp_attribution.restore_from_snapshot(snapshot);
+    }
+
+    /// Replaces provisional startup attribution after rollout references have been resolved.
+    /// This must run before tool execution or checkpoint publication, not during rollback.
+    pub(crate) fn restore_mcp_attribution_from_rollout_items(&self, items: &[RolloutItem]) {
+        self.mcp_attribution.restore_from_rollout_items(items);
+    }
+
+    /// Restores startup attribution from the complete selected shared response history.
+    /// A prepared fork's metadata-only rollout override can omit newer MCP checkpoints.
+    pub(crate) fn restore_mcp_attribution_from_response_items(
+        &self,
+        items: &[ResponseItemEnvelope],
+    ) {
+        self.mcp_attribution.restore_from_response_items(items);
     }
 
     pub(crate) fn mcp_attribution_checkpoint(&self, force: bool) -> Option<(McpAttribution, u64)> {

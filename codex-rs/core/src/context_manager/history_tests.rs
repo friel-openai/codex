@@ -785,6 +785,92 @@ fn annotated_history_apis_preserve_envelopes() {
     );
 }
 
+#[test]
+fn fork_copy_on_write_preserves_harness_metadata() {
+    let inherited = ResponseItemEnvelope {
+        item: assistant_msg("inherited"),
+        metadata: Some(CodexHarnessMetadata {
+            client_authored: true,
+            history_truncation_token_limit: Some(137),
+            delivered_assistant_message: Some("delivered inherited message".to_string()),
+            harness_authored_configuration: true,
+            compaction_model_hash: Some("inherited-compaction-model".to_string()),
+            user_input_order: Some(11),
+            inherited_user_message: true,
+            ..Default::default()
+        }),
+    };
+    let mut parent = ContextManager::new();
+    parent.replace_annotated(vec![inherited.clone()]);
+    let shared = parent.shared_annotated_items();
+    let mut child = ContextManager::new();
+    child.replace_shared_annotated(Arc::clone(&shared));
+
+    assert!(Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+    child.append_fork_items([ResponseItemEnvelope::new(assistant_msg("child"))]);
+
+    assert_eq!(parent.annotated_items(), std::slice::from_ref(&inherited));
+    assert_eq!(child.annotated_items()[0], inherited);
+    assert_eq!(child.annotated_items().len(), 2);
+    assert!(!Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+}
+
+#[test]
+fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
+    let mut parent = ContextManager::new();
+    parent.replace(vec![assistant_msg("first parent window")]);
+    parent.replace(vec![assistant_msg("second parent window")]);
+    assert_eq!(parent.reset_version, 2);
+
+    let mut child = ContextManager::new();
+    child.replace_shared_snapshot(&parent);
+    let captured = child.clone();
+    assert_eq!(captured.history_version(), 1);
+    assert_eq!(captured.reset_version, 1);
+    assert!(Arc::ptr_eq(&parent.items, &captured.items));
+
+    child.replace(vec![assistant_msg("new child window")]);
+    assert_eq!(child.reset_version, 2);
+    assert_ne!(
+        captured.reset_version, child.reset_version,
+        "Guardian must detect a reset after capturing the fork's history"
+    );
+}
+
+#[test]
+fn fork_snapshot_detects_context_changes_without_response_item_changes() {
+    let mut original = ContextManager::new();
+    original.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("parent"))]);
+    let mut review_history = TranscriptHistory::new(1);
+    review_history.record(&assistant_msg("review evidence"));
+    original.review_history = Some(review_history);
+    assert!(original.has_same_fork_metadata(&original.clone()));
+
+    let changes: [fn(&mut ContextManager); 7] = [
+        |history| {
+            history.reserve_input_order();
+        },
+        |history| history.guardian_context_mode = GuardianContextMode::ThreadOwned,
+        |history| history.guardian_review_mode = GuardianContextMode::ThreadOwned,
+        |history| history.retain_inherited_user_messages = true,
+        |history| history.reset_version += 1,
+        |history| history.user_message_revision += 1,
+        |history| {
+            history
+                .review_history
+                .as_mut()
+                .expect("legacy reviewer evidence")
+                .record(&assistant_msg("new review evidence"));
+        },
+    ];
+    for change in changes {
+        let mut changed = original.clone();
+        change(&mut changed);
+        assert!(Arc::ptr_eq(&original.items, &changed.items));
+        assert!(!original.has_same_fork_metadata(&changed));
+    }
+}
+
 #[test_case(None, 100, 5, true; "model policy")]
 #[test_case(Some(200), 100, 200, false; "configured override")]
 #[test_case(Some(100), 85, 100, true; "saved limit has no additional allowance")]

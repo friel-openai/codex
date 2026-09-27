@@ -46,6 +46,7 @@ pub(crate) fn serialize_tiered_input(
             RolloutItem::ResponseItem(item) => sanitize_response_item_for_memories(&item.item),
             RolloutItem::InterAgentCommunication(message) => Some(message.to_model_input_item()),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
