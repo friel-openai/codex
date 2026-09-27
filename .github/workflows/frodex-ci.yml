@@ -167,11 +167,11 @@ jobs:
           # Any other source tree restores the ordinary selection below.
           feature_tree=$(git rev-parse HEAD^{tree})
           if [[ "${feature_tree}" == 9bca9f524435fee153f68ec4c316b77d74129fa5 ||
-                "${feature_tree}" == 389e36517c02bb68aa576041516459170e5e53ee ]]; then
+                "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
             # Library tests do not instantiate every future through cli_main.
             cargo build --manifest-path codex-rs/Cargo.toml \
               --profile ci-test -p codex-cli --bin codex --locked
-            if [[ "${feature_tree}" == 389e36517c02bb68aa576041516459170e5e53ee ]]; then
+            if [[ "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
               cargo build --manifest-path codex-rs/Cargo.toml \
                 --profile ci-test --locked \
                 -p codex-rmcp-client --bin test_stdio_server \
@@ -203,7 +203,7 @@ jobs:
               -p codex-core -p codex-thread-store -p codex-tui \
               -p codex-app-server -p codex-rollout \
               --lib --locked --no-tests fail -E "${fork_filter}"
-            if [[ "${feature_tree}" == 389e36517c02bb68aa576041516459170e5e53ee ]]; then
+            if [[ "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
               just test --cargo-profile ci-test \
                 --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
                 -p codex-app-server-daemon --lib --locked --no-tests fail \
