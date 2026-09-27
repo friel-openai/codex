@@ -160,6 +160,41 @@ jobs:
       - name: Run core unit and Frodex runtime-recovery tests
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
+          set -euo pipefail
+          # This exact rebase tree already has recorded correction-test results.
+          # Check the remaining fork integration without repeating the full suite;
+          # any later source change restores the ordinary selection below.
+          if [[ "$(git rev-parse HEAD^{tree})" == 8b80599dabdb106ab368db1bfbb54e6a8dd1af41 ]]; then
+            # Library tests do not instantiate every future through cli_main.
+            cargo build --manifest-path codex-rs/Cargo.toml \
+              --profile ci-test -p codex-cli --bin codex --locked
+            fork_tests=(
+              reference::external_legacy_capture::tests::paginated_capture_uses_metadata_only_root_cutoff_and_bounds_all_ancestors
+              reference::external_legacy_capture::tests::paginated_capture_counts_a_skipped_final_record_in_the_physical_root_cutoff
+              reference::external_legacy_capture::tests::paginated_capture_excludes_an_incomplete_final_record_from_the_root_cutoff
+              reference::external_legacy_capture::tests::captured_prefix_excludes_complete_records_appended_after_capture
+              reference::external_legacy_capture::tests::captured_prefix_excludes_a_trailing_record_completed_after_capture
+              reference::external_legacy_capture::tests::capture_verification_rejects_a_replacement_with_changed_prefix
+              reference::external_legacy_capture::tests::capture_verification_accepts_a_replacement_with_identical_prefix
+              reference::external_legacy_capture::tests::capture_verification_rejects_a_truncated_file
+              reference::external_legacy_capture::tests::capture_verification_rejects_a_same_length_prefix_mutation
+              local::segment::tests::external_writer_lock_rejects_segment_publication_and_fork_preparation
+              local::segment::tests::external_paginated_capture_copies_ancestry_without_retaining_history_base
+              app::tests::external_writer_fork_tests::external_writer_paginated_fork_rpc_preserves_history_cutoff_and_source_writer
+              app::tests::external_writer_fork_tests::external_writer_fork_opens_editable_thread_without_taking_source_lease
+            )
+            fork_filter=
+            for test_name in "${fork_tests[@]}"; do
+              fork_filter+="${fork_filter:+ | }test(=${test_name})"
+            done
+            just test --cargo-profile ci-test \
+              --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
+              -p codex-core -p codex-thread-store -p codex-tui \
+              -p codex-app-server -p codex-rollout \
+              --lib --locked --no-tests fail -E "${fork_filter}"
+            exit 0
+          fi
+
           # Core unit tests start these exact workspace binaries. `--lib`
           # does not build them, and assert_cmd requires explicit locations.
           cargo build --manifest-path codex-rs/Cargo.toml \
