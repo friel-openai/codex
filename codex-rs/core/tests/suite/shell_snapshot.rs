@@ -344,8 +344,11 @@ fn shell_snapshot_v2_prewarm_builder(profile_home: &Path) -> TestCodexBuilder {
                 .permissions
                 .shell_environment_policy
                 .ignore_default_excludes = false;
-            config.permissions.shell_environment_policy.r#set =
-                HashMap::from([("HOME".to_string(), configured_home)]);
+            // The fixture exercises .bashrc, not a devbox's inherited BASH_ENV script.
+            config.permissions.shell_environment_policy.r#set = HashMap::from([
+                ("HOME".to_string(), configured_home),
+                ("BASH_ENV".to_string(), String::new()),
+            ]);
         })
 }
 
@@ -727,6 +730,15 @@ async fn shell_snapshot_v2_guardian_uses_its_resolved_permissions_and_tools(
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    // Shutdown cancels background prewarming. Observe the parent capture before
+    // stopping it, then verify that Guardian never acquired writable authority.
+    wait_for_file_contents(
+        &profile_home
+            .path()
+            .join(test.session_configured.thread_id.to_string()),
+        "capture",
+    )
+    .await?;
     test.codex.shutdown_and_wait().await?;
     let requests = responses.requests();
     let guardian_requests = requests
@@ -787,6 +799,7 @@ async fn shell_snapshot_v2_filters_profile_secrets_without_creating_files() -> R
             config.permissions.shell_environment_policy.r#set = HashMap::from([
                 ("HOME".to_string(), configured_home),
                 ("PROFILE_ALLOWED".to_string(), "policy".to_string()),
+                ("BASH_ENV".to_string(), String::new()),
             ]);
         });
     let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
