@@ -1159,7 +1159,6 @@ async fn manual_compact_records_durable_and_local_token_usage() {
         set_test_compact_prompt(config);
     });
     let test = builder.build(&server).await.unwrap();
-    let rollout_path = test.codex.rollout_path().expect("rollout path");
     let codex = test.codex;
 
     // Trigger manual compact and collect TokenCount events for the compact turn.
@@ -1196,12 +1195,13 @@ async fn manual_compact_records_durable_and_local_token_usage() {
         last > 0,
         "second TokenCount should reflect a non-zero estimated context size after compaction"
     );
-    let rollout_items = fs::read_to_string(rollout_path)
-        .expect("read rollout")
-        .lines()
-        .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
-        .map(|line| line.item)
-        .collect::<Vec<_>>();
+    // Compaction can rotate earlier records into immutable segments. Read the
+    // persisted logical history rather than only the active JSONL suffix.
+    let rollout_items = codex
+        .load_history(/*include_archived*/ false)
+        .await
+        .expect("read persisted rollout history")
+        .items;
     let records = rollout_items
         .iter()
         .filter_map(|item| match item {

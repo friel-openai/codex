@@ -342,8 +342,7 @@ async fn run_remote_compact_task_inner_impl(
         );
     }
     analytics_details.retained_image_count = Some(retained_images);
-    let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (initial_context, world_state_baseline) =
+    let (initial_context, world_state_baseline, prepared_window_advance) =
         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
@@ -380,20 +379,19 @@ async fn run_remote_compact_task_inner_impl(
         None
     };
     sess.replace_compacted_history(
+        compaction_turn_context,
         new_history,
         reference_context_item,
         world_state_baseline,
         CompactedHistoryMetadata {
             message: String::new(),
-            window_number: new_window_number,
-            window_ids: new_window_ids,
             compaction_response_id: Some(compaction_response_id),
             compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash,
+            prepared_window_advance,
         },
     )
     .await?;
-    sess.recompute_token_usage(compaction_turn_context).await;
 
     if reporting.defers_lifecycle() {
         sess.emit_turn_item_started(compaction_turn_context, &compaction_item)

@@ -7,10 +7,91 @@ use crate::mcp_policy::EnvironmentMcpPolicy;
 use crate::models::PermissionProfile;
 use crate::models::PermissionProfileSnapshot;
 use crate::protocol::AskForApproval;
+use crate::protocol::TurnEnvironmentSelection;
+use crate::protocol::TurnEnvironmentSelections;
 use crate::sandbox::SandboxType;
 use codex_execpolicy::RequirementsExecPolicy;
 use codex_network_proxy::EnvironmentNetworkPolicy;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
+use ts_rs::TS;
+
+/// Configuration authority retained across restarts, without process-local owner configuration.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PersistedEnvironmentConfigSource {
+    /// Older checkpoints omitted configuration authority and used thread configuration.
+    #[default]
+    Thread,
+    /// The environment owner must supply fresh configuration after a restart.
+    Owner,
+}
+
+/// A selected environment's durable location and configuration authority.
+/// Runtime permission snapshots, shell policy values, and failed startup details are not persisted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct PersistedEnvironmentSelection {
+    pub environment_id: String,
+    pub cwd: PathUri,
+    pub workspace_roots: Vec<PathUri>,
+    /// Missing in older checkpoints, which restored thread-derived configuration.
+    #[serde(default)]
+    pub config_source: PersistedEnvironmentConfigSource,
+}
+
+impl From<TurnEnvironmentSelection> for PersistedEnvironmentSelection {
+    fn from(selection: TurnEnvironmentSelection) -> Self {
+        Self {
+            environment_id: selection.environment_id,
+            cwd: selection.cwd,
+            workspace_roots: selection.workspace_roots,
+            config_source: match selection.config {
+                EnvironmentConfigState::FromThread => PersistedEnvironmentConfigSource::Thread,
+                EnvironmentConfigState::Pending
+                | EnvironmentConfigState::Ready(_)
+                | EnvironmentConfigState::Failed(_) => PersistedEnvironmentConfigSource::Owner,
+            },
+        }
+    }
+}
+
+impl From<PersistedEnvironmentSelection> for TurnEnvironmentSelection {
+    fn from(selection: PersistedEnvironmentSelection) -> Self {
+        Self {
+            environment_id: selection.environment_id,
+            cwd: selection.cwd,
+            workspace_roots: selection.workspace_roots,
+            config: match selection.config_source {
+                PersistedEnvironmentConfigSource::Thread => EnvironmentConfigState::FromThread,
+                PersistedEnvironmentConfigSource::Owner => EnvironmentConfigState::Pending,
+            },
+        }
+    }
+}
+
+/// Durable selection state; live settings continue to use `TurnEnvironmentSelections`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct PersistedEnvironmentSelections {
+    pub legacy_fallback_cwd: AbsolutePathBuf,
+    pub environments: Vec<PersistedEnvironmentSelection>,
+}
+
+impl From<TurnEnvironmentSelections> for PersistedEnvironmentSelections {
+    fn from(selections: TurnEnvironmentSelections) -> Self {
+        Self {
+            legacy_fallback_cwd: selections.legacy_fallback_cwd,
+            environments: selections
+                .environments
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
 
 /// Configuration supplied for a thread's selected environment.
 #[allow(clippy::large_enum_variant)]

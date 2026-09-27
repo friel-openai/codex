@@ -27,14 +27,17 @@ pub struct PreviousTurnSettings {
     pub realtime_active: Option<bool>,
 }
 
-/// Returns the runtime version stored in a turn context or compaction resume metadata.
-pub fn resume_multi_agent_version(item: &RolloutItem) -> Option<MultiAgentVersion> {
+/// Returns a persisted runtime value, including an authoritative empty value.
+///
+/// The outer `None` permits fallback to older records. `Some(None)` from modern
+/// compaction metadata must stop that scan rather than restore an older runtime.
+pub fn resume_multi_agent_version(item: &RolloutItem) -> Option<Option<MultiAgentVersion>> {
     match item {
-        RolloutItem::TurnContext(context) => context.multi_agent_version,
+        RolloutItem::TurnContext(context) => context.multi_agent_version.map(Some),
         RolloutItem::Compacted(compacted) => compacted
             .resume_metadata
             .as_ref()
-            .and_then(|metadata| metadata.multi_agent_version),
+            .map(|metadata| metadata.multi_agent_version),
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
@@ -43,6 +46,7 @@ pub fn resume_multi_agent_version(item: &RolloutItem) -> Option<MultiAgentVersio
         | RolloutItem::WorldState(_)
         | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     }
