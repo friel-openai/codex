@@ -6,6 +6,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -27,6 +28,9 @@ const MAX_NOT_FOUND_RETRIES: usize = 3;
 const OPEN_ROLLOUT_LINE_READER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const TEMP_SUFFIX: &str = ".tmp";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+// Feedback and SQLite subscribers capture TRACE by default, so file-open events must be opt-in.
+static HISTORY_IO_OBSERVATION_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("FRODEX_HISTORY_IO_TRACE").is_some_and(|value| value == "1"));
 
 /// The entry point that requested a compression pass, not a Statsig cohort.
 #[derive(Clone, Copy, Debug)]
@@ -81,6 +85,21 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
         reader::open_once(path, &mut metrics).await
     }
     .await;
+    metrics.duration = started_at.elapsed();
+    match result {
+        Ok(inner) => Ok(RolloutLineReader { inner, metrics }),
+        Err(err) => {
+            metrics.failed("open", &err);
+            Err(err)
+        }
+    }
+}
+
+/// Opens exactly the requested physical representation without plain-file precedence.
+pub(crate) async fn open_rollout_line_reader_exact(path: &Path) -> io::Result<RolloutLineReader> {
+    let started_at = Instant::now();
+    let mut metrics = ReadMetrics::default();
+    let result = reader::open_exact(path.to_path_buf(), &mut metrics).await;
     metrics.duration = started_at.elapsed();
     match result {
         Ok(inner) => Ok(RolloutLineReader { inner, metrics }),
@@ -1343,6 +1362,22 @@ mod reader {
         let path = path::existing_rollout_path(path)
             .await
             .unwrap_or_else(|| path.to_path_buf());
+        open_exact(path, metrics).await
+    }
+
+    pub(super) async fn open_exact(
+        path: std::path::PathBuf,
+        metrics: &mut ReadMetrics,
+    ) -> io::Result<RolloutLineReaderInner> {
+        if *super::HISTORY_IO_OBSERVATION_ENABLED {
+            tracing::event!(
+                target: "codex_history_io",
+                tracing::Level::TRACE,
+                event.name = "codex.history.rollout.open",
+                rollout_path = %path.display(),
+                "opening rollout history file"
+            );
+        }
         if path::is_compressed_rollout_path(path.as_path()) {
             metrics.format = "zstd";
             let reader = tokio::task::spawn_blocking(move || {

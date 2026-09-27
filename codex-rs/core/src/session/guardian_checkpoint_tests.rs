@@ -5,9 +5,11 @@ use crate::session::tests::make_session_and_context;
 use codex_history::InitialHistory;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use test_case::test_case;
 
 #[test_case(GuardianContextMode::Legacy; "legacy")]
@@ -30,6 +32,9 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
     let world_state = WorldStateSnapshot::from(baseline.as_object().unwrap());
     {
         let mut state = session.state.lock().await;
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
+        state.session_configuration.thread_source =
+            Some(ThreadSource::Feature("system".to_string()));
         state.history = ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
         state
             .history
@@ -90,10 +95,18 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
     // Replay into a fresh session so preserved live state cannot mask missing checkpoint data.
     let (mut fork, _) = make_session_and_context().await;
     fork.guardian_context_mode = mode;
-    fork.state.lock().await.history =
-        ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
+    {
+        let mut state = fork.state.lock().await;
+        // Only system-ephemeral startup is allowed to replay without a durable writer.
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
+        state.session_configuration.thread_source =
+            Some(ThreadSource::Feature("system".to_string()));
+        state.history = ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
+    }
     fork.record_initial_history(InitialHistory::Forked(items))
-        .await;
+        .await
+        .expect("guardian checkpoint history must replay successfully");
+    assert!(fork.live_thread().is_none());
     let restored = fork.clone_history().await;
     assert_eq!(restored.annotated_items(), expected.annotated_items());
     assert_eq!(restored.retained_context(), expected.retained_context());

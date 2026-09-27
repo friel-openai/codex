@@ -960,12 +960,8 @@ async fn fork_reconnect_preserves_inherited_parent_input() {
     let (child, _) = test
         .thread_manager
         .fork_prepared_thread(
-            test.config.clone(),
+            codex_core::StartThreadOptions::new(test.config.clone()),
             prepared,
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
-            codex_protocol::mcp::ClientMcpExtensions::default(),
-            /*reserved_thread_id*/ None,
         )
         .await
         .expect("fork with inherited context");

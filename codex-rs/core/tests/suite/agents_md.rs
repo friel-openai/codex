@@ -1595,6 +1595,7 @@ async fn fork_preserves_thread_instructions(
             test.thread_manager
                 .fork_prepared_thread(options, prepared)
                 .await?
+                .0
         }
     };
     submit_thread_turn(&fork.thread, "continue with inherited instructions").await?;
