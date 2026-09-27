@@ -33,7 +33,11 @@ codex_rust_crate(
     },
     test_data_extra = [
         "config.schema.json",
-    ] + glob(["src/**/snapshots/**"]) + [
+    ] + glob([
+        "src/**/snapshots/**",
+        "src/tools/fixtures/**",
+        "tests/fixtures/**",
+    ]) + [
         # This is a bit of a hack, but empirically, some of our integration tests
         # are relying on the presence of this file as a repo root marker. When
         # running tests locally, this "just works," but in remote execution,
