@@ -1064,6 +1064,8 @@ mod tests {
                 realtime_active: None,
                 cyber_access_program: None,
                 effort: None,
+                service_tier: None,
+                model_profile: None,
                 summary: ReasoningSummary::Auto,
             })
         };

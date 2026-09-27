@@ -39,7 +39,12 @@ async fn stops_at_newest_usable_compaction_and_keeps_companions() {
     let uuid = Uuid::from_u128(/*v*/ 1001);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
     let world_state = RolloutItem::WorldState(WorldStateItem::full(Default::default()));
-    let turn_context = turn_context(home.path(), "companion");
+    let mut turn_context = turn_context(home.path(), "companion");
+    let RolloutItem::TurnContext(latest_turn_context_item) = &mut turn_context else {
+        unreachable!("turn_context should return a turn context item");
+    };
+    latest_turn_context_item.service_tier = Some("priority".to_string());
+    latest_turn_context_item.model_profile = Some("balanced".to_string());
     let path = write_paginated_rollout(
         home.path(),
         "2025-01-03T13-00-00",
@@ -699,6 +704,8 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         realtime_active: None,
         cyber_access_program: None,
         effort: None,
+        service_tier: None,
+        model_profile: None,
         summary: ReasoningSummary::Auto,
     })
 }
