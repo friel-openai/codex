@@ -69,6 +69,7 @@ fn restores_cumulative_item_and_compaction_checkpoints() {
             replacement_history: Some(vec![envelope(Some(cumulative.clone()))]),
             guardian_history: None,
             retained_context: None,
+            retained_context_replay: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,

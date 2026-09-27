@@ -39,6 +39,7 @@ fn compacted() -> CompactedItem {
             internal_chat_message_metadata_passthrough: None,
         })]),
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         compaction_response_id: None,

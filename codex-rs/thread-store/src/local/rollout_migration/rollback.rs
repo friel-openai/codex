@@ -80,6 +80,8 @@ fn is_known_contextual_user_message_content(content: &[ContentItem]) -> bool {
 }
 
 fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> bool {
+    // Keep core/event_mapping.rs's persisted developer prefixes: trimming these records
+    // also supplies the source turn IDs used to remove retained verified answers.
     content.iter().any(|item| {
         let ContentItem::InputText { text } = item else {
             return false;
@@ -87,10 +89,13 @@ fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> boo
         let text = text.trim_start();
         [
             "<permissions instructions>",
+            "Approved command prefix saved:",
             "<model_switch>",
             "<managed_developer_instructions>",
+            "<persistent_mode>",
             "<apps_instructions>",
             "<collaboration_mode>",
+            "<multi_agent_role>",
             "<multi_agent_mode>",
             "<environments_instructions>",
             "<git_attribution>",

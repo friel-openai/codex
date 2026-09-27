@@ -234,7 +234,9 @@ async fn read_direct_reference_metadata(
     let mut session_meta = None;
     let mut leading_reference = None;
     while let Some(line) = reader.next_line().await? {
-        let Ok(line) = crate::parse_rollout_line(line.trim()) else {
+        let Ok(Some(line)) =
+            crate::recorder::RolloutRecorder::parse_rollout_line_bytes(line.trim().as_bytes())
+        else {
             continue;
         };
         match line.item {
