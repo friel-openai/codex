@@ -292,6 +292,7 @@ impl StepContext {
                 &[],
             )),
             loaded_agents_md: None,
+            context_transition: Default::default(),
         })
     }
 
@@ -11450,9 +11451,9 @@ impl SessionTask for ExtensionInterruptedTask {
     }
 }
 
-pub(super) struct HeldStepTask {
-    pub(super) kind: TaskKind,
-    pub(super) finish: Arc<Notify>,
+pub(crate) struct HeldStepTask {
+    pub(crate) kind: TaskKind,
+    pub(crate) finish: Arc<Notify>,
 }
 
 impl SessionTask for HeldStepTask {

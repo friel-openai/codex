@@ -1596,6 +1596,7 @@ impl Session {
         // Future thread settings may already differ from this request's settings.
         session_configuration.step_settings = Arc::new(settings.selected().clone());
         let environments = self.services.turn_environments.snapshot().await;
+        session_configuration.environments = environments.all_selections();
         let refreshed = self
             .new_turn_context_from_configuration(
                 current.sub_id.clone(),

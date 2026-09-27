@@ -113,6 +113,15 @@ pub(super) async fn reconnect(
         let result = tokio::time::timeout_at(deadline, attempt).await;
         match result {
             Ok(Ok(connected)) => return Ok(connected),
+            Ok(Err(error))
+                if error
+                    .downcast_ref::<crate::app_server_connection::LocalDaemonVersionMismatch>()
+                    .is_some() =>
+            {
+                // A different release cannot safely resume this session. Keep the TUI offline;
+                // only a fresh launch may choose an embedded server instead.
+                return Err(error);
+            }
             Ok(Err(_)) => {}
             Err(_) => break,
         }
