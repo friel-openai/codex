@@ -38,6 +38,7 @@ pub(crate) fn build_reviewer_config(parent_config: &Config) -> anyhow::Result<Co
     })?;
     for feature in [
         Feature::Collab,
+        Feature::AgentPromptInjection,
         Feature::MultiAgentV2,
         Feature::GuardianV2,
         Feature::TokenBudget,
