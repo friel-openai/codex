@@ -1165,14 +1165,15 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::RawResponseItem(mut raw_response_item_event) => {
             // Keep warehouse metadata out of app-server notifications.
             raw_response_item_event.item.clear_executed_tool_calls();
-            maybe_emit_raw_response_item_completed(
+            let mut notification = raw_response_item_completed_notification(
                 conversation_id,
                 &event_turn_id,
                 raw_response_item_event.item,
-                conversation.enabled(Feature::OmitAppServerNotificationMedia),
-                &outgoing,
-            )
-            .await;
+            );
+            if conversation.enabled(Feature::OmitAppServerNotificationMedia) {
+                notification = without_notification_media(notification);
+            }
+            outgoing.send_server_notification(notification).await;
         }
         EventMsg::RawResponseCompleted(raw_response_completed_event) => {
             let notification = RawResponseCompletedNotification {
@@ -1489,31 +1490,27 @@ async fn complete_command_execution_item(
         .await;
 }
 
-async fn maybe_emit_raw_response_item_completed(
+fn raw_response_item_completed_notification(
     conversation_id: ThreadId,
     turn_id: &str,
     item: codex_protocol::models::ResponseItem,
-    omit_media: bool,
-    outgoing: &ThreadScopedOutgoingMessageSender,
-) {
-    let mut notification = if let Some(thread_item) = inter_agent_message_item(&item) {
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
+) -> ServerNotification {
+    if let Some(thread_item) = inter_agent_message_item(&item) {
+        let notification = ItemCompletedNotification {
             thread_id: conversation_id.to_string(),
             turn_id: turn_id.to_string(),
             item: thread_item,
             completed_at_ms: now_unix_timestamp_ms(),
-        })
-    } else {
-        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
-            thread_id: conversation_id.to_string(),
-            turn_id: turn_id.to_string(),
-            item,
-        })
-    };
-    if omit_media {
-        notification = without_notification_media(notification);
+        };
+        return ServerNotification::ItemCompleted(notification);
     }
-    outgoing.send_server_notification(notification).await;
+
+    let notification = RawResponseItemCompletedNotification {
+        thread_id: conversation_id.to_string(),
+        turn_id: turn_id.to_string(),
+        item,
+    };
+    ServerNotification::RawResponseItemCompleted(notification)
 }
 
 pub(crate) fn is_inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> bool {
@@ -3991,14 +3988,12 @@ mod tests {
         );
         let item = communication.to_model_input_item();
 
-        maybe_emit_raw_response_item_completed(
-            conversation_id,
-            "turn-1",
-            item.clone(),
-            omit_media,
-            &outgoing,
-        )
-        .await;
+        let mut notification =
+            raw_response_item_completed_notification(conversation_id, "turn-1", item.clone());
+        if omit_media {
+            notification = without_notification_media(notification);
+        }
+        outgoing.send_server_notification(notification).await;
 
         let msg = recv_broadcast_notification(&mut rx).await?;
         match msg {
@@ -4058,14 +4053,12 @@ mod tests {
         );
         let item = communication.to_model_input_item();
 
-        maybe_emit_raw_response_item_completed(
-            conversation_id,
-            "turn-1",
-            item.clone(),
-            omit_media,
-            &outgoing,
-        )
-        .await;
+        let mut notification =
+            raw_response_item_completed_notification(conversation_id, "turn-1", item.clone());
+        if omit_media {
+            notification = without_notification_media(notification);
+        }
+        outgoing.send_server_notification(notification).await;
 
         let msg = recv_broadcast_notification(&mut rx).await?;
         match msg {
