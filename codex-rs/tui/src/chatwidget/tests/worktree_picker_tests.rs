@@ -15,16 +15,19 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.config.cwd =
         AbsolutePathBuf::from_absolute_path(checkout.path()).expect("absolute checkout");
 
-    chat.dispatch_command(SlashCommand::Fork);
+    chat.dispatch_fork_command(/*multiplexer*/ None);
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::ForkCurrentSession { name: None })
+        Ok(AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        })
     );
     chat.dispatch_command(SlashCommand::New);
     assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: None }));
 
     chat.set_feature_enabled(Feature::Worktrees, /*enabled*/ true);
-    chat.dispatch_command(SlashCommand::Fork);
+    chat.dispatch_fork_command(/*multiplexer*/ None);
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("worktrees_fork_choices", popup);
@@ -54,10 +57,13 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.set_local_worktree_operations(/*enabled*/ false);
     chat.dispatch_command(SlashCommand::New);
     assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: None }));
-    chat.dispatch_command(SlashCommand::Fork);
+    chat.dispatch_fork_command(/*multiplexer*/ None);
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::ForkCurrentSession { name: None })
+        Ok(AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        })
     );
     for (available, snapshot) in [
         (false, "worktrees_command_remote"),
