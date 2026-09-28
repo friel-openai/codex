@@ -474,7 +474,11 @@ impl LocalThreadStore {
                     malformed_lineage(segment.thread_id, "rollout byte offset overflow")
                 })?);
             }
-            let parsed = parse_rollout_bytes(bytes.as_slice(), segment.thread_id)?;
+            let parsed = parse_rollout_bytes(
+                materialized_path.as_path(),
+                bytes.as_slice(),
+                segment.thread_id,
+            )?;
             // Ordinal-only legacy cutoffs must name a real boundary, not an ordinal beyond EOF.
             if segment.end_ordinal_exclusive.is_some()
                 && parsed
@@ -1529,40 +1533,14 @@ async fn next_rollout_line(
 }
 
 fn parse_rollout_bytes(
+    path: &Path,
     bytes: &[u8],
     thread_id: ThreadId,
 ) -> ThreadStoreResult<Vec<(u64, RolloutLine)>> {
-    let mut parsed = Vec::new();
-    let mut offset = 0_u64;
-    for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let start = offset;
-        offset = offset
-            .checked_add(
-                u64::try_from(physical_line.len())
-                    .map_err(|_| malformed_lineage(thread_id, "rollout byte offset overflow"))?,
-            )
-            .ok_or_else(|| malformed_lineage(thread_id, "rollout byte offset overflow"))?;
-        if physical_line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let value =
-            serde_json::from_slice::<serde_json::Value>(physical_line).map_err(|error| {
-                malformed_lineage(
-                    thread_id,
-                    format!("source rollout contains invalid JSON: {error}").as_str(),
-                )
-            })?;
-        let Some(line) = RolloutRecorder::parse_rollout_line_value(value).map_err(|error| {
-            malformed_lineage(
-                thread_id,
-                format!("source rollout contains an invalid record: {error}").as_str(),
-            )
-        })?
-        else {
-            continue;
-        };
-        parsed.push((start, line));
-    }
+    // resolve_path validates SessionMeta and any leading reference before snapshot loading.
+    // Interior damaged records use the same policy as ordinary file loading, not head recovery.
+    let (parsed, _, _) = RolloutRecorder::load_rollout_lines_from_bytes(path, bytes)
+        .map_err(|error| malformed_lineage(thread_id, error.to_string().as_str()))?;
     Ok(parsed)
 }
 
@@ -1937,3 +1915,7 @@ fn lineage_io_error(err: io::Error) -> ThreadStoreError {
 #[cfg(test)]
 #[path = "rollout_lineage_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rollout_lineage_corrupt_records_tests.rs"]
+mod corrupt_records_tests;
