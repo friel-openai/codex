@@ -254,8 +254,9 @@ impl Default for GhostSnapshotConfig {
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
-pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
+// Frodex permits 256 children by default; the V2 session limit also counts the root.
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(256);
+pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 257;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
@@ -1342,7 +1343,7 @@ pub struct MultiAgentV2Config {
     pub wait_agent_enabled: bool,
     pub disable_direct_message: bool,
     pub message_board_in_memory: bool,
-    /// Expose same-thread adoption and promotion only after explicit opt-in.
+    /// Expose same-thread adoption and promotion unless explicitly disabled.
     pub enable_thread_adoption: bool,
     pub non_code_mode_only: bool,
 }
@@ -1365,7 +1366,7 @@ impl MultiAgentV2Config {
             wait_agent_enabled: true,
             disable_direct_message: false,
             message_board_in_memory: false,
-            enable_thread_adoption: false,
+            enable_thread_adoption: true,
             non_code_mode_only: true,
         }
     }
