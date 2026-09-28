@@ -17,6 +17,10 @@ pub(super) fn usage_hint_text(step_context: &StepContext) -> Option<MultiAgentRo
         return None;
     }
 
+    if crate::goal_supervisor::is_goal_supervisor_helper_source(&turn_context.session_source) {
+        return None;
+    }
+
     let multi_agent_messages =
         ResolvedModelMessages::from_model(&step_context.settings.model_info).multi_agent();
     let snapshot = resolve_usage_hints(

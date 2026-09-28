@@ -803,6 +803,7 @@ non_code_mode_only = true
             disable_direct_message: Some(true),
             message_board_in_memory: Some(true),
             non_code_mode_only: Some(true),
+            enable_thread_adoption: None,
         }))
     );
 }
