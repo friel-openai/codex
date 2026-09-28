@@ -25,7 +25,7 @@ use tokio::sync::watch;
 use crate::McpEventStreamOpener;
 use crate::McpRuntime;
 use crate::connection_manager::McpConnectionSet;
-use crate::connection_manager::McpServerConnection;
+use crate::connection_pool::McpPooledClient;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 
 /// One page of resources returned by an MCP server.
@@ -86,6 +86,9 @@ pub struct McpEventStream {
     runtime_handle: Handle,
     client: Option<Arc<RmcpClient>>,
     cancel_event_streams_on_server_removal: watch::Receiver<()>,
+    // Shared subscriptions retain their connection generation through cancellation.
+    // Dedicated subscription clients do not own a pool lease.
+    pooled_client: Option<McpPooledClient>,
 }
 
 impl McpEventStream {
@@ -109,6 +112,7 @@ impl McpEventStream {
             runtime_handle: Handle::current(),
             client: Some(client),
             cancel_event_streams_on_server_removal,
+            pooled_client: None,
         })
     }
 
@@ -139,6 +143,7 @@ impl McpEventStream {
             response = &mut request.handle.rx => {
                 self.request = None;
                 self.client = None;
+                self.pooled_client = None;
 
                 match response {
                     Ok(Ok(_))
@@ -159,6 +164,7 @@ impl McpEventStream {
         {
             drop(notifications);
             let client = self.client.take();
+            let pooled_client = self.pooled_client.take();
             self.runtime_handle.spawn(async move {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
@@ -166,6 +172,7 @@ impl McpEventStream {
                 )
                 .await;
                 drop(client);
+                drop(pooled_client);
             });
         }
     }
@@ -207,13 +214,15 @@ impl Eq for McpResourceClientCacheKey {}
 /// invalidated. The key does not keep superseded connections alive.
 #[derive(Clone)]
 pub struct McpResourceServerCacheKey {
-    pub(crate) connection: Weak<McpServerConnection>,
+    /// Identifies the physical connection, not the pool slot reused by replacements.
+    pub(crate) connection_id: u64,
+    /// Advances when the owning runtime explicitly invalidates resource caches.
     pub(crate) generation: u64,
 }
 
 impl PartialEq for McpResourceServerCacheKey {
     fn eq(&self, other: &Self) -> bool {
-        self.connection.ptr_eq(&other.connection) && self.generation == other.generation
+        self.connection_id == other.connection_id && self.generation == other.generation
     }
 }
 
@@ -307,14 +316,23 @@ impl McpResourceClient {
         let params = serde_json::to_value(params)
             .context("failed to serialize Codex Apps resource params")?;
         let connections = self.runtime.latest_host_owned_codex_apps_connections()?;
-        let (managed, timeout) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
+        let result = connections
+            .run_client_request_by_name(
+                CODEX_APPS_MCP_SERVER_NAME,
+                move |client, request_timeout| async move {
+                    let managed = client.client().await.context("failed to get MCP client")?;
+                    managed
+                        .client
+                        .send_custom_request_with_timeout(
+                            "resources/list",
+                            Some(params),
+                            request_timeout,
+                        )
+                        .await
+                        .context("resources/list failed for `codex_apps`")
+                },
+            )
             .await?;
-        let result = managed
-            .client
-            .send_custom_request_with_timeout("resources/list", Some(params), timeout)
-            .await
-            .context("resources/list failed for `codex_apps`")?;
         let result = match result {
             ServerResult::ListResourcesResult(result) => result,
             ServerResult::CustomResult(result) => result
@@ -355,14 +373,23 @@ impl McpResourceClient {
             .runtime
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
         let cache_key = McpResourceClientCacheKey(Arc::downgrade(&connections));
-        let (managed, request_timeout) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
+        let result = connections
+            .run_client_request_by_name(
+                CODEX_APPS_MCP_SERVER_NAME,
+                |client, request_timeout| async move {
+                    let managed = client.client().await.context("failed to get MCP client")?;
+                    managed
+                        .client
+                        .send_custom_request_with_timeout(
+                            "events/list",
+                            /*params*/ None,
+                            request_timeout,
+                        )
+                        .await
+                        .context("events/list failed for hosted Plugin Runtime")
+                },
+            )
             .await?;
-        let result = managed
-            .client
-            .send_custom_request_with_timeout("events/list", /*params*/ None, request_timeout)
-            .await
-            .context("events/list request failed")?;
         let ServerResult::CustomResult(result) = result else {
             return Err(anyhow!("events/list returned an unexpected MCP result"));
         };
@@ -386,17 +413,27 @@ impl McpResourceClient {
         let (connections, cancel_event_streams_on_server_removal) = self
             .runtime
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
-        let (managed, _) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
-            .await?;
-        McpEventStream::open(
-            managed.client,
-            cancel_event_streams_on_server_removal,
-            event_name,
-            arguments,
-            request_meta,
-        )
-        .await
+        let event_name = event_name.to_owned();
+        let arguments = arguments.clone();
+        let request_meta = request_meta.cloned();
+        connections
+            .run_client_request_by_name(
+                CODEX_APPS_MCP_SERVER_NAME,
+                move |client, _request_timeout| async move {
+                    let managed = client.client().await.context("failed to get MCP client")?;
+                    let mut stream = McpEventStream::open(
+                        managed.client,
+                        cancel_event_streams_on_server_removal,
+                        &event_name,
+                        &arguments,
+                        request_meta.as_ref(),
+                    )
+                    .await?;
+                    stream.pooled_client = Some(client);
+                    Ok(stream)
+                },
+            )
+            .await
     }
 
     /// Creates an event stream opener using the task's event server settings.

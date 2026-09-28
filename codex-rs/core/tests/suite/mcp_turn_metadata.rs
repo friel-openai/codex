@@ -397,6 +397,11 @@ default_tools_approval_mode = "{approval_mode}"
 "#
     ))
     .expect("apps config should parse");
+    std::fs::write(
+        &user_config_path,
+        toml::to_string(&user_config).expect("serialize apps config"),
+    )
+    .expect("persist apps config for per-turn reload");
     config.config_layer_stack = config
         .config_layer_stack
         .with_user_config(&user_config_path, user_config)
@@ -423,6 +428,11 @@ default_tools_approval_mode = "{approval_mode}"
 "#
     ))
     .expect("apps config should parse");
+    std::fs::write(
+        &user_config_path,
+        toml::to_string(&user_config).expect("serialize apps config"),
+    )
+    .expect("persist apps config for per-turn reload");
     config.config_layer_stack = config
         .config_layer_stack
         .with_user_config(&user_config_path, user_config)
@@ -877,6 +887,11 @@ approvals_reviewer = "auto_review"
 "#
                 ))
                 .expect("apps config should parse");
+                std::fs::write(
+                    config.codex_home.join("config.toml"),
+                    toml::to_string(&user_config).expect("serialize work-link config"),
+                )
+                .expect("persist work-link config for per-turn reload");
                 config.config_layer_stack = config
                     .config_layer_stack
                     .with_user_config(&config.codex_home.join("config.toml").abs(), user_config)
@@ -927,10 +942,7 @@ approvals_reviewer = "auto_review"
         .requests()
         .into_iter()
         .find(|request| {
-            request
-                .message_input_texts("developer")
-                .iter()
-                .any(|text| text.starts_with("You are judging one planned coding-agent action."))
+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
         })
         .expect("expected a Guardian request for the app MCP approval");
     assert!(guardian_request.body_contains_text("calendar_create_event"));
