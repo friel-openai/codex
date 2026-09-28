@@ -383,8 +383,10 @@ impl App {
                 && (modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT)
             {
                 self.chat_widget.fork_in_progress = true;
-                self.app_event_tx
-                    .send(AppEvent::ForkCurrentSession { name: None });
+                self.app_event_tx.send(AppEvent::ForkCurrentSession {
+                    name: None,
+                    placement: None,
+                });
                 return;
             }
             if matches!(key_event.code, KeyCode::Char('r' | 'R'))

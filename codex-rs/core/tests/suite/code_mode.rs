@@ -919,6 +919,8 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
             "exec".to_string(),
             "wait".to_string(),
             "request_user_input".to_string(),
+            "collaboration".to_string(),
+            "frodex".to_string(),
             "web_search".to_string()
         ]
     );
@@ -1366,6 +1368,17 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
                     }
 
                     let mut servers = config.mcp_servers.get().clone();
+                    // V2 collaboration stays direct in Frodex. Supply a genuinely
+                    // unrelated deferred namespace to test omission isolation.
+                    servers.insert(
+                        "unrelated".to_string(),
+                        serde_json::from_value(serde_json::json!({
+                            "command": rmcp_test_server_bin,
+                            "environment_id": environment_id,
+                            "cwd": config.cwd,
+                        }))
+                        .expect("unrelated MCP server config should be valid"),
+                    );
                     servers.insert(
                         "rmcp".to_string(),
                         serde_json::from_value(serde_json::json!({
@@ -1399,7 +1412,7 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
             assert_eq!(
                 tool_names(&body).iter().any(|name| name == "tool_search"),
                 supports_search_tool,
-                "MCP omissions must not disable tool search for other tools; \
+                "MCP omissions must not disable tool search for unrelated tools; \
              omit_tools_from={omit_tools_from:?}, \
              supports_search_tool={supports_search_tool}, \
              direct_only_namespace={direct_only_namespace}, namespace={namespace}, tools={:?}",
@@ -3520,6 +3533,8 @@ if (!tool) {
             "exec".to_string(),
             "wait".to_string(),
             "request_user_input".to_string(),
+            "collaboration".to_string(),
+            "frodex".to_string(),
             "web_search".to_string()
         ]
     );
