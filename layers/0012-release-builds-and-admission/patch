@@ -752,6 +752,18 @@ index 6281d0eba3ba2cd08b6cff5e5b8c7d77f2c0dbfd..a4aaed45408d3e22e71aa097ad37579b
  use clap::Args;
  use clap::CommandFactory;
  use clap::Parser;
+diff --git a/codex-rs/code-mode-host/tests/stdio.rs b/codex-rs/code-mode-host/tests/stdio.rs
+index e9a0fa805a2a630312abfd382dd3c9e60a0b4597..3636f6b4198fa7719a487941ea3825ad0a9a0c2f 100644
+--- a/codex-rs/code-mode-host/tests/stdio.rs
++++ b/codex-rs/code-mode-host/tests/stdio.rs
+@@ -246,6 +246,7 @@ async fn interrupt_yields_observations_without_stopping_the_cell() {
+         description: String::new(),
+         kind: CodeModeToolKind::Function,
+         input_schema: None,
++        input_schema_max_bytes: None,
+         output_schema: None,
+     }];
+     let signal = CancellationToken::new();
 diff --git a/scripts/frodex_admission.py b/scripts/frodex_admission.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220a27291b3
