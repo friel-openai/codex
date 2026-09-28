@@ -913,6 +913,7 @@ async fn standalone_fork_retains_inherited_user_instructions(
                 prepared,
             )
             .await?
+            .0
     } else {
         test.thread_manager
             .fork_thread_from_history(
