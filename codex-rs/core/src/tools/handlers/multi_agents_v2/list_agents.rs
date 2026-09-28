@@ -1,6 +1,6 @@
 use super::analytics::ToolCallAnalytics;
 use super::*;
-use crate::agent::control::ListedAgent;
+use crate::agent::AgentStatus;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
 use codex_tools::ToolSpec;
 
@@ -41,25 +41,25 @@ impl Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: ListAgentsArgs = parse_arguments(&arguments)?;
-        let page = session
+        let agents = session
             .services
             .agent_control
-            .list_page(
+            .list_canonical(
                 session.thread_id,
                 turn.parent_thread_id,
                 &turn.session_source,
                 args.path_prefix.as_deref(),
-                args.cursor.as_deref(),
-                args.limit,
             )
             .await
-            .map_err(collab_spawn_error)?;
+            .map_err(collab_spawn_error)?
+            .into_iter()
+            .map(|agent| CanonicalListedAgent {
+                agent_name: agent.agent_name,
+                agent_status: agent.agent_status,
+            })
+            .collect();
 
-        Ok(boxed_tool_output(ListAgentsResult {
-            agents: page.agents,
-            next_cursor: page.next_cursor,
-            total_count: page.total_count,
-        }))
+        Ok(boxed_tool_output(ListAgentsResult { agents }))
     }
 }
 
@@ -73,15 +73,18 @@ impl CoreToolRuntime for Handler {
 #[serde(deny_unknown_fields)]
 struct ListAgentsArgs {
     path_prefix: Option<String>,
-    cursor: Option<String>,
-    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ListAgentsResult {
-    agents: Vec<ListedAgent>,
-    next_cursor: Option<String>,
-    total_count: usize,
+    agents: Vec<CanonicalListedAgent>,
+}
+
+/// Canonical `list_agents` output, excluding Frodex-only agent metadata.
+#[derive(Debug, Serialize)]
+struct CanonicalListedAgent {
+    agent_name: String,
+    agent_status: AgentStatus,
 }
 
 impl ToolOutput for ListAgentsResult {

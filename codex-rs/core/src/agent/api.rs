@@ -5,9 +5,7 @@
 //! delivery and shared resources. These Rust contracts do not define a wire protocol.
 
 use crate::agent::control::ListedAgent;
-use crate::agent::control::ListedAgentsPage;
 use crate::agent::control::bounded_list_agents_preview;
-use crate::agent::control::paginate_listed_agents;
 use crate::agent::types::AgentExecutionGuard;
 use crate::agent::types::AgentMessage;
 use crate::agent::types::AgentMetadata;
@@ -90,21 +88,19 @@ pub trait AgentControl: Send + Sync {
         path_prefix: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<LiveAgent>>>;
 
-    /// Page the backend's agent listing without substituting another backend's membership.
+    /// List canonical agent names and statuses without substituting another backend's membership.
     /// Local control overrides this to include known unloaded agents; other backends retain
-    /// their existing loaded listing with the same cursor, preview, and response byte limits.
-    fn list_page<'a>(
+    /// their existing loaded listing. The model-facing tool omits private metadata and pagination.
+    fn list_canonical<'a>(
         &'a self,
         caller: ThreadId,
         parent: Option<ThreadId>,
         source: &'a SessionSource,
         path_prefix: Option<&'a str>,
-        cursor: Option<&'a str>,
-        limit: Option<usize>,
-    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
+    ) -> BoxFuture<'a, Result<Vec<ListedAgent>>> {
         Box::pin(async move {
             let agents = self.list(caller, parent, source, path_prefix).await?;
-            paginate_live_agents(agents, cursor, limit)
+            Ok(canonical_agents_from_live(agents))
         })
     }
 
@@ -168,11 +164,7 @@ pub trait AgentControl: Send + Sync {
     ) -> BoxFuture<'a, ()>;
 }
 
-fn paginate_live_agents(
-    agents: Vec<LiveAgent>,
-    cursor: Option<&str>,
-    limit: Option<usize>,
-) -> Result<ListedAgentsPage> {
+fn canonical_agents_from_live(agents: Vec<LiveAgent>) -> Vec<ListedAgent> {
     let mut agents = agents
         .into_iter()
         .map(|agent| ListedAgent {
@@ -197,7 +189,7 @@ fn paginate_live_agents(
             .cmp(&right.agent_name)
             .then_with(|| left.agent_id.to_string().cmp(&right.agent_id.to_string()))
     });
-    paginate_listed_agents(agents, cursor, limit)
+    agents
 }
 
 #[cfg(test)]
