@@ -522,6 +522,30 @@ pub(super) async fn submission_loop(
                     thread_settings,
                     reply,
                 } => {
+                    // Writer repair acquires admission before persistence; preserve that order.
+                    let checkpoint_admission = match sess
+                        .lock_checkpoint_admission("update thread settings")
+                        .await
+                    {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            let message = error.to_string();
+                            if let Some(reply) = reply {
+                                let _ = reply.send(Err(CodexErr::InvalidRequest(message)));
+                            } else {
+                                sess.send_event_raw(Event {
+                                    id: sub.id.clone(),
+                                    msg: EventMsg::Error(ErrorEvent {
+                                        misalignment: None,
+                                        message,
+                                        codex_error_info: Some(CodexErrorInfo::Other),
+                                    }),
+                                })
+                                .await;
+                            }
+                            return false;
+                        }
+                    };
                     let settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
                     let previous_execution_settings = thread_settings::execution_settings(&sess).await;
                     let execution_settings_changed = match thread_settings::update(&sess, thread_settings).await {
@@ -553,6 +577,7 @@ pub(super) async fn submission_loop(
                     };
                     // Helper startup persists settings and cannot retain this permit.
                     drop(settings_guard);
+                    drop(checkpoint_admission);
                     if execution_settings_changed {
                         crate::goal_supervisor::restart_active_helper_for_execution_settings_change(&sess).await;
                     }
