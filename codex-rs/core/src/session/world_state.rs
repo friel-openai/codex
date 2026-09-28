@@ -106,7 +106,11 @@ impl Session {
                 MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
                     self.services
                         .local_agent_runtime
-                        .format_legacy_environment_context_subagents(self.thread_id)
+                        .control(self.session_id())
+                        .format_environment_context_subagents(
+                            self.thread_id,
+                            turn_context.multi_agent_version,
+                        )
                         .await
                 }
             }
@@ -240,7 +244,7 @@ impl Session {
                     current_date,
                 )
                 .await
-                .with_subagents(environment_subagents),
+                .with_versioned_subagents(environment_subagents, turn_context.multi_agent_version),
             );
         }
         world_state.add_section(EnvironmentsInstructionsState::new(
