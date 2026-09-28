@@ -1,4 +1,4 @@
-//! Exercises read overlap and ordered identity registration when a V2 root resumes cold.
+//! Exercises lazy child restoration and graph identities when a V2 root resumes cold.
 
 use super::ROLE_MODEL;
 use super::ROLE_NAME;
@@ -11,7 +11,6 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
-use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::AppendThreadItemsParams;
@@ -49,8 +48,11 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+/// Hides the local metadata index without changing the durable ownership graph.
 struct GatedChildMetadataStore {
     inner: Arc<dyn ThreadStore>,
+    /// Per-child metadata reads; the second read is registration's missing-index fallback.
+    metadata_reads: Mutex<HashMap<ThreadId, usize>>,
     gates: Mutex<HashMap<ThreadId, oneshot::Receiver<()>>>,
     failed_child: ThreadId,
     started: mpsc::UnboundedSender<ThreadId>,
@@ -102,14 +104,24 @@ impl ThreadStore for GatedChildMetadataStore {
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(async move {
             let thread_id = params.thread_id;
+            let registration_fallback = if params.include_history {
+                false
+            } else {
+                let mut reads = self.metadata_reads.lock().expect("child metadata reads");
+                reads.get_mut(&thread_id).is_some_and(|count| {
+                    *count += 1;
+                    *count == 2
+                })
+            };
+            if !registration_fallback {
+                return self.inner.read_thread(params).await;
+            }
             let gate = self
                 .gates
                 .lock()
                 .expect("child read gates")
-                .remove(&thread_id);
-            let Some(gate) = gate else {
-                return self.inner.read_thread(params).await;
-            };
+                .remove(&thread_id)
+                .expect("selected child fallback gate");
             assert!(!params.include_history, "restoration only reads metadata");
             self.started.send(thread_id).expect("read started receiver");
             gate.await.expect("release child read");
@@ -120,7 +132,7 @@ impl ThreadStore for GatedChildMetadataStore {
                 })
             } else {
                 self.inner.read_thread(params).await.map(|mut thread| {
-                    // Only one child can register this path, exposing which result is applied first.
+                    // The ownership graph, not this stale metadata, must supply the identity.
                     thread.agent_path = Some("/root/restored".to_owned());
                     thread
                 })
@@ -134,8 +146,7 @@ impl ThreadStore for GatedChildMetadataStore {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_order() -> Result<()>
-{
+async fn cold_root_resume_defers_child_reads_and_preserves_graph_identities() -> Result<()> {
     let server = start_mock_server().await;
     let initial_url = format!("{}/v1", server.uri());
     let initial = test_codex()
@@ -190,8 +201,16 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
     let mut ordered_children = vec![first, failed, last];
     ordered_children.sort_by_key(ToString::to_string);
     assert_eq!(ordered_children, vec![first, failed, last]);
-    for child_id in [first, failed, last] {
+    let mut expected_sources = HashMap::new();
+    for (child_id, name) in [(first, "alpha"), (failed, "beta"), (last, "gamma")] {
         let child = initial.thread_manager.get_thread(child_id).await?;
+        let source = child.config_snapshot().await.session_source;
+        assert_eq!(source.parent_thread_id(), Some(root));
+        assert_eq!(
+            source.get_agent_path().map(|path| path.to_string()),
+            Some(format!("/root/{name}"))
+        );
+        expected_sources.insert(child_id, source);
         wait_for_event(child.as_ref(), |event| {
             matches!(event, EventMsg::TurnComplete(_))
         })
@@ -208,6 +227,7 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
     let (last_release, last_gate) = oneshot::channel();
     let store = Arc::new(GatedChildMetadataStore {
         inner: Arc::clone(&initial.thread_store),
+        metadata_reads: Mutex::new(HashMap::from([(first, 0), (failed, 0), (last, 0)])),
         gates: Mutex::new(HashMap::from([
             (first, first_gate),
             (failed, failed_gate),
@@ -218,52 +238,112 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
         completed: completed_tx,
     });
     let resume_url = format!("{}/v1", server.uri());
-    let mut resume_builder = test_codex()
-        .with_thread_store(store)
-        .with_config(move |config| {
-            configure_multi_agent_v2_with_role(config, &resume_url);
-            config
-                .features
-                .enable(Feature::Sqlite)
-                .expect("enable SQLite");
-            config.multi_agent_v2.max_concurrent_threads_per_session = 4;
-        });
+    let mut resume_builder =
+        test_codex()
+            .with_thread_store(store.clone())
+            .with_config(move |config| {
+                configure_multi_agent_v2_with_role(config, &resume_url);
+                config
+                    .features
+                    .enable(Feature::Sqlite)
+                    .expect("enable SQLite");
+                config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+            });
 
-    let (resumed, ()) = tokio::try_join!(resume_builder.restart(&server, &initial), async {
-        timeout(Duration::from_secs(10), async {
-            // Releasing nothing until all reads start makes a serial implementation fail.
-            let mut reads = Vec::new();
-            for _ in 0..3 {
-                reads.push(started.recv().await.context("child read started")?);
-            }
-            reads.sort_by_key(ToString::to_string);
-            assert_eq!(reads, ordered_children);
-
-            last_release.send(()).expect("release last child");
-            assert_eq!(completed.recv().await, Some(last));
-            failed_release.send(()).expect("release failed child");
-            assert_eq!(completed.recv().await, Some(failed));
-            first_release.send(()).expect("release first child");
-            assert_eq!(completed.recv().await, Some(first));
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("child metadata reads should overlap")?
-    })?;
-
+    // All child gates remain closed: root resume must not read any child's metadata.
+    let resumed = timeout(
+        Duration::from_secs(10),
+        resume_builder.restart(&server, &initial),
+    )
+    .await
+    .context("root resume must not wait for child metadata")??;
     assert_eq!(resumed.thread_manager.list_thread_ids().await, vec![root]);
-    for child_id in [last, failed] {
-        assert!(matches!(
-            resumed.thread_manager.ensure_multi_agent_v2_child_loaded(child_id).await,
-            Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_id)
-        ));
+    assert_eq!(
+        *store.metadata_reads.lock().expect("child metadata reads"),
+        HashMap::from([(first, 0), (failed, 0), (last, 0)])
+    );
+    assert!(matches!(
+        started.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let mut selected_children = Vec::new();
+    // Reverse graph order makes registration order independent of the durable identities.
+    for (child_id, release, should_fail) in [
+        (last, last_release, false),
+        (failed, failed_release, true),
+        (first, first_release, false),
+    ] {
+        selected_children.push(child_id);
+        let (result, ()) = tokio::try_join!(
+            async {
+                timeout(
+                    Duration::from_secs(10),
+                    resumed
+                        .thread_manager
+                        .ensure_multi_agent_v2_child_loaded(child_id),
+                )
+                .await
+                .context("selected child reload must finish after releasing metadata")
+            },
+            async {
+                timeout(Duration::from_secs(10), async {
+                    assert_eq!(started.recv().await, Some(child_id));
+                    assert_eq!(
+                        store.metadata_reads.lock().expect("child metadata reads")[&child_id],
+                        2,
+                        "ownership lookup must be followed by one selected-child fallback"
+                    );
+                    assert!(matches!(
+                        started.try_recv(),
+                        Err(mpsc::error::TryRecvError::Empty)
+                    ));
+                    release.send(()).expect("release selected child fallback");
+                    assert_eq!(completed.recv().await, Some(child_id));
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await
+                .context("selected child must reach the missing-index fallback")?
+            }
+        )?;
+        if should_fail {
+            let error = result.expect_err("injected child metadata failure");
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected child metadata failure")
+            );
+            assert!(resumed.thread_manager.get_thread(child_id).await.is_err());
+        } else {
+            result?;
+            let child = resumed.thread_manager.get_thread(child_id).await?;
+            assert_eq!(
+                child.config_snapshot().await.session_source,
+                expected_sources[&child_id]
+            );
+        }
+        let mut read_children: Vec<_> = store
+            .metadata_reads
+            .lock()
+            .expect("child metadata reads")
+            .iter()
+            .filter_map(|(id, count)| (*count > 0).then_some(*id))
+            .collect();
+        read_children.sort_by_key(ToString::to_string);
+        let mut expected_read_children = selected_children.clone();
+        expected_read_children.sort_by_key(ToString::to_string);
+        assert_eq!(read_children, expected_read_children);
     }
-    resumed
-        .thread_manager
-        .ensure_multi_agent_v2_child_loaded(first)
-        .await?;
+
+    assert_eq!(
+        resumed
+            .thread_manager
+            .list_agent_subtree_thread_ids(root)
+            .await?,
+        subtree
+    );
     assert!(resumed.thread_manager.get_thread(first).await.is_ok());
-    assert!(resumed.thread_manager.get_thread(last).await.is_err());
+    assert!(resumed.thread_manager.get_thread(last).await.is_ok());
     assert!(resumed.thread_manager.get_thread(failed).await.is_err());
     Ok(())
 }
