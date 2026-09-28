@@ -344,6 +344,7 @@ fn checkpoint_compacted(history: Vec<ResponseItem>) -> CompactedItem {
         message: String::new(),
         replacement_history: Some(annotated(history)),
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         compaction_response_id: None,
@@ -1939,6 +1940,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2006,6 +2008,7 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
@@ -2045,6 +2048,7 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2122,6 +2126,7 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
@@ -2164,6 +2169,7 @@ async fn reconstruct_history_replays_world_state_from_latest_compaction_window()
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
@@ -2297,6 +2303,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
                         "encrypted_content": format!("summary-{window_number}"),
                     })])),
                     retained_context: None,
+                    retained_context_replay: None,
                     guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
                         user_message("original task"),
                     ])),
@@ -2507,6 +2514,7 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
             message: "legacy summary".to_string(),
             replacement_history: None,
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2566,6 +2574,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
             message: "legacy summary".to_string(),
             replacement_history: None,
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2609,6 +2618,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
             message: "legacy summary".to_string(),
             replacement_history: None,
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2725,6 +2735,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2909,6 +2920,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -3182,6 +3194,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -3371,6 +3384,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
             message: String::new(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -3508,5 +3522,1965 @@ async fn incomplete_turn_after_modern_checkpoint_updates_only_last_started_turn_
     assert_eq!(
         reconstructed.previous_turn_settings,
         Some(previous_settings)
+    );
+}
+
+// The adjacent raw/event pair describes one user boundary to migration and replay.
+fn migration_user_turn_rollout(
+    context: TurnContextItem,
+    user: ResponseItemEnvelope,
+    remaining: Vec<RolloutItem>,
+) -> Vec<RolloutItem> {
+    let turn_id = context.turn_id.clone().expect("fixture turn ID");
+    let Some(codex_protocol::items::TurnItem::UserMessage(user_message)) =
+        crate::event_mapping::parse_turn_item(&user.item)
+    else {
+        panic!("migration fixture requires a user message");
+    };
+    let mut items = vec![
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_id.clone(),
+                root_turn_id: None,
+                trace_id: None,
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        )),
+        RolloutItem::ResponseItem(user),
+        RolloutItem::EventMsg(EventMsg::UserMessage(
+            codex_protocol::protocol::UserMessageEvent {
+                client_id: None,
+                message: user_message.message(),
+                images: None,
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+                ..Default::default()
+            },
+        )),
+        RolloutItem::TurnContext(context),
+    ];
+    items.extend(remaining);
+    items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
+        codex_protocol::protocol::TurnCompleteEvent {
+            turn_id,
+            last_agent_message: None,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        },
+    )));
+    items
+}
+
+// Uses the actual migration publication and readers, rather than reproducing their rewrite.
+async fn migrate_checkpoint_fixture(
+    home: &std::path::Path,
+    thread_id: ThreadId,
+    items: &[RolloutItem],
+) -> (
+    codex_thread_store::LocalThreadStore,
+    Vec<RolloutItem>,
+    Vec<RolloutItem>,
+) {
+    use codex_thread_store::ThreadStore;
+    use std::io::Write;
+
+    let directory = home.join("sessions/2025/01/03");
+    std::fs::create_dir_all(&directory).expect("create isolated session directory");
+    let path = directory.join(format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl"));
+    {
+        let mut file = std::fs::File::create(&path).expect("create legacy rollout");
+        for item in items {
+            let line = codex_rollout::RolloutLine {
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                ordinal: None,
+                item: item.clone(),
+            };
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&line).expect("serialize rollout")
+            )
+            .expect("write rollout");
+        }
+    }
+    let sqlite = codex_state::SqliteConfig::new_for_testing(
+        codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(home)
+            .expect("absolute isolated CODEX_HOME"),
+    );
+    let rollout_config = codex_rollout::RolloutConfig {
+        codex_home: home.to_path_buf(),
+        sqlite: sqlite.clone(),
+        cwd: home.to_path_buf(),
+        model_provider_id: "test-provider".to_string(),
+        generate_memories: false,
+    };
+    let state_db = codex_rollout::state_db::try_init(&rollout_config)
+        .await
+        .expect("backfill isolated legacy session");
+    let store = codex_thread_store::LocalThreadStore::new(
+        codex_thread_store::LocalThreadStoreConfig {
+            codex_home: home.to_path_buf(),
+            sqlite,
+            default_model_provider_id: "test-provider".to_string(),
+        },
+        Some(state_db),
+    );
+    let report = store
+        .migrate_rollouts(codex_thread_store::RolloutMigrationOptions {
+            mode: codex_thread_store::RolloutMigrationMode::Apply,
+            thread_ids: vec![thread_id],
+            max_mib_per_second: None,
+        })
+        .await
+        .expect("migrate isolated session");
+    assert_eq!(report.outcomes.len(), 1, "{report:?}");
+    assert_eq!(
+        report.outcomes[0].status,
+        codex_thread_store::RolloutMigrationStatus::Migrated,
+        "{report:?}"
+    );
+    let mut full = store
+        .load_history(codex_thread_store::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("read migrated full history")
+        .items;
+    let mut bounded = store
+        .load_latest_model_context(codex_thread_store::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("read migrated model context")
+        .items;
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(home, &mut full)
+        .await
+        .expect("resolve selected full-history review input");
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(home, &mut bounded)
+        .await
+        .expect("resolve selected bounded review input");
+    assert_eq!(
+        InitialHistory::Forked(full.clone()).get_history_mode(ThreadHistoryMode::Legacy),
+        ThreadHistoryMode::Paginated
+    );
+    (store, full, bounded)
+}
+
+#[tokio::test]
+async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollback() {
+    use codex_history::RetainedContextEntry;
+    use codex_history::RetainedContextOrder;
+
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let worker_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+    let assistant = |id: &str, turn_id: &str, text: &str, order: u64| ResponseItemEnvelope {
+        item: serde_json::from_value(json!({
+            "type": "message", "role": "assistant", "id": id,
+            "content": [{"type": "output_text", "text": text}],
+            "phase": "commentary",
+            "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+        }))
+        .expect("ordered assistant fixture"),
+        metadata: Some(codex_history::CodexHarnessMetadata {
+            user_input_order: Some(order),
+            ..Default::default()
+        }),
+    };
+    let mut inherited = assistant("parent-reply", "parent", "Parent context.", 90);
+    inherited.metadata.as_mut().unwrap().inherited_user_message = true;
+    let mut inherited_source = codex_history::record_retained_message(
+        &mut codex_history::RetainedContext::default(),
+        &inherited.item,
+        inherited.metadata.as_ref(),
+        codex_history::RetainedMessageSource::Original,
+    )
+    .expect("inherited assistant source");
+    inherited_source.complete = false;
+    inherited.metadata.as_mut().unwrap().retained_source = Some(inherited_source.clone());
+    let mut kept = vec![
+        inherited,
+        retained_user_message("A", "Keep this private.", 0),
+        assistant("reply-A", "A", "I will keep it private.", 1),
+        ResponseItemEnvelope {
+            item: serde_json::from_value(json!({
+                "type": "function_call", "id": "call-A", "call_id": "send-A",
+                "name": "send_message", "arguments": "{}",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "A"},
+            }))
+            .expect("original delivery call"),
+            metadata: Some(codex_history::CodexHarnessMetadata {
+                user_input_order: Some(2),
+                ..Default::default()
+            }),
+        },
+    ];
+    let mut unsequenced = assistant("unsequenced", "A", "Legacy assistant context.", 0);
+    unsequenced.metadata.as_mut().unwrap().user_input_order = None;
+    kept.push(unsequenced);
+    // These records were written before B, but were accepted after B's queued input.
+    let mut queued = vec![
+        assistant("queued-reply", "A", "Accepted after the steer.", 4),
+        ResponseItemEnvelope {
+            item: serde_json::from_value(json!({
+                "type": "function_call", "id": "queued-call", "call_id": "send-queued",
+                "name": "send_message", "arguments": "{}",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "A"},
+            }))
+            .expect("call accepted after the steer"),
+            metadata: Some(codex_history::CodexHarnessMetadata {
+                user_input_order: Some(5),
+                ..Default::default()
+            }),
+        },
+    ];
+    let mut removed = vec![
+        retained_user_message("B", "Temporary instruction.", 3),
+        ResponseItemEnvelope {
+            item: serde_json::from_value(json!({
+                "type": "function_call_output", "call_id": "send-A", "output": "Sent.",
+            }))
+            .expect("delayed delivery output"),
+            metadata: Some(codex_history::CodexHarnessMetadata {
+                delivered_assistant_message: Some("Confirmed private reply.".to_owned()),
+                ..Default::default()
+            }),
+        },
+        assistant("reply-B", "B", "Temporary answer.", 6),
+    ];
+    let mut captured = ContextManager::for_session(&worker_source);
+    let policy = turn_context.model_info().truncation_policy.into();
+    captured.record_annotated_items(&mut kept, policy);
+    captured.record_annotated_items(&mut queued, policy);
+    captured.record_annotated_items(&mut removed, policy);
+    let saved_sources = captured
+        .retained_context()
+        .ordered_entries()
+        .filter_map(|(order, entry)| {
+            matches!(order, RetainedContextOrder::Local(0..=2))
+                .then(|| captured.retained_context().source(entry))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(saved_sources.len(), 3);
+    assert_eq!(saved_sources[2].id.message_id, "call-A");
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    checkpoint.replacement_history = Some([kept.clone(), queued.clone(), removed.clone()].concat());
+    // Confirmed deliveries are saved in retained_context, not on the output envelope.
+    // Starting from this checkpoint checks their original revision as well as their order.
+    checkpoint.retained_context = Some(captured.retained_context().clone());
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: Some("B".to_owned()),
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_owned(),
+                cwd: home.path().to_path_buf(),
+                source: worker_source.clone(),
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+        RolloutItem::ResponseItem(kept[0].clone()),
+    ];
+    let mut a_context = turn_context.to_turn_context_item();
+    a_context.turn_id = Some("A".to_owned());
+    items.extend(migration_user_turn_rollout(
+        a_context,
+        kept[1].clone(),
+        kept[2..]
+            .iter()
+            .chain(&queued)
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect(),
+    ));
+    let mut b_context = turn_context.to_turn_context_item();
+    b_context.turn_id = Some("B".to_owned());
+    let mut b_suffix = removed[1..]
+        .iter()
+        .cloned()
+        .map(RolloutItem::ResponseItem)
+        .collect::<Vec<_>>();
+    b_suffix.push(RolloutItem::Compacted(checkpoint));
+    items.extend(migration_user_turn_rollout(
+        b_context,
+        removed[0].clone(),
+        b_suffix,
+    ));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let mut c_context = turn_context.to_turn_context_item();
+    c_context.turn_id = Some("C".to_owned());
+    items.extend(migration_user_turn_rollout(
+        c_context,
+        retained_user_message("C", "Later temporary instruction.", 7),
+        vec![RolloutItem::ResponseItem(ResponseItemEnvelope {
+            item: serde_json::from_value(json!({
+                "type": "function_call_output", "call_id": "send-queued", "output": "Sent.",
+            }))
+            .expect("stale delivery after rollback"),
+            metadata: Some(codex_history::CodexHarnessMetadata {
+                delivered_assistant_message: Some(
+                    "Must not resurrect removed evidence.".to_owned(),
+                ),
+                ..Default::default()
+            }),
+        })],
+    ));
+    // A stale call lookup would resurrect order 5 and survive the order-7 rollback.
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let (_, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    for source in [worker_source, SessionSource::Cli] {
+        let is_root = !source.is_non_root_agent();
+        turn_context.session_source = source;
+        let before = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(before.history, kept);
+        let retained = before
+            .retained_context
+            .ordered_entries()
+            .map(|(order, entry)| {
+                let (role, message) = match entry {
+                    RetainedContextEntry::UserMessage(message) => ("user", message),
+                    RetainedContextEntry::AssistantMessage(message) => ("assistant", message),
+                    RetainedContextEntry::VerifiedAnswer(_) => panic!("unexpected answer"),
+                };
+                (
+                    order,
+                    role,
+                    message.message_id.as_deref().unwrap(),
+                    message.text.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut expected = vec![
+            (
+                RetainedContextOrder::Local(0),
+                "user",
+                kept[1].item.id().unwrap().as_str(),
+                "Keep this private.",
+            ),
+            (
+                RetainedContextOrder::Local(1),
+                "assistant",
+                "reply-A",
+                "I will keep it private.",
+            ),
+            (
+                RetainedContextOrder::Local(2),
+                "assistant",
+                "call-A",
+                "Confirmed private reply.",
+            ),
+        ];
+        let mut expected_sources = saved_sources.clone();
+        if is_root {
+            expected.insert(
+                0,
+                (
+                    RetainedContextOrder::Inherited(0),
+                    "assistant",
+                    "parent-reply",
+                    "Parent context.",
+                ),
+            );
+            expected_sources.insert(0, inherited_source.clone());
+        }
+        assert_eq!(retained, expected);
+        assert_eq!(
+            before
+                .retained_context
+                .ordered_entries()
+                .filter_map(|(_, entry)| before.retained_context.source(entry))
+                .collect::<Vec<_>>(),
+            expected_sources,
+        );
+        for migrated in [&full, &bounded] {
+            assert_eq!(
+                session
+                    .reconstruct_history_from_rollout(&turn_context, migrated)
+                    .await,
+                before,
+                "migration changed assistant evidence for {:?}",
+                turn_context.session_source,
+            );
+        }
+    }
+}
+
+#[test_case(false, false, false; "populated checkpoint with one rollback")]
+#[test_case(true, false, false; "empty checkpoint with one rollback")]
+#[test_case(false, true, false; "populated checkpoint with repeated rollback")]
+#[test_case(true, true, false; "empty checkpoint with repeated rollback")]
+#[test_case(false, true, true; "populated checkpoint with newer C runtime")]
+#[test_case(true, true, true; "empty checkpoint with newer C runtime")]
+#[tokio::test]
+async fn migration_preserves_modern_checkpoint_reconstruction_after_rollback(
+    empty_resume_metadata: bool,
+    append_and_rollback_c: bool,
+    c_selects_v1: bool,
+) {
+    for identified_messages in [false, true] {
+        assert_migration_checkpoint_reconstruction_after_rollback(
+            empty_resume_metadata,
+            append_and_rollback_c,
+            c_selects_v1,
+            identified_messages,
+        )
+        .await;
+    }
+}
+
+async fn assert_migration_checkpoint_reconstruction_after_rollback(
+    empty_resume_metadata: bool,
+    append_and_rollback_c: bool,
+    c_selects_v1: bool,
+    identified_messages: bool,
+) {
+    use codex_thread_store::ThreadStore;
+
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let thread_id = session.thread_id;
+    let initial_window_id = Uuid::now_v7();
+    let previous_window_id = Uuid::now_v7();
+    let checkpoint_window_id = Uuid::now_v7();
+    let meta = SessionMetaLine {
+        meta: SessionMeta {
+            id: thread_id,
+            session_id: thread_id.into(),
+            timestamp: "2025-01-03T12:00:00Z".to_string(),
+            cwd: home.path().to_path_buf(),
+            originator: "checkpoint-migration-test".to_string(),
+            cli_version: "0.0.0".to_string(),
+            source: SessionSource::Cli,
+            model_provider: Some("test-provider".to_string()),
+            history_mode: ThreadHistoryMode::Legacy,
+            multi_agent_version: None,
+            ..SessionMeta::default()
+        },
+        git: None,
+    };
+    let previous_settings = (!empty_resume_metadata).then(|| PreviousTurnSettings {
+        model: "checkpoint-model".to_string(),
+        comp_hash: Some("checkpoint-comparison-hash".to_string()),
+        realtime_active: Some(true),
+    });
+    let mut expected_runtime =
+        (!empty_resume_metadata).then_some(codex_protocol::protocol::MultiAgentVersion::V2);
+    let a_user = if identified_messages {
+        retained_user_message("A", "A", 0)
+    } else {
+        user_message("A").into()
+    };
+    let b_user = if identified_messages {
+        retained_user_message("B", "B", 2)
+    } else {
+        user_message("B").into()
+    };
+    let mut kept = vec![
+        a_user.clone(),
+        ResponseItemEnvelope {
+            item: assistant_message("answer A"),
+            metadata: identified_messages.then(codex_history::CodexHarnessMetadata::default),
+        },
+    ];
+    let mut replacement = kept.clone();
+    replacement.extend([
+        b_user.clone(),
+        ResponseItemEnvelope {
+            item: assistant_message("answer B"),
+            metadata: identified_messages.then(codex_history::CodexHarnessMetadata::default),
+        },
+    ]);
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    let mut expected_retained = codex_history::RetainedContext::default();
+    if identified_messages {
+        let mut captured = ContextManager::for_session(&turn_context.session_source);
+        captured.record_annotated_items(
+            &mut kept,
+            turn_context.model_info().truncation_policy.into(),
+        );
+        replacement[..kept.len()].clone_from_slice(&kept);
+        captured.record_retained_context(&retained_answer("A", 1));
+        expected_retained = captured.retained_context().clone();
+        captured.record_annotated_items(
+            &mut replacement[kept.len()..],
+            turn_context.model_info().truncation_policy.into(),
+        );
+        captured.record_retained_context(&retained_answer("B", 3));
+        assert!(captured.retained_context().user_messages_complete());
+        assert!(captured.retained_context().verified_answers_complete());
+        checkpoint.retained_context = Some(captured.retained_context().clone());
+        expected_retained.reserve_order();
+        expected_retained.reserve_order();
+        if append_and_rollback_c {
+            expected_retained.reserve_order();
+        }
+    } else {
+        checkpoint.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(
+            replacement.iter().map(|item| item.item.clone()).collect(),
+        ));
+        expected_retained.restore(None, &kept);
+        if append_and_rollback_c {
+            // Accepted historical messages can lack every rollback identity. Preserve
+            // their incomplete evidence exactly instead of manufacturing new identities.
+            expected_retained.record_user_message(
+                codex_history::RetainedUserMessage {
+                    turn_id: String::new(),
+                    message_id: None,
+                    text: "C".to_string(),
+                    complete: false,
+                    origin: Default::default(),
+                    phase: None,
+                },
+                codex_history::RetainedInputSource::Local(None),
+            );
+        }
+    }
+    checkpoint.replacement_history = Some(replacement.clone());
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: expected_runtime,
+        last_started_turn_id: (!empty_resume_metadata).then(|| "B".to_string()),
+        previous_turn_settings: previous_settings.clone(),
+    });
+    checkpoint.window_number = Some(8);
+    checkpoint.first_window_id = Some(initial_window_id.to_string());
+    checkpoint.previous_window_id = Some(previous_window_id.to_string());
+    checkpoint.window_id = Some(checkpoint_window_id.to_string());
+    let mut usage = codex_protocol::protocol::TokenUsageRecord {
+        thread_id,
+        session_id: thread_id.into(),
+        turn_id: "B".to_string(),
+        root_turn_id: "B".to_string(),
+        response_id: "checkpoint-response".to_string(),
+        usage: codex_protocol::protocol::TokenUsage {
+            total_tokens: 420,
+            ..Default::default()
+        },
+        turn_token_usage: Default::default(),
+        thread_token_usage: Default::default(),
+    };
+    checkpoint.compaction_response_id = Some(usage.response_id.clone());
+    checkpoint.latest_token_usage_record = Some(usage.clone());
+    let mut settings = complete_thread_settings();
+    settings.thread_settings.model = "sticky-before-A-420".to_string();
+    settings.thread_settings.collaboration_mode.settings.model =
+        settings.thread_settings.model.clone();
+    let mut token_count = TokenCountEvent {
+        info: Some(codex_protocol::protocol::TokenUsageInfo {
+            total_token_usage: codex_protocol::protocol::TokenUsage {
+                total_tokens: 420,
+                ..Default::default()
+            },
+            last_token_usage: Default::default(),
+            model_context_window: Some(100_000),
+        }),
+        rate_limits: None,
+    };
+    let mut items = vec![
+        RolloutItem::SessionMeta(meta),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings.clone())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(token_count.clone())),
+    ];
+    let mut a_context = turn_context.to_turn_context_item();
+    a_context.turn_id = Some("A".to_string());
+    a_context.model = "older-model-must-not-be-restored".to_string();
+    a_context.comp_hash = Some("older-settings-must-not-be-restored".to_string());
+    a_context.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::V1);
+    items.extend(migration_user_turn_rollout(
+        a_context,
+        kept[0].clone(),
+        vec![RolloutItem::ResponseItem(
+            assistant_message("answer A").into(),
+        )],
+    ));
+    let mut b_context = turn_context.to_turn_context_item();
+    b_context.turn_id = Some("B".to_string());
+    b_context.model = "pre-compaction-B-model".to_string();
+    b_context.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::V1);
+    settings.thread_settings.model = "sticky-post-checkpoint-B-840".to_string();
+    settings.thread_settings.collaboration_mode.settings.model =
+        settings.thread_settings.model.clone();
+    token_count
+        .info
+        .as_mut()
+        .expect("token info")
+        .total_token_usage
+        .total_tokens = 840;
+    usage.response_id = "post-checkpoint-B-response".to_string();
+    usage.usage.total_tokens = 840;
+    items.extend(migration_user_turn_rollout(
+        b_context,
+        replacement[kept.len()].clone(),
+        vec![
+            RolloutItem::Compacted(checkpoint),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings.clone())),
+            RolloutItem::EventMsg(EventMsg::TokenCount(token_count.clone())),
+            RolloutItem::TokenUsageRecord(usage.clone()),
+        ],
+    ));
+    let rollback = RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+        num_turns: 1,
+    }));
+    items.push(rollback.clone());
+    if append_and_rollback_c {
+        let mut c_context = turn_context.to_turn_context_item();
+        c_context.turn_id = Some("C".to_string());
+        c_context.model = "rolled-back-C-model".to_string();
+        // Runtime selection has an independent reducer; rolling back C does not undo its V1.
+        c_context.multi_agent_version =
+            c_selects_v1.then_some(codex_protocol::protocol::MultiAgentVersion::V1);
+        if c_selects_v1 {
+            expected_runtime = Some(codex_protocol::protocol::MultiAgentVersion::V1);
+        }
+        settings.thread_settings.model = "sticky-rolled-back-C-1260".to_string();
+        settings.thread_settings.collaboration_mode.settings.model =
+            settings.thread_settings.model.clone();
+        token_count
+            .info
+            .as_mut()
+            .expect("token info")
+            .total_token_usage
+            .total_tokens = 1260;
+        usage.turn_id = "C".to_string();
+        usage.root_turn_id = "C".to_string();
+        usage.response_id = "rolled-back-C-response".to_string();
+        usage.usage.total_tokens = 1260;
+        items.extend(migration_user_turn_rollout(
+            c_context,
+            if identified_messages {
+                retained_user_message("C", "C", 4)
+            } else {
+                user_message("C").into()
+            },
+            vec![
+                RolloutItem::ResponseItem(assistant_message("answer C").into()),
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings.clone())),
+                RolloutItem::EventMsg(EventMsg::TokenCount(token_count.clone())),
+                RolloutItem::TokenUsageRecord(usage.clone()),
+            ],
+        ));
+        items.push(rollback);
+    }
+
+    let before = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(
+        before.guardian_history,
+        (!identified_messages).then(|| codex_history::GuardianHistoryCheckpoint(
+            kept.iter().map(|item| item.item.clone()).collect(),
+        )),
+        "a root retains the backup when checkpoint metadata omitted user evidence",
+    );
+    assert_eq!(before.retained_context, expected_retained);
+    assert_eq!(before.history, kept);
+    assert_eq!(before.previous_turn_settings, previous_settings);
+    assert_eq!(
+        before.last_started_turn_id.as_deref(),
+        if append_and_rollback_c {
+            Some("C")
+        } else if empty_resume_metadata {
+            None
+        } else {
+            Some("B")
+        }
+    );
+    assert_eq!(before.reference_context_item, None);
+    assert_eq!(before.world_state_baseline, None);
+    assert_eq!(before.window_number, 8);
+    assert_eq!(before.first_window_id, Some(initial_window_id));
+    assert_eq!(before.previous_window_id, Some(previous_window_id));
+    assert_eq!(before.window_id, Some(checkpoint_window_id));
+    assert_eq!(
+        InitialHistory::Forked(items.clone()).get_multi_agent_version(),
+        expected_runtime
+    );
+    assert_eq!(
+        serde_json::to_value(Session::restored_token_count_from_rollout(&items))
+            .expect("serialize restored token count"),
+        serde_json::to_value(Some(&token_count)).expect("serialize expected token count")
+    );
+    assert_eq!(
+        Session::last_token_usage_record_from_rollout(&items),
+        Some(usage.clone())
+    );
+    assert_eq!(
+        items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(value)) => Some(value),
+            _ => None,
+        }),
+        Some(&settings)
+    );
+
+    let (store, full, bounded) = migrate_checkpoint_fixture(home.path(), thread_id, &items).await;
+    let repeated = store
+        .migrate_rollouts(codex_thread_store::RolloutMigrationOptions {
+            mode: codex_thread_store::RolloutMigrationMode::Apply,
+            thread_ids: vec![thread_id],
+            max_mib_per_second: None,
+        })
+        .await
+        .expect("repeat migration of synthetic checkpoints");
+    assert_eq!(repeated.outcomes.len(), 1);
+    assert_eq!(
+        repeated.outcomes[0].status,
+        codex_thread_store::RolloutMigrationStatus::AlreadyPaginated
+    );
+    // Compare persisted records; `full` also contains a derived selected-review cache.
+    assert_eq!(
+        serde_json::to_value(
+            store
+                .load_history(codex_thread_store::LoadThreadHistoryParams {
+                    thread_id,
+                    include_archived: false,
+                })
+                .await
+                .expect("read checkpoints after repeated migration")
+                .items,
+        )
+        .expect("serialize checkpoints after repeated migration"),
+        serde_json::to_value(&full).expect("serialize first migration")
+    );
+    let state_checkpoints = full
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(compacted)
+                if compacted.message.is_empty()
+                    && compacted.resume_metadata.is_some()
+                    && compacted.compaction_response_id.is_none()
+                    && compacted.segment_state_checkpoint.is_none() =>
+            {
+                Some(compacted)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        state_checkpoints.len(),
+        if append_and_rollback_c { 2 } else { 1 },
+        "each accepted rollback must emit one state-only checkpoint at its source position"
+    );
+    let rollback_indices = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let checkpoint_indices = full
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, RolloutItem::Compacted(compacted)
+            if compacted.retained_context_replay.is_some())
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rollback_indices.len(), checkpoint_indices.len());
+    for (original_end, migrated_end) in rollback_indices.into_iter().zip(checkpoint_indices) {
+        let mut migrated_prefix = full[..=migrated_end].to_vec();
+        super::rollout_reconstruction::resolve_review_input_for_reconstruction(
+            home.path(),
+            &mut migrated_prefix,
+        )
+        .await
+        .expect("resolve the finite input prefix for this checkpoint");
+        let original = session
+            .reconstruct_history_from_rollout(&turn_context, &items[..=original_end])
+            .await;
+        let migrated = session
+            .reconstruct_history_from_rollout(&turn_context, &migrated_prefix)
+            .await;
+        assert_eq!(
+            migrated, original,
+            "finite checkpoint changed reconstruction"
+        );
+    }
+    let turns = store
+        .list_turns(codex_thread_store::ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 25,
+            sort_direction: codex_thread_store::SortDirection::Asc,
+            items_view: codex_thread_store::StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("read migrated visible turns");
+    assert!(turns.next_cursor.is_none());
+    assert_eq!(
+        turns
+            .turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A"],
+        "state-only rollback checkpoints must not add visible turns"
+    );
+    for (reader, migrated) in [("full history", full), ("bounded model context", bounded)] {
+        let after = session
+            .reconstruct_history_from_rollout(&turn_context, &migrated)
+            .await;
+        assert_eq!(
+            after, before,
+            "{reader}: migration changed core reconstruction"
+        );
+        assert_eq!(
+            InitialHistory::Forked(migrated.clone()).get_multi_agent_version(),
+            expected_runtime,
+            "{reader}: migration changed the selected runtime"
+        );
+        assert_eq!(
+            serde_json::to_value(Session::restored_token_count_from_rollout(&migrated))
+                .expect("serialize restored token count"),
+            serde_json::to_value(Some(&token_count)).expect("serialize expected token count"),
+            "{reader}"
+        );
+        assert_eq!(
+            Session::last_token_usage_record_from_rollout(&migrated),
+            Some(usage.clone()),
+            "{reader}"
+        );
+        assert_eq!(
+            migrated.iter().rev().find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(value)) => Some(value),
+                _ => None,
+            }),
+            Some(&settings),
+            "{reader}: migration changed sticky thread settings"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migration_preserves_retained_eviction_before_rollback() {
+    assert_migration_preserves_retained_eviction_before_rollback(None).await;
+}
+
+#[test_case(false; "initially complete")]
+#[test_case(true; "initially incomplete")]
+#[tokio::test]
+async fn migration_preserves_original_root_transcript_decision_after_retained_eviction(
+    initially_incomplete: bool,
+) {
+    assert_migration_preserves_retained_eviction_before_rollback(Some(initially_incomplete)).await;
+}
+
+async fn assert_migration_preserves_retained_eviction_before_rollback(
+    initially_incomplete: Option<bool>,
+) {
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let mut replacement = (0..8)
+        .map(|index| retained_user_message(&format!("kept-{index}"), "Keep this private.", index))
+        .collect::<Vec<_>>();
+    let mut captured = ContextManager::for_session(&turn_context.session_source);
+    captured.record_annotated_items(
+        &mut replacement,
+        turn_context.model_info().truncation_policy.into(),
+    );
+    let mut surviving = ContextManager::for_session(&turn_context.session_source);
+    for envelope in &replacement[2..] {
+        surviving
+            .replay_annotated_item(envelope, turn_context.model_info().truncation_policy.into());
+    }
+    let mut expected = surviving.retained_context().clone();
+    expected.reserve_order();
+    expected.reserve_order();
+    expected.mark_user_messages_incomplete();
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    checkpoint.replacement_history = Some(replacement.clone());
+    let mut retained = captured.retained_context().clone();
+    if initially_incomplete == Some(true) {
+        retained.mark_user_messages_incomplete();
+    }
+    checkpoint.retained_context = Some(retained);
+    let guardian_baseline = initially_incomplete.map(|_| {
+        // Both cases end with the same retained messages and missing flag. Only
+        // the original missing flag decides whether this unmatched instruction survives.
+        let mut messages = vec![user_message("Keep the earlier project confidential.")];
+        messages.extend(replacement.iter().map(|envelope| envelope.item.clone()));
+        codex_history::GuardianHistoryCheckpoint(messages)
+    });
+    checkpoint.guardian_history = guardian_baseline.clone();
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: Some("kept-7".to_string()),
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                cwd: home.path().to_path_buf(),
+                source: SessionSource::Cli,
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+    ];
+    for (index, user) in replacement.iter().enumerate() {
+        let mut context = turn_context.to_turn_context_item();
+        context.turn_id = Some(format!("kept-{index}"));
+        items.extend(migration_user_turn_rollout(
+            context,
+            user.clone(),
+            Vec::new(),
+        ));
+    }
+    items.push(RolloutItem::Compacted(checkpoint));
+    for (turn_id, order) in [("C", 8), ("D", 9)] {
+        let mut context = turn_context.to_turn_context_item();
+        context.turn_id = Some(turn_id.to_string());
+        items.extend(migration_user_turn_rollout(
+            context,
+            retained_user_message(turn_id, turn_id, order),
+            Vec::new(),
+        ));
+    }
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 2 },
+    )));
+
+    let (_, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    let worker_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+    for source in [turn_context.session_source.clone(), worker_source] {
+        let is_root = !source.is_non_root_agent();
+        turn_context.session_source = source;
+        let before = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(before.history, replacement);
+        assert_eq!(before.retained_context, expected);
+        assert!(!before.retained_context.user_messages_complete());
+        assert_eq!(
+            before.guardian_history,
+            if is_root && initially_incomplete == Some(true) {
+                guardian_baseline.clone()
+            } else {
+                None
+            }
+        );
+        for migrated in [&full, &bounded] {
+            if let Some(initially_incomplete) = initially_incomplete {
+                let baseline_decision = migrated.iter().find_map(|item| {
+                    let RolloutItem::Compacted(checkpoint) = item else {
+                        return None;
+                    };
+                    checkpoint
+                        .retained_context_replay
+                        .as_ref()?
+                        .resolved_review_input
+                        .as_ref()?
+                        .iter()
+                        .find_map(|record| match record {
+                            codex_history::ReviewInputRecord::Baseline {
+                                root_retains_legacy_transcript,
+                                ..
+                            } => Some(*root_retains_legacy_transcript),
+                            _ => None,
+                        })
+                });
+                assert_eq!(baseline_decision, Some(Some(initially_incomplete)));
+            }
+            let after = session
+                .reconstruct_history_from_rollout(&turn_context, migrated)
+                .await;
+            assert_eq!(after, before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn migration_preserves_post_completion_checkpoint_reconstruction() {
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let worker_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+    let mut inherited = ResponseItemEnvelope::new(user_message("Keep the project private."));
+    inherited.item.set_turn_id_if_missing("parent-turn");
+    inherited.metadata = Some(codex_history::CodexHarnessMetadata {
+        inherited_user_message: true,
+        ..Default::default()
+    });
+    let mut temporary = ResponseItemEnvelope::new(user_message("Temporary local instruction."));
+    temporary.item.set_turn_id_if_missing("temporary-turn");
+    temporary.metadata = Some(codex_history::CodexHarnessMetadata {
+        user_input_order: Some(0),
+        ..Default::default()
+    });
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    checkpoint.message = "checkpoint".to_string();
+    checkpoint.replacement_history = Some(vec![inherited.clone()]);
+    checkpoint.retained_context = Some(Default::default());
+    checkpoint.window_number = Some(1);
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    assert!(checkpoint.segment_state_checkpoint.is_none());
+    let started = |turn_id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_id.to_string(),
+                root_turn_id: None,
+                trace_id: None,
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        ))
+    };
+    let completed = |turn_id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnComplete(
+            codex_protocol::protocol::TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            },
+        ))
+    };
+    let items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                cwd: home.path().to_path_buf(),
+                source: worker_source.clone(),
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+        started("parent-turn"),
+        RolloutItem::ResponseItem(inherited.clone()),
+        completed("parent-turn"),
+        RolloutItem::Compacted(checkpoint),
+        started("temporary-turn"),
+        RolloutItem::ResponseItem(temporary),
+        completed("temporary-turn"),
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+            num_turns: 1,
+        })),
+    ];
+    let (_, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    for source in [worker_source, SessionSource::Cli] {
+        turn_context.session_source = source;
+        let original = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(original.history, vec![inherited.clone()]);
+        assert_eq!(
+            original.last_started_turn_id.as_deref(),
+            Some("temporary-turn")
+        );
+        assert_eq!(original.previous_turn_settings, None);
+        assert_eq!(original.reference_context_item, None);
+        assert_eq!(original.guardian_history, None);
+        assert_eq!(original.window_number, 1);
+        for migrated in [&full, &bounded] {
+            assert_eq!(
+                session
+                    .reconstruct_history_from_rollout(&turn_context, migrated)
+                    .await,
+                original,
+                "post-completion checkpoint changed reconstruction for {:?}",
+                turn_context.session_source,
+            );
+        }
+    }
+}
+
+#[test_case(8, 1; "preserves partial inherited eviction")]
+#[test_case(1, 8; "does not readopt fully evicted inherited prefix")]
+#[tokio::test]
+async fn migration_preserves_worker_checkpoint_after_root_fork(
+    inherited_count: u64,
+    local_count: u64,
+) {
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let worker_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(worker_path.clone()),
+            agent_nickname: None,
+            agent_role: None,
+        });
+    let inherited = (0..inherited_count)
+        .map(|index| {
+            let mut message = retained_user_message(
+                &format!("kept-{index}"),
+                &format!("Keep restriction {index}."),
+                index,
+            );
+            let metadata = message.metadata.as_mut().expect("input metadata");
+            metadata.inherited_user_message = true;
+            // This checkpoint already retained an incomplete parent copy. Its saved
+            // revision must survive adoption without claiming original completeness.
+            metadata.retained_source = Some(codex_history::RetainedSource {
+                id: codex_history::RetainedSourceId {
+                    message_id: message.item.id().expect("inherited identity").to_string(),
+                    turn_id: format!("kept-{index}"),
+                    role: codex_history::RetainedSourceRole::User,
+                },
+                revision: codex_protocol::ResponseItemId::with_suffix(
+                    "retained",
+                    format!("kept-{index}"),
+                ),
+                complete: false,
+            });
+            message
+        })
+        .collect::<Vec<_>>();
+    let assignment = InterAgentCommunication::new(
+        AgentPath::root(),
+        worker_path,
+        Vec::new(),
+        "Perform the delegated task.".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let mut replacement = inherited.clone();
+    replacement.push(ResponseItemEnvelope {
+        item: assignment.to_model_input_item(),
+        metadata: Some(codex_history::CodexHarnessMetadata::default()),
+    });
+    let mut worker_retained = codex_history::RetainedContext::default();
+    worker_retained.reserve_order();
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    checkpoint.replacement_history = Some(replacement.clone());
+    checkpoint.retained_context = Some(worker_retained);
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: Some("worker-task".to_string()),
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                cwd: home.path().to_path_buf(),
+                source: worker_source.clone(),
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+    ];
+    for (index, user) in inherited.iter().enumerate() {
+        let mut context = turn_context.to_turn_context_item();
+        context.turn_id = Some(format!("kept-{index}"));
+        items.extend(migration_user_turn_rollout(
+            context,
+            user.clone(),
+            Vec::new(),
+        ));
+    }
+    items.extend([
+        RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+        RolloutItem::ResponseItem(assignment.to_model_input_item().into()),
+    ]);
+    // The worker's own compaction follows its assignment. No later task delivery
+    // prevents this ordinary user suffix from entering modern rollback migration.
+    items.push(RolloutItem::Compacted(checkpoint));
+    for index in 0..local_count {
+        let turn_id = format!("local-{index}");
+        let mut context = turn_context.to_turn_context_item();
+        context.turn_id = Some(turn_id.clone());
+        items.extend(migration_user_turn_rollout(
+            context,
+            retained_user_message(&turn_id, "Temporary worker input.", index + 1),
+            Vec::new(),
+        ));
+    }
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent {
+            num_turns: u32::try_from(local_count).expect("small rollback count"),
+        },
+    )));
+    let (_, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    for source in [worker_source.clone(), SessionSource::Cli] {
+        let root_thread_owned = !source.is_non_root_agent();
+        turn_context.session_source = source;
+        let before = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        let expected_messages = if root_thread_owned {
+            inherited
+                    .iter()
+                    .enumerate()
+                    .skip(usize::try_from(local_count).expect("small local input count"))
+                    .map(|(index, envelope)| {
+                        json!({
+                            "inherited": true, "order": index,
+                            "turn_id": format!("kept-{index}"),
+                            "message_id": envelope.item.id().expect("inherited identity"),
+                            "revision": envelope.metadata.as_ref().unwrap().retained_source.as_ref().unwrap().revision,
+                            "text": format!("Keep restriction {index}."),
+                            "complete": false,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(before.history, replacement);
+        assert_eq!(
+            serde_json::to_value(&before.retained_context).expect("serialize retained state"),
+            json!({
+                "verified_answers": [], "incomplete": root_thread_owned,
+                "user_messages": expected_messages,
+                "user_messages_incomplete": root_thread_owned,
+                "assistant_messages": [], "assistant_messages_incomplete": false,
+                "next_order": local_count + 1,
+            }),
+        );
+        for migrated in [&full, &bounded] {
+            let after = session
+                .reconstruct_history_from_rollout(&turn_context, migrated)
+                .await;
+            assert_eq!(after, before);
+
+            let (resumed_session, _) = make_session_and_context().await;
+            {
+                let mut state = resumed_session.state.lock().await;
+                state.session_configuration.session_source = turn_context.session_source.clone();
+                state.history = ContextManager::for_session(&turn_context.session_source);
+            }
+            resumed_session
+                .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+                    conversation_id: resumed_session.thread_id,
+                    history: Arc::new(migrated.clone()),
+                    rollout_path: None,
+                }))
+                .await
+                .expect("install the migrated retained state");
+            assert_eq!(
+                resumed_session.clone_history().await.retained_context(),
+                &before.retained_context,
+            );
+        }
+    }
+}
+
+#[test_case(None; "unknown producer hash")]
+#[test_case(Some("producer-hash"); "known producer hash")]
+#[tokio::test]
+async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash: Option<&str>) {
+    use codex_thread_store::ThreadStore;
+
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let opaque = ResponseItem::Compaction {
+        id: Some(codex_protocol::ResponseItemId::with_suffix("cmp", "opaque")),
+        encrypted_content: "opaque".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let replacement = vec![ResponseItemEnvelope {
+        item: opaque.clone(),
+        metadata: producer_hash.map(|hash| codex_history::CodexHarnessMetadata {
+            compaction_model_hash: Some(hash.to_string()),
+            ..Default::default()
+        }),
+    }];
+    let mut checkpoint = checkpoint_compacted(Vec::new());
+    checkpoint.replacement_history = Some(replacement.clone());
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                cwd: home.path().to_path_buf(),
+                source: SessionSource::Cli,
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+        RolloutItem::Compacted(checkpoint),
+    ];
+    let mut context = turn_context.to_turn_context_item();
+    context.turn_id = Some("C".to_string());
+    items.extend(migration_user_turn_rollout(
+        context,
+        user_message("C").into(),
+        Vec::new(),
+    ));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let (store, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    let report = store
+        .migrate_rollouts(codex_thread_store::RolloutMigrationOptions {
+            mode: codex_thread_store::RolloutMigrationMode::Apply,
+            thread_ids: vec![session.thread_id],
+            max_mib_per_second: None,
+        })
+        .await
+        .expect("repeat migration");
+    assert_eq!(
+        report.outcomes[0].status,
+        codex_thread_store::RolloutMigrationStatus::AlreadyPaginated,
+    );
+    let mut repeated = store
+        .load_history(codex_thread_store::LoadThreadHistoryParams {
+            thread_id: session.thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("read repeated migration")
+        .items;
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(
+        home.path(),
+        &mut repeated,
+    )
+    .await
+    .expect("resolve repeated migration review input");
+    assert_eq!(
+        serde_json::to_value(&repeated).expect("serialize repeated migration"),
+        serde_json::to_value(&full).expect("serialize first migration"),
+    );
+    let fallback = codex_history::GuardianHistoryCheckpoint(vec![opaque]);
+    let before = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(before.history, replacement);
+    assert_eq!(before.guardian_history, Some(fallback.clone()),);
+    assert_eq!(
+        serde_json::to_value(&before.retained_context).expect("serialize retained context"),
+        json!({
+            "verified_answers": [], "incomplete": false,
+            "user_messages": [{
+                "order": 0, "turn_id": "", "message_id": null,
+                "text": "C", "complete": false,
+            }],
+            "user_messages_incomplete": true,
+            "assistant_messages": [], "assistant_messages_incomplete": false,
+            "next_order": 1,
+        }),
+    );
+    for reviewer_hash in [None, Some("producer-hash"), Some("other-hash")] {
+        let uses_parent_context = producer_hash.is_some() && producer_hash == reviewer_hash;
+        for source_items in [&items, &full, &bounded, &repeated] {
+            let reconstructed = session
+                .reconstruct_history_from_rollout(&turn_context, source_items)
+                .await;
+            assert_eq!(reconstructed, before);
+            let (installed, _) = make_session_and_context().await;
+            let mut state = installed.state.lock().await;
+            state.history = ContextManager::for_session(&turn_context.session_source);
+            assert_eq!(
+                Session::install_rollout_reconstruction_in_state(
+                    &mut state,
+                    reconstructed,
+                    /*shared_model_response_items*/ None,
+                    /*shared_model_state*/ None,
+                    reviewer_hash,
+                ),
+                None,
+            );
+            assert_eq!(state.history.annotated_items(), &replacement);
+            assert_eq!(state.history.retained_context(), &before.retained_context);
+            assert_eq!(
+                state
+                    .history
+                    .conversation_history_snapshot()
+                    .uses_parent_context_for_review(),
+                uses_parent_context,
+            );
+            assert_eq!(
+                state.history.guardian_history_checkpoint(),
+                (!uses_parent_context).then(|| fallback.clone()),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+    use std::io::Write;
+
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    let baseline = user_message("A");
+    let removed = user_message("C");
+    let opaque = ResponseItem::Compaction {
+        id: Some(codex_protocol::ResponseItemId::with_suffix("cmp", "later")),
+        encrypted_content: "later opaque response".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut checkpoint = checkpoint_compacted(vec![baseline.clone()]);
+    checkpoint.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(vec![
+        baseline.clone(),
+    ]));
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::Compacted(checkpoint.clone()),
+        RolloutItem::ResponseItem(opaque.clone().into()),
+    ];
+    let mut context = turn_context.to_turn_context_item();
+    context.turn_id = Some("C".to_string());
+    items.extend(migration_user_turn_rollout(
+        context,
+        removed.clone().into(),
+        Vec::new(),
+    ));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let records = vec![
+        codex_history::ReviewInputRecord::Baseline {
+            applicability: codex_history::ReviewTranscriptApplicability::Legacy,
+            root_retains_legacy_transcript: Some(true),
+            history: codex_history::GuardianHistoryCheckpoint(vec![baseline.clone()]),
+        },
+        codex_history::ReviewInputRecord::ResponseItem {
+            response: opaque.clone().into(),
+        },
+        codex_history::ReviewInputRecord::ResponseItem {
+            response: removed.clone().into(),
+        },
+        codex_history::ReviewInputRecord::Rollback { boundary: removed },
+    ];
+    let segment_id = ThreadId::new();
+    let segment_path = codex_rollout::review_input_segment_path(home.path(), segment_id);
+    std::fs::create_dir_all(segment_path.parent().expect("review segment directory"))
+        .expect("create review segment directory");
+    let mut segment = std::fs::File::create(segment_path).expect("create review segment");
+    let header = codex_rollout::RolloutLine {
+        timestamp: "2025-01-03T12:00:00Z".to_string(),
+        ordinal: Some(0),
+        item: RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: segment_id,
+                session_id: segment_id.into(),
+                segment_id: Some(
+                    codex_protocol::SegmentId::from_string(&segment_id.to_string())
+                        .expect("review segment ID"),
+                ),
+                history_mode: ThreadHistoryMode::Paginated,
+                ..Default::default()
+            },
+            git: None,
+        }),
+    };
+    serde_json::to_writer(&mut segment, &header).expect("serialize review segment header");
+    segment
+        .write_all(b"\n")
+        .expect("terminate review segment header");
+    for (index, record) in records.iter().enumerate() {
+        serde_json::to_writer(
+            &mut segment,
+            &json!({"ordinal": index + 1, "record": record}),
+        )
+        .expect("serialize review input");
+        segment.write_all(b"\n").expect("terminate review input");
+    }
+    let position = codex_protocol::protocol::HistoryPosition {
+        thread_id: segment_id,
+        end_ordinal_exclusive: u64::try_from(records.len() + 1).expect("review endpoint ordinal"),
+        end_byte_offset: segment.metadata().expect("review segment metadata").len(),
+    };
+    drop(segment);
+
+    let legacy: codex_history::RetainedContext = serde_json::from_value(json!({
+        "verified_answers": [], "incomplete": false,
+        "user_messages": [], "user_messages_incomplete": true, "next_order": 0,
+    }))
+    .expect("Legacy retained state");
+    let thread_owned: codex_history::RetainedContext = serde_json::from_value(json!({
+        "verified_answers": [], "incomplete": false,
+        "user_messages": [{"order": 0, "turn_id": "", "message_id": null,
+            "text": "C", "complete": false}],
+        "user_messages_incomplete": true, "next_order": 1,
+    }))
+    .expect("ThreadOwned retained state");
+    let expected_history = vec![baseline, opaque];
+    let expected_guardian = codex_history::GuardianHistoryCheckpoint(expected_history.clone());
+    checkpoint.replacement_history = Some(annotated(expected_history.clone()));
+    checkpoint.guardian_history = Some(expected_guardian.clone());
+    checkpoint.retained_context = Some(thread_owned.clone());
+    checkpoint
+        .resume_metadata
+        .as_mut()
+        .unwrap()
+        .last_started_turn_id = Some("C".to_string());
+    checkpoint.retained_context_replay = Some(codex_history::RetainedContextReplay {
+        legacy: legacy.clone(),
+        thread_owned_worker: thread_owned.clone(),
+        thread_owned_root: thread_owned.clone(),
+        review_input: Some(position),
+        resolved_review_input: None,
+    });
+    let mut inferred = ContextManager::for_session(&turn_context.session_source);
+    inferred.replace_annotated(checkpoint.replacement_history.clone().unwrap());
+    inferred.restore_replayed_review_context(&thread_owned, Some(&expected_guardian), None);
+    // Without explicitly restoring None, the final opaque model activates this fallback.
+    assert_eq!(
+        inferred.guardian_history_checkpoint(),
+        Some(expected_guardian.clone())
+    );
+
+    let mut replayed_items = vec![RolloutItem::Compacted(checkpoint)];
+    let wire = serde_json::to_value(&replayed_items).expect("serialize unresolved checkpoint");
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(
+        home.path(),
+        &mut replayed_items,
+    )
+    .await
+    .expect("resolve selected checkpoint review input");
+    assert_eq!(serde_json::to_value(&replayed_items).unwrap(), wire);
+    let RolloutItem::Compacted(checkpoint) = &replayed_items[0] else {
+        unreachable!()
+    };
+    assert_eq!(
+        checkpoint
+            .retained_context_replay
+            .as_ref()
+            .unwrap()
+            .resolved_review_input
+            .as_ref()
+            .unwrap()
+            .as_ref(),
+        &records
+    );
+    let worker_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+    for source in [turn_context.session_source.clone(), worker_source] {
+        let is_root = !source.is_non_root_agent();
+        turn_context.session_source = source;
+        let original = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(
+            original
+                .history
+                .iter()
+                .map(|item| item.item.clone())
+                .collect::<Vec<_>>(),
+            expected_history
+        );
+        assert_eq!(
+            original.guardian_history,
+            is_root.then(|| expected_guardian.clone())
+        );
+        assert_eq!(original.last_started_turn_id.as_deref(), Some("C"));
+        assert_eq!(original.retained_context, thread_owned);
+        assert_eq!(
+            session
+                .reconstruct_history_from_rollout(&turn_context, &replayed_items)
+                .await,
+            original,
+            "legacy review input must preserve missing root instructions without adopting them for workers",
+        );
+    }
+
+    let RolloutItem::Compacted(checkpoint) = &mut replayed_items[0] else {
+        unreachable!()
+    };
+    let records = Arc::make_mut(
+        checkpoint
+            .retained_context_replay
+            .as_mut()
+            .unwrap()
+            .resolved_review_input
+            .as_mut()
+            .unwrap(),
+    );
+    let codex_history::ReviewInputRecord::Baseline {
+        root_retains_legacy_transcript,
+        ..
+    } = &mut records[0]
+    else {
+        unreachable!()
+    };
+    *root_retains_legacy_transcript = None;
+    turn_context.session_source = SessionSource::Cli;
+    let predecessor = session
+        .reconstruct_history_from_rollout(&turn_context, &replayed_items)
+        .await;
+    assert_eq!(predecessor.guardian_history, None);
+    assert_eq!(predecessor.retained_context, thread_owned);
+}
+
+#[test_case(false; "thread-owned fallback")]
+#[test_case(true; "ordinary guardian backup")]
+#[tokio::test]
+async fn migration_preserves_review_eviction_under_current_model_policy(has_guardian_backup: bool) {
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = ThreadHistoryMode::Paginated;
+    let opaque = ResponseItem::Compaction {
+        id: Some(codex_protocol::ResponseItemId::with_suffix("cmp", "opaque")),
+        encrypted_content: "opaque".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let baseline_output: ResponseItem = serde_json::from_value(json!({
+        "type": "function_call_output", "call_id": "baseline",
+        "output": "x".repeat(4 * 1024 * 1024 - 64 * 1024),
+    }))
+    .expect("baseline tool output");
+    let baseline = vec![opaque, baseline_output];
+    let mut checkpoint = checkpoint_compacted(baseline.clone());
+    checkpoint.guardian_history =
+        has_guardian_backup.then(|| codex_history::GuardianHistoryCheckpoint(baseline.clone()));
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    let mut items = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: session.thread_id,
+                session_id: session.thread_id.into(),
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                cwd: home.path().to_path_buf(),
+                source: SessionSource::Cli,
+                history_mode: ThreadHistoryMode::Legacy,
+                ..Default::default()
+            },
+            git: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(complete_thread_settings())),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+        RolloutItem::Compacted(checkpoint),
+    ];
+    let removed_output: ResponseItem = serde_json::from_value(json!({
+        "type": "function_call_output", "call_id": "removed",
+        "output": "y".repeat(1024 * 1024),
+    }))
+    .expect("historical output without a saved truncation budget");
+    let mut context = turn_context.to_turn_context_item();
+    context.turn_id = Some("C".to_string());
+    items.extend(migration_user_turn_rollout(
+        context,
+        user_message("C").into(),
+        vec![RolloutItem::ResponseItem(removed_output.into())],
+    ));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let (_, full, bounded) =
+        migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+    for byte_budget in [1024, 256 * 1024] {
+        Arc::make_mut(&mut Arc::make_mut(&mut turn_context.initial_settings).model_info)
+            .truncation_policy =
+            codex_protocol::openai_models::TruncationPolicyConfig::bytes(byte_budget);
+        let before = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        let expected_guardian = Some({
+            codex_history::GuardianHistoryCheckpoint(if byte_budget == 1024 {
+                baseline.clone()
+            } else {
+                Vec::new()
+            })
+        });
+        // Equality remains exact without printing several MiB of fixture text on failure.
+        assert!(
+            before.guardian_history == expected_guardian,
+            "unexpected original transcript for budget {byte_budget}",
+        );
+        assert_eq!(
+            serde_json::to_value(&before.retained_context).expect("serialize retained context"),
+            json!({
+                "verified_answers": [], "incomplete": false,
+                "user_messages": [{
+                    "order": 0, "turn_id": "", "message_id": null,
+                    "text": "C", "complete": false,
+                }],
+                "user_messages_incomplete": true,
+                "assistant_messages": [], "assistant_messages_incomplete": false,
+                "next_order": 1,
+            }),
+        );
+        for migrated in [&full, &bounded] {
+            let after = session
+                .reconstruct_history_from_rollout(&turn_context, migrated)
+                .await;
+            assert!(
+                after == before,
+                "migration changed reconstruction for budget {byte_budget}",
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_input_resolution_follows_reconstruction_checkpoint() {
+    let home = tempfile::tempdir().expect("isolated CODEX_HOME");
+    let (session, _) = make_session_and_context().await;
+    let mut selected = checkpoint_compacted(vec![user_message("A")]);
+    selected.segment_state_checkpoint = None;
+    selected.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    selected.retained_context_replay = Some(codex_history::RetainedContextReplay {
+        legacy: codex_history::RetainedContext::default(),
+        thread_owned_worker: codex_history::RetainedContext::default(),
+        thread_owned_root: codex_history::RetainedContext::default(),
+        review_input: Some(codex_protocol::protocol::HistoryPosition {
+            thread_id: ThreadId::new(),
+            end_ordinal_exclusive: 3,
+            end_byte_offset: 4096,
+        }),
+        resolved_review_input: Some(Arc::new(vec![
+            codex_history::ReviewInputRecord::Baseline {
+                applicability: codex_history::ReviewTranscriptApplicability::Both,
+                root_retains_legacy_transcript: None,
+                history: codex_history::GuardianHistoryCheckpoint(vec![user_message("A")]),
+            },
+            codex_history::ReviewInputRecord::Rollback {
+                boundary: user_message("removed"),
+            },
+        ])),
+    });
+    let mut incomplete = selected.clone();
+    incomplete.replacement_history = None;
+    incomplete.resume_metadata = None;
+    incomplete
+        .retained_context_replay
+        .as_mut()
+        .unwrap()
+        .resolved_review_input = None;
+    let mut items = vec![
+        RolloutItem::Compacted(selected),
+        RolloutItem::Compacted(incomplete),
+    ];
+    let wire_before = serde_json::to_value(&items).expect("serialize unresolved history");
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(home.path(), &mut items)
+        .await
+        .expect("reuse selected cache without opening newer incomplete reference");
+    assert_eq!(serde_json::to_value(&items).unwrap(), wire_before);
+    let RolloutItem::Compacted(incomplete) = &items[1] else {
+        unreachable!()
+    };
+    assert!(
+        incomplete
+            .retained_context_replay
+            .as_ref()
+            .unwrap()
+            .resolved_review_input
+            .is_none()
+    );
+
+    let RolloutItem::Compacted(selected) = &mut items[0] else {
+        unreachable!()
+    };
+    selected
+        .retained_context_replay
+        .as_mut()
+        .unwrap()
+        .resolved_review_input = None;
+    let error = super::rollout_reconstruction::resolve_review_input_for_reconstruction(
+        home.path(),
+        &mut items,
+    )
+    .await
+    .expect_err("selected missing input must not fall back to an empty transcript");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        session
+            .materialize_forked_history(&items, ForkedHistoryMaterialization::Recent)
+            .await
+            .is_err(),
+        "review-only references must resolve without ordinary rollout references"
+    );
+
+    let RolloutItem::Compacted(mut newest) = items[0].clone() else {
+        unreachable!()
+    };
+    newest.retained_context_replay = None;
+    items.push(RolloutItem::Compacted(newest));
+    super::rollout_reconstruction::resolve_review_input_for_reconstruction(home.path(), &mut items)
+        .await
+        .expect("a selected checkpoint without review input must not open older references");
+}
+
+#[test]
+fn modern_state_only_checkpoint_is_invisible_without_hiding_real_compaction() {
+    let mut checkpoint = checkpoint_compacted(vec![user_message("A")]);
+    checkpoint.message.clear();
+    checkpoint.segment_state_checkpoint = None;
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    checkpoint.compaction_response_id = None;
+    assert!(
+        codex_app_server_protocol::build_turns_from_rollout_items(&[RolloutItem::Compacted(
+            checkpoint.clone(),
+        )])
+        .is_empty()
+    );
+
+    checkpoint.compaction_response_id = Some("real-compaction-response".to_string());
+    let real =
+        codex_app_server_protocol::build_turns_from_rollout_items(&[RolloutItem::Compacted(
+            checkpoint,
+        )]);
+    assert_eq!(
+        real.len(),
+        1,
+        "a real compaction must remain visible even with an empty summary"
+    );
+}
+
+#[test_case(false; "legacy summary compaction")]
+#[test_case(true; "modern summary compaction")]
+fn nonempty_summary_compaction_remains_visible(modern: bool) {
+    let mut checkpoint = checkpoint_compacted(vec![user_message("A")]);
+    checkpoint.message = "A real compaction summary".to_string();
+    checkpoint.segment_state_checkpoint = None;
+    checkpoint.compaction_response_id = None;
+    checkpoint.resume_metadata = modern.then_some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    let turns =
+        codex_app_server_protocol::build_turns_from_rollout_items(&[RolloutItem::Compacted(
+            checkpoint,
+        )]);
+    assert_eq!(
+        turns.len(),
+        1,
+        "a nonempty compaction summary must remain visible"
+    );
+}
+
+#[test]
+fn incomplete_modern_checkpoint_without_window_remains_visible() {
+    let mut checkpoint = checkpoint_compacted(vec![user_message("A")]);
+    checkpoint.message.clear();
+    checkpoint.segment_state_checkpoint = None;
+    checkpoint.window_number = None;
+    checkpoint.compaction_response_id = None;
+    checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    let turns =
+        codex_app_server_protocol::build_turns_from_rollout_items(&[RolloutItem::Compacted(
+            checkpoint,
+        )]);
+    assert_eq!(
+        turns.len(),
+        1,
+        "incomplete modern metadata must remain visible"
     );
 }
