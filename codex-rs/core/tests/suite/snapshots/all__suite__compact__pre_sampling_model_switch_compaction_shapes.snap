@@ -6,24 +6,98 @@ Scenario: Pre-sampling compaction on model switch to a smaller context window: c
 
 ## Window 1
 -- request 1 (turn; Initial Request (Previous Model)) --
-00:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
-01:message/user:
+00:message/developer[2]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
+
+        - Prefer direct execution over coordination when you can make faster progress yourself.
+        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
+        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
+        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
+        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
+        - When you receive messages from other agents, verify their claims before relying on them.
+
+    [02] <PERMISSIONS_INSTRUCTIONS>
+01:message/developer:
+    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+    At the start of your turn, you are the active agent.
+    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
+    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+
+    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+    Child agents can also spawn their own sub-agents.
+    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
+    - All agents use the same current working directory.
+    - As a result, edits made by one agent are immediately visible to all other agents.
+
+    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
+
+    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
+02:message/developer:
+    <MULTI_AGENT_MODE>
+03:message/user:
     <ENVIRONMENT_CONTEXT>
-02:message/user:
+04:message/user:
     before switch
 
 ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
 -- request 2 (compaction; Pre-sampling Compaction Request) --
-00:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
-01:message/user:
+00:message/developer[2]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
+
+        - Prefer direct execution over coordination when you can make faster progress yourself.
+        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
+        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
+        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
+        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
+        - When you receive messages from other agents, verify their claims before relying on them.
+
+    [02] <PERMISSIONS_INSTRUCTIONS>
+01:message/developer:
+    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+    At the start of your turn, you are the active agent.
+    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
+    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+
+    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+    Child agents can also spawn their own sub-agents.
+    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
+    - All agents use the same current working directory.
+    - As a result, edits made by one agent are immediately visible to all other agents.
+
+    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
+
+    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
+02:message/developer:
+    <MULTI_AGENT_MODE>
+03:message/user:
     <ENVIRONMENT_CONTEXT>
-02:message/user:
-    before switch
-03:message/assistant:
-    before switch
 04:message/user:
+    before switch
+05:message/assistant:
+    before switch
+06:message/user:
     <SUMMARIZATION_PROMPT>
 
 ## Window 3 (after request 2: input diverged at item 00, settings changed (model, parallel_tool_calls, tools))
@@ -33,10 +107,47 @@ Scenario: Pre-sampling compaction on model switch to a smaller context window: c
 01:message/user:
     <COMPACTION_SUMMARY>
     PRE_SAMPLING_SUMMARY
-02:message/developer[2]:
+02:message/developer[3]:
     [01] <MODEL_SWITCH>
-    [02] <PERMISSIONS_INSTRUCTIONS>
-03:message/user:
+    [02] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
+
+        - Prefer direct execution over coordination when you can make faster progress yourself.
+        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
+        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
+        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
+        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
+        - When you receive messages from other agents, verify their claims before relying on them.
+
+    [03] <PERMISSIONS_INSTRUCTIONS>
+03:message/developer:
+    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+    At the start of your turn, you are the active agent.
+    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
+    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+
+    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+    Child agents can also spawn their own sub-agents.
+    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
+    - All agents use the same current working directory.
+    - As a result, edits made by one agent are immediately visible to all other agents.
+
+    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
+
+    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
+04:message/developer:
+    <MULTI_AGENT_MODE>
+05:message/user:
     <ENVIRONMENT_CONTEXT>
-04:message/user:
+06:message/user:
     after switch
