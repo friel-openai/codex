@@ -9,8 +9,13 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+
+use sha2::Digest;
+use sha2::Sha256;
 
 use codex_protocol::ResponseItemId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -18,22 +23,95 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::UserMessageImageKind;
 use codex_rollout::CompactedItem;
+use codex_rollout::RetainedContext;
 use codex_rollout::RetainedContextEntry;
 use codex_rollout::RetainedInputSource;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 
 use super::migration_error;
+use super::modern_rollback::ModernRollbackPlan;
+use super::modern_rollback::ModernRollbackPlanner;
 use super::rollback;
+use super::rollback_checkpoint::apply_compaction_edits;
 use super::rollback_replay::ModelReplayPlanner;
 use crate::ThreadStoreResult;
 
-#[derive(Clone)]
+/// Deferred edits to one compaction. The replay pass owns the large replacement history, so the
+/// planner retains only the rollback counts rather than cloning every model-context checkpoint.
 struct CompactionFrame {
     record_index: usize,
     boundary_depth: usize,
     owner: Option<usize>,
-    item: CompactedItem,
+    has_replacement_history: bool,
+    /// Retained-context edits in the order historical rollbacks occurred.
+    retained_context_edits: Vec<Arc<RetainedContextEdit>>,
+    /// User-turn removals in their original replay order.
+    rollback_turns: Vec<u32>,
+}
+
+/// A bounded description of one historical rollback's effect on an earlier checkpoint.
+pub(super) struct RetainedContextEdit {
+    removed_turn_ids: Vec<String>,
+    pub(super) first_removed_message_id: Option<ResponseItemId>,
+    /// Original instruction position, not the later rollback record's position.
+    pub(super) source_record_index: usize,
+    /// Exact serialized item identity for legacy instructions without message IDs.
+    pub(super) first_removed_fingerprint: Option<[u8; 32]>,
+    input_source: RetainedInputSource,
+    force_ordered_rollback: bool,
+    known_answer_sources: HashSet<(String, String)>,
+    removed_answer_sources: HashSet<(String, String)>,
+}
+
+impl RetainedContextEdit {
+    pub(super) fn apply(&self, compacted: &mut CompactedItem) {
+        let has_replay = compacted.retained_context_replay.is_some();
+        if let Some(states) = compacted.retained_context_replay.as_mut() {
+            self.apply_legacy(&mut states.legacy);
+            self.apply_ordered(&mut states.thread_owned_root);
+            self.apply_ordered(&mut states.thread_owned_worker);
+        }
+        let Some(context) = compacted.retained_context.as_mut() else {
+            return;
+        };
+        if has_replay
+            || self.force_ordered_rollback
+            || context
+                .ordered_entries()
+                .any(|(_, entry)| matches!(entry, RetainedContextEntry::UserMessage(_)))
+        {
+            self.apply_ordered(context);
+        } else {
+            self.apply_legacy(context);
+        }
+    }
+
+    fn apply_ordered(&self, context: &mut RetainedContext) {
+        let removed_turn_ids = self
+            .removed_turn_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        context.rollback(
+            &removed_turn_ids,
+            self.first_removed_message_id
+                .as_ref()
+                .map(ResponseItemId::as_str),
+            self.input_source,
+        );
+    }
+
+    fn apply_legacy(&self, context: &mut RetainedContext) {
+        context.retain_answers(|answer| {
+            let source = (answer.turn_id.clone(), answer.call_id.clone());
+            if self.removed_answer_sources.contains(&source) {
+                return false;
+            }
+            self.known_answer_sources.contains(&source)
+                || !self.removed_turn_ids.contains(&answer.turn_id)
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -45,6 +123,8 @@ struct PendingUserResponse {
 struct InstructionBoundary {
     record_index: usize,
     message_id: Option<ResponseItemId>,
+    /// Bounded identity metadata; never retain the original user/image payload here.
+    fingerprint: Option<[u8; 32]>,
     input_source: RetainedInputSource,
     alive: bool,
 }
@@ -59,10 +139,34 @@ struct RetainedFactSource {
 pub(super) struct RollbackPlan {
     record_boundaries: Vec<Option<usize>>,
     boundary_alive: Vec<bool>,
-    compacted_items: HashMap<usize, CompactedItem>,
+    /// A removed compaction whose empty checkpoint must still stop reverse model replay.
+    empty_replacement_history_compaction: Option<usize>,
+    /// Deferred user-turn removals keyed by parsed source-record index.
+    compacted_rollbacks: HashMap<usize, Vec<u32>>,
+    /// Deferred retained-context edits keyed by parsed source-record index.
+    retained_context_edits: HashMap<usize, Vec<Arc<RetainedContextEdit>>>,
+    /// Explicit turn IDs whose last instruction boundary was removed.
+    removed_turn_ids: HashSet<String>,
+    /// State-only checkpoints for the narrowly supported modern rollback suffix.
+    modern_rollbacks: Option<ModernRollbackPlan>,
 }
 
 impl RollbackPlan {
+    pub(super) fn modern_rollbacks_mut(&mut self) -> Option<&mut ModernRollbackPlan> {
+        self.modern_rollbacks.as_mut()
+    }
+
+    pub(super) fn needs_review_input_segment(&self) -> bool {
+        self.modern_rollbacks.as_ref().is_some_and(|plan| {
+            plan.snapshots
+                .values()
+                .any(|snapshot| snapshot.review_input_end.is_some())
+        })
+    }
+
+    pub(super) fn removed_turn_ids(&self) -> &HashSet<String> {
+        &self.removed_turn_ids
+    }
     pub(super) fn record_count(&self) -> usize {
         self.record_boundaries.len()
     }
@@ -80,13 +184,64 @@ impl RollbackPlan {
             &line.item,
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
         ) {
+            if let Some(modern) = &self.modern_rollbacks
+                && let Some(snapshot) = modern.snapshots.get(&record_index)
+                && let Some(mut compacted) = modern.compacted_at(record_index)
+            {
+                let edits = self
+                    .retained_context_edits
+                    .get(&modern.checkpoint_index)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                apply_compaction_edits(
+                    modern.checkpoint_index,
+                    &mut compacted,
+                    &edits[..snapshot.retained_context_edit_count],
+                    &snapshot.rollback_turns,
+                    false,
+                )?;
+                // History edits address the original checkpoint. Retained replay also includes
+                // raw suffix admissions, their acceptance counter, and irreversible evictions.
+                compacted.retained_context = Some(snapshot.retained_context.clone());
+                if let Some(replay) = compacted.retained_context_replay.as_mut() {
+                    replay.legacy = snapshot.retained_context_replay.legacy.clone();
+                    replay.thread_owned_root =
+                        snapshot.retained_context_replay.thread_owned_root.clone();
+                    replay.thread_owned_worker =
+                        snapshot.retained_context_replay.thread_owned_worker.clone();
+                }
+                line.item = RolloutItem::Compacted(compacted);
+                return Ok(Some(line));
+            }
             return Ok(None);
         }
-        // A rolled-back turn can still own the empty checkpoint that keeps cold resume from
-        // replaying older history.
-        if let Some(compacted) = self.compacted_items.get(&record_index) {
-            line.item = RolloutItem::Compacted(compacted.clone());
-            return Ok(Some(line));
+        let is_replay_anchor = self.empty_replacement_history_compaction == Some(record_index);
+        let is_modern_base = self
+            .modern_rollbacks
+            .as_ref()
+            .is_some_and(|modern| modern.checkpoint_index == record_index);
+        let retained_context_edits = self.retained_context_edits.get(&record_index);
+        let rollbacks = self.compacted_rollbacks.get(&record_index);
+        if !is_modern_base
+            && (is_replay_anchor || retained_context_edits.is_some() || rollbacks.is_some())
+        {
+            let RolloutItem::Compacted(compacted) = &mut line.item else {
+                return Err(migration_error(
+                    "rollback compaction changed during source replay",
+                ));
+            };
+            apply_compaction_edits(
+                record_index,
+                compacted,
+                retained_context_edits
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                rollbacks.map(Vec::as_slice).unwrap_or_default(),
+                is_replay_anchor,
+            )?;
+            if is_replay_anchor {
+                return Ok(Some(line));
+            }
         }
         if boundary.is_some_and(|boundary| !self.boundary_alive[boundary]) {
             return Ok(None);
@@ -108,8 +263,13 @@ pub(super) struct RollbackPlanner {
     turn_boundaries: HashMap<String, usize>,
     call_boundaries: HashMap<(String, String), Option<usize>>,
     retained_fact_sources: Vec<RetainedFactSource>,
+    /// Canonical user snapshots can be repeated after the matching model response.
+    native_user_boundaries: HashMap<(String, String), usize>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
+    modern_replay: ModernRollbackPlanner,
+    /// These snapshots survive rollback independently of their originating user turn.
+    sticky_record_indices: Vec<usize>,
 }
 
 impl RollbackPlanner {
@@ -126,20 +286,48 @@ impl RollbackPlanner {
             turn_boundaries: HashMap::new(),
             call_boundaries: HashMap::new(),
             retained_fact_sources: Vec::new(),
+            native_user_boundaries: HashMap::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
+            modern_replay: ModernRollbackPlanner::new(),
+            sticky_record_indices: Vec::new(),
         }
     }
 
+    pub(super) fn set_source(&mut self, source: &codex_protocol::protocol::SessionSource) {
+        self.modern_replay.set_source(source);
+    }
+
     pub(super) fn observe(&mut self, line: &RolloutLine) -> ThreadStoreResult<()> {
+        self.observe_inner(line, /*native*/ false)
+    }
+
+    pub(super) fn observe_paginated(&mut self, line: &RolloutLine) -> ThreadStoreResult<()> {
+        self.observe_inner(line, /*native*/ true)
+    }
+
+    fn observe_inner(&mut self, line: &RolloutLine, native: bool) -> ThreadStoreResult<()> {
+        let index = self.record_boundaries.len();
+        self.modern_replay.observe(index, &line.item);
+        if matches!(
+            &line.item,
+            RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::EventMsg(EventMsg::TokenCount(_))
+                | RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+        ) {
+            self.sticky_record_indices.push(index);
+        }
         if matches!(line.item, RolloutItem::RolloutReference(_)) {
             self.model_replay
                 .observe(self.record_boundaries.len(), &line.item);
             self.record_boundaries.push(None);
             return Ok(());
         }
-        let index = self.record_boundaries.len();
-        self.model_replay.observe(index, &line.item);
+        if native {
+            self.model_replay.observe_paginated(index, &line.item);
+        } else {
+            self.model_replay.observe(index, &line.item);
+        }
         self.record_boundaries
             .push(self.boundary_stack.last().copied());
         let paired_user_boundary = match (&self.pending_user_response, &line.item) {
@@ -147,6 +335,19 @@ impl RollbackPlanner {
                 if user_response_matches_event(&pending.content, event) =>
             {
                 Some(pending.boundary)
+            }
+            (Some(pending), RolloutItem::EventMsg(EventMsg::ItemCompleted(event))) => {
+                match &event.item {
+                    TurnItem::UserMessage(user) => match user.as_legacy_event() {
+                        EventMsg::UserMessage(event)
+                            if user_response_matches_event(&pending.content, &event) =>
+                        {
+                            Some(pending.boundary)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
             }
             _ => None,
         };
@@ -181,9 +382,17 @@ impl RollbackPlanner {
                 if let Some(boundary) = paired_delivery_boundary {
                     self.record_boundaries[index] = Some(boundary);
                     self.boundaries[boundary].message_id = response.id().cloned();
+                    if response.id().is_none() {
+                        self.boundaries[boundary].fingerprint =
+                            Some(instruction_fingerprint(&response.item)?);
+                    }
                 } else if rollback::counts_as_boundary(&response.item) {
                     let boundary = self.start_boundary(index);
                     self.boundaries[boundary].message_id = response.id().cloned();
+                    if response.id().is_none() {
+                        self.boundaries[boundary].fingerprint =
+                            Some(instruction_fingerprint(&response.item)?);
+                    }
                     self.boundaries[boundary].input_source = response.metadata.as_ref().into();
                     if let ResponseItem::Message { role, content, .. } = &response.item
                         && role == "user"
@@ -239,7 +448,26 @@ impl RollbackPlanner {
                 self.record_boundaries[index] = Some(boundary);
             }
             RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
-                self.assign_targeted_record(index, Some(event.turn_id.as_str()));
+                if let TurnItem::UserMessage(user) = &event.item
+                    && native
+                {
+                    let key = (event.turn_id.clone(), user.id.clone());
+                    let boundary = self
+                        .native_user_boundaries
+                        .get(&key)
+                        .copied()
+                        .or(paired_user_boundary)
+                        .unwrap_or_else(|| self.start_boundary(index));
+                    self.native_user_boundaries.insert(key, boundary);
+                    self.turn_boundaries.insert(event.turn_id.clone(), boundary);
+                    self.record_boundaries[index] = Some(boundary);
+                    if self.boundaries[boundary].message_id.is_none() {
+                        self.boundaries[boundary].message_id =
+                            Some(ResponseItemId::from_server(user.id.clone()));
+                    }
+                } else {
+                    self.assign_targeted_record(index, Some(event.turn_id.as_str()));
+                }
             }
             RolloutItem::EventMsg(event) => {
                 self.assign_targeted_record(index, explicit_event_turn_id(event));
@@ -261,7 +489,9 @@ impl RollbackPlanner {
                     record_index: index,
                     boundary_depth: self.boundary_stack.len(),
                     owner,
-                    item: item.clone(),
+                    has_replacement_history: item.replacement_history.is_some(),
+                    retained_context_edits: Vec::new(),
+                    rollback_turns: Vec::new(),
                 });
             }
             RolloutItem::TurnContext(_) => {
@@ -306,35 +536,62 @@ impl RollbackPlanner {
 
     pub(super) fn finish(self) -> RollbackPlan {
         let RollbackPlanner {
-            record_boundaries,
+            mut record_boundaries,
             boundaries,
             compactions,
             model_replay,
+            turn_boundaries,
+            modern_replay,
+            sticky_record_indices,
             ..
         } = self;
-        let replay_anchor = model_replay.finish().empty_replacement_history_compaction;
+        let modern_rollbacks = modern_replay.finish();
+        let replay_anchor = modern_rollbacks
+            .is_none()
+            .then(|| model_replay.finish().empty_replacement_history_compaction)
+            .flatten();
+        if modern_rollbacks.is_some() {
+            for index in sticky_record_indices {
+                record_boundaries[index] = None;
+            }
+        }
         let boundary_alive = boundaries
             .into_iter()
             .map(|boundary| boundary.alive)
             .collect::<Vec<_>>();
-        let compacted_items = compactions
-            .into_iter()
-            .filter_map(|mut frame| {
-                if Some(frame.record_index) == replay_anchor {
-                    frame.item.replacement_history = Some(Vec::new());
-                    frame.item.mcp_resource_origins = None;
-                    return Some((frame.record_index, frame.item));
-                }
-                frame
+        let mut compacted_rollbacks = HashMap::new();
+        let mut retained_context_edits = HashMap::new();
+        for frame in compactions {
+            let is_replay_anchor = Some(frame.record_index) == replay_anchor;
+            if !is_replay_anchor
+                && modern_rollbacks
+                    .as_ref()
+                    .is_none_or(|modern| modern.checkpoint_index != frame.record_index)
+                && frame
                     .owner
-                    .is_none_or(|boundary| boundary_alive[boundary])
-                    .then_some((frame.record_index, frame.item))
-            })
-            .collect::<HashMap<_, _>>();
+                    .is_some_and(|boundary| !boundary_alive[boundary])
+            {
+                continue;
+            }
+            if !frame.retained_context_edits.is_empty() {
+                retained_context_edits.insert(frame.record_index, frame.retained_context_edits);
+            }
+            if !frame.rollback_turns.is_empty() {
+                compacted_rollbacks.insert(frame.record_index, frame.rollback_turns);
+            }
+        }
+        let removed_turn_ids = turn_boundaries
+            .into_iter()
+            .filter_map(|(turn_id, boundary)| (!boundary_alive[boundary]).then_some(turn_id))
+            .collect();
         RollbackPlan {
             record_boundaries,
             boundary_alive,
-            compacted_items,
+            empty_replacement_history_compaction: replay_anchor,
+            compacted_rollbacks,
+            retained_context_edits,
+            removed_turn_ids,
+            modern_rollbacks,
         }
     }
 
@@ -343,6 +600,7 @@ impl RollbackPlanner {
         self.boundaries.push(InstructionBoundary {
             record_index: index,
             message_id: None,
+            fingerprint: None,
             input_source: RetainedInputSource::Local(None),
             alive: true,
         });
@@ -399,8 +657,10 @@ impl RollbackPlanner {
             first_removed_boundary = Some(boundary);
         }
         if let Some(boundary) = first_removed_boundary {
-            let source = &self.boundaries[boundary];
-            let acceptance_order = source.input_source.acceptance_order();
+            let source_record_index = self.boundaries[boundary].record_index;
+            let first_removed_message_id = self.boundaries[boundary].message_id.clone();
+            let input_source = self.boundaries[boundary].input_source;
+            let acceptance_order = input_source.acceptance_order();
             if let Some(order) = acceptance_order {
                 // An answer may have been persisted before the queued instruction
                 // accepted ahead of it. Both are removed at that acceptance boundary.
@@ -413,11 +673,11 @@ impl RollbackPlanner {
                     }
                 }
             }
-            let removed_turns = self
+            let removed_turn_ids = self
                 .turn_boundaries
                 .iter()
                 .filter(|(_, boundary)| removed_boundaries.contains(*boundary))
-                .map(|(turn_id, _)| turn_id.as_str())
+                .map(|(turn_id, _)| turn_id.clone())
                 .chain(
                     self.retained_fact_sources
                         .iter()
@@ -425,44 +685,57 @@ impl RollbackPlanner {
                             self.record_boundaries[fact.record_index]
                                 .is_some_and(|boundary| removed_boundaries.contains(&boundary))
                         })
-                        .map(|fact| fact.turn_id.as_str()),
+                        .map(|fact| fact.turn_id.clone()),
                 )
                 .collect::<Vec<_>>();
             // Accepted answers can precede a queued instruction in the rollout,
             // including in checkpoints. Legacy evidence uses the recorded boundary.
             // Later checkpoints have not been observed yet and already reflect this rollback.
+            let known_answer_sources = self.call_boundaries.keys().cloned().collect();
+            let removed_answer_sources = self
+                .call_boundaries
+                .iter()
+                .filter(|&(_, boundary)| {
+                    boundary
+                        .as_ref()
+                        .is_some_and(|boundary| !self.boundaries[*boundary].alive)
+                })
+                .map(|(source, _)| source.clone())
+                .collect();
+            let edit = Arc::new(RetainedContextEdit {
+                removed_turn_ids,
+                first_removed_message_id,
+                source_record_index,
+                first_removed_fingerprint: self.boundaries[boundary].fingerprint,
+                input_source,
+                force_ordered_rollback: acceptance_order.is_some(),
+                known_answer_sources,
+                removed_answer_sources,
+            });
             for frame in self.compactions.iter_mut().rev().take_while(|frame| {
-                acceptance_order.is_some() || frame.record_index >= source.record_index
+                acceptance_order.is_some() || frame.record_index >= source_record_index
             }) {
-                if let Some(context) = &mut frame.item.retained_context {
-                    if acceptance_order.is_some()
-                        || context
-                            .ordered_entries()
-                            .any(|(_, entry)| matches!(entry, RetainedContextEntry::UserMessage(_)))
-                    {
-                        context.rollback(
-                            &removed_turns,
-                            source.message_id.as_ref().map(ResponseItemId::as_str),
-                            source.input_source,
-                        );
-                    } else {
-                        // Checkpoints written without instruction retention keep the legacy
-                        // source-call boundary, including answers before a same-turn steer.
-                        context.retain_answers(|answer| {
-                            self.call_boundaries
-                                .get(&(answer.turn_id.clone(), answer.call_id.clone()))
-                                .map_or_else(
-                                    || !removed_turns.contains(&answer.turn_id.as_str()),
-                                    |boundary| {
-                                        boundary
-                                            .is_none_or(|boundary| self.boundaries[boundary].alive)
-                                    },
-                                )
-                        });
-                    }
-                }
+                frame.retained_context_edits.push(Arc::clone(&edit));
             }
         }
+        let modern_edit_count = self
+            .modern_replay
+            .checkpoint_index()
+            .and_then(|checkpoint_index| {
+                self.compactions
+                    .iter()
+                    .find(|frame| frame.record_index == checkpoint_index)
+                    .map(|frame| frame.retained_context_edits.len())
+            })
+            .unwrap_or_default();
+        self.modern_replay.observe_rollback(
+            self.record_boundaries.len() - 1,
+            num_turns,
+            modern_edit_count,
+            |index| {
+                self.record_boundaries[index].is_none_or(|boundary| self.boundaries[boundary].alive)
+            },
+        );
         let compaction_index = self.compactions.iter().rposition(|frame| {
             frame
                 .owner
@@ -473,17 +746,14 @@ impl RollbackPlanner {
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
             if remaining > 0 {
-                frame.item.mcp_resource_origins = None;
-                let replacement_history =
-                    frame.item.replacement_history.as_mut().ok_or_else(|| {
-                        migration_error(
-                            "legacy rollback crosses a compaction without replacement history",
-                        )
-                    })?;
-                rollback::drop_last_n_user_turns(
-                    replacement_history,
-                    u32::try_from(remaining).unwrap_or(u32::MAX),
-                );
+                if !frame.has_replacement_history {
+                    return Err(migration_error(
+                        "legacy rollback crosses a compaction without replacement history",
+                    ));
+                }
+                frame
+                    .rollback_turns
+                    .push(u32::try_from(remaining).unwrap_or(u32::MAX));
             }
         }
         self.active_turn_id = None;
@@ -493,6 +763,17 @@ impl RollbackPlanner {
         self.pending_delivery_boundary = None;
         Ok(())
     }
+}
+
+pub(super) fn instruction_fingerprint(item: &ResponseItem) -> ThreadStoreResult<[u8; 32]> {
+    // JSON objects can deserialize with different key order. Preserve item identity without
+    // retaining every ID-less instruction's user text or inline image in the rollback plan.
+    let mut value = serde_json::to_value(item)
+        .map_err(|err| migration_error(format!("serialize rollback instruction: {err}")))?;
+    value.sort_all_objects();
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|err| migration_error(format!("serialize rollback instruction: {err}")))?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 fn explicit_event_turn_id(event: &EventMsg) -> Option<&str> {

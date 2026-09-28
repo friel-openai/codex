@@ -46,6 +46,8 @@ impl RetainedContext {
         }
         message.bound();
         let inherited = source == RetainedInputSource::Inherited;
+        // Worker checkpoints omit parent answers. Match restore's answer gap at admission.
+        self.verified_answers_incomplete |= inherited;
         if let Some(index) = self.assistant_messages.iter().position(|entry| {
             message.message_id.is_some() && entry.value.message_id == message.message_id
         }) {

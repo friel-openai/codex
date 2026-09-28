@@ -462,6 +462,33 @@ impl ThreadHistoryBuilder {
         }
     }
 
+    /// Reduces persisted native records, including presentation items omitted by Legacy replay.
+    /// Mixed-format migration uses this for inherited native records before applying rollbacks.
+    pub fn handle_paginated_rollout_item(&mut self, item: &RolloutItem) {
+        self.current_rollout_index = self.next_rollout_index;
+        self.next_rollout_index += 1;
+        if let RolloutItem::EventMsg(EventMsg::ItemCompleted(payload)) = item {
+            let item = ThreadItem::from(payload.item.clone());
+            if matches!(
+                payload.item,
+                codex_protocol::items::TurnItem::EnteredReviewMode(_)
+                    | codex_protocol::items::TurnItem::ExitedReviewMode(_)
+            ) {
+                self.upsert_review_mode_item(Some(&payload.turn_id), item);
+            } else {
+                self.upsert_item_in_turn_id(&payload.turn_id, item);
+            }
+        } else if let RolloutItem::EventMsg(
+            event @ (EventMsg::TurnStarted(_)
+            | EventMsg::TurnComplete(_)
+            | EventMsg::TurnAborted(_)
+            | EventMsg::ThreadRolledBack(_)),
+        ) = item
+        {
+            self.handle_event(event);
+        }
+    }
+
     /// Handles one event and returns the materialized items or turn metadata
     /// changed by that event.
     pub fn handle_event_with_changes(&mut self, event: &EventMsg) -> ThreadHistoryChangeSet {
@@ -1405,7 +1432,13 @@ impl ThreadHistoryBuilder {
         // Fork and rollback checkpoints use Compacted as a persisted state baseline, not as a
         // user-visible compaction turn. Real compactions retain their summary message and remain
         // visible even though both records carry the same checkpoint descriptor.
-        if payload.message.is_empty() && payload.segment_state_checkpoint.is_some() {
+        if payload.message.is_empty()
+            && (payload.segment_state_checkpoint.is_some()
+                || (payload.compaction_response_id.is_none()
+                    && payload.replacement_history.is_some()
+                    && payload.window_number.is_some()
+                    && payload.resume_metadata.is_some()))
+        {
             return;
         }
         self.ensure_turn().saw_compaction = true;
@@ -4563,6 +4596,7 @@ mod tests {
                 message: String::new(),
                 replacement_history: None,
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
