@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 7e753f8adb334f836de54c7ec5db78493ce24dde..f85fd85b8d75eee91a9ea7f06066519d77cc24b9 100644
+index 144a0f330a7317936f3d82ecadad15739316799c..c9064180274165de3793a7fc1f29d4e7b16c1474 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2080,6 +2080,7 @@ dependencies = [
+@@ -2100,6 +2100,7 @@ dependencies = [
   "codex-git-utils",
   "codex-goal-extension",
   "codex-guardian-v2",
@@ -52,7 +52,7 @@ index db5ff718b6a83ded8f519d913336896eaaadc186..b61ddcde19f1c0a548c74ccd8a73dd89
          let trimmed = entry.trim();
          if trimmed.is_empty() {
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index b981e63feaeb9b58f2bb9cde2d8409fda7704949..6e113857c2c1cd8dd2325bbe396b5ee44da31534 100644
+index 0ee91ed8119586d220b5523997ba60f7a9fc0f57..91005ca687d381da0e567a9f4f488840aae8ab60 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -125,6 +125,16 @@ macro_rules! experimental_type_entry {
@@ -152,7 +152,7 @@ index 3aac8e7863db9f4644254af91bb56cb3926d92f3..2c9dcec2d99a1eb518e69be08ed88f76
      /// Parses valid absolute instruction source paths and omits malformed legacy values.
      pub fn instruction_source_path_uris(&self) -> Vec<PathUri> {
 diff --git a/codex-rs/app-server/Cargo.toml b/codex-rs/app-server/Cargo.toml
-index bd47a54d084fb1eb8ea730ebeac5d4a7f4af600b..cde229a70e401a3ad2640f89daa5f7b891b4f3f9 100644
+index ad0a5fbab36268a3e85baa3ff2c2069ea6fb8a91..9e498670c0d0b4f48fc5a91ed2c392f906689a2c 100644
 --- a/codex-rs/app-server/Cargo.toml
 +++ b/codex-rs/app-server/Cargo.toml
 @@ -54,6 +54,7 @@ codex-goal-extension = { workspace = true }
@@ -163,7 +163,7 @@ index bd47a54d084fb1eb8ea730ebeac5d4a7f4af600b..cde229a70e401a3ad2640f89daa5f7b8
  codex-file-watcher = { workspace = true }
  codex-hooks = { workspace = true }
  codex-history-notes-extension = { workspace = true }
-@@ -91,6 +92,7 @@ codex-sandboxing = { workspace = true }
+@@ -92,6 +93,7 @@ codex-sandboxing = { workspace = true }
  codex-state = { workspace = true }
  codex-thread-store = { workspace = true }
  codex-tools = { workspace = true }
@@ -172,10 +172,10 @@ index bd47a54d084fb1eb8ea730ebeac5d4a7f4af600b..cde229a70e401a3ad2640f89daa5f7b8
  codex-utils-json-to-toml = { workspace = true }
  codex-utils-path-uri = { workspace = true }
 diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
-index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0eec7a5bf64 100644
+index 8865bff54bd3b33a2bba952b4d3a8c5bf2193558..22cf716b25108e0e9e898237b0df70c3a8439fe9 100644
 --- a/codex-rs/app-server/src/in_process.rs
 +++ b/codex-rs/app-server/src/in_process.rs
-@@ -814,8 +814,12 @@ mod tests {
+@@ -826,8 +826,12 @@ mod tests {
      use codex_app_server_protocol::SessionSource as ApiSessionSource;
      use codex_app_server_protocol::ThreadAttachmentOperation;
      use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
@@ -188,7 +188,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
      use codex_app_server_protocol::ThreadQueueChangedNotification;
      use codex_app_server_protocol::ThreadStartParams;
      use codex_app_server_protocol::ThreadStartResponse;
-@@ -856,7 +860,7 @@ mod tests {
+@@ -868,7 +872,7 @@ mod tests {
          let codex_home = TempDir::new().expect("temp dir");
          let config = Arc::new(build_test_config(codex_home.path()).await);
          start_test_client_with_config_loader(
@@ -197,7 +197,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
              config,
              Arc::new(codex_config::NoopThreadConfigLoader),
              session_source,
-@@ -867,7 +871,7 @@ mod tests {
+@@ -879,7 +883,7 @@ mod tests {
      }
 
      async fn start_test_client_with_config_loader(
@@ -206,7 +206,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
          config: Arc<Config>,
          thread_config_loader: Arc<dyn ThreadConfigLoader>,
          session_source: SessionSource,
-@@ -907,7 +911,7 @@ mod tests {
+@@ -919,7 +923,7 @@ mod tests {
              channel_capacity,
          };
          let mut client = start(args).await.expect("in-process runtime should start");
@@ -215,7 +215,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
          client
      }
 
-@@ -1046,8 +1050,19 @@ mod tests {
+@@ -1058,8 +1062,19 @@ mod tests {
          const ROLLBACK_APPEND: &str = "append before rollback fork freeze";
          const ROLLBACK_TURN_ID: &str = "rollback-boundary";
 
@@ -236,7 +236,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
          let model_provider = config.model_provider_id.as_str();
          let interrupted_thread_id = app_test_support::create_fake_rollout(
              codex_home.path(),
-@@ -1102,8 +1117,8 @@ mod tests {
+@@ -1114,8 +1129,8 @@ mod tests {
 
          let config_loader = Arc::new(GatedThreadConfigLoader::default());
          let client = start_test_client_with_config_loader(
@@ -247,7 +247,7 @@ index d6a94150abf6e148ef069620941502e1d15747cd..117a7c8d023132fc021f52a3457bc0ee
              config_loader.clone(),
              SessionSource::Cli,
              DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
-@@ -1257,6 +1272,172 @@ mod tests {
+@@ -1269,6 +1284,172 @@ mod tests {
              rollback_error.message
          );
 
@@ -569,10 +569,10 @@ index be77c1bdab751aa2fcb55439a88f11c5991aed03..317e2b78b2efc59d6388f356c6254836
      outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
      request_id: i64,
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index ac6b3bdf30a7966ef219cba2adaf28dd98a703a9..1489e09832ed3dbac7761f8d65ef4f9cc4d5a1d6 100644
+index 23969ceea20cdbdc26054e2ed1094cd27c1a22b0..a70ada7aa4ca19ad1fa4a0c2e7d9b1efdf222e70 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
-@@ -563,6 +563,7 @@ mod search;
+@@ -564,6 +564,7 @@ mod search;
  mod thread_attachments;
  mod thread_enrichment;
  mod thread_fork_goal;
@@ -1189,7 +1189,7 @@ index 0000000000000000000000000000000000000000..47b3b03fdfae15efeb1a9141fb626a75
 +    }
 +}
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09b3161525 100644
+index 8c92699d08ddcb6bb2e0c7032ae39d1bab8adca3..6d9e515d65b52afa9481f22f236f9a1a069b36b5 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -8,6 +8,7 @@ use super::persisted_resume_settings::PersistedResumeSettings;
@@ -1224,7 +1224,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
          ))
          .await
          .map(|()| None)
-@@ -6592,6 +6596,7 @@ impl ThreadRequestProcessor {
+@@ -6609,6 +6613,7 @@ impl ThreadRequestProcessor {
          thread_id: ThreadId,
          include_history: bool,
      ) -> Result<StoredThread, JSONRPCErrorError> {
@@ -1232,7 +1232,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
          self.thread_store
              .read_thread(StoreReadThreadParams {
                  thread_id,
-@@ -6728,14 +6733,42 @@ impl ThreadRequestProcessor {
+@@ -6745,14 +6750,42 @@ impl ThreadRequestProcessor {
          }
      }
 
@@ -1276,7 +1276,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
          let ThreadForkParams {
              thread_id,
              last_turn_id,
-@@ -6773,15 +6806,20 @@ impl ThreadRequestProcessor {
+@@ -6790,15 +6823,20 @@ impl ThreadRequestProcessor {
                  "`permissions` cannot be combined with `sandbox`",
              ));
          }
@@ -1305,7 +1305,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
          if last_turn_id.is_some() && before_turn_id.is_some() {
              return Err(invalid_request(
                  "`beforeTurnId` cannot be combined with `lastTurnId`",
-@@ -6811,7 +6849,9 @@ impl ThreadRequestProcessor {
+@@ -6828,7 +6866,9 @@ impl ThreadRequestProcessor {
              .and_then(codex_core::util::normalize_thread_name);
          let mut source_approvals_reviewer = None;
          let mut source_token_usage_info = None;
@@ -1316,7 +1316,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
              let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                  (Some(turn_id), None) => {
                      codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
-@@ -6848,7 +6888,9 @@ impl ThreadRequestProcessor {
+@@ -6865,7 +6905,9 @@ impl ThreadRequestProcessor {
              let model_context =
                  if matches!(&params.boundary, codex_thread_store::ForkBoundary::Latest)
                      && let Some(local_store) = local_store
@@ -1327,7 +1327,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
                      && !matches!(parent.agent_status().await, AgentStatus::Running)
                      && parent.flush_rollout().await.is_ok()
                      && let Ok(Some(expected_position)) = local_store
-@@ -6983,9 +7025,21 @@ impl ThreadRequestProcessor {
+@@ -7000,9 +7042,21 @@ impl ThreadRequestProcessor {
                  }
              }
              Some(prepared)
@@ -1349,7 +1349,7 @@ index 306e6b4d419f18743257ef936a69aa93204f1aa9..b770e4bcafb6b3af287602a25f8ead09
          let projected_response_turns = prepared_fork
              .as_ref()
              .and_then(|prepared| prepared.projected_response_turns.clone());
-@@ -7098,8 +7152,11 @@ impl ThreadRequestProcessor {
+@@ -7115,8 +7169,11 @@ impl ThreadRequestProcessor {
              !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
          let needs_latest_settings =
              restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
@@ -1679,7 +1679,7 @@ index 0000000000000000000000000000000000000000..03997e5e163f4b428d26a29849ec0901
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_continuity_restoration_tests.rs b/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
-index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1ac68ea21 100644
+index 04f924ffa8bacaf53d5048e00601ab205d5ca3ae..5d07949c13ae858596ca17712ee106b907452c15 100644
 --- a/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
 +++ b/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
 @@ -92,7 +92,7 @@ async fn indexed_supervisor_continuity_uses_projected_parent_completion_inner()
@@ -1692,10 +1692,10 @@ index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 60b319a8701c4a242088676acf25d6b80ea843d4..da0e9d21e5aeed0b0070540cd7c5616c31b11897 100644
+index ab3d6149a30ba621b0ecf74e3cd6eec1ea7acf33..e56121317523104789ff12ea1aaeb7f9e42e34a1 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1829,7 +1829,9 @@ impl ThreadManager {
+@@ -1869,7 +1869,9 @@ impl ThreadManager {
          };
          model_history_override.extend_from_slice(synthesized_suffix);
          let shared_model_response_items = prepared.shared_model_response_items.clone();
@@ -1706,7 +1706,7 @@ index 60b319a8701c4a242088676acf25d6b80ea843d4..da0e9d21e5aeed0b0070540cd7c5616c
              if let Ok(source) = self.state.get_thread(source_thread_id).await {
                  Some(
                      source
-@@ -1874,7 +1876,7 @@ impl ThreadManager {
+@@ -1914,7 +1916,7 @@ impl ThreadManager {
                  ForkHistory {
                      snapshot: None,
                      initial_history: history,
@@ -1715,7 +1715,7 @@ index 60b319a8701c4a242088676acf25d6b80ea843d4..da0e9d21e5aeed0b0070540cd7c5616c
                      model_history_override: Some(model_history_override),
                      settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                      shared_model_response_items,
-@@ -2386,7 +2388,7 @@ impl ThreadManagerState {
+@@ -2426,7 +2428,7 @@ impl ThreadManagerState {
                          "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                      ))
                  })?;
@@ -1725,10 +1725,10 @@ index 60b319a8701c4a242088676acf25d6b80ea843d4..da0e9d21e5aeed0b0070540cd7c5616c
                  let logical_history = copied_history.as_ref().clone();
                  let model_history = prepared.model_context.as_ref().clone();
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index c3ccc07ed93367aba8930f5e0addfc4ae98cb620..0f4b0df1a3035bea8e441e4f8c384129e59881c6 100644
+index 409cdb1300921e3052e050a2a4317c4490b1f84d..453bbcafbbc217a5d50f1411f5de234a44d0da45 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
-@@ -642,7 +642,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+@@ -646,7 +646,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
      };
      let prepared = PreparedFork::new(
          source_thread_id,
@@ -1737,7 +1737,7 @@ index c3ccc07ed93367aba8930f5e0addfc4ae98cb620..0f4b0df1a3035bea8e441e4f8c384129
          /*history_base*/ None,
          Some(frozen_segment),
          Arc::new(boundary_context.clone()),
-@@ -3608,20 +3608,24 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+@@ -3664,20 +3664,24 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
      assert!(source_snapshot_state.ends_mid_turn);
      let expected_turn_id = source_snapshot_state.active_turn_id.clone();
      assert_eq!(expected_turn_id, None);
@@ -1765,8 +1765,8 @@ index c3ccc07ed93367aba8930f5e0addfc4ae98cb620..0f4b0df1a3035bea8e441e4f8c384129
 +    assert_eq!(source_end_ordinal_exclusive, None);
 
      let forked = manager
-         .fork_thread(
-@@ -3710,10 +3714,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+         .fork_legacy_thread(
+@@ -3766,10 +3770,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
              .count(),
          1,
      );
@@ -2377,7 +2377,7 @@ index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 5d8e2a9b5f7933ee3bca0b23467c9e2c80266184..16f8885e4d53324397e890f57aa1c0d18050e26e 100644
+index 9aad4c2c83709fde7accc4fbe554e39464bbd0c5..e6ecb215f91eba410d076fbf81b47badbf9a4d30 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -2755,10 +2755,10 @@ index d981555e24b5d0e2e0066e9db2b96257ac94fc73..061278a50d1d2a3491e5114d0be09c04
              _source_reservation: Box::new(source_reservation),
          }
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 96b1a054838b7efe265704b3099abd1e75137fb8..5b2b1ada68923eb4e625587a882fe7e793ff040f 100644
+index 3deaf68e8da222bd956963494b195e08b2c4c939..0088226615a3a7e786a83f016152f75cd630c677 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -540,12 +540,21 @@ impl App {
+@@ -559,12 +559,21 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2780,7 +2780,7 @@ index 96b1a054838b7efe265704b3099abd1e75137fb8..5b2b1ada68923eb4e625587a882fe7e7
                          )
                          .await
                          {
-@@ -576,11 +585,20 @@ impl App {
+@@ -595,11 +604,20 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2801,7 +2801,7 @@ index 96b1a054838b7efe265704b3099abd1e75137fb8..5b2b1ada68923eb4e625587a882fe7e7
                          )
                          .await
                          {
-@@ -2881,8 +2899,15 @@ impl App {
+@@ -2895,8 +2913,15 @@ impl App {
                  parent_thread_id,
                  placement,
              } => {
@@ -3439,7 +3439,7 @@ index 9cb912221be6fd58570a48202859b33e803250c4..35b972a442714dd39e27824c19754930
      Ok(())
  }
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 995a47eb1a067ca10c3d322cc3f8cd667d1a3bd7..9cf285a58bfe6d3c4e66bfeb50341842a4317368 100644
+index d75f10de755c0fa85601afd0f4d813a52b1206ff..624c715a55bfdd8d4b8e82689fdf56cf57f14ec5 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
 @@ -167,6 +167,7 @@ impl App {
@@ -3596,7 +3596,7 @@ index 1192b393d53d8bc21da88816e8699e6f0157393a..d5acd0d9acb697235881438b56282603
  async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
      let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
 diff --git a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
-index 4c789caf5e6458450ca2881c648761a69e73b782..654c91ae34121c69e05838941fc7c7cd6b3de6f6 100644
+index 5e2409e78e18f429c216f8f4d2c13454344e55c0..a8203c186129eb1384ee2bf9e3d009846c1837de 100644
 --- a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 +++ b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 @@ -24,6 +24,7 @@ async fn run_startup_for_test(
@@ -3608,7 +3608,7 @@ index 4c789caf5e6458450ca2881c648761a69e73b782..654c91ae34121c69e05838941fc7c7cd
          /*is_first_run*/ false,
          /*should_prompt_windows_sandbox_nux_at_startup*/ false,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index a6cdaf2004c2697c4b1b4f5b8e43b21c6056e62d..0607737bc02f843fa0a0629cc51fca7385a5d57a 100644
+index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c0e178268 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -148,6 +148,7 @@ use color_eyre::eyre::Result;
@@ -3905,10 +3905,10 @@ index aef73cb4b8b423f4e4af28b9f68222514d683bb9..42db5f78a427a831ca0f4f9a0513b151
      .expect_err("NUL must fail shell quoting");
      assert!(err.contains("failed to quote fork command for Ghostty"));
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index f1701062885c963e1c0cb69b8d933ed5264fdb97..17ec87d7cd419afb518ca2c9992cc277b790190a 100644
+index ddbf245e39f52702f8c8db49f2f005c391d0e1f3..8f296c471dbd4e5ce8435e4be20c7ba92f780fa5 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1466,6 +1466,23 @@ async fn run_ratatui_app(
+@@ -1469,6 +1469,23 @@ async fn run_ratatui_app(
      let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
      let mut session_selection = if cli.agents_overview {
          resume_picker::SessionSelection::AgentsOverview
@@ -3932,7 +3932,7 @@ index f1701062885c963e1c0cb69b8d933ed5264fdb97..17ec87d7cd419afb518ca2c9992cc277
      } else if let Some(id_str) = cli.side_session_id.as_deref() {
          let Some(startup_app_server) = app_server.as_mut() else {
              unreachable!("app server should be initialized for an internal side session");
-@@ -1702,39 +1719,43 @@ async fn run_ratatui_app(
+@@ -1705,39 +1722,43 @@ async fn run_ratatui_app(
      }
 
      let current_cwd = config.cwd.clone();
@@ -4009,7 +4009,7 @@ index f1701062885c963e1c0cb69b8d933ed5264fdb97..17ec87d7cd419afb518ca2c9992cc277
          }
      };
 
-@@ -2007,6 +2028,7 @@ async fn run_ratatui_app(
+@@ -2010,6 +2031,7 @@ async fn run_ratatui_app(
          prompt,
          shared,
          daemon_cli_executable,
@@ -4017,7 +4017,7 @@ index f1701062885c963e1c0cb69b8d933ed5264fdb97..17ec87d7cd419afb518ca2c9992cc277
          ..
      } = cli;
      let images = shared.into_inner().images;
-@@ -2085,6 +2107,7 @@ async fn run_ratatui_app(
+@@ -2088,6 +2110,7 @@ async fn run_ratatui_app(
          prompt,
          images,
          session_selection,
@@ -4026,7 +4026,7 @@ index f1701062885c963e1c0cb69b8d933ed5264fdb97..17ec87d7cd419afb518ca2c9992cc277
          should_show_trust_screen, // Proxy to: is it a first run in this directory?
          should_prompt_windows_sandbox_nux_at_startup,
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index 80607ca52d146f7b7bd68f6f3872948eaa21e785..739b4e6f99a6264b750b90ea7ac1f14b78f037ba 100644
+index 602037d1958e742ea1781cbcafa5c97b4d64ef0b..a2abb5312c62d4902cdfa98ba55aba3260597627 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
 @@ -102,7 +102,7 @@ pub(super) async fn run_main_inner(

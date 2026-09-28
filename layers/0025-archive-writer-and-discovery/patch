@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 8c577a06bad4253a79ace87ff4686501f91836d2..b07f51e9945ad16d2428b20630fbfc3ef250cc3c 100644
+index f5fecfe3cd46efcde8c5a0ff2811167342193661..9f4b7e1625e280a9d4b64f05e8fea8cc5bc186f2 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
+@@ -2179,7 +2179,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index 8c577a06bad4253a79ace87ff4686501f91836d2..b07f51e9945ad16d2428b20630fbfc3e
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6536,6 +6536,28 @@ impl ThreadRequestProcessor {
+@@ -6553,6 +6553,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {

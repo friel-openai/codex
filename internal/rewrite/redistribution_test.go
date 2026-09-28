@@ -11,7 +11,80 @@ import (
 	"testing"
 
 	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
 )
+
+func TestApplyPatchPrefersDirectContextAndRetainsThreeWayFallback(t *testing.T) {
+	const block = "fn fixture() {\n    McpConfig {\n        startup_timeout: None,\n        tool_timeout: None,\n        default_tools: None,\n    }\n}\n"
+	correctedBlock := strings.Replace(block, "        tool_timeout: None,\n", "        startup_readiness: Default::default(),\n        tool_timeout: None,\n        schema_max: Default::default(),\n", 1)
+	for _, tc := range []struct {
+		name          string
+		context       string
+		early         string
+		middle        string
+		late          string
+		want          string
+		directApplies bool
+	}{
+		{
+			name:          "late-blob-conflicts-but-direct-context-applies",
+			context:       "--unified=1",
+			early:         block,
+			middle:        block + "\n" + block,
+			late:          block + "\n" + correctedBlock,
+			want:          correctedBlock,
+			directApplies: true,
+		},
+		{
+			name:          "changed-context-needs-three-way-fallback",
+			context:       "--unified=3",
+			early:         "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n",
+			middle:        "line 1\ncontext 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n",
+			late:          "line 1\ncontext 2\nline 3\nline 4\ncorrected 5\nline 6\nline 7\nline 8\n",
+			want:          "line 1\nline 2\nline 3\nline 4\ncorrected 5\nline 6\nline 7\nline 8\n",
+			directApplies: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GIT_DIFF_OPTS", tc.context)
+			fixture := newRewriteFixture(t, nil, []testLayer{
+				{id: definition.FoundationLayerID, message: "Foundation\n", edit: func(root string) {
+					writeTestFile(t, filepath.Join(root, "fixture.txt"), []byte(tc.early), 0o644)
+				}},
+				{id: "0001-context", message: "Later context\n", edit: func(root string) {
+					writeTestFile(t, filepath.Join(root, "fixture.txt"), []byte(tc.middle), 0o644)
+				}},
+				{id: "0002-correction", message: "Initializer correction\n", edit: func(root string) {
+					writeTestFile(t, filepath.Join(root, "fixture.txt"), []byte(tc.late), 0o644)
+				}},
+			})
+			patch := fixture.patch(t, "0002-correction")
+			worktree := filepath.Join(t.TempDir(), "early")
+			gitTestRun(t, fixture.gitRoot, "worktree", "add", "--detach", worktree, "HEAD~2")
+
+			// The late blob includes another fixture that does not exist at the
+			// target. Git's full-file three-way merge conflicts in the first case,
+			// although the selected initializer hunk applies to the target exactly.
+			_, err := fixture.service.Git.Invoke(t.Context(), worktree, gitrepo.Invocation{
+				Arguments: []string{"apply", "--index", "--check", "--whitespace=nowarn"},
+				Stdin:     patch,
+			})
+			if (err == nil) != tc.directApplies {
+				t.Fatalf("direct application error = %v; want applicability %t", err, tc.directApplies)
+			}
+			if err := fixture.service.applyPatch(t.Context(), worktree, patch, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(readTestFile(t, filepath.Join(worktree, "fixture.txt"))); got != tc.want {
+				t.Fatalf("worktree file = %q, want %q", got, tc.want)
+			}
+			if got := string(gitTestBytes(t, worktree, "show", ":fixture.txt")); got != tc.want {
+				t.Fatalf("indexed file = %q, want %q", got, tc.want)
+			}
+			gitTestRun(t, worktree, "diff", "--exit-code")
+		})
+	}
+}
 
 func TestRedistributeOneSourceToMultipleTargets(t *testing.T) {
 	fixture := newRewriteFixture(t, func(root string) { writeTestFile(t, filepath.Join(root, "text.txt"), textLines(), 0o644) }, []testLayer{

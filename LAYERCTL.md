@@ -133,6 +133,10 @@ replay and recapture the candidate definitions. They reject conflicts, stale
 inputs and any difference in the final Git tree hash. Commit hashes can change
 because commit parents and messages change. Dependent hunks cannot always move
 across intervening changes; a rejected move leaves definitions unchanged.
+Patch application checks exact textual context first, then uses Git's three-way
+merge when direct application does not apply. This avoids merging an isolated
+hunk against unrelated changes in its original full-file base. Both methods
+must pass the same final-tree and serialized-replay checks before installation.
 
 Successful commands print a JSON receipt containing the before/after tree hashes
 and attribution. `--dry-run` verifies without replacing definitions. Installation

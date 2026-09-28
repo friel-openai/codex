@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8fab2632e 100644
+index 943866fc42bd9a004973d0844f50cae1cc86c023..595bdf4152e19cd0d21320c976db5136b08b3641 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -43,7 +43,9 @@ use std::sync::LazyLock;
@@ -127,7 +127,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
      pub(crate) async fn thread_shell_command(
          &self,
          request_id: &ConnectionRequestId,
-@@ -4495,7 +4576,7 @@ impl ThreadRequestProcessor {
+@@ -4512,7 +4593,7 @@ impl ThreadRequestProcessor {
      ) -> std::io::Result<LegacyHistoryWindow> {
          if matches!(sort_direction, SortDirection::Asc) && cursor.is_none() {
              return Ok(LegacyHistoryWindow {
@@ -136,7 +136,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
                      self.config.codex_home.as_path(),
                      rollout_path,
                  )
-@@ -4513,6 +4594,7 @@ impl ThreadRequestProcessor {
+@@ -4530,6 +4611,7 @@ impl ThreadRequestProcessor {
          } else {
              None
          };
@@ -144,7 +144,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
          let mut ordinary_reference_limit = match (&generation, cursor) {
              (Some(generation), Some(cursor)) if !cursor.include_anchor => self
                  .legacy_page_depth_hints
-@@ -4527,7 +4609,8 @@ impl ThreadRequestProcessor {
+@@ -4544,7 +4626,8 @@ impl ThreadRequestProcessor {
                  .lookup(generation, None, page_size)
                  .unwrap_or(DEFAULT_ROLLOUT_REFERENCE_DEPTH),
              _ => DEFAULT_ROLLOUT_REFERENCE_DEPTH,
@@ -154,7 +154,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
          let mut materializer = codex_rollout::BoundedRolloutMaterializer::new(
              self.config.codex_home.as_path(),
              rollout_path,
-@@ -4547,7 +4630,9 @@ impl ThreadRequestProcessor {
+@@ -4564,7 +4647,9 @@ impl ThreadRequestProcessor {
                  sort_direction,
                  materialized.has_older_reference,
              ) {
@@ -165,7 +165,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
                      && !items.iter().any(|item| {
                          matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)))
                      })
-@@ -4580,11 +4665,12 @@ impl ThreadRequestProcessor {
+@@ -4597,11 +4682,12 @@ impl ThreadRequestProcessor {
                  }
                  return Ok(LegacyHistoryWindow {
                      items,
@@ -180,7 +180,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
                  return Ok(LegacyHistoryWindow {
                      items,
                      has_older_reference: false,
-@@ -4594,7 +4680,7 @@ impl ThreadRequestProcessor {
+@@ -4611,7 +4697,7 @@ impl ThreadRequestProcessor {
              let next_limit = ordinary_reference_limit.checked_mul(2).ok_or_else(|| {
                  std::io::Error::other("rollout reference depth exceeds addressable memory")
              })?;
@@ -189,7 +189,7 @@ index 3e95ef35855facf0cf34c7c3819741e2b3d8b459..c031a730e4e3362544921c53bf20aaf8
          }
      }
 
-@@ -5348,6 +5434,15 @@ impl ThreadRequestProcessor {
+@@ -5365,6 +5451,15 @@ impl ThreadRequestProcessor {
                          restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
                      })
                      .filter(|turn_id| !turn_id.is_empty());

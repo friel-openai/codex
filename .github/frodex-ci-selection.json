@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "package": "codex-core",
+      "binary": "codex-core",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "agent::api::tests::host_list_canonical_preserves_metadata_and_order",
+        "agent::api::tests::host_list_canonical_does_not_truncate_at_private_page_limit",
+        "agent::api::tests::host_list_canonical_bounds_task_previews_and_falls_back_to_id",
+        "agent::control::tests::list_agents_pages_are_byte_bounded_and_complete",
+        "agent::control::tests::ensure_v2_child_loaded_preserves_saved_target_under_ephemeral_parent",
+        "agent::control::tests::ensure_v2_child_loaded_preserves_evicted_parent_authority",
+        "agent::control::tests::ensure_agent_loaded_preserves_evicted_parent_instructions",
+        "agent::control::tests::ensure_agent_loaded_preserves_materialized_ephemeral_target",
+        "agent::control::tests::read_saved_thread_repairs_ephemeral_runtime_without_losing_live_message",
+        "agent::control::tests::concurrent_saved_thread_reads_preserve_active_turn_and_messages",
+        "agent::control::tests::saved_thread_read_retries_after_writer_acquisition_conflict",
+        "agent::control::tests::multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry::concrete",
+        "agent::control::tests::multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry::trait_send",
+        "agent::control::tests::goal_supervisor_full_history_bootstrap_survives_cold_resume",
+        "agent::control::tests::paginated_goal_supervisor_helper_preserves_parent_request_prefix",
+        "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_model_history_without_removed_authorization::matching_guardian_boundary",
+        "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_model_history_without_removed_authorization::missing_guardian_boundary_clears_evidence",
+        "session::rollout_reconstruction_tests::complete_history_rollback_does_not_restore_removed_checkpoint_authorization",
+        "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_retained_authorization::matching_retained_message_identity",
+        "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_retained_authorization::missing_retained_message_identity_marks_evidence_incomplete",
+        "session::rollout_reconstruction_tests::modern_certified_checkpoint_rollback_preserves_authoritative_metadata::rollback_checkpoint_turn",
+        "session::rollout_reconstruction_tests::modern_certified_checkpoint_rollback_preserves_authoritative_metadata::rollback_newer_completed_turn",
+        "session::rollout_reconstruction_tests::modern_certified_checkpoint_rollback_preserves_authoritative_metadata::retained_authorization_rollback_checkpoint_turn",
+        "session::rollout_reconstruction_tests::modern_certified_checkpoint_rollback_preserves_authoritative_metadata::retained_authorization_rollback_newer_completed_turn",
+        "session::tests::queued_thread_settings_fail_after_checkpoint_becomes_indeterminate",
+        "session::rollout_reconstruction_tests::migration_preserves_modern_checkpoint_reconstruction_after_rollback::populated_checkpoint_with_repeated_rollback",
+        "session::rollout_reconstruction_tests::migration_preserves_modern_checkpoint_reconstruction_after_rollback::empty_checkpoint_with_newer_c_runtime",
+        "session::rollout_reconstruction_tests::migration_preserves_retained_eviction_before_rollback",
+        "session::rollout_reconstruction_tests::migration_preserves_worker_checkpoint_after_root_fork::preserves_partial_inherited_eviction",
+        "session::rollout_reconstruction_tests::migration_preserves_worker_checkpoint_after_root_fork::does_not_readopt_fully_evicted_inherited_prefix",
+        "session::rollout_reconstruction_tests::reconstruction_preserves_legacy_only_review_input_applicability",
+        "session::rollout_reconstruction_tests::migration_preserves_opaque_checkpoint_reviewer_fallback::unknown_producer_hash",
+        "session::rollout_reconstruction_tests::migration_preserves_opaque_checkpoint_reviewer_fallback::known_producer_hash",
+        "session::rollout_reconstruction_tests::migration_preserves_review_eviction_under_current_model_policy::thread_owned_fallback",
+        "session::rollout_reconstruction_tests::migration_preserves_review_eviction_under_current_model_policy::ordinary_guardian_backup",
+        "session::rollout_reconstruction_tests::migration_preserves_assistant_delivery_and_source_revisions_after_rollback",
+        "session::tests::inject_items_context_preserves_published_model_metadata",
+        "session::rollout_reconstruction_tests::migration_preserves_original_root_transcript_decision_after_retained_eviction::initially_complete",
+        "session::rollout_reconstruction_tests::migration_preserves_original_root_transcript_decision_after_retained_eviction::initially_incomplete"
+      ]
+    },
+    {
+      "package": "codex-core",
+      "binary": "codex-core::all",
+      "kind": "test",
+      "target": "all",
+      "tests": [
+        "suite::agent_control::default_list_canonical_uses_provided_host_controller",
+        "suite::guardian_retained_context::retained_instructions_keep_identity_across_compaction_and_resume::enabled_paginated_resume",
+        "suite::guardian_retained_context::retained_instructions_keep_identity_across_compaction_and_resume::oversized_instruction_resume",
+        "suite::guardian_retained_context::streamed_question_precedes_reply_across_resume::server_message_id",
+        "suite::guardian_retained_context::streamed_question_precedes_reply_across_resume::generated_message_id",
+        "suite::guardian_retained_context::streamed_question_precedes_reply_across_resume::plan_with_server_message_id",
+        "suite::guardian_retained_context::streamed_question_precedes_reply_across_resume::plan_with_generated_message_id",
+        "suite::guardian_retained_context::streamed_question_precedes_reply_across_resume::text_and_plan_share_one_order",
+        "suite::guardian_authorization_refresh::guardian_refreshes_subagent_authorization::parent_revokes_authorization",
+        "suite::mcp_agent_tree::root_and_child_observe_one_stateful_mcp_server",
+        "suite::mcp_agent_tree::child_receives_elicitation_from_the_shared_mcp_server",
+        "suite::mcp_agent_tree::explicit_root_refresh_replaces_the_shared_tree_connection"
+      ]
+    },
+    {
+      "package": "codex-mcp",
+      "binary": "codex-mcp",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "connection_manager::tests::catalog_readiness_accepts_pending_required_server_but_explicit_capture_waits",
+        "connection_manager::tests::catalog_readiness_preserves_failed_startup_cache_but_rejects_filtered_tools",
+        "connection_pool::tests::prepared_call_waits_for_refresh_route_before_locking_catalog",
+        "connection_pool::tests::cancelling_prepared_call_releases_route_and_catalog_locks",
+        "connection_manager::tests::stable_binding_identity_tracks_the_physical_connection_generation"
+      ]
+    },
+    {
+      "package": "codex-app-server",
+      "binary": "codex-app-server::all",
+      "kind": "test",
+      "target": "all",
+      "tests": [
+        "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::different_sync_hash_preserves_retained_evidence",
+        "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::unknown_sync_hash_preserves_retained_evidence",
+        "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::empty_sync_hash_preserves_retained_evidence",
+        "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::ultrafast_sol_preserves_retained_evidence_with_different_parent_hash",
+        "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::empty_checkpoint_fails_closed"
+      ]
+    },
+    {
+      "package": "codex-history",
+      "binary": "codex-history",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "user_authorization::tests::retained_messages_preserve_phase_origin_and_source",
+        "user_authorization::tests::retained_messages_preserve_incompleteness_and_exclude_compaction_output",
+        "user_authorization::tests::retained_assistant_message_bounds_text_and_marks_media_incomplete",
+        "user_authorization::tests::checkpoint_matching_requires_original_role_identity_text_and_guardian_visibility",
+        "review_input::tests::review_input_baseline_preserves_root_legacy_transcript_decision_compatibility"
+      ]
+    },
+    {
+      "package": "codex-thread-store",
+      "binary": "codex-thread-store",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "local::rollout_migration::modern_rollback::retained_tests::assistant_delivery_keeps_call_order_and_saved_revisions_after_rollback",
+        "local::rollout_migration::modern_rollback::retained_tests::legacy_instruction_candidates_preserve_runtime_exclusions",
+        "local::rollout_migration::tests::review_input_storage_tests::remigrated_review_input_preserves_root_legacy_transcript_decision"
+      ]
+    }
+  ]
+}

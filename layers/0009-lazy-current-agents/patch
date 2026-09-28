@@ -254,7 +254,7 @@ index 9112070c9c47c4fe02244ab02a91f3db3d484fa9..7f44d12c7628e8ea9e3ae3a1dfcef1f7
          cwd: test_path_buf("/tmp").abs(),
          cli_version: "0.0.0".to_string(),
 diff --git a/codex-rs/analytics/src/tests/support.rs b/codex-rs/analytics/src/tests/support.rs
-index 4386962b6a184c72edb4040bee797ac625504ac1..b35b6ce63e0889739223d8d8318e2b27f9f410f1 100644
+index 5ce1c77216c425bd518d05029e8131f12f35f15a..95590d06a374457214d616c5aa4b04a7d2365d1d 100644
 --- a/codex-rs/analytics/src/tests/support.rs
 +++ b/codex-rs/analytics/src/tests/support.rs
 @@ -125,6 +125,7 @@ pub(super) fn sample_thread_with_metadata(
@@ -293,10 +293,10 @@ index 7a89eeaea798a7b08cb46134f868c3cde574a104..781f120e076ed9b75919982bbc31abc9
            "description": "Opaque pagination cursor returned by a previous call.",
            "type": [
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 9920c7aaf3e0c9e2408f1e0a012f8c500379621b..2a8d4cb844d926663a254bd8c671293b136f9cd9 100644
+index de53014c26d7f4b0d1d7a58a34d7ef5f3b96b81e..0b3e5baa083cfe1eb92306e13d1484bbefd9172a 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-@@ -4263,7 +4263,7 @@
+@@ -4265,7 +4265,7 @@
            ]
          },
          "parentThreadId": {
@@ -306,10 +306,10 @@ index 9920c7aaf3e0c9e2408f1e0a012f8c500379621b..2a8d4cb844d926663a254bd8c671293b
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index b7d760602f43081b5a20a49cc938850e4316d5c2..40269c38d1deaae44fec6c4ba532b51651a89771 100644
+index a5efad767a6646d5e43173277347f9c5410f039a..fb4ff2f873c83c381dc2abcccb231992174e2810 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-@@ -21197,7 +21197,7 @@
+@@ -20807,7 +20807,7 @@
              ]
            },
            "parentThreadId": {
@@ -318,7 +318,7 @@ index b7d760602f43081b5a20a49cc938850e4316d5c2..40269c38d1deaae44fec6c4ba532b516
              "type": [
                "string",
                "null"
-@@ -23087,7 +23087,7 @@
+@@ -22697,7 +22697,7 @@
          "$schema": "http://json-schema.org/draft-07/schema#",
          "properties": {
            "archived": {
@@ -327,7 +327,7 @@ index b7d760602f43081b5a20a49cc938850e4316d5c2..40269c38d1deaae44fec6c4ba532b516
              "type": [
                "boolean",
                "null"
-@@ -23227,6 +23227,13 @@
+@@ -22837,6 +22837,13 @@
        "ThreadLoadedListParams": {
          "$schema": "http://json-schema.org/draft-07/schema#",
          "properties": {
@@ -342,10 +342,10 @@ index b7d760602f43081b5a20a49cc938850e4316d5c2..40269c38d1deaae44fec6c4ba532b516
              "description": "Opaque pagination cursor returned by a previous call.",
              "type": [
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index a1908066558a03ddbe69768e188761cff93aa494..153965779add90646d303bbd32045f380dbb68a9 100644
+index bd2649cdb7798b9d4d876c837b5380a9374c7e8c..580609905f45bdb965f00d1d575351f2d3ba25cc 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-@@ -18911,7 +18911,7 @@
+@@ -18521,7 +18521,7 @@
            ]
          },
          "parentThreadId": {
@@ -354,7 +354,7 @@ index a1908066558a03ddbe69768e188761cff93aa494..153965779add90646d303bbd32045f38
            "type": [
              "string",
              "null"
-@@ -20801,7 +20801,7 @@
+@@ -20411,7 +20411,7 @@
        "$schema": "http://json-schema.org/draft-07/schema#",
        "properties": {
          "archived": {
@@ -363,7 +363,7 @@ index a1908066558a03ddbe69768e188761cff93aa494..153965779add90646d303bbd32045f38
            "type": [
              "boolean",
              "null"
-@@ -20941,6 +20941,13 @@
+@@ -20551,6 +20551,13 @@
      "ThreadLoadedListParams": {
        "$schema": "http://json-schema.org/draft-07/schema#",
        "properties": {
@@ -378,10 +378,10 @@ index a1908066558a03ddbe69768e188761cff93aa494..153965779add90646d303bbd32045f38
            "description": "Opaque pagination cursor returned by a previous call.",
            "type": [
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
-index 821156e085f3faf50fc10e6703665bbc294772fe..0bad6d78d7d9c8458ad8545c9acaabec4bdf64bf 100644
+index ae7c0296f911ef0ab22d33f04fbfb1d6af958ce9..97673ac16cf010c8cb4f57b98ee6da5bc84837f5 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
-@@ -1405,7 +1405,7 @@
+@@ -1406,7 +1406,7 @@
            ]
          },
          "parentThreadId": {
@@ -404,10 +404,10 @@ index 83d8171483f4c92d0cc602abf6eb60c7474bccf9..276bd4e4400e4b294218236c59ea3b3f
          "boolean",
          "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
-index f2388adec45a3031e8e52265e82b1cc5d4bec83e..9f216a064dbaff068574619ae097443116d34270 100644
+index 422dde9b4fd6ab9dbbe701e6711843272c9a87fc..eb757a6f146d80364e21f02d7f9d5e5f6ef0178e 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
-@@ -1196,7 +1196,7 @@
+@@ -1197,7 +1197,7 @@
            ]
          },
          "parentThreadId": {
@@ -435,10 +435,10 @@ index d10ee7ed96cbb8d2ec55843c51fa724571b6ec39..3c2aed5c1b3e3b24fdc2bd3b24dd023d
        "description": "Opaque pagination cursor returned by a previous call.",
        "type": [
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
-index e854f75959dcd984a368adbae3b4aee60aeacb5c..04abfd0e7d407b8734be6fa1e9207432e4847bd2 100644
+index c6319f80f038a176211e439c612721e1a2ab5959..ee09d4667a757bc51a1fc766199c1e97ab211504 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
-@@ -1196,7 +1196,7 @@
+@@ -1197,7 +1197,7 @@
            ]
          },
          "parentThreadId": {
@@ -448,10 +448,10 @@ index e854f75959dcd984a368adbae3b4aee60aeacb5c..04abfd0e7d407b8734be6fa1e9207432
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
-index 46c5db4905eee5bfdae920f62b9dd408aaffe9d4..c754c60914538ae3bb84272bd3c5fa41c308cf60 100644
+index 0e43a4943c570a1d26a5dc4fb9cc53b86d815a06..5574c5b47c953f728b25b9c9c267ff80adc0d2c3 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
-@@ -1196,7 +1196,7 @@
+@@ -1197,7 +1197,7 @@
            ]
          },
          "parentThreadId": {
@@ -461,10 +461,10 @@ index 46c5db4905eee5bfdae920f62b9dd408aaffe9d4..c754c60914538ae3bb84272bd3c5fa41
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
-index 18dc6f98c8d0fd89ba1217a889c5670983f75eef..56dc57dcd295b26fafb0fad54cbe78b21f6c3d2a 100644
+index 2c5b04f924d04ba9e251deb212e399d09ac33fd0..b8f491344ec2d2d3753a71b01538287fd4091c87 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
-@@ -1457,7 +1457,7 @@
+@@ -1458,7 +1458,7 @@
            ]
          },
          "parentThreadId": {
@@ -474,10 +474,10 @@ index 18dc6f98c8d0fd89ba1217a889c5670983f75eef..56dc57dcd295b26fafb0fad54cbe78b2
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
-index 59157b1406bae6a2b471bea19b73324821831bbd..27f36cbf03aa17345b07c0317c805973ab1dc486 100644
+index ce39a0388b12bf4f45d80f7dc629a786158ab94d..e2d7f460bbfa59cdad7656cd55388ff57501698e 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
-@@ -1405,7 +1405,7 @@
+@@ -1406,7 +1406,7 @@
            ]
          },
          "parentThreadId": {
@@ -487,10 +487,10 @@ index 59157b1406bae6a2b471bea19b73324821831bbd..27f36cbf03aa17345b07c0317c805973
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
-index 77e20cb9f21719eb13a3798c003b1b548eed1493..388d99970e202b641f5ab37789e5d552f523e3a5 100644
+index fcb90a50af252d41ddcbcbcfc226d6638898ff6d..10ccf0d8e8269557be4051c735c2e71f3cdf10f1 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
-@@ -1196,7 +1196,7 @@
+@@ -1197,7 +1197,7 @@
            ]
          },
          "parentThreadId": {
@@ -500,10 +500,10 @@ index 77e20cb9f21719eb13a3798c003b1b548eed1493..388d99970e202b641f5ab37789e5d552
              "string",
              "null"
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
-index 5b60e711656bca2de63a4b384980676874e38fe9..3372836ed0bc6f20805fd4cfa0f0d9efdc551427 100644
+index b4f25ab89da1e77ba069b414cf75f0494a767d71..5ff5976a3adfe885e4a739b747b22b00f9f747a4 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
-@@ -1196,7 +1196,7 @@
+@@ -1197,7 +1197,7 @@
            ]
          },
          "parentThreadId": {
@@ -557,10 +557,10 @@ index a7889e4f09a78810d65e0e2648c461e81dddd20d..a9075b405a664a04d57bd25ed4ce6cb4
 + */
 +ancestorThreadId?: string | null, };
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 8ddf160c71b77eb492ad33d9d8c9653104719d74..b981e63feaeb9b58f2bb9cde2d8409fda7704949 100644
+index c37c4956f1c3cbf21f293ca2aa41a6fec209bcfa..0ee91ed8119586d220b5523997ba60f7a9fc0f57 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
-@@ -3220,6 +3220,7 @@ mod tests {
+@@ -3221,6 +3221,7 @@ mod tests {
                      updated_at: 2,
                      recency_at: Some(3),
                      status: v2::ThreadStatus::Idle,
@@ -568,7 +568,7 @@ index 8ddf160c71b77eb492ad33d9d8c9653104719d74..b981e63feaeb9b58f2bb9cde2d8409fd
                      path: None,
                      cwd: cwd.clone(),
                      cli_version: "0.0.0".to_string(),
-@@ -3281,6 +3282,7 @@ mod tests {
+@@ -3282,6 +3283,7 @@ mod tests {
                          "status": {
                              "type": "idle"
                          },
@@ -577,7 +577,7 @@ index 8ddf160c71b77eb492ad33d9d8c9653104719d74..b981e63feaeb9b58f2bb9cde2d8409fd
                          "cwd": absolute_path_string("tmp"),
                          "cliVersion": "0.0.0",
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-index 69e314c28fd1bbf5c32379f9168c267b91dd6875..7f37ffa6fb791e9e1b9b729c12c0a21f6453b31e 100644
+index 95429db98476a42b4d890008c39555c705d61e08..7eed8fd2559a6bf7ddc34ff847e35fdc3cc59d6a 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 @@ -61,6 +61,20 @@ use std::collections::HashMap;
@@ -602,7 +602,7 @@ index 69e314c28fd1bbf5c32379f9168c267b91dd6875..7f37ffa6fb791e9e1b9b729c12c0a21f
  #[serde(rename_all = "camelCase")]
  #[ts(export_to = "v2/")]
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
-index 3c97c16a4f5ab076ceb0c515c191ea114dcaa6a5..5c0a3ed5888451d0c636698cd8fd5e2d7ea8ddb9 100644
+index 9973ad4b77ce7ecd159b955bc22802da0690aca5..630eb61a03d7c31f12ea56ac813bbaa3c803e860 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 @@ -307,6 +307,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
@@ -735,10 +735,10 @@ index 6d94cdd78bf340f9a9ddeb84110efb9bc6d8477a..edc189f4d497f91ca40fa3c4af6dd0be
              cli_version: thread.cli_version,
 diff --git a/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f51367bd9d75dd50c9519526f505de51aa528ff5
+index 0000000000000000000000000000000000000000..7c5f3ae5436d2efcdfe8da24d6a6343569308b3e
 --- /dev/null
 +++ b/codex-rs/app-server/src/message_processor_saved_thread_persistence_tests.rs
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,301 @@
 +use super::*;
 +use codex_app_server_protocol::ThreadItem;
 +use codex_app_server_protocol::ThreadItemsListParams;
@@ -751,6 +751,8 @@ index 0000000000000000000000000000000000000000..f51367bd9d75dd50c9519526f505de51
 +use codex_app_server_protocol::ThreadTurnsListResponse;
 +use codex_app_server_protocol::TurnItemsView;
 +use codex_core::StartThreadOptions;
++use codex_history::InitialHistory;
++use codex_history::ResumedHistory;
 +use codex_protocol::ResponseItemId;
 +use codex_protocol::mcp::ClientMcpExtensions;
 +use codex_protocol::models::ContentItem;
@@ -832,13 +834,23 @@ index 0000000000000000000000000000000000000000..f51367bd9d75dd50c9519526f505de51
 +            assert!(manager.remove_thread(&thread_id).await.is_some());
 +            drop(saved);
 +
++            let saved_context = store
++                .load_latest_model_context(LoadThreadHistoryParams {
++                    thread_id,
++                    include_archived: true,
++                })
++                .await?;
 +            // Bypass the fixed agent loader to reproduce the old runtime's bad config.
 +            let mut broken_config = config.clone();
 +            broken_config.ephemeral = true;
 +            let broken = manager
-+                .resume_thread_from_rollout(
++                .resume_thread_with_history(
 +                    broken_config,
-+                    rollout_path.clone(),
++                    InitialHistory::Resumed(ResumedHistory {
++                        conversation_id: thread_id,
++                        history: Arc::new(saved_context.items),
++                        rollout_path: Some(rollout_path.clone()),
++                    }),
 +                    Arc::clone(&auth_manager),
 +                    /*parent_trace*/ None,
 +                    ClientMcpExtensions::default(),
@@ -1134,7 +1146,7 @@ index 41d843c743abf671b82983e3bcec118ea5df99d2..be77c1bdab751aa2fcb55439a88f11c5
          if response.id != RequestId::Integer(request_id) {
              continue;
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 378b327a6b5cbfb11afcd7e68fe38242dab62640..2696f77fa5bf8e57551dfab2e31c8a3ee0041335 100644
+index 5e08861028c441c489b283a3ce9ae2d8abdd8841..6d351b9a0e2c26ccdd1250dd56121107a5812809 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -492,6 +492,7 @@ use codex_thread_store::LoadThreadHistoryParams as StoreLoadThreadHistoryParams;
@@ -1145,7 +1157,7 @@ index 378b327a6b5cbfb11afcd7e68fe38242dab62640..2696f77fa5bf8e57551dfab2e31c8a3e
  use codex_thread_store::SearchThreadOccurrencesParams as StoreSearchThreadOccurrencesParams;
  use codex_thread_store::SearchThreadsParams as StoreSearchThreadsParams;
  use codex_thread_store::SortDirection as StoreSortDirection;
-@@ -609,6 +610,28 @@ use crate::thread_state::ThreadStateManager;
+@@ -610,6 +611,28 @@ use crate::thread_state::ThreadStateManager;
  use token_usage_replay::restored_token_usage_turn_id;
  use token_usage_replay::send_thread_token_usage_update_to_connection;
 
@@ -1300,7 +1312,7 @@ index 7b014daa21f2f899420150fefd3235114644c563..56b2cef383331e1829ad6493bd5ebb6a
      }
 
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2b3d8b459 100644
+index 5907301ab1630ed18259e53bc45213ed462e2bad..943866fc42bd9a004973d0844f50cae1cc86c023 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -13,6 +13,7 @@ use super::thread_input::ensure_direct_input_allowed;
@@ -1346,7 +1358,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          self.pending_thread_unloads.lock().await.remove(&thread_id);
          self.outgoing
              .cancel_requests_for_thread(thread_id, /*error*/ None)
-@@ -1833,20 +1839,32 @@ impl ThreadRequestProcessor {
+@@ -1845,20 +1851,32 @@ impl ThreadRequestProcessor {
          let thread_id = ThreadId::from_string(&params.thread_id)
              .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
 
@@ -1382,7 +1394,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
                      archive_thread_ids.push(thread_id);
                  }
              }
-@@ -1863,10 +1881,13 @@ impl ThreadRequestProcessor {
+@@ -1875,10 +1893,13 @@ impl ThreadRequestProcessor {
                  .await
              {
                  Ok(thread) => {
@@ -1397,7 +1409,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
                  Err(err) => {
                      warn!(
                          "failed to read spawned descendant thread {descendant_thread_id} while archiving {thread_id}: {err}"
-@@ -1876,45 +1897,86 @@ impl ThreadRequestProcessor {
+@@ -1888,45 +1909,86 @@ impl ThreadRequestProcessor {
          }
 
          if archive_thread_ids.is_empty() {
@@ -1505,7 +1517,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
      async fn thread_increment_elicitation_inner(
          &self,
          params: ThreadIncrementElicitationParams,
-@@ -2675,21 +2737,58 @@ impl ThreadRequestProcessor {
+@@ -2692,21 +2754,58 @@ impl ThreadRequestProcessor {
              }
          }
          let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
@@ -1578,7 +1590,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          };
 
          let requested_page_size = limit
-@@ -2708,6 +2807,26 @@ impl ThreadRequestProcessor {
+@@ -2725,6 +2824,26 @@ impl ThreadRequestProcessor {
              | StoreThreadSortKey::UpdatedAt
              | StoreThreadSortKey::RecencyAt => SortDirection::Desc,
          });
@@ -1605,7 +1617,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          let (stored_threads, next_cursor) = self
              .list_threads_common(
                  requested_page_size,
-@@ -2882,14 +3001,55 @@ impl ThreadRequestProcessor {
+@@ -2899,14 +3018,55 @@ impl ThreadRequestProcessor {
          &self,
          params: ThreadLoadedListParams,
      ) -> Result<ThreadLoadedListResponse, JSONRPCErrorError> {
@@ -1669,7 +1681,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
 
          if data.is_empty() {
              return Ok(ThreadLoadedListResponse {
-@@ -3015,6 +3175,15 @@ impl ThreadRequestProcessor {
+@@ -3032,6 +3192,15 @@ impl ThreadRequestProcessor {
          };
 
          thread.daybreak_enabled = thread.daybreak_enabled.or(pending_daybreak_enabled);
@@ -1685,7 +1697,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
 
          let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
              matches!(loaded_thread.agent_status().await, AgentStatus::Running)
-@@ -3127,6 +3296,10 @@ impl ThreadRequestProcessor {
+@@ -3144,6 +3313,10 @@ impl ThreadRequestProcessor {
                  thread.path = fallback_thread.path.clone();
              }
              thread.session_id.clone_from(&fallback_thread.session_id);
@@ -1696,7 +1708,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
              thread.ephemeral = fallback_thread.ephemeral;
              thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
              thread
-@@ -4611,7 +4784,7 @@ impl ThreadRequestProcessor {
+@@ -4628,7 +4801,7 @@ impl ThreadRequestProcessor {
                  Err(error) => Err(error),
              }
          };
@@ -1705,7 +1717,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          if let InitialHistory::Resumed(resumed) = &thread_history
              && self
                  .pending_thread_unloads
-@@ -4624,6 +4797,33 @@ impl ThreadRequestProcessor {
+@@ -4641,6 +4814,33 @@ impl ThreadRequestProcessor {
                  resumed.conversation_id
              )));
          }
@@ -1739,7 +1751,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
              matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
          });
-@@ -5262,11 +5462,9 @@ impl ThreadRequestProcessor {
+@@ -5279,11 +5479,9 @@ impl ThreadRequestProcessor {
      ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
          let running_thread = if params.history.is_some() {
              if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
@@ -1754,7 +1766,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
              {
                  return Err(invalid_request(format!(
                      "cannot resume thread {existing_thread_id} with history while it is already running"
-@@ -5274,7 +5472,8 @@ impl ThreadRequestProcessor {
+@@ -5291,7 +5489,8 @@ impl ThreadRequestProcessor {
              }
              None
          } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
@@ -1764,7 +1776,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          {
              let source_thread = self
                  .read_stored_thread_for_resume(
-@@ -5293,9 +5492,11 @@ impl ThreadRequestProcessor {
+@@ -5310,9 +5509,11 @@ impl ThreadRequestProcessor {
                  )
                  .await?;
              let existing_thread_id = source_thread.thread_id;
@@ -1779,7 +1791,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
                      return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
                          source_thread,
                      ))));
-@@ -5762,13 +5963,31 @@ impl ThreadRequestProcessor {
+@@ -5779,13 +5980,31 @@ impl ThreadRequestProcessor {
          include_history: bool,
      ) -> Result<StoredThread, JSONRPCErrorError> {
          let result = if let Some(path) = path {
@@ -1813,7 +1825,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          } else {
              let existing_thread_id = match ThreadId::from_string(thread_id) {
                  Ok(id) => id,
-@@ -5776,6 +5995,7 @@ impl ThreadRequestProcessor {
+@@ -5793,6 +6012,7 @@ impl ThreadRequestProcessor {
                      return Err(invalid_request(format!("invalid session id: {err}")));
                  }
              };
@@ -1821,7 +1833,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
              let params = StoreReadThreadParams {
                  thread_id: existing_thread_id,
                  include_archived: true,
-@@ -7761,6 +7981,7 @@ pub(crate) fn thread_from_stored_thread(
+@@ -7778,6 +7998,7 @@ pub(crate) fn thread_from_stored_thread(
          updated_at: thread.updated_at.timestamp(),
          recency_at: Some(thread.recency_at.timestamp()),
          status: ThreadStatus::NotLoaded,
@@ -1829,7 +1841,7 @@ index d1bdbb976aa85da68f5c6053d61350f04b91d9f0..3e95ef35855facf0cf34c7c3819741e2
          path,
          cwd,
          cli_version: thread.cli_version,
-@@ -7943,6 +8164,7 @@ fn build_thread_from_snapshot(
+@@ -7960,6 +8181,7 @@ fn build_thread_from_snapshot(
          updated_at: now,
          recency_at: Some(now),
          status: ThreadStatus::NotLoaded,
@@ -7777,10 +7789,10 @@ index 0000000000000000000000000000000000000000..2c0371d2c623a5eccd075446b05594a4
 +    serde_json::from_str(&output).with_context(|| format!("{call} failed: {output}"))
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-index 80e201540a3e1e294845f5ad74740d47967fe425..d94ed412c23b458a28d792a377e1031acd085e60 100644
+index f52b60fd6817b1d388e8b9330d02e86ab27dd6eb..550908ea5590524206c69765360a4ee7092f738e 100644
 --- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
 +++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-@@ -2739,8 +2739,12 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
+@@ -2744,8 +2744,12 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
      let response_mock = responses::mount_sse_once(&server, body).await;
 
      let codex_home = TempDir::new()?;
@@ -7794,7 +7806,7 @@ index 80e201540a3e1e294845f5ad74740d47967fe425..d94ed412c23b458a28d792a377e1031a
          .write(codex_home.path())?;
 
      let mut mcp = TestAppServer::builder()
-@@ -2806,8 +2810,12 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
+@@ -2811,8 +2815,12 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
      let response_mock = responses::mount_sse_once(&server, body).await;
 
      let codex_home = TempDir::new()?;
@@ -7808,7 +7820,7 @@ index 80e201540a3e1e294845f5ad74740d47967fe425..d94ed412c23b458a28d792a377e1031a
          .write(codex_home.path())?;
 
      let mut mcp = TestAppServer::builder()
-@@ -4359,6 +4367,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
+@@ -4364,6 +4372,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
              "chatgpt_base_url = \"{}\"\ntools.update_plan.enabled = true",
              server.uri()
          ))
@@ -7816,7 +7828,7 @@ index 80e201540a3e1e294845f5ad74740d47967fe425..d94ed412c23b458a28d792a377e1031a
          .write(codex_home.path())?;
      mount_analytics_capture(&server, codex_home.path()).await?;
 
-@@ -5002,6 +5011,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
+@@ -5007,6 +5016,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
      let codex_home = TempDir::new()?;
      MockResponsesConfig::new(&server.uri())
          .enable_feature(Feature::Collab)
@@ -7824,30 +7836,177 @@ index 80e201540a3e1e294845f5ad74740d47967fe425..d94ed412c23b458a28d792a377e1031a
          .write(codex_home.path())?;
      std::fs::write(
          codex_home.path().join("custom-role.toml"),
-diff --git a/codex-rs/core/src/agent/agent_resolver.rs b/codex-rs/core/src/agent/agent_resolver.rs
-index 76a2c481228336f9cf174d8a1458c6a92119a4e8..d96ab51c9f9f4478c2f4a27eabc8f7b5659e7ff6 100644
---- a/codex-rs/core/src/agent/agent_resolver.rs
-+++ b/codex-rs/core/src/agent/agent_resolver.rs
-@@ -13,7 +13,13 @@ pub(crate) async fn resolve_agent_target(
- ) -> Result<ThreadId, FunctionCallError> {
-     register_session_root(session, turn);
-     if let Ok(thread_id) = ThreadId::from_string(target) {
--        return Ok(thread_id);
-+        return session
-+            .services
-+            .agent_control
-+            .ensure_open_agent_known_by_id(session.thread_id, thread_id)
-+            .await
-+            .map(|_| thread_id)
-+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()));
-     }
+diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
+index e2ef8de4b58ff1f64873118fed6aa291e9d179e4..591d3038f2803324d07096e56c1bff5e7e60130d 100644
+--- a/codex-rs/core/src/agent/api.rs
++++ b/codex-rs/core/src/agent/api.rs
+@@ -4,6 +4,10 @@
+ //! and turn contexts stay in the runtime. Implementations own membership, loading,
+ //! delivery and shared resources. These Rust contracts do not define a wire protocol.
 
-     session
++use crate::agent::control::ListedAgent;
++use crate::agent::control::ListedAgentsPage;
++use crate::agent::control::bounded_list_agents_preview;
++use crate::agent::control::paginate_listed_agents;
+ use crate::agent::types::AgentExecutionGuard;
+ use crate::agent::types::AgentMessage;
+ use crate::agent::types::AgentMetadata;
+@@ -86,6 +90,24 @@ pub trait AgentControl: Send + Sync {
+         path_prefix: Option<&'a str>,
+     ) -> BoxFuture<'a, Result<Vec<LiveAgent>>>;
+
++    /// Page the backend's agent listing without substituting another backend's membership.
++    /// Local control overrides this to include known unloaded agents; other backends retain
++    /// their existing loaded listing with the same cursor, preview, and response byte limits.
++    fn list_page<'a>(
++        &'a self,
++        caller: ThreadId,
++        parent: Option<ThreadId>,
++        source: &'a SessionSource,
++        path_prefix: Option<&'a str>,
++        cursor: Option<&'a str>,
++        limit: Option<usize>,
++    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
++        Box::pin(async move {
++            let agents = self.list(caller, parent, source, path_prefix).await?;
++            paginate_live_agents(agents, cursor, limit)
++        })
++    }
++
+     /// Known direct children for V2 model context, including unloaded agents. Loaded
+     /// children come first, alphabetically within each group; an unknown parent yields none.
+     /// This reads existing membership without registering the parent or loading children.
+@@ -146,6 +168,42 @@ pub trait AgentControl: Send + Sync {
+     ) -> BoxFuture<'a, ()>;
+ }
+
++fn paginate_live_agents(
++    agents: Vec<LiveAgent>,
++    cursor: Option<&str>,
++    limit: Option<usize>,
++) -> Result<ListedAgentsPage> {
++    let mut agents = agents
++        .into_iter()
++        .map(|agent| ListedAgent {
++            agent_id: agent.thread_id,
++            parent_agent_id: agent.metadata.parent_thread_id,
++            agent_name: agent
++                .metadata
++                .agent_path
++                .as_ref()
++                .map(ToString::to_string)
++                .unwrap_or_else(|| agent.thread_id.to_string()),
++            agent_status: agent.status,
++            last_task_message: agent
++                .metadata
++                .last_task_message
++                .as_deref()
++                .map(bounded_list_agents_preview),
++        })
++        .collect::<Vec<_>>();
++    agents.sort_by(|left, right| {
++        left.agent_name
++            .cmp(&right.agent_name)
++            .then_with(|| left.agent_id.to_string().cmp(&right.agent_id.to_string()))
++    });
++    paginate_listed_agents(agents, cursor, limit)
++}
++
++#[cfg(test)]
++#[path = "api_tests.rs"]
++mod tests;
++
+ /// References resolve relative to the registered caller. IDs retain each operation's
+ /// existing lookup policy, including legacy access to unregistered loaded threads.
+ #[derive(Clone, Debug)]
+diff --git a/codex-rs/core/src/agent/api_tests.rs b/codex-rs/core/src/agent/api_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..af3e0fcfdc5370d62b19caf577067aacef1ed427
+--- /dev/null
++++ b/codex-rs/core/src/agent/api_tests.rs
+@@ -0,0 +1,77 @@
++use super::*;
++use pretty_assertions::assert_eq;
++
++fn listed_host_agent(path: Option<&str>) -> LiveAgent {
++    LiveAgent {
++        thread_id: ThreadId::new(),
++        metadata: AgentMetadata {
++            agent_path: path.map(|path| AgentPath::try_from(path).expect("agent path")),
++            ..Default::default()
++        },
++        status: AgentStatus::Running,
++    }
++}
++
++#[test]
++fn host_list_page_preserves_metadata_and_uses_stable_cursor_order() {
++    let mut first = listed_host_agent(Some("/root/a"));
++    first.metadata.parent_thread_id = Some(ThreadId::new());
++    first.metadata.last_task_message = Some("parent task".to_string());
++    first.status = AgentStatus::Completed(Some("done".to_string()));
++    let second = listed_host_agent(Some("/root/b"));
++    let first_page =
++        paginate_live_agents(vec![second.clone(), first.clone()], None, Some(1)).unwrap();
++    assert_eq!(first_page.total_count, 2);
++    assert_eq!(first_page.agents.len(), 1);
++    assert_eq!(first_page.agents[0].agent_id, first.thread_id);
++    assert_eq!(
++        first_page.agents[0].parent_agent_id,
++        first.metadata.parent_thread_id
++    );
++    assert_eq!(first_page.agents[0].agent_status, first.status);
++    assert_eq!(
++        first_page.agents[0].last_task_message,
++        first.metadata.last_task_message
++    );
++    assert_eq!(first_page.next_cursor, Some(first.thread_id.to_string()));
++
++    let second_page = paginate_live_agents(
++        vec![first, second.clone()],
++        first_page.next_cursor.as_deref(),
++        Some(1),
++    )
++    .unwrap();
++    assert_eq!(second_page.agents[0].agent_id, second.thread_id);
++    assert_eq!(second_page.next_cursor, None);
++}
++
++#[test]
++fn host_list_page_uses_shared_cursor_and_limit_rules() {
++    let agents = (0..30).map(|_| listed_host_agent(None)).collect::<Vec<_>>();
++    for (limit, expected_count) in [(None, 25), (Some(0), 1), (Some(usize::MAX), 25)] {
++        let page = paginate_live_agents(agents.clone(), None, limit).unwrap();
++        assert_eq!(page.agents.len(), expected_count);
++    }
++    assert!(paginate_live_agents(agents, Some("unknown-cursor"), None).is_err());
++    assert_eq!(
++        paginate_live_agents(Vec::new(), None, None).unwrap(),
++        ListedAgentsPage::default()
++    );
++}
++
++#[test]
++fn host_list_page_bounds_task_previews_and_response_bytes() {
++    let mut agent = listed_host_agent(None);
++    agent.metadata.last_task_message = Some("x".repeat(10_000));
++    let page = paginate_live_agents(vec![agent.clone()], None, None).unwrap();
++    assert_eq!(page.agents[0].agent_name, agent.thread_id.to_string());
++    let expected_preview = format!("{}...", "x".repeat(253));
++    assert_eq!(
++        page.agents[0].last_task_message.as_deref(),
++        Some(expected_preview.as_str())
++    );
++
++    agent.metadata.agent_path =
++        Some(AgentPath::try_from(format!("/root/{}", "x".repeat(13_000))).unwrap());
++    assert!(paginate_live_agents(vec![agent], None, None).is_err());
++}
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490eea83887d 100644
+index d7bbc8e8dc676e0b213ecc19dcf7d11dc1f3a481..23a0ec1e05f0601e0739c27da643742ef0007f43 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -7,6 +7,7 @@ use crate::agent::role::resolve_role_config;
+@@ -7,11 +7,13 @@ use crate::agent::role::resolve_role_config;
  use crate::agent::types::AgentMetadata;
  use crate::agent::types::LiveAgent;
  use crate::agent_communication::AgentCommunicationContext;
@@ -7855,18 +8014,26 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
  use crate::config::Config;
  use crate::config::RolloutBudgetConfig;
  use crate::environment_selection::TurnEnvironmentSnapshot;
-@@ -52,6 +53,8 @@ use codex_protocol::turn_input::TurnInputMode;
+ use crate::inherited_thread_state::InheritedThreadState;
+ use crate::session::emit_subagent_session_started;
++use crate::session_prefix::format_subagent_context_line;
+ use crate::state::McpToolSnapshot;
+ use crate::thread_manager::ResumeThreadWithHistoryOptions;
+ use crate::thread_manager::ThreadIdGenerator;
+@@ -50,7 +52,10 @@ use codex_protocol::turn_input::TurnInputMode;
  use codex_protocol::user_input::UserInput;
  use codex_thread_store::LoadThreadHistoryParams;
  use codex_thread_store::ReadThreadParams;
 +use serde::Deserialize;
 +use serde::Serialize;
  use std::collections::HashMap;
- use std::collections::HashSet;
++use std::collections::HashSet;
  use std::collections::VecDeque;
-@@ -62,7 +65,14 @@ use uuid::Uuid;
-
+ use std::sync::Arc;
+ use std::sync::Weak;
+@@ -61,7 +66,14 @@ pub(crate) use self::runtime::AgentControlInit;
  pub(crate) use self::runtime::LocalAgentRuntime;
+ pub(crate) use self::watch::StatusSubscription;
 
 -const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 +const LIST_AGENTS_DEFAULT_LIMIT: usize = 25;
@@ -7880,7 +8047,7 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
  const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
      "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
  const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
-@@ -70,6 +80,7 @@ const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_age
+@@ -69,6 +81,7 @@ const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_age
  mod api;
  mod budget;
  mod completion;
@@ -7888,32 +8055,35 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
  mod delivery;
  mod execution;
  mod inspection;
-@@ -91,6 +102,24 @@ mod watch;
- const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
- const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
+@@ -89,6 +102,27 @@ mod target;
+ mod user_authorization;
+ mod watch;
 
++const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
++const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
++
 +/// Model-visible current agent identity and bounded task preview.
 +#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-+pub(crate) struct ListedAgent {
-+    pub(crate) agent_id: ThreadId,
-+    pub(crate) parent_agent_id: Option<ThreadId>,
-+    pub(crate) agent_name: String,
-+    pub(crate) agent_status: AgentStatus,
-+    pub(crate) last_task_message: Option<String>,
++pub struct ListedAgent {
++    pub agent_id: ThreadId,
++    pub parent_agent_id: Option<ThreadId>,
++    pub agent_name: String,
++    pub agent_status: AgentStatus,
++    pub last_task_message: Option<String>,
 +}
 +
 +/// Byte-bounded page shared by agent listing tools and supervisor startup context.
 +#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-+pub(crate) struct ListedAgentsPage {
-+    pub(crate) agents: Vec<ListedAgent>,
-+    pub(crate) next_cursor: Option<String>,
-+    pub(crate) total_count: usize,
++pub struct ListedAgentsPage {
++    pub agents: Vec<ListedAgent>,
++    pub next_cursor: Option<String>,
++    pub total_count: usize,
 +}
 +
  /// Result of a supervisor request to compact its authenticated direct parent.
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub(crate) enum SupervisorParentCompactionResult {
-@@ -132,6 +161,50 @@ impl Default for LocalAgentControl {
+@@ -130,6 +164,50 @@ impl Default for LocalAgentControl {
  }
 
  impl LocalAgentControl {
@@ -7964,7 +8134,7 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
      /// Construct a new `LocalAgentControl` that can spawn/message agents via the given manager state.
      pub(crate) fn new(
          manager: Weak<ThreadManagerState>,
-@@ -438,7 +511,12 @@ impl LocalAgentControl {
+@@ -412,7 +490,12 @@ impl LocalAgentControl {
              return AgentStatus::NotFound;
          };
          let Ok(thread) = state.get_thread(agent_id).await else {
@@ -7978,8 +8148,8 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
          };
          thread.agent_status().await
      }
-@@ -475,83 +553,124 @@ impl LocalAgentControl {
-         Ok(thread_ids)
+@@ -434,12 +517,125 @@ impl LocalAgentControl {
+         self.runtime.ensure_agent_known(agent_id)
      }
 
 +    pub(crate) async fn get_agent_config_snapshot(
@@ -7992,68 +8162,18 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 +        }
 +    }
 +
-     pub(crate) async fn format_environment_context_subagents(
-         &self,
-         parent_thread_id: ThreadId,
-         multi_agent_version: MultiAgentVersion,
-     ) -> String {
--        if multi_agent_version != MultiAgentVersion::V2 {
--            let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
--                return String::new();
--            };
--            return agents
--                .into_iter()
--                .map(|(thread_id, metadata)| {
--                    let reference = metadata
--                        .agent_path
--                        .as_ref()
--                        .map(|path| path.name().to_string())
--                        .unwrap_or_else(|| thread_id.to_string());
--                    format_subagent_context_line(&reference, metadata.agent_nickname.as_deref())
--                })
--                .collect::<Vec<_>>()
--                .join("\n");
--        }
--
--        let Some(parent_path) = self
--            .runtime
--            .registry
--            .agent_metadata_for_thread(parent_thread_id)
--            .and_then(|metadata| metadata.agent_path)
--        else {
++    pub(crate) async fn format_environment_context_subagents(
++        &self,
++        parent_thread_id: ThreadId,
++        multi_agent_version: MultiAgentVersion,
++    ) -> String {
 +        let Ok(current_members) = self.current_agent_members().await else {
-             return String::new();
-         };
--        let parent_prefix = format!("{parent_path}/");
--        let mut agent_paths = self
--            .runtime
--            .registry
--            .live_agents()
++            return String::new();
++        };
 +        let direct_members = current_members
-             .into_iter()
--            .filter_map(|metadata| metadata.agent_path)
--            .filter(|path| {
--                path.as_str()
--                    .strip_prefix(&parent_prefix)
--                    .is_some_and(|name| !name.contains('/'))
--            })
++            .into_iter()
 +            .filter(|member| member.parent_thread_id == parent_thread_id)
-             .collect::<Vec<_>>();
--        let loaded_paths = self
--            .open_thread_spawn_children(parent_thread_id)
--            .await
--            .unwrap_or_default()
--            .into_iter()
--            .filter_map(|(_, metadata)| metadata.agent_path)
--            .collect::<HashSet<_>>();
--        agent_paths.sort();
--        // Stable sorting preserves alphabetical order within each group.
--        agent_paths.sort_by_key(|path| !loaded_paths.contains(path));
--
--        let mut lines = Vec::with_capacity(agent_paths.len().min(MAX_ENVIRONMENT_SUBAGENTS));
--        let mut rendered_bytes = "  <subagents>\n  </subagents>\n".len();
--        for agent_path in agent_paths {
--            if lines.len() == MAX_ENVIRONMENT_SUBAGENTS {
++            .collect::<Vec<_>>();
 +        let total_count = direct_members.len();
 +        if total_count == 0 {
 +            return String::new();
@@ -8065,6 +8185,7 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 +                .filter_map(|member| member.agent_path.clone())
 +                .collect::<Vec<_>>();
 +            let loaded_paths = self
++                .runtime
 +                .open_thread_spawn_children(parent_thread_id)
 +                .await
 +                .unwrap_or_default()
@@ -8122,13 +8243,8 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 +                .saturating_add(truncation_bytes)
 +                > ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES
 +            {
-                 break;
-             }
--            let line = format!(r#"<agent name="{agent_path}" />"#);
--            let line_bytes = "    \n".len() + line.len();
--            if rendered_bytes + line_bytes <= MAX_ENVIRONMENT_SUBAGENT_BYTES {
--                rendered_bytes += line_bytes;
--                lines.push(line);
++                break;
++            }
 +            if !rendered.is_empty() {
 +                rendered.push('\n');
 +            }
@@ -8143,25 +8259,24 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 +            );
 +            if !rendered.is_empty() {
 +                rendered.push('\n');
-             }
++            }
 +            rendered.push_str(truncation_line.as_str());
-         }
--        lines.join("\n")
++        }
 +        debug_assert!(rendered.len() <= ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES);
 +        rendered
-     }
-
++    }
++
      pub(crate) async fn list_agents(
          &self,
          current_session_source: &SessionSource,
          path_prefix: Option<&str>,
 -    ) -> CodexResult<Vec<LiveAgent>> {
--        let state = self.upgrade()?;
+-        let state = self.runtime.upgrade()?;
 +    ) -> CodexResult<Vec<ListedAgent>> {
          let resolved_prefix = path_prefix
              .map(|prefix| {
                  current_session_source
-@@ -562,79 +681,93 @@ impl LocalAgentControl {
+@@ -450,79 +646,49 @@ impl LocalAgentControl {
              })
              .transpose()?;
 
@@ -8266,58 +8381,14 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 +        let agents = self
 +            .list_agents(current_session_source, path_prefix)
 +            .await?;
-+        let total_count = agents.len();
-+        let start = match cursor {
-+            Some(cursor) => agents
-+                .iter()
-+                .position(|agent| agent.agent_id.to_string() == cursor)
-+                .map(|index| index.saturating_add(1))
-+                .ok_or_else(|| {
-+                    CodexErr::InvalidRequest("list_agents cursor is no longer valid".to_string())
-+                })?,
-+            None => 0,
-+        };
-+        let limit = limit
-+            .unwrap_or(LIST_AGENTS_DEFAULT_LIMIT)
-+            .clamp(1, LIST_AGENTS_MAX_LIMIT);
-+        let requested_end = start.saturating_add(limit).min(total_count);
-+        let mut end = start;
-+        while end < requested_end {
-+            let candidate_end = end + 1;
-+            let candidate = ListedAgentsPage {
-+                agents: agents[start..candidate_end].to_vec(),
-+                next_cursor: (candidate_end < total_count)
-+                    .then(|| agents[candidate_end - 1].agent_id.to_string()),
-+                total_count,
-+            };
-+            let serialized_len = serde_json::to_vec(&candidate)
-+                .map_err(|err| CodexErr::Fatal(format!("failed to serialize list_agents: {err}")))?
-+                .len();
-+            if serialized_len > LIST_AGENTS_MAX_SERIALIZED_BYTES {
-+                if end == start {
-+                    return Err(CodexErr::InvalidRequest(format!(
-+                        "agent {} exceeds the list_agents response byte limit",
-+                        agents[end].agent_id
-+                    )));
-+                }
-+                break;
-+            }
-+            end = candidate_end;
-+        }
-+        let next_cursor =
-+            (end < total_count).then(|| agents[end.saturating_sub(1)].agent_id.to_string());
-+        Ok(ListedAgentsPage {
-+            agents: agents[start..end].to_vec(),
-+            next_cursor,
-+            total_count,
-+        })
++        paginate_listed_agents(agents, cursor, limit)
 +    }
 +
 +    pub(super) fn prepare_agent_metadata(
          &self,
          reservation: &mut crate::agent::registry::SpawnReservation,
          config: &Config,
-@@ -674,13 +807,15 @@ impl LocalAgentControl {
+@@ -562,13 +728,15 @@ impl LocalAgentControl {
          if depth == 1 {
              self.runtime.registry.register_root_thread(parent_thread_id);
          }
@@ -8334,15 +8405,67 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
          let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
              parent_thread_id,
              depth,
-@@ -747,6 +882,7 @@ impl LocalAgentControl {
-         Some(Arc::clone(&parent_thread.session.services.exec_policy))
+@@ -664,6 +832,59 @@ impl LocalAgentControl {
      }
+ }
 
-+    #[cfg(test)]
-     async fn open_thread_spawn_children(
-         &self,
-         parent_thread_id: ThreadId,
-@@ -917,28 +1053,28 @@ fn non_empty_task_message(message: String) -> Option<String> {
++/// Applies the same count and byte limits to local and host-provided agent listings.
++pub(crate) fn paginate_listed_agents(
++    agents: Vec<ListedAgent>,
++    cursor: Option<&str>,
++    limit: Option<usize>,
++) -> CodexResult<ListedAgentsPage> {
++    let total_count = agents.len();
++    let start = match cursor {
++        Some(cursor) => agents
++            .iter()
++            .position(|agent| agent.agent_id.to_string() == cursor)
++            .map(|index| index.saturating_add(1))
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest("list_agents cursor is no longer valid".to_string())
++            })?,
++        None => 0,
++    };
++    let limit = limit
++        .unwrap_or(LIST_AGENTS_DEFAULT_LIMIT)
++        .clamp(1, LIST_AGENTS_MAX_LIMIT);
++    let requested_end = start.saturating_add(limit).min(total_count);
++    let mut end = start;
++    while end < requested_end {
++        let candidate_end = end + 1;
++        let candidate = ListedAgentsPage {
++            agents: agents[start..candidate_end].to_vec(),
++            next_cursor: (candidate_end < total_count)
++                .then(|| agents[candidate_end - 1].agent_id.to_string()),
++            total_count,
++        };
++        let serialized_len = serde_json::to_vec(&candidate)
++            .map_err(|err| CodexErr::Fatal(format!("failed to serialize list_agents: {err}")))?
++            .len();
++        if serialized_len > LIST_AGENTS_MAX_SERIALIZED_BYTES {
++            if end == start {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "agent {} exceeds the list_agents response byte limit",
++                    agents[end].agent_id
++                )));
++            }
++            break;
++        }
++        end = candidate_end;
++    }
++    let next_cursor =
++        (end < total_count).then(|| agents[end.saturating_sub(1)].agent_id.to_string());
++    Ok(ListedAgentsPage {
++        agents: agents[start..end].to_vec(),
++        next_cursor,
++        total_count,
++    })
++}
++
+ fn subagent_assignment_item(session_source: &SessionSource, message: String) -> ResponseItem {
+     let agent_path = session_source
+         .get_agent_path()
+@@ -730,28 +951,28 @@ fn non_empty_task_message(message: String) -> Option<String> {
      (!message.is_empty()).then_some(message)
  }
 
@@ -8366,7 +8489,7 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
 -        "generated_at": chrono::Utc::now().timestamp(),
 -        "owner_thread_id": owner_thread_id.to_string(),
 -        "agents": agents,
-+fn bounded_list_agents_preview(message: &str) -> String {
++pub(crate) fn bounded_list_agents_preview(message: &str) -> String {
 +    bounded_utf8_with_ellipsis(message, LIST_AGENTS_TASK_PREVIEW_BYTES)
 +}
 +
@@ -8392,7 +8515,7 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
      output.success = Some(true);
 
      vec![
-@@ -947,7 +1083,7 @@ fn synthetic_supervisor_list_agents_items(
+@@ -760,7 +981,7 @@ fn synthetic_supervisor_list_agents_items(
                  id: None,
                  name: "list_agents".to_string(),
                  namespace: None,
@@ -8402,27 +8525,69 @@ index 57eb621ea88b8d57741f235cdf56094bde09fbcf..78100f5984f7f360057b85ddbea0490e
                  encrypted_function_args: None,
                  internal_chat_message_metadata_passthrough: None,
 diff --git a/codex-rs/core/src/agent/control/api.rs b/codex-rs/core/src/agent/control/api.rs
-index 957505dc1994bdbf90a553c47f8807aa91295c19..f85b20bb28d988e278b80f7de4e25f23bd235ecf 100644
+index 7d922f3f645e669a40c55f6b15a96d57268517a7..f9c9f4e195061e8c2a194077daa8f2f2856b945a 100644
 --- a/codex-rs/core/src/agent/control/api.rs
 +++ b/codex-rs/core/src/agent/control/api.rs
-@@ -14,6 +14,7 @@ use crate::agent::api::SendRequest;
+@@ -1,7 +1,9 @@
+ //! Implements shared controller operations using the existing local runtime helpers.
+ //! Runtime loading, message delivery and shared state remain in their existing modules.
+
++use super::ListedAgentsPage;
+ use super::LocalAgentControl;
++use super::agent_matches_prefix;
+ use super::spawn::SpawnInitialInput;
+ use crate::agent::api::AgentConfigUpdate;
+ use crate::agent::api::AgentControl;
+@@ -13,6 +15,7 @@ use crate::agent::api::DeliveryReceipt;
+ use crate::agent::api::SendRequest;
  use crate::agent::api::SpawnRequest;
- use crate::agent::api::StatusSubscription;
  use crate::agent::types::AgentExecutionGuard;
 +use crate::agent::types::AgentMetadata;
  use crate::agent::types::LiveAgent;
  use crate::agent::types::MessageDeliveryMode;
  use crate::agent_communication::AgentCommunicationContext;
-@@ -88,7 +89,7 @@ impl AgentControl for LocalAgentControl {
-         source: SessionSource,
-     ) -> BoxFuture<'_, Result<(LiveAgent, ThreadConfigSnapshot)>> {
+@@ -24,6 +27,7 @@ use codex_protocol::AgentPath;
+ use codex_protocol::SessionId;
+ use codex_protocol::ThreadId;
+ use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::SessionSource;
+@@ -47,11 +51,11 @@ impl AgentControl for LocalAgentControl {
          Box::pin(async move {
--            let target = self.resolve_target(caller, &target)?;
-+            let target = self.resolve_target(caller, &target).await?;
-             self.resume_agent(config, target, source).await
+             self.runtime.register_session_root(caller, parent);
+             if let Ok(thread_id) = ThreadId::from_string(target) {
++                self.ensure_open_agent_known_by_id(caller, thread_id)
++                    .await?;
+                 return Ok(thread_id);
+             }
+-            self.runtime
+-                .resolve_agent_reference(caller, source, target)
+-                .await
++            self.resolve_agent_reference(caller, source, target).await
          })
      }
-@@ -105,7 +106,7 @@ impl AgentControl for LocalAgentControl {
+
+@@ -104,9 +108,14 @@ impl AgentControl for LocalAgentControl {
+
+     fn ensure_child_loaded(&self, parent: ThreadId, child: ThreadId) -> BoxFuture<'_, Result<()>> {
+         Box::pin(async move {
+-            let parent = self.runtime.upgrade()?.get_thread(parent).await?;
+-            let config = parent.session.get_config().await.as_ref().clone();
+-            self.ensure_v2_agent_loaded(config, child, Some(parent))
++            let parent_thread = self.runtime.upgrade()?.get_thread(parent).await?;
++            let parent_snapshot = parent_thread.config_snapshot().await;
++            self.runtime
++                .register_session_root(parent, parent_snapshot.parent_thread_id);
++            self.ensure_open_agent_known_by_id_for_explicit_resume(parent, child)
++                .await?;
++            let config = parent_thread.session.get_config().await.as_ref().clone();
++            self.ensure_v2_agent_loaded(config, child, Some(parent_thread))
+                 .await
+         })
+     }
+@@ -118,7 +127,7 @@ impl AgentControl for LocalAgentControl {
          version: MultiAgentVersion,
      ) -> BoxFuture<'_, Result<AgentInfo>> {
          Box::pin(async move {
@@ -8431,59 +8596,124 @@ index 957505dc1994bdbf90a553c47f8807aa91295c19..f85b20bb28d988e278b80f7de4e25f23
              match version {
                  MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
                      let snapshot = self.inspect_agent(target).await?;
-@@ -119,16 +120,13 @@ impl AgentControl for LocalAgentControl {
-
-     fn close(&self, caller: ThreadId, target: AgentTarget) -> BoxFuture<'_, Result<AgentInfo>> {
-         Box::pin(async move {
--            let target = self.resolve_target(caller, &target)?;
-+            let target = self.resolve_target(caller, &target).await?;
-             self.close_agent(target).await
-         })
-     }
-
-     fn inspect(&self, caller: ThreadId, target: AgentTarget) -> BoxFuture<'_, Result<AgentInfo>> {
--        Box::pin(async move {
--            let target = self.resolve_target(caller, &target)?;
--            self.inspect_agent(target).await
--        })
-+        Box::pin(LocalAgentControl::inspect(self, caller, target))
-     }
-
-     fn list<'a>(
-@@ -136,7 +134,23 @@ impl AgentControl for LocalAgentControl {
-         source: &'a SessionSource,
-         path_prefix: Option<&'a str>,
+@@ -139,32 +148,86 @@ impl AgentControl for LocalAgentControl {
      ) -> BoxFuture<'a, Result<Vec<LiveAgent>>> {
--        Box::pin(self.list_agents(source, path_prefix))
-+        Box::pin(async move {
-+            Ok(self
-+                .list_agents(source, path_prefix)
-+                .await?
-+                .into_iter()
-+                .map(|agent| LiveAgent {
-+                    thread_id: agent.agent_id,
-+                    metadata: self
-+                        .get_agent_metadata(agent.agent_id)
-+                        .unwrap_or(AgentMetadata {
-+                            agent_id: Some(agent.agent_id),
-+                            ..Default::default()
-+                        }),
-+                    status: agent.agent_status,
-+                })
-+                .collect())
-+        })
-     }
-
-     fn watch(
-@@ -145,7 +159,7 @@ impl AgentControl for LocalAgentControl {
-         target: AgentTarget,
-     ) -> BoxFuture<'_, Result<StatusSubscription>> {
          Box::pin(async move {
--            let target = self.resolve_target(caller, &target)?;
-+            let target = self.resolve_target(caller, &target).await?;
-             self.subscribe_status(target).await
+             self.runtime.register_session_root(caller, parent);
+-            self.list_agents(source, path_prefix).await
++            let state = self.runtime.upgrade()?;
++            let resolved_prefix = path_prefix
++                .map(|prefix| {
++                    source
++                        .get_agent_path()
++                        .unwrap_or_else(AgentPath::root)
++                        .resolve(prefix)
++                        .map_err(CodexErr::UnsupportedOperation)
++                })
++                .transpose()?;
++            let mut metadata = self.runtime.registry.live_agents();
++            let root_path = AgentPath::root();
++            if let Some(root_thread_id) = self.runtime.registry.agent_id_for_path(&root_path) {
++                metadata.push(AgentMetadata {
++                    agent_id: Some(root_thread_id),
++                    agent_path: Some(root_path),
++                    last_task_message: Some("Main thread".to_string()),
++                    ..Default::default()
++                });
++            }
++            metadata.sort_by(|left, right| {
++                left.agent_path.cmp(&right.agent_path).then_with(|| {
++                    left.agent_id
++                        .map(|id| id.to_string())
++                        .cmp(&right.agent_id.map(|id| id.to_string()))
++                })
++            });
++            let mut agents = Vec::with_capacity(metadata.len());
++            for metadata in metadata {
++                let Some(thread_id) = metadata.agent_id else {
++                    continue;
++                };
++                if resolved_prefix.as_ref().is_some_and(|prefix| {
++                    !agent_matches_prefix(metadata.agent_path.as_ref(), prefix)
++                }) {
++                    continue;
++                }
++                // The upstream list contract returns loaded runtimes; list_page includes cold identities.
++                let thread = match state.get_thread(thread_id).await {
++                    Ok(thread) => thread,
++                    Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
++                        continue;
++                    }
++                    Err(err) => return Err(err),
++                };
++                agents.push(LiveAgent {
++                    thread_id,
++                    metadata,
++                    status: thread.agent_status().await,
++                });
++            }
++            Ok(agents)
++        })
++    }
++
++    fn list_page<'a>(
++        &'a self,
++        caller: ThreadId,
++        parent: Option<ThreadId>,
++        source: &'a SessionSource,
++        path_prefix: Option<&'a str>,
++        cursor: Option<&'a str>,
++        limit: Option<usize>,
++    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
++        Box::pin(async move {
++            self.runtime.register_session_root(caller, parent);
++            self.list_agents_page(source, path_prefix, cursor, limit)
++                .await
          })
      }
+
+     fn child_agent_paths(&self, parent: ThreadId) -> BoxFuture<'_, Vec<AgentPath>> {
+         Box::pin(async move {
+-            let Some(parent_path) = self
+-                .runtime
+-                .registry
+-                .agent_metadata_for_thread(parent)
+-                .and_then(|metadata| metadata.agent_path)
+-            else {
++            let Ok(current_members) = self.current_agent_members().await else {
+                 return Vec::new();
+             };
+-            let parent_prefix = format!("{parent_path}/");
+-            let mut agent_paths = self
+-                .runtime
+-                .registry
+-                .live_agents()
++            let mut agent_paths = current_members
+                 .into_iter()
+-                .filter_map(|metadata| metadata.agent_path)
+-                .filter(|path| {
+-                    path.as_str()
+-                        .strip_prefix(&parent_prefix)
+-                        .is_some_and(|name| !name.contains('/'))
+-                })
++                .filter(|member| member.parent_thread_id == parent)
++                .filter_map(|member| member.agent_path)
+                 .collect::<Vec<_>>();
+             let loaded_paths = self
+                 .runtime
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index db5a638460ad4ddf23c702d0e8fcafdd5243b418..dad0952f30ce71ab137e799d10490a1fd80effed 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -62,7 +62,7 @@ impl LocalAgentControl {
+         {
+             let initiating_thread_id = match outcome.initiating_agent_path.as_ref() {
+                 Some(initiating_agent_path) if initiating_agent_path != &parent_agent_path => {
+-                    self.runtime.resolve_agent_reference(
++                    self.resolve_agent_reference(
+                         outcome.thread_id,
+                         &outcome.source,
+                         initiating_agent_path.as_str(),
 diff --git a/codex-rs/core/src/agent/control/current_membership.rs b/codex-rs/core/src/agent/control/current_membership.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..143ed40e46a28adad5f935843cecfe5d1ac41cd1
@@ -8710,7 +8940,7 @@ index 1429d8cc4151c9226c05af596a0b7ebb9b38bf28..95b22e7335f7242adf95fa290e02d2a6
                  let mut receiver = match registered_receiver {
                      Some(receiver) => receiver,
 diff --git a/codex-rs/core/src/agent/control/inspection.rs b/codex-rs/core/src/agent/control/inspection.rs
-index 115037166a3e507f5a24f9484832ff934622bd57..a9ba012e5d56f5872d5a0ce49a5365f8239da5b4 100644
+index e495f5233245a2ed7a4f0a5cdd4b49eadc1158f0..80a25904a7997babc0f4bbe2860ae85d7c45dffb 100644
 --- a/codex-rs/core/src/agent/control/inspection.rs
 +++ b/codex-rs/core/src/agent/control/inspection.rs
 @@ -3,12 +3,33 @@
@@ -8744,11 +8974,11 @@ index 115037166a3e507f5a24f9484832ff934622bd57..a9ba012e5d56f5872d5a0ce49a5365f8
 +        }
 +    }
 +
-     pub(super) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {
-         let manager = self.upgrade()?;
+     pub(crate) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {
+         let manager = self.runtime.upgrade()?;
          let thread = match manager.get_thread(thread_id).await {
 diff --git a/codex-rs/core/src/agent/control/legacy.rs b/codex-rs/core/src/agent/control/legacy.rs
-index 17eb8f76b0639529c73af8ca6ab7ea53efee083e..0ab19d37d42dff554ced93ac13160322931cdb91 100644
+index e22d1f8b98b361a03502632e2ef1ca448d837768..1dcd5f936a90a1505bebb119db7232364f649906 100644
 --- a/codex-rs/core/src/agent/control/legacy.rs
 +++ b/codex-rs/core/src/agent/control/legacy.rs
 @@ -57,8 +57,19 @@ impl LocalAgentControl {
@@ -8775,10 +9005,10 @@ index 17eb8f76b0639529c73af8ca6ab7ea53efee083e..0ab19d37d42dff554ced93ac13160322
      /// Submit a shutdown request for a live agent without marking it explicitly closed in
 diff --git a/codex-rs/core/src/agent/control/membership_eviction_tests.rs b/codex-rs/core/src/agent/control/membership_eviction_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e72ad3e11
+index 0000000000000000000000000000000000000000..ac8092351cacaeed6f70f3cf378c4cef11434dde
 --- /dev/null
 +++ b/codex-rs/core/src/agent/control/membership_eviction_tests.rs
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,356 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +use tokio::time::Duration;
@@ -8802,7 +9032,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +        .enable(Feature::Sqlite)
 +        .expect("enable indexed ownership");
 +    let harness = AgentControlHarness::new_with_config(home, config).await;
-+    let state = harness.control.upgrade().expect("manager state");
++    let state = harness.control.runtime.upgrade().expect("manager state");
 +    let graph = state.agent_graph_store().expect("indexed ownership graph");
 +    let root_thread_id = ThreadId::new();
 +    let owner_thread_id = ThreadId::new();
@@ -8814,6 +9044,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +    let mismatched_leaf_id = ThreadId::new();
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
 +    for (thread_id, parent_thread_id, depth) in [
 +        (owner_thread_id, root_thread_id, 1),
@@ -8915,6 +9146,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +    let (root_thread_id, _) = harness.start_thread().await;
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
 +    let worker_thread_id = harness
 +        .spawn_anonymous_child(root_thread_id, SpawnAgentOptions::default())
@@ -8938,7 +9170,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +        AgentStatus::Completed(None),
 +        /*visible_when_cold*/ true,
 +    );
-+    let state = harness.control.upgrade().expect("manager state");
++    let state = harness.control.runtime.upgrade().expect("manager state");
 +    harness
 +        .control
 +        .unload_agent_thread(&state, grandchild_thread_id)
@@ -8960,6 +9192,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +    let (root_thread_id, _) = harness.start_thread().await;
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
 +    let worker_path = AgentPath::root().join("worker").expect("worker path");
 +    let worker_thread_id = harness
@@ -9031,8 +9264,9 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +    let (root_thread_id, _) = harness.start_thread().await;
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
-+    let state = harness.control.upgrade().expect("manager state");
++    let state = harness.control.runtime.upgrade().expect("manager state");
 +    let lifecycle_mutation = state.lock_lifecycle_mutation().await;
 +    let control = harness.control.clone();
 +    let config = harness.config.clone();
@@ -9077,6 +9311,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +    let (root_thread_id, _) = harness.start_thread().await;
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
 +    let child_thread_id = harness
 +        .control
@@ -9099,7 +9334,7 @@ index 0000000000000000000000000000000000000000..c28bbaccbe3b77455c3ebf4b51c5a54e
 +            .is_none()
 +    );
 +
-+    let state = harness.control.upgrade().expect("manager state");
++    let state = harness.control.runtime.upgrade().expect("manager state");
 +    let lifecycle_mutation = state.lock_lifecycle_mutation().await;
 +    let control = harness.control.clone();
 +    let mut registration = tokio::spawn(async move {
@@ -9318,7 +9553,7 @@ index bc6c57b3ff6b1c849c43af206bb3acf9d9cbe4c2..ac30f5f4d2409a4ceb7302e26bc3baba
      }
  }
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
-index ceef1f20d627bd4c01be046e1d2cbbdaac52cca6..1993699de3cc57ad5491dfe1490c12e89b6e11fd 100644
+index da064dcf81ff1a0925fe80a5ab7c0bca9866cbad..f3542699e277ba170bc37ec5e6e17d5e5ccb8e98 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
 +++ b/codex-rs/core/src/agent/control/residency_tests.rs
 @@ -2,7 +2,7 @@ use super::is_resident_session_source;
@@ -9331,7 +9566,7 @@ index ceef1f20d627bd4c01be046e1d2cbbdaac52cca6..1993699de3cc57ad5491dfe1490c12e8
  use crate::config::Config;
  use crate::config::test_config;
 diff --git a/codex-rs/core/src/agent/control/resume.rs b/codex-rs/core/src/agent/control/resume.rs
-index a398c7ae505145ac0f5c59a3b605920b6c904125..ffec3c68f1ff6219b97903f7fa912ce0050c4006 100644
+index b14831cb5ba76ab1b800a09097e7949f0605a7b5..e8d8155d294b77866ad7ef0200f5ae58d9d73bea 100644
 --- a/codex-rs/core/src/agent/control/resume.rs
 +++ b/codex-rs/core/src/agent/control/resume.rs
 @@ -8,6 +8,7 @@ use crate::agent::registry::AgentLifecycle;
@@ -9346,7 +9581,7 @@ index a398c7ae505145ac0f5c59a3b605920b6c904125..ffec3c68f1ff6219b97903f7fa912ce0
  }
 
  impl LocalAgentControl {
-+    fn resumed_agent_is_ephemeral(&self, stored_thread: &StoredThread) -> bool {
++    pub(super) fn resumed_agent_is_ephemeral(&self, stored_thread: &StoredThread) -> bool {
 +        self.runtime
 +            .registry
 +            .evicted_ephemeral(stored_thread.thread_id)
@@ -9627,10 +9862,10 @@ index a398c7ae505145ac0f5c59a3b605920b6c904125..ffec3c68f1ff6219b97903f7fa912ce0
              .agent_path
              .as_deref()
 diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
-index fbdc7b76e6b38e3421dba059dbfceb19174c989f..482885522a5945efb68b0be307fc2540b172367e 100644
+index aa7107861db631d87f6a34536613bd739e3c4c4f..b49a5af33b1e375ce16af2539f6a11d46d1263b5 100644
 --- a/codex-rs/core/src/agent/control/runtime.rs
 +++ b/codex-rs/core/src/agent/control/runtime.rs
-@@ -33,7 +33,7 @@ pub(crate) struct LocalAgentRuntime {
+@@ -35,7 +35,7 @@ pub(crate) struct LocalAgentRuntime {
      /// Retains the root's opt-in instruction provider even when the root is unloaded.
      pub(super) shared_thread_instructions_provider:
          Arc<OnceLock<Arc<dyn ThreadInstructionsProvider>>>,
@@ -9640,19 +9875,19 @@ index fbdc7b76e6b38e3421dba059dbfceb19174c989f..482885522a5945efb68b0be307fc2540
      pub(super) agent_residency: Arc<AgentResidency>,
  }
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6eea15c135 100644
+index af072501f13998ded367b76ed258fc32838cafc9..57e77f1d9f03e60df61b20ec0b2ad320fbf27540 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -31,8 +31,6 @@ use codex_protocol::intersect_effective_permission_profiles;
+@@ -32,8 +32,6 @@ use codex_protocol::intersect_effective_permission_profiles;
  use codex_protocol::protocol::EnvironmentConfigState;
  use codex_thread_store::PersistContext;
  use codex_utils_path_uri::PathUri;
 -use futures::StreamExt;
 -use futures::stream;
+ use std::time::Duration;
+ use std::time::Instant;
 
- const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
-
-@@ -189,184 +187,6 @@ async fn load_agent_model_context(
+@@ -190,184 +188,6 @@ async fn load_agent_model_context(
  }
 
  impl LocalAgentControl {
@@ -9665,7 +9900,7 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
 -        let registry = &self.runtime.registry;
 -        registry.register_root_thread(root_thread_id);
 -
--        let Ok(state) = self.upgrade() else {
+-        let Ok(state) = self.runtime.upgrade() else {
 -            return;
 -        };
 -        let Some(agent_graph_store) = state.agent_graph_store() else {
@@ -9837,7 +10072,32 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
      /// Spawn a new agent thread and submit the initial prompt.
      #[cfg(test)]
      pub(crate) async fn spawn_agent(
-@@ -721,8 +541,11 @@ impl LocalAgentControl {
+@@ -417,7 +237,7 @@ impl LocalAgentControl {
+         if parent.is_none() {
+             return self.ensure_agent_loaded(config, thread_id).await;
+         }
+-        let state = self.upgrade()?;
++        let state = self.runtime.upgrade()?;
+         let owner_thread_id = parent.as_ref().map(|parent| parent.session.thread_id);
+         self.ensure_agent_known(thread_id)?;
+         let lifecycle = self
+@@ -466,6 +286,7 @@ impl LocalAgentControl {
+             })
+             .await?;
+         let stored_model = stored_thread.model.clone();
++        let resumed_is_ephemeral = self.resumed_agent_is_ephemeral(&stored_thread);
+         let stored_model_provider = stored_thread.model_provider.clone();
+         let stored_reasoning_effort = stored_thread.reasoning_effort.clone();
+         let stored_source = stored_thread.source.clone();
+@@ -553,6 +374,7 @@ impl LocalAgentControl {
+                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
+                 })?;
+         }
++        config.ephemeral = resumed_is_ephemeral;
+         config.service_tier = self.root_service_tier();
+         if let Some(model) = stored_model {
+             config.model = Some(model);
+@@ -722,8 +544,11 @@ impl LocalAgentControl {
                  if let Some(parent_thread_id) = owner_thread_id {
                      self.validate_loaded_v2_child(&reloaded_thread.thread, parent_thread_id)?;
                  }
@@ -9850,7 +10110,7 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
                  residency_slot.commit(reloaded_thread.thread_id);
                  state.notify_thread_created(reloaded_thread.thread_id);
                  Ok(())
-@@ -732,8 +555,11 @@ impl LocalAgentControl {
+@@ -733,8 +558,11 @@ impl LocalAgentControl {
                      if let Some(parent_thread_id) = owner_thread_id {
                          self.validate_loaded_v2_child(&thread, parent_thread_id)?;
                      }
@@ -9863,10 +10123,10 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
                      drop(residency_slot);
                      self.touch_loaded_agent_residency(&state, thread_id).await;
                      return Ok(());
-@@ -751,6 +577,19 @@ impl LocalAgentControl {
-         options: SpawnAgentOptions,
+@@ -753,6 +581,19 @@ impl LocalAgentControl {
      ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
-         let state = self.upgrade()?;
+         let spawn_started_at = Instant::now();
+         let state = self.runtime.upgrade()?;
 +        let membership_parent_thread_id = session_source
 +            .as_ref()
 +            .and_then(SessionSource::parent_thread_id);
@@ -9883,7 +10143,7 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
          let multi_agent_version = state
              .effective_multi_agent_version_for_spawn(
                  &InitialHistory::New,
-@@ -832,6 +671,8 @@ impl LocalAgentControl {
+@@ -839,6 +680,8 @@ impl LocalAgentControl {
                  agent_role,
                  ..
              })) => {
@@ -9892,7 +10152,7 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
                  let (session_source, agent_metadata) = self.prepare_thread_spawn(
                      &mut reservation,
                      &config,
-@@ -1514,11 +1355,16 @@ impl LocalAgentControl {
+@@ -1566,11 +1409,16 @@ impl LocalAgentControl {
              Err(_) => SessionSource::Cli,
          };
          self.register_session_root(owner_thread_id, owner_source.parent_thread_id());
@@ -9913,10 +10173,18 @@ index cf0e165a5af527a82e3394ef294f5845ca917d09..76b2c1af51ea3a696e5f1157ab059f6e
      }
  }
 diff --git a/codex-rs/core/src/agent/control/target.rs b/codex-rs/core/src/agent/control/target.rs
-index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1c3cbc356 100644
+index e6b8f13998e054d5d4456f1e4ea23fbe62664a8a..bd7f71fb63e67690a8c76b8b92606ad1c3cbc356 100644
 --- a/codex-rs/core/src/agent/control/target.rs
 +++ b/codex-rs/core/src/agent/control/target.rs
-@@ -10,49 +10,55 @@ use codex_protocol::error::Result as CodexResult;
+@@ -2,7 +2,6 @@
+ //! Legacy callers can still supply their captured session source for path resolution.
+
+ use super::LocalAgentControl;
+-use super::LocalAgentRuntime;
+ use crate::agent::api::AgentTarget;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ThreadId;
+@@ -11,51 +10,55 @@ use codex_protocol::error::Result as CodexResult;
  use codex_protocol::protocol::SessionSource;
 
  impl LocalAgentControl {
@@ -9930,10 +10198,11 @@ index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1
 +            // Direct IDs also address loaded roots that are not registered as agents.
              AgentTarget::Id(thread_id) => Ok(*thread_id),
              AgentTarget::Reference(reference) => {
--                let caller = self.ensure_agent_known(caller)?;
-+                let caller_metadata = self.ensure_agent_known(caller)?;
-                 self.resolve_path_reference(
+-                let caller = self.runtime.ensure_agent_known(caller)?;
+-                self.runtime.resolve_path_reference(
 -                    &caller.agent_path.unwrap_or_else(AgentPath::root),
++                let caller_metadata = self.ensure_agent_known(caller)?;
++                self.resolve_path_reference(
 +                    caller,
 +                    &caller_metadata.agent_path.unwrap_or_else(AgentPath::root),
                      reference,
@@ -9942,7 +10211,9 @@ index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1
              }
          }
      }
+-}
 
+-impl LocalAgentRuntime {
      pub(crate) async fn resolve_agent_reference(
          &self,
 -        _current_thread_id: ThreadId,
@@ -9958,7 +10229,7 @@ index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1
 +            .await
      }
 
--    fn resolve_path_reference(
+-    pub(super) fn resolve_path_reference(
 +    async fn resolve_path_reference(
          &self,
 +        current_thread_id: ThreadId,
@@ -9968,7 +10239,7 @@ index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1
          let agent_path = current_agent_path
              .resolve(agent_reference)
              .map_err(CodexErr::UnsupportedOperation)?;
--        if let Some(thread_id) = self.runtime.registry.agent_id_for_path(&agent_path) {
+-        if let Some(thread_id) = self.registry.agent_id_for_path(&agent_path) {
 -            return Ok(thread_id);
 -        }
 -        Err(CodexErr::UnsupportedOperation(format!(
@@ -9987,10 +10258,10 @@ index 44d07873a3e7d461442e49f0ac1731e2c305b083..bd7f71fb63e67690a8c76b8b92606ad1
  }
 diff --git a/codex-rs/core/src/agent/control_lazy_target_tests.rs b/codex-rs/core/src/agent/control_lazy_target_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d43c9dc8331e94f6b1f536cff366c2c88794794
+index 0000000000000000000000000000000000000000..9d28928f83342c7b8884d36c32fc351e40dfd0c7
 --- /dev/null
 +++ b/codex-rs/core/src/agent/control_lazy_target_tests.rs
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,320 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +
@@ -10084,7 +10355,11 @@ index 0000000000000000000000000000000000000000..2d43c9dc8331e94f6b1f536cff366c2c
 +    let harness = AgentControlHarness::new_with_config(home, config).await;
 +    let (parent_id, parent) = harness.start_thread().await;
 +    let child = spawn_v2_reload_test_child(
-+        &parent.session.services.agent_control,
++        &parent
++            .session
++            .services
++            .local_agent_runtime
++            .control(parent.session.session_id()),
 +        harness.config.clone(),
 +        &parent,
 +        "worker",
@@ -10308,10 +10583,18 @@ index 0000000000000000000000000000000000000000..2d43c9dc8331e94f6b1f536cff366c2c
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4946e6e65 100644
+index 78e6977b60d37f02362d38a2630c64d55abcc6d3..3f54b8548c08bf11ac8c9ed710e15493f0a1848d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -68,6 +68,7 @@ use codex_protocol::mcp::McpAttributionErrorReason;
+@@ -6,6 +6,7 @@ use crate::agent::agent_status_from_event;
+ use crate::agent::api::AgentControl;
+ use crate::agent::api::AgentInfo;
+ use crate::agent::api::AgentInput;
++use crate::agent::api::AgentTarget;
+ use crate::agent::api::SpawnRequest;
+ use crate::agent::next_thread_spawn_depth;
+ use crate::agent::types::AgentMessage;
+@@ -67,6 +68,7 @@ use codex_protocol::mcp::McpAttributionErrorReason;
  use codex_protocol::mcp::McpAttributionSource;
  use codex_protocol::mcp::McpAttributionStatus;
  use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
@@ -10319,7 +10602,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
  use codex_protocol::models::BaseInstructions;
  use codex_protocol::models::ContentItem;
  use codex_protocol::models::ContentItemKind;
-@@ -875,6 +876,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -876,6 +878,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          .get_thread(resumed_helper_id)
          .await
          .expect("cold-resumed goal supervisor helper should be registered");
@@ -10327,7 +10610,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      let resumed_history = resumed_helper.session.clone_history().await;
      assert_goal_supervisor_boot_history(
          resumed_history.raw_items(),
-@@ -1226,7 +1228,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
+@@ -1211,7 +1214,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
  }
 
  #[tokio::test]
@@ -10336,12 +10619,13 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      let harness = AgentControlHarness::new().await;
      let (parent_thread_id, _) = harness.start_thread().await;
      let state_db = harness
-@@ -1307,8 +1309,20 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1292,8 +1295,21 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 
      harness
          .control
 -        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
 -        .await;
++        .runtime
 +        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
 +    assert!(
 +        harness
@@ -10359,7 +10643,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 
      let indexed_metadata = harness
          .control
-@@ -1323,6 +1337,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1308,6 +1324,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
          Some("indexed-name")
      );
 
@@ -10371,7 +10655,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      let anonymous_metadata = harness
          .control
          .runtime
-@@ -1366,6 +1385,144 @@ async fn get_status_returns_not_found_without_manager() {
+@@ -1351,6 +1372,168 @@ async fn get_status_returns_not_found_without_manager() {
      assert_eq!(got, AgentStatus::NotFound);
  }
 
@@ -10381,6 +10665,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +    let (root_thread_id, _) = harness.start_thread().await;
 +    harness
 +        .control
++        .runtime
 +        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
 +
 +    let mut expected_ids = Vec::new();
@@ -10432,13 +10717,32 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +            );
 +    }
 +
++    let dynamic_control: &dyn AgentControl = &harness.control;
++    let loaded_agents = dynamic_control
++        .list(
++            root_thread_id,
++            /*parent*/ None,
++            &SessionSource::Cli,
++            /*path_prefix*/ None,
++        )
++        .await
++        .expect("dynamic list should return only loaded runtimes");
++    assert_eq!(
++        loaded_agents
++            .iter()
++            .map(|agent| agent.thread_id)
++            .collect::<Vec<_>>(),
++        vec![root_thread_id],
++    );
++
 +    let mut cursor = None;
 +    let mut actual_ids = Vec::new();
 +    let mut first_page = None;
 +    loop {
-+        let page = harness
-+            .control
-+            .list_agents_page(
++        let page = dynamic_control
++            .list_page(
++                root_thread_id,
++                /*parent*/ None,
 +                &SessionSource::Cli,
 +                /*path_prefix*/ None,
 +                cursor.as_deref(),
@@ -10511,12 +10815,16 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +    assert!(synthetic_page.agents.len() <= LIST_AGENTS_MAX_LIMIT);
 +    assert!(synthetic_page.next_cursor.is_some());
 +    assert_eq!(synthetic_page.total_count, expected_ids.len());
++    assert_eq!(
++        harness.manager.list_thread_ids().await,
++        vec![root_thread_id]
++    );
 +}
 +
  #[tokio::test]
  async fn on_event_updates_status_from_task_started() {
      let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
-@@ -1512,6 +1669,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
+@@ -1497,6 +1680,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
      assert_eq!(status, AgentStatus::NotFound);
  }
 
@@ -10559,7 +10867,54 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
  #[tokio::test]
  async fn get_status_returns_pending_init_for_new_thread() {
      let harness = AgentControlHarness::new().await;
-@@ -1810,8 +2003,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1638,6 +1857,11 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
+     check_v2_agent_reload(V2ReloadRoute::Sender).await;
+ }
+
++#[tokio::test]
++async fn ensure_v2_child_loaded_preserves_saved_target_under_ephemeral_parent() {
++    check_v2_agent_reload(V2ReloadRoute::EphemeralParent).await;
++}
++
+ #[tokio::test]
+ async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
+     check_v2_agent_reload(V2ReloadRoute::NestedParent).await;
+@@ -1652,6 +1876,7 @@ async fn ensure_agent_loaded_preserves_evicted_parent_instructions() {
+ #[derive(Clone, Copy)]
+ enum V2ReloadRoute {
+     Sender,
++    EphemeralParent,
+     NestedParent,
+     Generic,
+ }
+@@ -1698,6 +1923,8 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     let harness = AgentControlHarness::new_with_config(home, config).await;
+     let client_mcp_extensions =
+         ClientMcpExtensions::new([(OPENAI_FORM_EXTENSION_ID.to_string(), serde_json::json!({}))]);
++    let mut root_config = harness.config.clone();
++    root_config.ephemeral = matches!(route, V2ReloadRoute::EphemeralParent);
+     let root = harness
+         .manager
+         .start_thread(StartThreadOptions {
+@@ -1714,7 +1941,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+                 text: "thread instructions survive parent eviction".into(),
+                 shared: false,
+             })),
+-            ..StartThreadOptions::new(harness.config.clone())
++            ..StartThreadOptions::new(root_config)
+         })
+         .await
+         .expect("start root thread");
+@@ -1725,7 +1952,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+         .local_agent_runtime
+         .control(root.thread.session.session_id());
+     let parent_thread = match route {
+-        V2ReloadRoute::Sender => root.thread,
++        V2ReloadRoute::Sender | V2ReloadRoute::EphemeralParent => root.thread,
+         V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => {
+             let parent = spawn_v2_reload_test_child(
+                 &control,
+@@ -1800,8 +2027,22 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          },
          Ok(_) => panic!("expected thread to be removed"),
      }
@@ -10582,7 +10937,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      sender_config.model_provider_id = "ollama".to_string();
      sender_config.model_provider = sender_config
          .model_providers
-@@ -1822,7 +2029,11 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1812,9 +2053,24 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
      let mut parent_turn = parent_thread.session.new_default_turn().await;
      match route {
          V2ReloadRoute::Sender => control
@@ -10594,8 +10949,21 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +            )
              .await
              .expect("known v2 agent should reload"),
++        V2ReloadRoute::EphemeralParent => {
++            assert!(parent_thread.config_snapshot().await.ephemeral);
++            control
++                .ensure_v2_agent_loaded(
++                    sender_config.clone(),
++                    spawned_agent.thread_id,
++                    Some(Arc::clone(&parent_thread)),
++                )
++                .await
++                .expect("saved child should reload under an ephemeral parent");
++        }
          V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => {
-@@ -1860,7 +2071,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+             let environment = parent_turn
+                 .initial_environments
+@@ -1850,20 +2106,25 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
                      .await
                      .expect("known child should reload through its parent"),
                  V2ReloadRoute::Generic => control
@@ -10603,8 +10971,10 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +                    .ensure_agent_loaded(sender_config.clone(), spawned_agent.thread_id)
                      .await
                      .expect("generic delivery should reload through the captured parent"),
-                 V2ReloadRoute::Sender => unreachable!(),
-@@ -1869,11 +2080,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+-                V2ReloadRoute::Sender => unreachable!(),
++                V2ReloadRoute::Sender | V2ReloadRoute::EphemeralParent => unreachable!(),
+             }
+             parent_turn = parent_thread.session.new_default_turn().await;
              assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
          }
      }
@@ -10621,7 +10991,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      let reloaded_instructions = reloaded_child.session.inherited_instructions().await;
      assert_eq!(
          (reloaded_instructions.user, reloaded_instructions.thread),
-@@ -1955,141 +2171,779 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1945,116 +2206,780 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          .into_iter()
          .find(|entry| captured_op_matches(entry, &expected));
      assert!(captured.is_some());
@@ -10908,11 +11278,25 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +    // Bypass agent delivery's prevention fix to reproduce a runtime loaded by an old daemon.
 +    let mut broken_config = harness.config.clone();
 +    broken_config.ephemeral = true;
++    let saved_context = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&harness.config),
++        harness.state_db.clone(),
++    )
++    .load_latest_model_context(LoadThreadHistoryParams {
++        thread_id,
++        include_archived: true,
++    })
++    .await
++    .expect("load saved paginated model context");
 +    let broken_thread = harness
 +        .manager
-+        .resume_thread_from_rollout(
++        .resume_thread_with_history(
 +            broken_config,
-+            rollout_path.clone(),
++            InitialHistory::Resumed(ResumedHistory {
++                conversation_id: thread_id,
++                history: Arc::new(saved_context.items),
++                rollout_path: Some(rollout_path.clone()),
++            }),
 +            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
 +            /*parent_trace*/ None,
 +            ClientMcpExtensions::default(),
@@ -10943,7 +11327,12 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 -            "Message Type: MESSAGE\nTask name: /root/cold_v1_child\nSender: /root\nPayload:\nqueued while cold"
 -                .to_string(),
 -            /*trigger_turn*/ false,
--        );
++            live_history_before_read
++                .raw_items()
++                .filter(|item| *item == marker)
++                .count(),
++            1,
+         );
 -        assert!(
 -            harness
 -                .manager
@@ -10951,30 +11340,6 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 -                .iter()
 -                .any(|(thread_id, op)| {
 -                    *thread_id == child_thread_id
--                        && matches!(op, Op::InterAgentCommunication { communication, .. }
--                    if communication == &expected_communication)
--                })
-+            live_history_before_read
-+                .raw_items()
-+                .filter(|item| *item == marker)
-+                .count(),
-+            1,
-         );
--        control
--            .send(crate::SendRequest {
--                caller: parent_thread_id,
--                target: AgentTarget::Id(child_thread_id),
--                resume_config,
--                input: AgentInput::Message {
--                    message: AgentMessage::Plaintext("cold v1 delivery".to_string()),
--                    mode: MessageDeliveryMode::TriggerTurn,
--                },
--                start_options: TurnStartOptions {
--                    parent_turn_id: Some(parent_turn_id.to_string()),
--                    root_turn_id: Some(root_turn_id.to_string()),
--                    ..Default::default()
--                },
--            })
 +    }
 +
 +    let disk_before_read = LocalThreadStore::new(
@@ -11221,7 +11586,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +    }
 +    let visible_message = |item: &codex_app_server_protocol::ThreadItem| match item {
 +        codex_app_server_protocol::ThreadItem::AgentMessage { id, text, .. }
-+            if Some(id.as_str()) == live_marker.id().map(|id| id.as_ref()) =>
++            if Some(id.as_str()) == live_marker.id().map(std::convert::AsRef::as_ref) =>
 +        {
 +            Some(text.clone())
 +        }
@@ -11296,13 +11661,24 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +        vec!["accepted only in the accidentally ephemeral runtime".to_owned()],
 +        "turn pagination must not drop an item whose original lifecycle event was unsaved",
 +    );
++    let repaired_context = disk_after_read
++        .load_latest_model_context(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: true,
++        })
++        .await
++        .expect("load repaired paginated model context");
 +    drop(disk_after_read);
 +    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
 +    let resumed = harness
 +        .manager
-+        .resume_thread_from_rollout(
++        .resume_thread_with_history(
 +            harness.config.clone(),
-+            broken_thread.rollout_path().expect("repaired rollout path"),
++            InitialHistory::Resumed(ResumedHistory {
++                conversation_id: thread_id,
++                history: Arc::new(repaired_context.items),
++                rollout_path: Some(broken_thread.rollout_path().expect("repaired rollout path")),
++            }),
 +            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
 +            /*parent_trace*/ None,
 +            ClientMcpExtensions::default(),
@@ -11356,7 +11732,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +        .persist(PersistContext::Standard)
 +        .await
 +        .expect("materialize temporary context for debugging");
-+    let manager = harness.control.upgrade().expect("manager");
++    let manager = harness.control.runtime.upgrade().expect("manager");
 +    assert!(
 +        harness
 +            .control
@@ -11424,6 +11800,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +    let parent = harness
 +        .manager
 +        .start_thread(StartThreadOptions {
++            history_mode: Some(ThreadHistoryMode::Paginated),
 +            thread_instructions_provider: Some(Arc::new(TestThreadInstructionsProvider {
 +                text: "preserve these inherited cold-delivery instructions".into(),
 +                shared: true,
@@ -11493,27 +11870,10 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +                .iter()
 +                .any(|(thread_id, op)| {
 +                    *thread_id == child_thread_id
-+                        && matches!(op, Op::InterAgentCommunication { communication, .. }
-+                    if communication == &expected_communication)
-+                })
-+        );
-+        control
-+            .send(crate::SendRequest {
-+                caller: parent_thread_id,
-+                target: AgentTarget::Id(child_thread_id),
-+                resume_config,
-+                input: AgentInput::Message {
-+                    message: AgentMessage::Plaintext("cold v1 delivery".to_string()),
-+                    mode: MessageDeliveryMode::TriggerTurn,
-+                },
-+                start_options: TurnStartOptions {
-+                    parent_turn_id: Some(parent_turn_id.to_string()),
-+                    root_turn_id: Some(root_turn_id.to_string()),
-+                    ..Default::default()
-+                },
-+            })
-             .await?;
-     } else {
+                         && matches!(op, Op::InterAgentCommunication { communication, .. }
+                     if communication == &expected_communication)
+                 })
+@@ -2079,7 +3004,7 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
          harness
              .control
              .deliver_input_to_agent(
@@ -11522,7 +11882,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
                  child_thread_id,
                  text_input("cold v1 delivery"),
                  AgentInputDelivery::Queue,
-@@ -2138,12 +2992,46 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
+@@ -2128,12 +3053,73 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -11565,24 +11925,53 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +            .count();
 +        assert_eq!(persisted_deliveries, 1);
 +    } else {
-+        assert!(persisted.items.iter().any(|item| matches!(
-+            item,
-+            RolloutItem::EventMsg(EventMsg::UserMessage(message))
-+                if message.message.contains("cold v1 delivery")
-+        )));
++        // Paginated rollouts persist ItemCompleted rather than legacy UserMessage events.
++        let persisted_user_items = persisted
++            .items
++            .iter()
++            .filter(|item| {
++                matches!(
++                    item,
++                    RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
++                        item: TurnItem::UserMessage(message),
++                        ..
++                    })) if message.content == text_input("cold v1 delivery")
++                )
++            })
++            .count();
++        assert_eq!(persisted_user_items, 1);
++        let persisted_user_responses = persisted
++            .items
++            .iter()
++            .filter(|item| {
++                let RolloutItem::ResponseItem(response) = item else {
++                    return false;
++                };
++                matches!(
++                    &response.item,
++                    ResponseItem::Message { role, content, .. }
++                        if role == "user"
++                            && matches!(content.as_slice(), [ContentItem::InputText { text }]
++                                if text == "cold v1 delivery")
++                )
++            })
++            .count();
++        assert_eq!(persisted_user_responses, 1);
 +    }
      Ok(())
  }
 
-@@ -2360,6 +3248,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2350,6 +3336,9 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
          .await
          .expect("v2 root resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
-+    resumed_control.register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
++    resumed_control
++        .runtime
++        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
      assert_ne!(
          resumed_control.get_status(parent_thread_id).await,
          AgentStatus::NotFound
-@@ -2367,11 +3256,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2357,16 +3346,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
@@ -11590,7 +11979,12 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 -        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
 -        .await;
      for thread_id in [worker_thread_id, sibling_thread_id] {
--        assert!(resumed_control.ensure_agent_known(thread_id).is_ok());
+-        assert!(
+-            resumed_control
+-                .runtime
+-                .ensure_agent_known(thread_id)
+-                .is_ok()
+-        );
 +        resumed_control
 +            .ensure_open_agent_known_by_id(parent_thread_id, thread_id)
 +            .await
@@ -11598,7 +11992,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      }
 
      resumed_control
-@@ -2543,6 +3432,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+@@ -2546,6 +3530,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
 
      if nested {
          let turn = resumed_parent.thread.session.new_default_turn().await;
@@ -11607,12 +12001,12 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 +            .thread
 +            .session
 +            .services
-+            .agent_control
++            .local_agent_runtime
 +            .register_session_root(parent_thread_id, turn.parent_thread_id);
          resumed_parent
              .thread
              .session
-@@ -7469,18 +8365,17 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -7467,18 +8458,18 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -11627,6 +12021,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 -            .is_some_and(|thread_id| stale_helper_thread_ids.contains(&thread_id)),
 -        "cold restore should reproduce the stale canonical path collision"
 -    );
++        .runtime
 +        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
      for stale_helper_thread_id in stale_helper_thread_ids {
 +        assert!(
@@ -11641,7 +12036,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8928,6 +9823,12 @@ while True:
+@@ -8933,6 +9924,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -11654,12 +12049,10 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -8963,273 +9864,85 @@ while True:
-                             .as_str()
-                             .is_some_and(|text| text.contains("You are also a **goal supervisor**"))
+@@ -8970,271 +9967,83 @@ while True:
                      })
--                })
--        }),
+                 })
+         }),
 -        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
 -    );
 -    for unexpected_child_context in [
@@ -11810,8 +12203,6 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
 -                agent_path: None,
 -                agent_nickname: None,
 -                agent_role: None,
-+                })
-+        }),
 +        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
 +    );
 +    for unexpected_child_context in [
@@ -12000,7 +12391,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
  }
 
  #[tokio::test]
-@@ -9315,8 +10028,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9320,8 +10129,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -12018,11 +12409,13 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -9325,21 +10045,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9330,21 +10146,80 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
-+    resumed_control.register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
++    resumed_control
++        .runtime
++        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
      assert_ne!(
 -        harness.control.get_status(parent_thread_id).await,
 +        resumed_control.get_status(parent_thread_id).await,
@@ -12104,7 +12497,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -9356,8 +10133,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9361,8 +10236,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -12114,7 +12507,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9512,13 +10288,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9522,13 +10396,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -12183,7 +12576,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9614,6 +10442,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9629,6 +10555,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -12215,7 +12608,7 @@ index 11858233c39551996e9d1dd952918abf1bdabdfc..0d1c96a9dd7138cb413490d9c5b577e4
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9648,3 +10501,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9663,3 +10614,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }
@@ -13014,10 +13407,10 @@ index 782087f9167765b504919930a9d740812279dbb3..3e4acc9bc7c8bdb74ddd9a1d88fee521
      pub agent_nickname: Option<String>,
      pub agent_role: Option<String>,
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a9b38b79c 100644
+index 444eeb564076ee6901782aa376c28fa19ea94dc9..478c64ca35219dc74b87bb02bb04d0bb007dfdb8 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -795,7 +795,38 @@ impl CodexThread {
+@@ -850,7 +850,39 @@ impl CodexThread {
      }
 
      pub fn rollout_path(&self) -> Option<PathBuf> {
@@ -13048,7 +13441,8 @@ index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a
 +            && self
 +                .session
 +                .services
-+                .agent_control
++                .local_agent_runtime
++                .control(self.session.session_id())
 +                .is_saved_target(self.session.thread_id)
 +        {
 +            self.restore_saved_thread_persistence().await?;
@@ -13057,7 +13451,7 @@ index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a
      }
 
      /// Returns startup metadata without the one-time initial message replay.
-@@ -820,6 +851,7 @@ impl CodexThread {
+@@ -875,6 +907,7 @@ impl CodexThread {
          &self,
          include_archived: bool,
      ) -> ThreadStoreResult<StoredThreadHistory> {
@@ -13065,7 +13459,7 @@ index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a
          let live_thread = self
              .session
              .live_thread_for_persistence("load history")
-@@ -834,6 +866,7 @@ impl CodexThread {
+@@ -889,6 +922,7 @@ impl CodexThread {
          include_archived: bool,
          include_history: bool,
      ) -> ThreadStoreResult<StoredThread> {
@@ -13073,7 +13467,7 @@ index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a
          let live_thread = self
              .session
              .live_thread_for_persistence("read thread")
-@@ -850,6 +883,7 @@ impl CodexThread {
+@@ -905,6 +939,7 @@ impl CodexThread {
          patch: ThreadMetadataPatch,
          include_archived: bool,
      ) -> ThreadStoreResult<StoredThread> {
@@ -13081,7 +13475,7 @@ index 60b8ea53d3d4f19b697527c623a6de74f814f6a2..90efd46f208b00a093c041a9b889803a
          let live_thread = self
              .session
              .live_thread_for_persistence("update thread metadata")
-@@ -861,6 +895,7 @@ impl CodexThread {
+@@ -916,6 +951,7 @@ impl CodexThread {
 
      /// Appends rollout items through the live thread so derived metadata stays in sync.
      pub async fn append_rollout_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
@@ -13379,10 +13773,10 @@ index 6bda9b79b65b2b5a3ff134e0a9f1920f016dce80..de42e04df9595cb39c5c0eb0aa01b72e
  fn legacy_single_environment_snapshot_does_not_change() -> Result<()> {
      let environment = EnvironmentsState {
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index 7808d695b0142cbfca816545f2da46c4667ec631..67479784abf921d5eaa10ecf365427d81fd3a2b4 100644
+index 30c4162ffc06307dc0a73189cb4b7944b6a949c2..8d46f4a6d399bf6d03f1e78d478dc89a8e8653e4 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
-@@ -910,7 +910,7 @@ pub(crate) async fn emit_hook_completed_events(
+@@ -911,7 +911,7 @@ pub(crate) async fn emit_hook_completed_events(
          })
      {
          state_db::mark_thread_memory_mode_polluted(
@@ -13392,10 +13786,10 @@ index 7808d695b0142cbfca816545f2da46c4667ec631..67479784abf921d5eaa10ecf365427d8
              "mcp_tool_hook",
          )
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index d3be4b19102cda5d53ca8c82b9673780168d2e56..f642137fec25df21f2534a2dd4baf972f3889a2a 100644
+index 58c3a418a89aa52f106b5587b922d2590f87ea25..40db46ab5067fa0aaa81d9f04abf3528990e040e 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -36,6 +36,8 @@ mod compact_remote_history;
+@@ -37,6 +37,8 @@ mod compact_remote_history;
  mod compact_remote_v2;
  mod compact_token_budget;
  mod thread_startup_metadata;
@@ -13404,7 +13798,16 @@ index d3be4b19102cda5d53ca8c82b9673780168d2e56..f642137fec25df21f2534a2dd4baf972
  pub use codex_network_proxy::EnvironmentNetworkPolicy;
  pub use codex_network_proxy::NetworkDomainPermission;
  pub use codex_network_proxy::NetworkDomainPermissionEntry;
-@@ -148,6 +150,7 @@ pub use codex_prompts as review_prompts;
+@@ -64,6 +66,8 @@ pub use agent::api::AgentTurnOutcome;
+ pub use agent::api::DeliveryReceipt;
+ pub use agent::api::SendRequest;
+ pub use agent::api::SpawnRequest;
++pub use agent::control::ListedAgent;
++pub use agent::control::ListedAgentsPage;
+ pub use agent::types::AgentExecutionGuard;
+ pub use agent::types::AgentMessage;
+ pub use agent::types::AgentMetadata;
+@@ -147,6 +151,7 @@ pub use codex_prompts as review_prompts;
  mod thread_manager;
  pub(crate) mod web_search;
  pub(crate) mod windows_sandbox_read_grants;
@@ -13413,10 +13816,10 @@ index d3be4b19102cda5d53ca8c82b9673780168d2e56..f642137fec25df21f2534a2dd4baf972
  pub use thread_manager::InternalSessionParent;
  pub use thread_manager::NewThread;
 diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
-index 0112be0b4001e3ca47cc68d3f04b85fb32dd7728..a76d4ded55a3e2e33911f7c0ec6e88b06c235d6b 100644
+index 4630da96c259166c861a6f844cfcc2f9cddb6491..8ceea2e4e73efa37b13bcc3e77080aeb8b45913b 100644
 --- a/codex-rs/core/src/mcp_tool_call.rs
 +++ b/codex-rs/core/src/mcp_tool_call.rs
-@@ -916,7 +916,7 @@ async fn maybe_mark_thread_memory_mode_polluted(
+@@ -917,7 +917,7 @@ async fn maybe_mark_thread_memory_mode_polluted(
          return;
      }
      state_db::mark_thread_memory_mode_polluted(
@@ -13426,22 +13829,22 @@ index 0112be0b4001e3ca47cc68d3f04b85fb32dd7728..a76d4ded55a3e2e33911f7c0ec6e88b0
          "mcp_tool_call",
      )
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 8ab59644272ec87d673f9133a99f3cc67228412d..4d2b207302eecf6b6f53b6f4994b5e2ad28f1953 100644
+index 3cbc40427114738308b478a498dbc1ce0bb1d170..d5c868d697f1569b51e3afc7106e49a46472e5ad 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
-@@ -284,6 +284,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
+@@ -285,6 +285,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
  }
 
  pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
 +    sess.close_persistence_repair().await;
-     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
-         startup_prewarm.abort().await;
-     }
+     let startup_prewarm = {
+         let mut state = sess.state.lock().await;
+         // Stop admission and take the current warmup together so resume cannot replace it.
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3eca909925f 100644
+index 33b6f8dee9af7ef2712130172e653ee126f09eeb..047f7a23ad659144dfe79f2d06ff615f081d433a 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -259,6 +259,7 @@ mod mcp_runtime;
+@@ -260,6 +260,7 @@ mod mcp_runtime;
  mod model_alias_refresh;
  mod model_routing;
  pub(crate) mod multi_agents;
@@ -13449,7 +13852,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
  mod plugin_selection;
  mod realtime_history;
  mod retained_context;
-@@ -1679,7 +1680,11 @@ impl Session {
+@@ -1672,7 +1673,11 @@ impl Session {
      }
 
      pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
@@ -13462,7 +13865,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
      }
 
      pub(crate) fn live_thread_for_persistence(
-@@ -1691,7 +1696,11 @@ impl Session {
+@@ -1684,7 +1689,11 @@ impl Session {
      }
 
      pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
@@ -13475,7 +13878,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
      }
 
      pub(crate) async fn set_thread_memory_mode(
-@@ -4292,8 +4301,9 @@ impl Session {
+@@ -4284,8 +4293,9 @@ impl Session {
              .iter()
              .map(|envelope| envelope.item.clone())
              .collect::<Vec<_>>();
@@ -13486,17 +13889,17 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
              state
                  .current_time_reminder
                  .note_recorded_items(&response_items);
-@@ -4316,7 +4326,8 @@ impl Session {
+@@ -4325,7 +4335,8 @@ impl Session {
              state
                  .history
-                 .record_annotated_items(&items, model_info.truncation_policy.into());
+                 .record_annotated_items(&mut items, model_info.truncation_policy.into());
 -        }
 +            persistence
 +        };
          for image in image_preparations {
              self.services
                  .analytics_events_client
-@@ -4327,13 +4338,14 @@ impl Session {
+@@ -4336,13 +4347,14 @@ impl Session {
          }
          let rollout_items: Vec<RolloutItem> =
              items.into_iter().map(RolloutItem::ResponseItem).collect();
@@ -13512,7 +13915,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
          if turn_context.config.memories.disable_on_external_context
              && let Some(item) = response_items
                  .iter()
-@@ -4613,18 +4625,21 @@ impl Session {
+@@ -4653,18 +4665,21 @@ impl Session {
              .await;
          let items = items.as_ref();
          let response_item = items[0].clone();
@@ -13537,7 +13940,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
          self.send_raw_response_items(turn_context, items).await;
      }
 
-@@ -5196,6 +5211,11 @@ impl Session {
+@@ -5236,6 +5251,11 @@ impl Session {
 
      #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
      pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
@@ -13549,7 +13952,7 @@ index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..802e94e242eebeee256ac0ab5574f3ec
          if self.persistence_restart_required() {
              error!("failed to record rollout items: thread persistence requires a restart");
              return false;
-@@ -5472,12 +5492,14 @@ impl Session {
+@@ -5512,12 +5532,14 @@ impl Session {
          // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
          // durable baseline. This normally records one item per user turn; a tool that changes the
          // active context may record another item before the next model step in that turn.
@@ -13938,10 +14341,23 @@ index 0000000000000000000000000000000000000000..9119e9c3683349635bf272df4a846575
 +#[path = "persistence_repair_tests.rs"]
 +mod tests;
 diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
-index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb84463bdf7 100644
+index a50a36acb6d9117570dd13513026c958e8e38517..254a996aba2b55bfd7d7a83271f99e69029dba71 100644
 --- a/codex-rs/core/src/session/world_state.rs
 +++ b/codex-rs/core/src/session/world_state.rs
-@@ -201,7 +201,7 @@ impl Session {
+@@ -106,7 +106,11 @@ impl Session {
+                 MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
+                     self.services
+                         .local_agent_runtime
+-                        .format_legacy_environment_context_subagents(self.thread_id)
++                        .control(self.session_id())
++                        .format_environment_context_subagents(
++                            self.thread_id,
++                            turn_context.multi_agent_version,
++                        )
+                         .await
+                 }
+             }
+@@ -240,7 +244,7 @@ impl Session {
                      current_date,
                  )
                  .await
@@ -13951,10 +14367,10 @@ index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb8
          }
          world_state.add_section(EnvironmentsInstructionsState::new(
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 6a4faeffa08f4e53baa2242f7e0bd125058f015c..02348046238282a4e2ba2f7855171d1e1acb77d1 100644
+index e5a22f525d92aedc9f08f81dcc4b463d9c62971c..bb83757357fa216e1e7d49aea9d609279c31dffd 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
-@@ -121,7 +121,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+@@ -136,7 +136,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
              .await;
      }
      mark_thread_memory_mode_polluted_if_external_context(sess, turn_context, item).await;
@@ -13963,7 +14379,7 @@ index 6a4faeffa08f4e53baa2242f7e0bd125058f015c..02348046238282a4e2ba2f7855171d1e
          Some(db) => db
              .memories_for_version(turn_context.config.memories.version)
              .await
-@@ -163,7 +163,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
+@@ -178,7 +178,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
          return;
      }
      state_db::mark_thread_memory_mode_polluted(
@@ -13973,7 +14389,7 @@ index 6a4faeffa08f4e53baa2242f7e0bd125058f015c..02348046238282a4e2ba2f7855171d1e
          "record_completed_response_item",
      )
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa64f99ef0 100644
+index 8d8e3c0df0d6d64367f04a0f75b7bf5cb1842938..fc96b2e00ca2ba5876c3cb386f4adfa5ae968344 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -2,6 +2,8 @@ mod managed;
@@ -13983,9 +14399,9 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
 +use crate::agent::CurrentAgentMember;
 +use crate::agent::CurrentAgentMembershipSnapshot;
  use crate::agent::LocalAgentControl;
- use crate::agents_md_manager::SessionInstructions;
- use crate::attestation::AttestationProvider;
-@@ -66,6 +68,7 @@ use codex_protocol::error::Result as CodexResult;
+ use crate::agent::api::AgentConfigUpdate;
+ use crate::agent::api::AgentControl;
+@@ -69,6 +71,7 @@ use codex_protocol::error::Result as CodexResult;
  use codex_protocol::mcp::ClientMcpExtensions;
  use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
  use codex_protocol::openai_models::ModelPreset;
@@ -13993,7 +14409,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
  use codex_protocol::protocol::Event;
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::InternalSessionSource;
-@@ -116,6 +119,8 @@ use std::sync::Arc;
+@@ -121,6 +124,8 @@ use std::sync::Arc;
  use std::sync::atomic::AtomicBool;
  use std::sync::atomic::Ordering;
  use std::time::Duration;
@@ -14002,7 +14418,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
  use tokio::sync::RwLock;
  use tokio::sync::broadcast;
  use tracing::instrument;
-@@ -123,6 +128,9 @@ use tracing::warn;
+@@ -128,6 +133,9 @@ use tracing::warn;
 
  const THREAD_CREATED_CHANNEL_CAPACITY: usize = 1024;
 
@@ -14012,7 +14428,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
  /// Test-only override for enabling thread-manager behaviors used by integration
  /// tests.
  ///
-@@ -485,7 +493,15 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
+@@ -492,7 +500,15 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
  pub(crate) struct ThreadManagerState {
      // Eviction updates this registry and residency together, locking the registry first.
      pub(crate) threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
@@ -14027,8 +14443,8 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
 +    retained_agent_controls: std::sync::Mutex<HashMap<ThreadId, LocalAgentControl>>,
      thread_created_tx: broadcast::Sender<ThreadId>,
      thread_id_generator: ThreadIdGenerator,
-     auth_manager: Arc<AuthManager>,
-@@ -648,7 +664,11 @@ impl ThreadManager {
+     agent_control_factory: Option<AgentControlFactory>,
+@@ -656,7 +672,11 @@ impl ThreadManager {
          Self {
              state: Arc::new(ThreadManagerState {
                  threads: Arc::new(RwLock::new(HashMap::new())),
@@ -14039,8 +14455,8 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
 +                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                  thread_created_tx,
                  thread_id_generator: default_thread_id_generator(),
-                 models_manager,
-@@ -797,7 +817,11 @@ impl ThreadManager {
+                 agent_control_factory: None,
+@@ -828,7 +848,11 @@ impl ThreadManager {
          Self {
              state: Arc::new(ThreadManagerState {
                  threads: Arc::new(RwLock::new(HashMap::new())),
@@ -14051,8 +14467,8 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
 +                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                  thread_created_tx,
                  thread_id_generator: default_thread_id_generator(),
-                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-@@ -983,7 +1007,14 @@ impl ThreadManager {
+                 agent_control_factory: None,
+@@ -1015,7 +1039,14 @@ impl ThreadManager {
      }
 
      pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
@@ -14068,7 +14484,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      }
 
      /// Updates metadata for loaded and cold threads through one entrypoint.
-@@ -1069,6 +1100,64 @@ impl ThreadManager {
+@@ -1102,6 +1133,64 @@ impl ThreadManager {
          Ok(subtree_thread_ids)
      }
 
@@ -14133,7 +14549,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
          Box::pin(self.start_thread_inner(
              options,
-@@ -1153,6 +1242,9 @@ impl ThreadManager {
+@@ -1185,6 +1274,9 @@ impl ThreadManager {
          startup: Option<Arc<crate::session::startup::SessionStartup>>,
          fork_startup_items: ForkStartupItems,
      ) -> CodexResult<NewThread> {
@@ -14143,7 +14559,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
          let (resumed_session_source, resumed_thread_source) = options
              .initial_history
              .get_resumed_session_sources()
-@@ -1182,7 +1274,6 @@ impl ThreadManager {
+@@ -1214,7 +1306,6 @@ impl ThreadManager {
              request.forked_from_thread_id = request.options.initial_history.forked_from_id();
              request
          } else {
@@ -14151,23 +14567,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
              let mut request = ThreadSpawnRequest::new(
                  options,
                  Arc::clone(&self.state.auth_manager),
-@@ -1323,6 +1414,15 @@ impl ThreadManager {
-             .services
-             .local_agent_runtime
-             .control(parent.session.session_id());
-+        // Frodex restores descendant identities lazily. Resolve this child through the loaded
-+        // parent's indexed ownership graph before the reload checks its in-memory lifecycle.
-+        agent_control.register_session_root(
-+            parent_thread_id,
-+            parent.session.session_source().await.parent_thread_id(),
-+        );
-+        agent_control
-+            .ensure_open_agent_known_by_id_for_explicit_resume(parent_thread_id, child_thread_id)
-+            .await?;
-         agent_control
-             .ensure_v2_agent_loaded(config, child_thread_id, Some(parent))
-             .await
-@@ -1337,7 +1437,9 @@ impl ThreadManager {
+@@ -1376,7 +1467,9 @@ impl ThreadManager {
          parent_trace: Option<W3cTraceContext>,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
@@ -14178,19 +14578,21 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
          let (session_source, thread_source) = initial_history
              .get_resumed_session_sources()
              .unwrap_or_else(|| (self.state.session_source.clone(), None));
-@@ -1382,8 +1484,10 @@ impl ThreadManager {
+@@ -1421,10 +1514,12 @@ impl ThreadManager {
          user_shell_override: crate::shell::Shell,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
 -        let agent_control = self.agent_control_for_config(&config);
-         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+         let initial_history = self
+             .legacy_initial_history_from_rollout_path(rollout_path)
+             .await?;
 +        let (agent_control, _lifecycle_mutation) = self
 +            .agent_control_for_initial_history(&config, &initial_history)
 +            .await?;
          let (session_source, thread_source) = initial_history
              .get_resumed_session_sources()
              .unwrap_or_else(|| (self.state.session_source.clone(), None));
-@@ -1858,6 +1962,37 @@ impl ThreadManager {
+@@ -1902,6 +1997,37 @@ impl ThreadManager {
          )
      }
 
@@ -14228,7 +14630,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      #[cfg(test)]
      pub(crate) fn captured_ops(&self) -> Vec<(ThreadId, Op)> {
          self.state
-@@ -1877,6 +2012,14 @@ impl ThreadManager {
+@@ -1921,6 +2047,14 @@ impl ThreadManager {
  }
 
  impl ThreadManagerState {
@@ -14243,7 +14645,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      pub(crate) fn shared_thread_instructions_provider(
          &self,
          root_thread_id: ThreadId,
-@@ -1886,6 +2029,10 @@ impl ThreadManagerState {
+@@ -1930,6 +2064,10 @@ impl ThreadManagerState {
              .for_root(root_thread_id, provider)
      }
 
@@ -14254,7 +14656,7 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      /// Updates metadata without requiring a public `ThreadManager` handle.
      ///
      /// Agent ownership transitions hold only the shared manager state while they move loaded and
-@@ -1940,6 +2087,14 @@ impl ThreadManagerState {
+@@ -1984,6 +2122,14 @@ impl ThreadManagerState {
          self.agent_graph_store.clone()
      }
 
@@ -14269,23 +14671,24 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
      pub(crate) async fn indexed_thread_metadata(
          &self,
          thread_id: ThreadId,
-@@ -2947,15 +3102,6 @@ impl ThreadManagerState {
-                 threads.remove(&resumed.conversation_id);
-             }
-         }
+@@ -3020,16 +3166,6 @@ impl ThreadManagerState {
+         let initial_host_config = (self.agent_control_factory.is_some()
+             && parent_thread_id.is_none())
+         .then(|| AgentConfigUpdate::ServiceTier(config.service_tier.clone()));
 -        // Both resume entry points must restore identities before children can be loaded lazily.
 -        if let InitialHistory::Resumed(resumed) = &initial_history
 -            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
 -            && !session_source.is_non_root_agent()
+-            && let AgentControlInit::Local(control) = &agent_control
 -        {
--            agent_control
+-            control
 -                .restore_v2_agent_metadata(&config, resumed.conversation_id)
 -                .await;
 -        }
          let (instructions, inherited_exec_policy, extensions, mcp_manager, multi_agent_version) =
              if isolation == codex_extension_api::SessionIsolation::Isolated {
                  (
-@@ -3141,6 +3287,7 @@ impl ThreadManagerState {
+@@ -3222,6 +3358,7 @@ impl ThreadManagerState {
          model_history_complete: bool,
      ) -> CodexResult<NewThread> {
          let thread_id = session.thread_id();
@@ -14293,10 +14696,10 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
          let event = io.next_event().await?;
          let session_configured = match event {
              Event {
-@@ -3155,6 +3302,12 @@ impl ThreadManagerState {
-         {
-             let mut threads = self.threads.write().await;
-             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
+@@ -3242,6 +3379,12 @@ impl ThreadManagerState {
+                         .agent_control
+                         .propagate_config_update(update);
+                 }
 +                // A later reload must not replace the target's intent with its sender's config.
 +                self.thread_ephemeral_intent
 +                    .lock()
@@ -14308,10 +14711,10 @@ index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..21290e1e9b1e8594c62752771b6c7ffa
                      io,
 diff --git a/codex-rs/core/src/thread_manager/current_membership.rs b/codex-rs/core/src/thread_manager/current_membership.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e250b8154e2439f0f0ae81c26bae4642f6918b3d
+index 0000000000000000000000000000000000000000..f0d2cdfdf65e8412387f0c3662518d8a62638605
 --- /dev/null
 +++ b/codex-rs/core/src/thread_manager/current_membership.rs
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,551 @@
 +use super::*;
 +use codex_agent_graph_store::ThreadSpawnEdgeStatus;
 +
@@ -14651,7 +15054,11 @@ index 0000000000000000000000000000000000000000..e250b8154e2439f0f0ae81c26bae4642
 +        let mut candidates = threads
 +            .into_iter()
 +            .filter_map(|thread| {
-+                let control = thread.session.services.agent_control.clone();
++                let control = thread
++                    .session
++                    .services
++                    .local_agent_runtime
++                    .control(thread.session.session_id());
 +                let registry_root_thread_id = control.current_membership_root_thread_id();
 +                // A resumed legacy child can carry the root's session ID without
 +                // registering that root or sharing its current agents.
@@ -14861,10 +15268,10 @@ index 0000000000000000000000000000000000000000..e250b8154e2439f0f0ae81c26bae4642
 +}
 diff --git a/codex-rs/core/src/thread_manager/current_membership_tests.rs b/codex-rs/core/src/thread_manager/current_membership_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c28bf359daee7115bafbc6ab22d1acd07201a0f
+index 0000000000000000000000000000000000000000..6248c239191ecd1700e89fff0ebb033ceefe7223
 --- /dev/null
 +++ b/codex-rs/core/src/thread_manager/current_membership_tests.rs
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,381 @@
 +use super::*;
 +use crate::config::test_config;
 +use codex_agent_graph_store::ThreadSpawnEdgeStatus;
@@ -15112,7 +15519,12 @@ index 0000000000000000000000000000000000000000..4c28bf359daee7115bafbc6ab22d1acd
 +        .start_thread(StartThreadOptions::new(config.clone()))
 +        .await
 +        .expect("root");
-+    let control = root.thread.session.services.agent_control.clone();
++    let control = root
++        .thread
++        .session
++        .services
++        .local_agent_runtime
++        .control(root.thread.session.session_id());
 +    control.register_session_root(root.thread_id, /*current_parent_thread_id*/ None);
 +    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
 +        parent_thread_id: root.thread_id,
@@ -15178,7 +15590,8 @@ index 0000000000000000000000000000000000000000..4c28bf359daee7115bafbc6ab22d1acd
 +            .thread
 +            .session
 +            .services
-+            .agent_control
++            .local_agent_runtime
++            .control(legacy.thread.session.session_id())
 +            .current_membership_root_thread_id(),
 +        root.thread_id
 +    );
@@ -15187,7 +15600,8 @@ index 0000000000000000000000000000000000000000..4c28bf359daee7115bafbc6ab22d1acd
 +            .thread
 +            .session
 +            .services
-+            .agent_control
++            .local_agent_runtime
++            .control(legacy.thread.session.session_id())
 +            .get_agent_metadata(root.thread_id)
 +            .is_none()
 +    );
@@ -15240,7 +15654,7 @@ index 0000000000000000000000000000000000000000..4c28bf359daee7115bafbc6ab22d1acd
 +        .expect("shutdown legacy runtime");
 +}
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index d992cab2aca1b88ba7d7c59d5af8b351a9962013..f27242f3f6ceea33fd22d6c504f4170fa3086c5b 100644
+index 43dc708f8e0d62c56a1f68cc9241e721342637ae..0895cb2458722bc497f83844a31af6caec1c9ef4 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -282,6 +282,43 @@ async fn thread_analytics_opt_out_overrides_shared_client() {
@@ -15288,7 +15702,7 @@ index d992cab2aca1b88ba7d7c59d5af8b351a9962013..f27242f3f6ceea33fd22d6c504f4170f
  async fn persisted_v1_history_wins_over_configured_v2_for_spawn() {
      let temp_dir = tempdir().expect("tempdir");
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
-index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da8a23e0c9 100644
+index 4883dc77ad12ebed0cd553f0c3f4b0495de9185c..b3b7ccc6e1c651548dd7cffcebbcdae8ba10038c 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
 @@ -1,8 +1,11 @@
@@ -15312,7 +15726,7 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
              self.spec(),
          )
      }
-@@ -80,36 +83,39 @@ async fn handle_resume_agent(
+@@ -82,28 +85,25 @@ async fn handle_resume_agent(
          )
          .await;
 
@@ -15325,55 +15739,33 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
 -            /*agent_role*/ None,
 -            /*task_name*/ None,
 -        )?;
--        Box::pin(
--            session
--                .services
--                .agent_control
--                .resume_agent(config, receiver_thread_id, source),
--        )
--        .await
--        .map_err(|err| collab_agent_error(receiver_thread_id, err))
+-        local_agent_control
+-            .resume_agent(config, receiver_thread_id, source)
+-            .await
+-            .map_err(|err| collab_agent_error(receiver_thread_id, err))
 -    }
 -    .await;
 -    let (status, receiver_agent, error) = match result {
 -        Ok((agent, _)) => (agent.status, agent.metadata, None),
 -        Err(err) => (
--            session
--                .services
--                .agent_control
--                .get_status(receiver_thread_id)
--                .await,
+-            local_agent_control.get_status(receiver_thread_id).await,
 -            receiver_agent,
 -            Some(err),
 -        ),
-+    let mut status = session
-+        .services
-+        .agent_control
-+        .get_status(receiver_thread_id)
-+        .await;
++    let mut status = local_agent_control.get_status(receiver_thread_id).await;
 +    let (receiver_agent, error) = if matches!(status, AgentStatus::NotFound) {
 +        match Box::pin(try_resume_open_agent(&session, &turn, receiver_thread_id)).await {
 +            Ok(()) => {
-+                status = session
-+                    .services
-+                    .agent_control
-+                    .get_status(receiver_thread_id)
-+                    .await;
++                status = local_agent_control.get_status(receiver_thread_id).await;
 +                (
-+                    session
-+                        .services
-+                        .agent_control
++                    local_agent_control
 +                        .get_agent_metadata(receiver_thread_id)
 +                        .unwrap_or(receiver_agent),
 +                    None,
 +                )
 +            }
 +            Err(err) => {
-+                status = session
-+                    .services
-+                    .agent_control
-+                    .get_status(receiver_thread_id)
-+                    .await;
++                status = local_agent_control.get_status(receiver_thread_id).await;
 +                (receiver_agent, Some(err))
 +            }
 +        }
@@ -15382,7 +15774,7 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
      };
      session
          .emit_turn_item_completed(
-@@ -175,3 +181,38 @@ impl ToolOutput for ResumeAgentResult {
+@@ -169,3 +169,32 @@ impl ToolOutput for ResumeAgentResult {
          tool_output_code_mode_result(self, "resume_agent")
      }
  }
@@ -15392,13 +15784,12 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
 +    turn: &Arc<TurnContext>,
 +    receiver_thread_id: ThreadId,
 +) -> Result<(), FunctionCallError> {
-+    session
++    let local_agent_control = session
 +        .services
-+        .agent_control
-+        .register_session_root(session.thread_id(), turn.parent_thread_id);
-+    session
-+        .services
-+        .agent_control
++        .local_agent_runtime
++        .control(session.session_id());
++    local_agent_control.register_session_root(session.thread_id(), turn.parent_thread_id);
++    local_agent_control
 +        .ensure_open_agent_known_by_id_for_explicit_resume(session.thread_id(), receiver_thread_id)
 +        .await
 +        .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
@@ -15411,21 +15802,16 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
 +        /*agent_role*/ None,
 +        /*task_name*/ None,
 +    )?;
-+    Box::pin(
-+        session
-+            .services
-+            .agent_control
-+            .resume_agent(config, receiver_thread_id, source),
-+    )
-+    .await
-+    .map(|_| ())
-+    .map_err(|err| collab_agent_error(receiver_thread_id, err))
++    Box::pin(local_agent_control.resume_agent(config, receiver_thread_id, source))
++        .await
++        .map(|_| ())
++        .map_err(|err| collab_agent_error(receiver_thread_id, err))
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
-index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddfb46894e8 100644
+index 630454042ad1063ac016302774a88756916d7180..d0c3c9c5dfe17bf05126f600fb806580819c6004 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
-@@ -100,6 +100,7 @@ impl Handler {
+@@ -102,6 +102,7 @@ impl Handler {
              ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
          };
 
@@ -15433,7 +15819,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
          session
              .emit_turn_item_started(
                  &turn,
-@@ -118,88 +119,81 @@ impl Handler {
+@@ -120,88 +121,85 @@ impl Handler {
              )
              .await;
 
@@ -15444,7 +15830,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
 +        let mut futures = FuturesUnordered::new();
          for id in &receiver_thread_ids {
 -            let subscription = async {
--                let mut updates = session.services.agent_control.subscribe_status(*id).await?;
+-                let mut updates = local_agent_control.subscribe_status(*id).await?;
 -                let initial = updates
 -                    .next()
 -                    .await
@@ -15463,9 +15849,13 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
 +            let call_id = call_id.clone();
 +            let receiver_agents = &receiver_agents;
 +            futures.push(async move {
++                let local_agent_control = session
++                    .services
++                    .local_agent_runtime
++                    .control(session.session_id());
 +                let subscription = subscribe_status_for_wait(
-+                    || session.services.agent_control.subscribe_status(*id),
-+                    || session.services.agent_control.get_status(*id),
++                    || local_agent_control.subscribe_status(*id),
++                    || local_agent_control.get_status(*id),
 +                )
 +                .await;
 +                let updates = match subscription {
@@ -15483,7 +15873,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
 -                }
 -                Err(err) => {
 -                    let mut statuses = HashMap::with_capacity(1);
--                    statuses.insert(*id, session.services.agent_control.get_status(*id).await);
+-                    statuses.insert(*id, local_agent_control.get_status(*id).await);
 -                    session
 -                        .emit_turn_item_completed(
 -                            &turn,
@@ -15506,7 +15896,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
 -            }
 +                    Err(err) => {
 +                        let mut statuses = HashMap::with_capacity(1);
-+                        statuses.insert(*id, session.services.agent_control.get_status(*id).await);
++                        statuses.insert(*id, local_agent_control.get_status(*id).await);
 +                        session
 +                            .emit_turn_item_completed(
 +                                &turn,
@@ -15589,7 +15979,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddf
 
          let timed_out = statuses.is_empty();
          let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
-@@ -238,6 +232,55 @@ impl Handler {
+@@ -240,6 +238,55 @@ impl Handler {
      }
  }
 
@@ -15774,10 +16164,10 @@ index 4e05e9edc8ca60aa43f4bc44b60158c458e6cf0b..43d597b89a4720509e3da724fa1906c1
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a2402e5cb 100644
+index be95ffed7445d11fa0fd527c8412c291208f03d9..ff3b5ac4714bc72e955149cf93657358413cdbfe 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -230,12 +230,17 @@ where
+@@ -237,12 +237,17 @@ where
  #[derive(Debug, Deserialize)]
  struct ListAgentsResult {
      agents: Vec<ListedAgentResult>,
@@ -15795,11 +16185,23 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
  }
 
  #[derive(Debug, Deserialize)]
-@@ -1713,6 +1718,11 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -930,6 +935,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
+     let child_thread_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(
+             session.thread_id,
+             &turn.session_source,
+@@ -1829,6 +1835,15 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
          .await
          .get_agent_path()
          .expect("goal supervisor helper should have an agent path");
-+    let helper_control = &helper.session.services.agent_control;
++    let helper_control = helper
++        .session
++        .services
++        .local_agent_runtime
++        .control(helper.session.session_id());
 +    assert!(helper_control.get_agent_metadata(root.thread_id).is_some());
 +    helper_control.unregister_goal_supervisor_parent_for_test(root.thread_id);
 +    assert!(helper_control.get_agent_metadata(root.thread_id).is_none());
@@ -15807,7 +16209,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
      let output = FollowupTaskHandlerV2
          .handle(invocation(
              Arc::clone(&helper.session),
-@@ -1731,7 +1741,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1847,7 +1862,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
          *thread_id == root.thread_id
              && matches!(
                  op,
@@ -15816,7 +16218,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
                      if communication.author == helper_path
                          && communication.recipient == AgentPath::root()
                          && communication.trigger_turn
-@@ -1775,13 +1785,13 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1891,13 +1906,13 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
  async fn multi_agent_v2_list_agents_returns_completed_status() {
      let (mut session, mut turn) = make_session_and_context().await;
      let manager = thread_manager(&turn);
@@ -15831,7 +16233,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
      let _ = config.features.enable(Feature::MultiAgentV2);
      set_turn_config(&mut turn, config);
 
-@@ -1794,7 +1804,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1910,7 +1925,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
              "spawn_agent",
              function_payload(json!({
                  "message": "inspect this repo",
@@ -15841,7 +16243,15 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
              })),
          ))
          .await
-@@ -1846,13 +1857,18 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1920,6 +1936,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker path should resolve");
+@@ -1962,13 +1979,18 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          .iter()
          .map(|agent| agent.agent_name.as_str())
          .collect::<Vec<_>>();
@@ -15861,7 +16271,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
      assert_eq!(success, Some(true));
  }
 
-@@ -1944,13 +1960,13 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
+@@ -2062,13 +2084,13 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
  async fn multi_agent_v2_list_agents_omits_closed_agents() {
      let (mut session, mut turn) = make_session_and_context().await;
      let manager = thread_manager(&turn);
@@ -15876,7 +16286,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
      let _ = config.features.enable(Feature::MultiAgentV2);
      set_turn_config(&mut turn, config);
 
-@@ -1963,7 +1979,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
+@@ -2081,7 +2103,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
              "spawn_agent",
              function_payload(json!({
                  "message": "inspect this repo",
@@ -15886,7 +16296,15 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
              })),
          ))
          .await
-@@ -1996,21 +2013,22 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
+@@ -2091,6 +2114,7 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker path should resolve");
+@@ -2115,21 +2139,22 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -15912,7 +16330,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
      let _ = config.features.enable(Feature::MultiAgentV2);
      set_turn_config(&mut turn, config);
 
-@@ -2023,7 +2041,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
+@@ -2142,7 +2167,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
              "spawn_agent",
              function_payload(json!({
                  "message": "inspect this repo",
@@ -15922,7 +16340,15 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
              })),
          ))
          .await
-@@ -2067,9 +2086,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
+@@ -2152,6 +2178,7 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker path should resolve");
+@@ -2186,9 +2213,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -15934,7 +16360,55 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
  }
 
  #[tokio::test]
-@@ -3715,6 +3733,363 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
+@@ -2222,6 +2248,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -2278,6 +2305,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -2355,6 +2383,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -2508,6 +2537,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -2561,6 +2591,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -3499,6 +3530,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -3835,6 +3867,357 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
      assert_eq!(success, None);
  }
 
@@ -15952,21 +16426,18 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +        set_agent_control(&mut session, manager.agent_control());
 +        let agent_id = ThreadId::new();
 +        let missing_id = ThreadId::new();
++        let local_agent_control = session
++            .services
++            .local_agent_runtime
++            .control(session.session_id());
 +        // Root registration supplies a cold identity for this status-only fixture; ownership
 +        // and root resume are not involved in the wait handler's status lookup.
-+        session
-+            .services
-+            .agent_control
-+            .register_session_root(agent_id, /*current_parent_thread_id*/ None);
-+        session
-+            .services
-+            .agent_control
++        local_agent_control.register_session_root(agent_id, /*current_parent_thread_id*/ None);
++        local_agent_control
 +            .registered_agent_lifecycle(agent_id)
 +            .expect("registered agent lifecycle")
 +            .remember_cold_terminal_status(expected.clone(), /*visible_when_cold*/ true);
-+        let subscription_error = session
-+            .services
-+            .agent_control
++        let subscription_error = local_agent_control
 +            .subscribe_status(agent_id)
 +            .await
 +            .err()
@@ -16014,20 +16485,19 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +    let manager = thread_manager(&turn);
 +    set_agent_control(&mut session, manager.agent_control());
 +    let agent_id = ThreadId::new();
-+    session
++    let local_agent_control = session
 +        .services
-+        .agent_control
-+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
-+    session
-+        .services
-+        .agent_control
++        .local_agent_runtime
++        .control(session.session_id());
++    local_agent_control.register_session_root(agent_id, /*current_parent_thread_id*/ None);
++    local_agent_control
 +        .registered_agent_lifecycle(agent_id)
 +        .expect("registered agent lifecycle")
 +        .remember_cold_terminal_status(AgentStatus::Interrupted, /*visible_when_cold*/ true);
 +
 +    let subscription = wait::subscribe_status_for_wait(
-+        || session.services.agent_control.subscribe_status(agent_id),
-+        || session.services.agent_control.get_status(agent_id),
++        || local_agent_control.subscribe_status(agent_id),
++        || local_agent_control.get_status(agent_id),
 +    )
 +    .now_or_never()
 +    .expect("retained interruption must not retry until the wait deadline")
@@ -16053,7 +16523,8 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +        .expect("start thread");
 +    let mut real_updates = session
 +        .services
-+        .agent_control
++        .local_agent_runtime
++        .control(session.session_id())
 +        .subscribe_status(thread.thread_id)
 +        .await
 +        .expect("loaded agent has a status stream");
@@ -16128,6 +16599,10 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +        .await
 +        .expect("start thread");
 +    let agent_id = thread.thread_id;
++    let local_agent_control = session
++        .services
++        .local_agent_runtime
++        .control(session.session_id());
 +    let subscriptions = AtomicUsize::new(0);
 +    let (initial, updates) = wait::subscribe_status_for_wait(
 +        || async {
@@ -16135,13 +16610,9 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +                // Simulate absence at subscription followed by a loaded runtime at get_status.
 +                return Err(codex_protocol::error::CodexErr::ThreadNotFound(agent_id));
 +            }
-+            session
-+                .services
-+                .agent_control
-+                .subscribe_status(agent_id)
-+                .await
++            local_agent_control.subscribe_status(agent_id).await
 +        },
-+        || session.services.agent_control.get_status(agent_id),
++        || local_agent_control.get_status(agent_id),
 +    )
 +    .await
 +    .expect("resumed agent should be subscribed without reporting a terminal result");
@@ -16171,14 +16642,13 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +    let manager = thread_manager(&turn);
 +    set_agent_control(&mut session, manager.agent_control());
 +    let agent_id = ThreadId::new();
-+    session
++    let local_agent_control = session
 +        .services
-+        .agent_control
-+        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
++        .local_agent_runtime
++        .control(session.session_id());
++    local_agent_control.register_session_root(agent_id, /*current_parent_thread_id*/ None);
 +    // Model repeated resume races or an inconsistent non-final cache without a runtime.
-+    session
-+        .services
-+        .agent_control
++    local_agent_control
 +        .registered_agent_lifecycle(agent_id)
 +        .expect("registered agent lifecycle")
 +        .remember_cold_terminal_status(AgentStatus::Running, /*visible_when_cold*/ true);
@@ -16220,13 +16690,13 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +        let manager = thread_manager(&turn);
 +        set_agent_control(&mut session, manager.agent_control());
 +        let retrying_id = ThreadId::new();
-+        session
++        let local_agent_control = session
 +            .services
-+            .agent_control
++            .local_agent_runtime
++            .control(session.session_id());
++        local_agent_control
 +            .register_session_root(retrying_id, /*current_parent_thread_id*/ None);
-+        session
-+            .services
-+            .agent_control
++        local_agent_control
 +            .registered_agent_lifecycle(retrying_id)
 +            .expect("registered retrying agent lifecycle")
 +            .remember_cold_terminal_status(AgentStatus::Running, /*visible_when_cold*/ true);
@@ -16246,9 +16716,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 +            .expect("shutdown status channel should remain open");
 +        assert_eq!(*status_rx.borrow(), AgentStatus::Shutdown);
 +
-+        let terminal_target = session
-+            .services
-+            .agent_control
++        let terminal_target = local_agent_control
 +            .get_agent_metadata(terminal.thread_id)
 +            .and_then(|metadata| metadata.agent_path)
 +            .map(|path| path.to_string())
@@ -16298,7 +16766,71 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
  #[tokio::test]
  async fn wait_agent_times_out_when_status_is_not_final() {
      let (mut session, turn) = make_session_and_context().await;
-@@ -4420,8 +4795,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -4000,6 +4383,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "test_process")
+         .await
+         .expect("relative path should resolve");
+@@ -4091,6 +4475,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -4177,6 +4562,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
+     let worker_b_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker_b")
+         .await
+         .expect("worker_b should resolve");
+@@ -4269,6 +4655,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker should resolve");
+@@ -4362,6 +4749,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker path should resolve");
+@@ -4385,6 +4773,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
+     let child_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker/child")
+         .await
+         .expect("child path should resolve");
+@@ -4407,6 +4796,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
+         session
+             .services
+             .local_agent_runtime
++            .control(session.session_id())
+             .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+             .await
+             .expect("worker path should remain resolvable"),
+@@ -4483,6 +4873,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+     let agent_id = session
+         .services
+         .local_agent_runtime
++        .control(session.session_id())
+         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+         .await
+         .expect("worker path should resolve");
+@@ -4540,8 +4931,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
      let (content, _) = expect_text_output(output);
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
@@ -16309,7 +16841,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
-index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080256ecb56 100644
+index 9e0eaa74c03e232cfa86660047797a199df0c6c8..668b5fc75dcabc881263912fe0156a67bc3ef8b9 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs
 @@ -1,5 +1,6 @@
@@ -16319,21 +16851,23 @@ index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080
  use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
  use codex_tools::ToolSpec;
 
-@@ -44,26 +45,23 @@ impl Handler {
-             .services
-             .agent_control
-             .register_session_root(session.thread_id, turn.parent_thread_id);
+@@ -40,31 +41,25 @@ impl Handler {
+         } = invocation;
+         let arguments = function_arguments(payload)?;
+         let args: ListAgentsArgs = parse_arguments(&arguments)?;
 -        let agents = session
 +        let page = session
              .services
              .agent_control
--            .list_agents(&turn.session_source, args.path_prefix.as_deref())
-+            .list_agents_page(
-+                &turn.session_source,
-+                args.path_prefix.as_deref(),
+-            .list(
++            .list_page(
+                 session.thread_id,
+                 turn.parent_thread_id,
+                 &turn.session_source,
+                 args.path_prefix.as_deref(),
 +                args.cursor.as_deref(),
 +                args.limit,
-+            )
+             )
              .await
              .map_err(collab_spawn_error)?;
 
@@ -16358,7 +16892,7 @@ index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080
      }
  }
 
-@@ -77,17 +75,15 @@ impl CoreToolRuntime for Handler {
+@@ -78,17 +73,15 @@ impl CoreToolRuntime for Handler {
  #[serde(deny_unknown_fields)]
  struct ListAgentsArgs {
      path_prefix: Option<String>,
@@ -16381,10 +16915,10 @@ index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080
 
  impl ToolOutput for ListAgentsResult {
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index 8051ab1a3608888b7feb826b1d0b2b3d22d4de4b..2c52dda81e2aace30e8122f61518f5576b398691 100644
+index cd0241ffe5c3cbb39b1d9d5712c33535465cdec4..4d8250747aa7d41f8317358f7d9e04833fc314d0 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
-@@ -816,7 +816,7 @@ async fn handle_any_tool(
+@@ -830,7 +830,7 @@ async fn handle_any_tool(
          && invocation.turn.config.memories.disable_on_external_context
      {
          state_db::mark_thread_memory_mode_polluted(
@@ -16393,8 +16927,40 @@ index 8051ab1a3608888b7feb826b1d0b2b3d22d4de4b..2c52dda81e2aace30e8122f61518f557
              invocation.session.thread_id,
              "tool_output",
          )
+diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
+index 551b2cedb3679e35d355cd1ea507128f9c962c00..68c9870fdb84074dec1725dbf7d5a3532837e7b4 100644
+--- a/codex-rs/core/tests/suite/agent_control_tests.rs
++++ b/codex-rs/core/tests/suite/agent_control_tests.rs
+@@ -195,6 +195,27 @@ impl AgentControl for TestAgentControl {
+     }
+ }
+
++#[tokio::test]
++async fn default_list_page_uses_provided_host_controller() {
++    let thread_id = ThreadId::new();
++    let controller: Arc<dyn AgentControl> = Arc::new(TestAgentControl::new(thread_id));
++    let error = controller
++        .list_page(
++            thread_id,
++            None,
++            &SessionSource::Exec,
++            Some("/root"),
++            None,
++            Some(1),
++        )
++        .await
++        .expect_err("host list rejection must survive the default page adapter");
++    assert!(matches!(
++        error.details(),
++        CodexErrorDetails::InvalidRequest(message) if message == "host list rejection"
++    ));
++}
++
+ async fn test_with_host_control(
+     server: &MockServer,
+ ) -> anyhow::Result<(TestCodex, Arc<TestAgentControl>)> {
 diff --git a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs b/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
-index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25ccf70b977a 100644
+index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..ce24c542fde262451643e36472418b990ca77eb4 100644
 --- a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
 +++ b/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
 @@ -1,4 +1,4 @@
@@ -16497,7 +17063,7 @@ index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25cc
          gates: Mutex::new(HashMap::from([
              (first, first_gate),
              (failed, failed_gate),
-@@ -218,52 +238,114 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
+@@ -218,52 +238,112 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
          completed: completed_tx,
      });
      let resume_url = format!("{}/v1", server.uri());
@@ -16577,16 +17143,14 @@ index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25cc
 +        selected_children.push(child_id);
 +        let (result, ()) = tokio::try_join!(
 +            async {
-+                Ok::<_, anyhow::Error>(
-+                    timeout(
-+                        Duration::from_secs(10),
-+                        resumed
-+                            .thread_manager
-+                            .ensure_multi_agent_v2_child_loaded(child_id),
-+                    )
-+                    .await
-+                    .context("selected child reload must finish after releasing metadata")?,
++                timeout(
++                    Duration::from_secs(10),
++                    resumed
++                        .thread_manager
++                        .ensure_multi_agent_v2_child_loaded(child_id),
 +                )
++                .await
++                .context("selected child reload must finish after releasing metadata")
 +            },
 +            async {
 +                timeout(Duration::from_secs(10), async {
@@ -16655,10 +17219,10 @@ index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25cc
      Ok(())
  }
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
-index f60e8f4cad5f94dfdf2adbc33d53bb767a1f9262..c45732fe2e801f347cb62cdccbce805a6cc04076 100644
+index 597b85c4a1ac4faec3a9a37d0b68e84fc3ad9e8c..d13de079e36797dc5ccd6bcb79950658f36bfb14 100644
 --- a/codex-rs/state/src/lib.rs
 +++ b/codex-rs/state/src/lib.rs
-@@ -51,6 +51,7 @@ pub use model::Anchor;
+@@ -52,6 +52,7 @@ pub use model::Anchor;
  pub use model::BackfillState;
  pub use model::BackfillStats;
  pub use model::BackfillStatus;
@@ -17238,10 +17802,10 @@ index d228b83a6e6c42ccad600def8d803ef9166c48e6..dde17868286d96a11200b233e0aad8b2
      async fn open_thread_spawn_descendant_identities_ignore_root_self_loop() {
          let codex_home = unique_temp_dir();
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index b7ced5a0960e0378d33519e7ce8564b9ad3f8a15..00a4f3da85640fb1c83c986f5895c70b7b9f5e88 100644
+index b0377a36bc5b03febfede0e6a5e8b8581aa5bac5..70041b9c8acb67bf28bbd6b5cc91427ab4fa066f 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
-@@ -706,6 +706,8 @@ pub struct InMemoryThreadStore {
+@@ -684,6 +684,8 @@ pub struct InMemoryThreadStore {
  #[derive(Default)]
  struct InMemoryThreadStoreState {
      calls: InMemoryThreadStoreCalls,
@@ -17250,7 +17814,7 @@ index b7ced5a0960e0378d33519e7ce8564b9ad3f8a15..00a4f3da85640fb1c83c986f5895c70b
      created_threads: HashMap<ThreadId, CreateThreadParams>,
      creation_times: HashMap<ThreadId, DateTime<Utc>>,
      histories: HashMap<ThreadId, Vec<RolloutItem>>,
-@@ -783,6 +785,16 @@ impl InMemoryThreadStore {
+@@ -761,6 +763,16 @@ impl InMemoryThreadStore {
              .store(true, Ordering::Relaxed);
      }
 
@@ -17267,7 +17831,7 @@ index b7ced5a0960e0378d33519e7ce8564b9ad3f8a15..00a4f3da85640fb1c83c986f5895c70b
      #[cfg(test)]
      pub(crate) async fn queue_root_recency_touch_results(
          &self,
-@@ -1170,7 +1182,15 @@ impl InMemoryThreadStore {
+@@ -1147,7 +1159,15 @@ impl InMemoryThreadStore {
      }
 
      async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
@@ -17284,7 +17848,7 @@ index b7ced5a0960e0378d33519e7ce8564b9ad3f8a15..00a4f3da85640fb1c83c986f5895c70b
          let deleted_state_rows = if let Some(state_db) = &self.state_db {
              state_db
                  .delete_threads_strict(&[params.thread_id])
-@@ -1354,9 +1374,15 @@ impl ThreadStore for InMemoryThreadStore {
+@@ -1331,9 +1351,15 @@ impl ThreadStore for InMemoryThreadStore {
          Box::pin(InMemoryThreadStore::move_thread_to_section(self, params))
      }
 
@@ -17809,7 +18373,7 @@ index 3e8a5eff37bdc4f3f9e01b5ab471a34f6c6faa6f..da69eeee1c464dae5fac85a9d2ea5d1b
 
      #[cfg(unix)]
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index afd0abb690d486b08824789ee9d4da60cc1d2e97..a96201c82016f54d5a60e861549cd00ad02758eb 100644
+index e8ffe1ad061eeec683e9301700dd47850b12891b..a99b4e8b3af0de98d2c2678723cfe6ee33b89457 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -70,6 +70,7 @@ use crate::CreateThreadSectionParams;
@@ -17868,7 +18432,7 @@ index afd0abb690d486b08824789ee9d4da60cc1d2e97..a96201c82016f54d5a60e861549cd00a
      /// Returns whether the projected visible history can satisfy paginated reads.
      pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
          let Some(resolved) =
-@@ -941,6 +976,10 @@ impl ThreadStore for LocalThreadStore {
+@@ -945,6 +980,10 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(async move { read_thread::read_thread(self, params).await })
      }
 
@@ -17879,7 +18443,7 @@ index afd0abb690d486b08824789ee9d4da60cc1d2e97..a96201c82016f54d5a60e861549cd00a
      fn read_thread_by_rollout_path(
          &self,
          params: ReadThreadByRolloutPathParams,
-@@ -1164,6 +1203,13 @@ impl ThreadStore for LocalThreadStore {
+@@ -1168,6 +1207,13 @@ impl ThreadStore for LocalThreadStore {
      fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move { delete_thread::delete_threads(self, params).await })
      }
@@ -18249,7 +18813,7 @@ index 786068a308b748789496d85e5875b43e4f56b7dd..b3aaeaf79575c53491f4e78c23a3f968
                      .await
                  {
 diff --git a/codex-rs/tui/src/app/agents_overview_tests.rs b/codex-rs/tui/src/app/agents_overview_tests.rs
-index 182d7ac643e032768e8b2b399b84c8e4f27420c0..dcf9310a26a0dc2e012e66d20cdd9d58125723f6 100644
+index 473ab79dcf13ed3f4f520029fd8e768b5777a924..b2afdc28e6c5ce817957d8fbea7bc47d3f3e8d46 100644
 --- a/codex-rs/tui/src/app/agents_overview_tests.rs
 +++ b/codex-rs/tui/src/app/agents_overview_tests.rs
 @@ -2484,6 +2484,7 @@ async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<
@@ -18273,7 +18837,7 @@ index 66e36d6b122ee0ba62951293f90525e8c30853d7..2af5b54c49e99a97cf4aecc4eb8b669f
              cwd: test_path_buf("/tmp").abs(),
              cli_version: "0.0.0".to_string(),
 diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
-index 80103d41a764a3e9215b02d8eef8b38a3782e3ef..a725aeb7640cf85506e68706529c52797c26f7f7 100644
+index 69ea66fe1bbaa59831905475b49362a7cee91cf9..5b0ab724fc3c308de57c6248ddaf6fb0761a86d3 100644
 --- a/codex-rs/tui/src/app/session_lifecycle.rs
 +++ b/codex-rs/tui/src/app/session_lifecycle.rs
 @@ -1163,6 +1163,7 @@ impl App {
@@ -18285,10 +18849,10 @@ index 80103d41a764a3e9215b02d8eef8b38a3782e3ef..a725aeb7640cf85506e68706529c5279
              .await
          {
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index cbcbbcd485246732d593e2e341dd0962908c8d23..83a223e19b817a47ccc222bda7448763a66a42a9 100644
+index 64e4c096962ff98596282f31b17b71f9eec41311..3e0901b7cd612f3ad3ca8d46a978eb572db06487 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
-@@ -2274,6 +2274,76 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
+@@ -2276,6 +2276,76 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
      Ok(())
  }
 
@@ -18426,7 +18990,7 @@ index fe67bd4070d29d720f4fac7fdbd71b13121c0987..4d10399943e3e259362b4e5840cb2813
              cwd: test_path_buf("/tmp/read").abs(),
              cli_version: "0.0.0".to_string(),
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index bb05071f0da1945f2fc20926ad53ccefdbf4eedb..8ca108499a6a63e6a1de18a0069581ad09f09c26 100644
+index 4ca8ee2777a8a603c097ed7463eb96b8c72537c1..2c661d2b9d66b16d5c5c5f528215f313a69d5173 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -4018,6 +4018,7 @@ model = "gpt-5.1-codex"
@@ -18438,10 +19002,10 @@ index bb05071f0da1945f2fc20926ad53ccefdbf4eedb..8ca108499a6a63e6a1de18a0069581ad
                  cwd: test_path_buf("/tmp/project").abs(),
                  cli_version: "0.0.0".to_string(),
 diff --git a/codex-rs/tui/src/resume_picker.rs b/codex-rs/tui/src/resume_picker.rs
-index cbe80d77264dea480f808a70e8009e71c38623df..c86c444aa365d0c37a355df7e356ab90c7326e9f 100644
+index 1e612232d62ff771e39f84ecace22a11ec14ea96..7e3fb84a58cc5f408a41bc8b5efa62a3137fd4d3 100644
 --- a/codex-rs/tui/src/resume_picker.rs
 +++ b/codex-rs/tui/src/resume_picker.rs
-@@ -6652,6 +6652,7 @@ session_picker_view = "dense"
+@@ -6663,6 +6663,7 @@ session_picker_view = "dense"
              updated_at: 2,
              recency_at: Some(2),
              status: codex_app_server_protocol::ThreadStatus::Idle,
@@ -18449,7 +19013,7 @@ index cbe80d77264dea480f808a70e8009e71c38623df..c86c444aa365d0c37a355df7e356ab90
              path: None,
              cwd: test_path_buf("/tmp").abs(),
              cli_version: String::from("0.0.0"),
-@@ -6699,6 +6700,7 @@ session_picker_view = "dense"
+@@ -6710,6 +6711,7 @@ session_picker_view = "dense"
              updated_at: 2,
              recency_at: Some(2),
              status: codex_app_server_protocol::ThreadStatus::Idle,
@@ -18457,7 +19021,7 @@ index cbe80d77264dea480f808a70e8009e71c38623df..c86c444aa365d0c37a355df7e356ab90
              path: None,
              cwd: test_path_buf("/tmp").abs(),
              cli_version: String::from("0.0.0"),
-@@ -6786,6 +6788,7 @@ session_picker_view = "dense"
+@@ -6797,6 +6799,7 @@ session_picker_view = "dense"
              updated_at: 2,
              recency_at: Some(2),
              status: codex_app_server_protocol::ThreadStatus::Idle,
@@ -18465,7 +19029,7 @@ index cbe80d77264dea480f808a70e8009e71c38623df..c86c444aa365d0c37a355df7e356ab90
              path: None,
              cwd: test_path_buf("/tmp").abs(),
              cli_version: String::from("0.0.0"),
-@@ -6864,6 +6867,7 @@ session_picker_view = "dense"
+@@ -6875,6 +6878,7 @@ session_picker_view = "dense"
              updated_at: 2,
              recency_at: Some(2),
              status: codex_app_server_protocol::ThreadStatus::Idle,

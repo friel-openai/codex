@@ -257,50 +257,6 @@ index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad446983
 +    assert!(app_server.shutdown_gracefully().await?.success());
 +    Ok(())
 +}
-diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-index 219dc76d5bcd33e1a2807d8f36c03eb30c9f201b..0e611b519bee16bbdadac339047da8fd7cda917d 100644
---- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-+++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-@@ -1929,6 +1929,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
-             message: String::new(),
-             replacement_history: Some(Vec::new()),
-             retained_context: None,
-+            retained_context_replay: None,
-             guardian_history: None,
-             mcp_resource_origins: None,
-             window_number: None,
-@@ -2502,6 +2503,7 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
-             message: "legacy summary".to_string(),
-             replacement_history: None,
-             retained_context: None,
-+            retained_context_replay: None,
-             guardian_history: None,
-             mcp_resource_origins: None,
-             window_number: None,
-@@ -2559,6 +2561,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
-             message: "legacy summary".to_string(),
-             replacement_history: None,
-             retained_context: None,
-+            retained_context_replay: None,
-             guardian_history: None,
-             mcp_resource_origins: None,
-             window_number: None,
-@@ -2719,6 +2722,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
-             message: String::new(),
-             replacement_history: Some(Vec::new()),
-             retained_context: None,
-+            retained_context_replay: None,
-             guardian_history: None,
-             mcp_resource_origins: None,
-             window_number: None,
-@@ -3367,6 +3371,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
-             message: String::new(),
-             replacement_history: Some(Vec::new()),
-             retained_context: None,
-+            retained_context_replay: None,
-             guardian_history: None,
-             mcp_resource_origins: None,
-             window_number: None,
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
 index c9e1a3ec57447a0df79bb4da531885de022d6597..b8973506bec28b72683638b5e8c3c5ef83f8b82c 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap

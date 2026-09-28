@@ -603,9 +603,17 @@ func (s *Service) applyPatch(ctx context.Context, worktree string, patch []byte,
 	if len(patch) == 0 {
 		return nil
 	}
-	args := []string{"-c", "rerere.enabled=false", "apply", "--3way", "--index", "--whitespace=nowarn"}
+	args := []string{"-c", "rerere.enabled=false", "apply", "--index", "--whitespace=nowarn"}
 	if reverse {
 		args = append(args, "--reverse")
+	}
+	// A selected hunk retains the later file's blob IDs. A three-way merge can
+	// conflict with unrelated intervening edits even when its context applies
+	// cleanly to the earlier target. Check without mutating before using Git's
+	// direct application; replay still verifies the complete final tree.
+	check := append(append([]string(nil), args...), "--check")
+	if _, err := s.Git.Invoke(ctx, worktree, gitrepo.Invocation{Arguments: check, Stdin: patch}); err != nil {
+		args = append(args, "--3way")
 	}
 	_, err := s.Git.Invoke(ctx, worktree, gitrepo.Invocation{Arguments: args, Stdin: patch})
 	return err

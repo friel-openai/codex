@@ -1,5 +1,5 @@
 diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
-index d772044f3e1ed0ba24ec3aa6384bded6d1b1c350..c84ce3e9c38b792628e82383bdccb140fce8ca9a 100644
+index 29d1448397e799466caa73bb6b28c5ea175dce56..f208e9e0ca10dd6bd649215151d74077542c4e07 100644
 --- a/codex-rs/analytics/src/reducer.rs
 +++ b/codex-rs/analytics/src/reducer.rs
 @@ -516,7 +516,9 @@ impl TurnToolCounts {
@@ -23,7 +23,7 @@ index d772044f3e1ed0ba24ec3aa6384bded6d1b1c350..c84ce3e9c38b792628e82383bdccb140
          | ThreadItem::ExitedReviewMode { .. }
          | ThreadItem::ContextCompaction { .. } => None,
 diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history.rs b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
-index 90df776957fbdb2d0f56bef3091feb36b45bdc84..fd0468952b9a1295895a5a87f3451600669bf922 100644
+index d31d414e885e02b2e7d1ed98a6819b590b73a783..d2e0229b7b3dac70f19993395af7f906cad6c035 100644
 --- a/codex-rs/app-server-protocol/src/protocol/thread_history.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
 @@ -426,8 +426,16 @@ impl ThreadHistoryBuilder {
@@ -62,7 +62,7 @@ index 90df776957fbdb2d0f56bef3091feb36b45bdc84..fd0468952b9a1295895a5a87f3451600
      use codex_protocol::protocol::ItemStartedEvent;
      use codex_protocol::protocol::McpInvocation;
      use codex_protocol::protocol::McpToolCallEndEvent;
-@@ -4654,6 +4665,28 @@ mod tests {
+@@ -4662,6 +4673,28 @@ mod tests {
          );
      }
 
@@ -92,7 +92,7 @@ index 90df776957fbdb2d0f56bef3091feb36b45bdc84..fd0468952b9a1295895a5a87f3451600
      fn reconstructs_interrupted_send_input_as_completed_collab_call() {
          // `send_input(interrupt=true)` first stops the child's active turn, then redirects it with
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-index 06f1bc711790166b71800872076391d3d7e53173..07f3b2dd50b430a8458c522d4292fd8e29febd28 100644
+index 04f68a3351c765d6c2be8d492b1a3cded43a22bb..c7e8b6f40b9f233eef2deeacf3bd0a8baec82781 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 @@ -47,6 +47,7 @@ use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
@@ -128,7 +128,7 @@ index 06f1bc711790166b71800872076391d3d7e53173..07f3b2dd50b430a8458c522d4292fd8e
      /// EXPERIMENTAL - proposed plan item content. The completed plan item is
      /// authoritative and may not match the concatenation of `PlanDelta` text.
      Plan {
-@@ -450,6 +469,8 @@ impl ThreadItem {
+@@ -454,6 +473,8 @@ impl ThreadItem {
              | ThreadItem::HookPrompt { id, .. }
              | ThreadItem::AgentMessage { id, .. }
              | ThreadItem::FunctionCallOutput { id, .. }
@@ -138,7 +138,7 @@ index 06f1bc711790166b71800872076391d3d7e53173..07f3b2dd50b430a8458c522d4292fd8e
              | ThreadItem::Reasoning { id, .. }
              | ThreadItem::CommandExecution { id, .. }
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
-index 7b8f7913e7c549bd498f420ee8d8a04ff3356a7a..9e753025f880e46f615349f6549d87941b7425a6 100644
+index ed2f0729d9b22bd2ad78ec275d409ff5d71211f3..c413e73ada19d8cdc67f0bd158d70d9ed2766316 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 @@ -27,11 +27,13 @@ use codex_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
@@ -189,10 +189,10 @@ index 7b8f7913e7c549bd498f420ee8d8a04ff3356a7a..9e753025f880e46f615349f6549d8794
  fn thread_items_list_round_trips() {
      let params = ThreadItemsListParams {
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index c88258fa56fa28c4cc0c66a3e831121b91512982..ff2381e970030c6efab8714051a94afd3a0a00df 100644
+index c5a87f6eeda2f549cee41ec69709f2087b9c30b9..98a0ab6b3e92cd8f4a51760a3d8b367e85b60228 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
-@@ -2124,6 +2124,7 @@ mod tests {
+@@ -2126,6 +2126,7 @@ mod tests {
      use codex_protocol::protocol::EventMsg;
      use codex_protocol::protocol::GuardianAssessmentEvent;
      use codex_protocol::protocol::GuardianAssessmentStatus;
@@ -200,7 +200,7 @@ index c88258fa56fa28c4cc0c66a3e831121b91512982..ff2381e970030c6efab8714051a94afd
      use codex_protocol::protocol::ItemCompletedEvent;
      use codex_protocol::protocol::ItemStartedEvent;
      use codex_protocol::protocol::RateLimitSnapshot;
-@@ -3920,4 +3921,42 @@ mod tests {
+@@ -3923,4 +3924,42 @@ mod tests {
          assert!(rx.try_recv().is_err(), "no extra messages expected");
          Ok(())
      }
@@ -330,7 +330,7 @@ index 036dd056a8372d5775472d79faaf6c3e150bdc12..5ec7f32e6e89da884806fa40bc8a0147
              (older_child_id.to_string(), Some(parent_id.to_string())),
          ]
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index c6ea68f725196b8fa0141f57dc39385f0b70d54e..11ad6916644b214e0afc1aedca36a0ad7d087210 100644
+index 12beecc08767c5710b4d48302d840bf19d70fa63..57bf307d57e62f344e1b5a117bc061c15ee58bcf 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 @@ -83,6 +83,7 @@ use codex_core::ARCHIVED_SESSIONS_SUBDIR;
@@ -349,7 +349,7 @@ index c6ea68f725196b8fa0141f57dc39385f0b70d54e..11ad6916644b214e0afc1aedca36a0ad
  use codex_protocol::protocol::McpInvocation;
  use codex_protocol::protocol::McpToolCallEndEvent;
  use codex_protocol::protocol::MultiAgentVersion;
-@@ -6088,6 +6090,68 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
+@@ -6098,6 +6100,68 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
      Ok(())
  }
 
@@ -419,10 +419,10 @@ index c6ea68f725196b8fa0141f57dc39385f0b70d54e..11ad6916644b214e0afc1aedca36a0ad
      mcp: TestAppServer,
      thread_id: String,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 3b84f9eb8f62dc7a410b19933aac935626d83789..06abb4d6cea6d330f6313a4cae02a1e107adc09e 100644
+index 0f56ec78e71b0291ca400da2cf0ac13dae1c4989..9f15c3d9b11b87ac627f6ffe69422c1ac6572dee 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -642,6 +642,24 @@ async fn on_event_updates_status_from_task_complete() {
+@@ -628,6 +628,24 @@ async fn on_event_updates_status_from_task_complete() {
      }
  }
 
@@ -448,11 +448,11 @@ index 3b84f9eb8f62dc7a410b19933aac935626d83789..06abb4d6cea6d330f6313a4cae02a1e1
  async fn on_event_updates_status_from_error() {
      let status = agent_status_from_event(&EventMsg::Error(ErrorEvent {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs b/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
-index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2cb3a92491 100644
+index 3d2942f1196d6840bfc16a6e4a3e519bee4c8c5a..42fc1ea7e4df7862c1ec87c1744a33f19183e6ea 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/send_input.rs
-@@ -1,7 +1,12 @@
- use super::*;
+@@ -2,8 +2,13 @@ use super::*;
+ use crate::agent::api::AgentTarget;
  use crate::agent::child_config::build_agent_resume_config;
  use crate::agent::control::render_input_preview;
 +use crate::agent_communication::AgentCommunicationContext;
@@ -460,11 +460,12 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
  use crate::tools::handlers::multi_agents_spec::create_send_input_tool_v1;
 +use codex_protocol::AgentPath;
 +use codex_protocol::protocol::InterAgentCommunication;
+ use codex_protocol::protocol::MultiAgentVersion;
 +use codex_protocol::protocol::SessionSource;
  use codex_tools::ToolSpec;
 
  pub(crate) struct Handler;
-@@ -45,6 +50,8 @@ impl Handler {
+@@ -47,6 +52,8 @@ impl Handler {
          let arguments = function_arguments(payload)?;
          let args: SendInputArgs = parse_arguments(&arguments)?;
          let receiver_thread_id = parse_agent_id_target(&args.target)?;
@@ -472,12 +473,12 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
 +        let items = args.items.clone();
          let input_items = parse_collab_input(args.message, args.items)?;
          let prompt = render_input_preview(&input_items);
-         let receiver_agent = session
-@@ -88,20 +95,63 @@ impl Handler {
+         let local_agent_control = session
+@@ -92,20 +99,63 @@ impl Handler {
+                 }),
              )
              .await;
-         let agent_control = session.services.agent_control.clone();
--        let result = agent_control
+-        let result = local_agent_control
 -            .send_input(
 -                receiver_thread_id,
 -                input_items,
@@ -498,7 +499,7 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
 +                    .session_source
 +                    .get_agent_path()
 +                    .or_else(|| {
-+                        agent_control
++                        local_agent_control
 +                            .get_agent_metadata(session.thread_id)
 +                            .and_then(|metadata| metadata.agent_path)
 +                    })
@@ -507,7 +508,7 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
 +                    .agent_path
 +                    .clone()
 +                    .unwrap_or_else(|| fallback_agent_path(receiver_thread_id));
-+                agent_control
++                local_agent_control
 +                    .send_inter_agent_communication(
 +                        receiver_thread_id,
 +                        InterAgentCommunication::new(
@@ -532,7 +533,7 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
 +                    .await
 +            }
 +            _ => {
-+                agent_control
++                local_agent_control
 +                    .send_input(
 +                        receiver_thread_id,
 +                        input_items,
@@ -548,9 +549,9 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
 +            }
 +        }
 +        .map_err(|err| collab_agent_error(receiver_thread_id, err));
-         let status = session
-             .services
-             .agent_control
+         let status = local_agent_control.get_status(receiver_thread_id).await;
+         session
+             .emit_turn_item_completed(
 @@ -140,6 +190,13 @@ impl CoreToolRuntime for Handler {
      }
  }
@@ -566,10 +567,10 @@ index 1548d01bc880aa6f6605a5f01e2606f45e766085..310d216802dd2f219ebab5446da22b2c
  struct SendInputArgs {
      target: String,
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 0bba76c7f209dd68bf7f89ce2a905d3925633d98..a55f77eb99cf7ee9ed4732d3abeacfd23d37ff42 100644
+index 9c8268c542b681c19840028c19808220494efeef..3a8b1ba169018c44429331d91079239237793353 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -2331,7 +2331,6 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
+@@ -2449,7 +2449,6 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
          agent_nickname: None,
          agent_role: None,
      });
@@ -577,7 +578,7 @@ index 0bba76c7f209dd68bf7f89ce2a905d3925633d98..a55f77eb99cf7ee9ed4732d3abeacfd2
      let invocation = invocation(
          Arc::new(session),
          Arc::new(turn),
-@@ -2629,6 +2628,81 @@ async fn send_input_accepts_structured_items() {
+@@ -2747,6 +2746,81 @@ async fn send_input_accepts_structured_items() {
          .expect("shutdown should submit");
  }
 
@@ -660,20 +661,18 @@ index 0bba76c7f209dd68bf7f89ce2a905d3925633d98..a55f77eb99cf7ee9ed4732d3abeacfd2
  async fn resume_agent_rejects_invalid_id() {
      let (session, turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde2edbd5d7 100644
+index d5e1b9ba3e4059ab7d88751f70e7655415051002..3204d620326f2d1094bf48d64064ac4fa74b8a57 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-@@ -114,6 +114,55 @@ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyh
+@@ -189,6 +189,45 @@ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyh
      Ok(())
  }
 
 +#[tokio::test]
 +async fn streaming_output_buffers_multibyte_characters_across_chunks() {
 +    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
-+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
 +    let mut output: Buffer = Buffer {
 +        pending: Vec::new(),
-+        transcript: Arc::clone(&transcript),
 +        emitter: Emitter {
 +            remaining_deltas: 1,
 +            session,
@@ -686,10 +685,6 @@ index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde
 +    assert_eq!(output.pending, vec![0xc3]);
 +    assert_eq!(output.emitter.remaining_deltas, 1);
 +    assert!(rx_event.try_recv().is_err());
-+    assert_eq!(
-+        transcript.lock().await.to_bytes_with_omission_marker(),
-+        vec![0xc3]
-+    );
 +
 +    output.push(vec![0xa9]).await;
 +    assert!(output.pending.is_empty());
@@ -708,10 +703,6 @@ index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde
 +            chunk: vec![0xc3, 0xa9],
 +        }
 +    );
-+    assert_eq!(
-+        transcript.lock().await.to_bytes_with_omission_marker(),
-+        vec![0xc3, 0xa9]
-+    );
 +    output.finish().await;
 +    assert!(rx_event.try_recv().is_err());
 +}
@@ -719,28 +710,30 @@ index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde
  #[tokio::test]
  async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyhow::Result<()> {
      let StreamingOutputHarness {
-@@ -310,6 +359,37 @@ fn utf8_boundary_batches_malformed_output() {
+@@ -397,6 +436,43 @@ fn utf8_boundary_batches_malformed_output() {
      assert_eq!(utf8_boundary(b"a\xffbbb"), 5);
  }
 
 +#[tokio::test]
-+async fn streaming_output_does_not_apply_a_cumulative_byte_limit() {
-+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
-+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-+    let mut output: Buffer = Buffer {
-+        pending: Vec::new(),
-+        transcript: Arc::clone(&transcript),
-+        emitter: Emitter {
-+            remaining_deltas: crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL,
-+            session,
-+            turn,
-+            call_id: "cumulative-output-test".to_string(),
-+        },
-+    };
++async fn streaming_output_does_not_apply_a_cumulative_byte_limit() -> anyhow::Result<()> {
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        output_buffer,
++        context,
++        rx_event,
++    } = streaming_output_harness().await?;
++    start_streaming_output(&process, &context);
++    let output_drained = process.output_drained_notify();
++    let drained = output_drained.notified();
++    tokio::pin!(drained);
 +    // Exceed the former 1 MiB cutoff without exhausting the event count.
 +    let bytes = vec![b'a'; 1024 * 1024 + 1];
-+    output.push(bytes.clone()).await;
-+    output.finish().await;
++    stdout_tx.send(bytes.clone())?;
++    drop(stdout_tx);
++    exit_tx.send(0).expect("send exit");
++    drained.await;
 +
 +    let mut streamed = Vec::new();
 +    while let Ok(event) = rx_event.try_recv() {
@@ -751,11 +744,15 @@ index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde
 +        streamed.extend(delta.chunk);
 +    }
 +    assert_eq!(streamed, bytes);
-+    assert_eq!(transcript.lock().await.total_bytes(), bytes.len());
++    assert_eq!(
++        output_buffer.lock().await.transcript.total_bytes(),
++        bytes.len()
++    );
++    Ok(())
 +}
 +
  #[tokio::test]
- async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() {
+ async fn streaming_output_bounds_invalid_bytes() {
      let (session, turn, rx_event) = make_session_and_context_with_rx().await;
 diff --git a/codex-rs/git-utils/src/info.rs b/codex-rs/git-utils/src/info.rs
 index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec6218863898802 100644
@@ -932,7 +929,7 @@ index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec62188
      fn canonicalize_git_remote_url_normalizes_github_variants() {
          for remote in [
 diff --git a/codex-rs/git-utils/src/lib.rs b/codex-rs/git-utils/src/lib.rs
-index ec0f4128b70be859df44fbd57a9afc6912689405..94d04fea78db9c9853fa3c0e5a3bfe604cbd7d12 100644
+index 495a459fb0b9a9ac228a6c040b13477a6370f1da..df1049f9b794ec906b3910068e5389f1b11bccd0 100644
 --- a/codex-rs/git-utils/src/lib.rs
 +++ b/codex-rs/git-utils/src/lib.rs
 @@ -37,6 +37,7 @@ pub use fsmonitor::detect_fsmonitor_override;
@@ -1072,10 +1069,10 @@ index f93fe61eb30d2675a768e82abccfd476d40dd56c..aea377cdefbc91f352b51811e3b10976
          | ThreadItem::Reasoning { .. }
          | ThreadItem::CommandExecution { .. }
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 9349649f248df7a23686ccdb2dfc41ae77d5f374..01073669c73f4fe9a3e7fc3333fa3703024a794d 100644
+index 506aefc10ed0e74f55bbd78f2e9120352cb37e28..503a0f0ffcf8033a44fb5e7fe2c2f4a96a6f8015 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
-@@ -236,6 +236,7 @@ pub(crate) use new_session::has_launch_setting;
+@@ -236,6 +236,7 @@ mod clipboard;
  mod native_history;
  mod owned_transcript;
  mod pending_interactive_replay;
@@ -1083,7 +1080,7 @@ index 9349649f248df7a23686ccdb2dfc41ae77d5f374..01073669c73f4fe9a3e7fc3333fa3703
  mod permission_shortcuts;
  mod pets;
  mod platform_actions;
-@@ -286,6 +287,7 @@ use self::side::SideParentStatus;
+@@ -287,6 +288,7 @@ use self::side::SideParentStatus;
  use self::side::SideParentStatusChange;
  use self::side::SideThreadState;
  use self::startup_prompts::*;
@@ -1091,7 +1088,7 @@ index 9349649f248df7a23686ccdb2dfc41ae77d5f374..01073669c73f4fe9a3e7fc3333fa3703
  use self::thread_events::*;
 
  const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
-@@ -646,6 +648,8 @@ pub(crate) struct App {
+@@ -649,6 +651,8 @@ pub(crate) struct App {
      temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
      /// Track title generation across thread switches and deduplicate automatic requests.
      pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
@@ -1118,10 +1115,10 @@ index bab6e567373108f8c410795f54573b369809e2ad..e7d07cafb3e99f246350bcb04bf133f8
      bounded_summary(summary)
  }
 diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
-index bfa33203da5025c3de954e7a796cc8dff11d3bb9..c5060874f5befb5b7a69b63beec96686bf0e74c5 100644
+index 2219ee0e1ce28ee1df8e3cc3c1c90700548afee3..fa136574c9284b9883981207bd98811e9af2b45f 100644
 --- a/codex-rs/tui/src/app/background_requests.rs
 +++ b/codex-rs/tui/src/app/background_requests.rs
-@@ -647,10 +647,10 @@ impl App {
+@@ -650,10 +650,10 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -1134,7 +1131,7 @@ index bfa33203da5025c3de954e7a796cc8dff11d3bb9..c5060874f5befb5b7a69b63beec96686
          };
 
          if should_send {
-@@ -668,6 +668,7 @@ impl App {
+@@ -671,6 +671,7 @@ impl App {
                  }
              }
          }
@@ -1143,10 +1140,10 @@ index bfa33203da5025c3de954e7a796cc8dff11d3bb9..c5060874f5befb5b7a69b63beec96686
 
      pub(super) async fn handle_feedback_submitted(
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 7fc9161a24829958904853ebcaa7f7291a45639a..67cb401a86d3afb977e0b73405220bbd077eba22 100644
+index 2c9303f52b7c2d8310d02bfc34c5e99d99c41a0d..20b60d5673b87bd0253f3a9f80d47763cbf86b91 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -1145,6 +1145,20 @@ impl App {
+@@ -1174,6 +1174,20 @@ impl App {
              AppEvent::SubmitThreadOp { thread_id, op } => {
                  self.submit_thread_op(app_server, thread_id, op).await?;
              }
@@ -1252,7 +1249,7 @@ index 0000000000000000000000000000000000000000..bf0d534940a8a03e21f4d8d0393790a7
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
-index 1ad29bfa688f791ae0922cf86496dee0ddcd71d9..6828461792306004405289be0ee5772d4c6aa35f 100644
+index 0b0089f0c846c6e545fb2c13e020ebd5417da8b1..08b92b0292ba0231b3df8452552cc435e0b770f3 100644
 --- a/codex-rs/tui/src/app/session_lifecycle.rs
 +++ b/codex-rs/tui/src/app/session_lifecycle.rs
 @@ -263,6 +263,7 @@ impl App {
@@ -1263,7 +1260,7 @@ index 1ad29bfa688f791ae0922cf86496dee0ddcd71d9..6828461792306004405289be0ee5772d
      }
 
      /// Persists the app-server's authoritative ownership flag and updates the active composer.
-@@ -823,6 +824,7 @@ impl App {
+@@ -806,6 +807,7 @@ impl App {
          self.realtime_replay_order.clear();
          self.pending_server_profiles.clear();
          self.agents_overview.activity.clear();
@@ -1272,10 +1269,10 @@ index 1ad29bfa688f791ae0922cf86496dee0ddcd71d9..6828461792306004405289be0ee5772d
          self.side_threads.clear();
          self.active_thread_id = None;
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 95807f0a724c07544fe7d51e0eba4b1ca1bdcd27..e1fdffd2052c81a1c5220fd565f55bfc8232e46f 100644
+index f9da39c26c9d9a79d8d16d652afd67880c3dc97a..8aeebabfba001e8c4670ce1d04a03705783064a6 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -809,6 +809,7 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -814,6 +814,7 @@ See the Codex keymap documentation for supported actions and examples."
              background_voice_error: None,
              temporary_structured_requests: HashMap::new(),
              pending_thread_titles: HashMap::new(),
@@ -1284,10 +1281,10 @@ index 95807f0a724c07544fe7d51e0eba4b1ca1bdcd27..e1fdffd2052c81a1c5220fd565f55bfc
              agent_navigation: AgentNavigationState::default(),
              agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index 24242f3fc9abdf572f559cfa3a5a4b6382b58dfd..6664c5846b8bbd7c1c15ff75f29f6f811ccd27ae 100644
+index 92b07cd3590d20332ffb89e3f130389d97fe381b..f5e39c75ed2705446e150e0aa405048cfb78d022 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -90,6 +90,7 @@ pub(crate) async fn make_test_app() -> App {
+@@ -85,6 +85,7 @@ pub(crate) async fn make_test_app() -> App {
          background_voice_error: None,
          temporary_structured_requests: HashMap::new(),
          pending_thread_titles: HashMap::new(),
@@ -1296,7 +1293,7 @@ index 24242f3fc9abdf572f559cfa3a5a4b6382b58dfd..6664c5846b8bbd7c1c15ff75f29f6f81
          agent_navigation: AgentNavigationState::default(),
          agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index 4e17f2df3afded996ea6fcb5ba5eadf78c456350..bb644f7af937b5d918aa3254a70d057a3e31b379 100644
+index dd0aadf5d078a8f98e33ae3c18b3e382a1da212a..4e52b81502ef9730fb330f56b83760929b699c6d 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
 @@ -9,6 +9,8 @@ mod math_interruption_tests;
@@ -1308,7 +1305,7 @@ index 4e17f2df3afded996ea6fcb5ba5eadf78c456350..bb644f7af937b5d918aa3254a70d057a
  #[path = "tests/approvals_reviewer_error_tests.rs"]
  mod approvals_reviewer_error_tests;
  #[path = "tests/backend_banner_fallback_tests.rs"]
-@@ -6049,6 +6051,7 @@ async fn make_test_app() -> Box<App> {
+@@ -6057,6 +6059,7 @@ async fn make_test_app() -> Box<App> {
          temporary_structured_requests: HashMap::new(),
          pending_thread_titles: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
@@ -1316,7 +1313,7 @@ index 4e17f2df3afded996ea6fcb5ba5eadf78c456350..bb644f7af937b5d918aa3254a70d057a
          agent_navigation: AgentNavigationState::default(),
          pending_server_profiles: HashMap::new(),
          agents_overview: Default::default(),
-@@ -6155,6 +6158,7 @@ pub(super) async fn make_test_app_with_channels() -> (
+@@ -6172,6 +6175,7 @@ pub(super) async fn make_test_app_with_channels() -> (
              temporary_structured_requests: HashMap::new(),
              pending_thread_titles: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
@@ -1697,7 +1694,7 @@ index b7d34f637f24c6d6b8ab4e5fb039511ca91ac239..6c4eed2d0f4bab0a81515a81fca16fd4
          let (sender, receiver) = mpsc::channel(capacity);
          Self {
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index c134d692282ff57906612741ecad1f88d09e6680..a5e63f0bdf1144f6cb76423063bf9fd847adf01c 100644
+index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a73e3580ec 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
 @@ -668,9 +668,9 @@ impl App {
@@ -1875,7 +1872,7 @@ index c134d692282ff57906612741ecad1f88d09e6680..a5e63f0bdf1144f6cb76423063bf9fd8
      }
 
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index 4dbdc87bf5e9b12b6b40f4a68bf3f5ff7c11d182..bc0b2a05e1559de86d0b491e1c9df2b2a6f4b527 100644
+index d2b8942fc7749cf4024f3d459d090a24f75c36d3..bc3caca163d831f31cd18bc37dd8e095a82a14ae 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
 @@ -31,6 +31,7 @@ use codex_app_server_protocol::PluginReadParams;
@@ -1909,7 +1906,7 @@ index 4dbdc87bf5e9b12b6b40f4a68bf3f5ff7c11d182..bc0b2a05e1559de86d0b491e1c9df2b2
      ThreadHistoryEntryResponse {
          thread_id: ThreadId,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index eb22370563636f0c80fed50348080641c2d4cfdf..ad2c8a8d6561c103573fd1cfc8d4a87c55581a11 100644
+index 30e1ee1dfcc9a99c94000a1a6acc0ff2ef947494..df9dc79a8e97f8d81f846b93129a983adb33a4d2 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -2053,6 +2053,7 @@ pub(crate) fn thread_start_params_from_config(
@@ -1929,7 +1926,7 @@ index eb22370563636f0c80fed50348080641c2d4cfdf..ad2c8a8d6561c103573fd1cfc8d4a87c
 
      #[tokio::test]
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 984a9582cc931881eaa786f721a2c652840a8411..ac84eaf15f1a2a08a97aeae96c5c94b9b31c6729 100644
+index 5ca4182939242138ee01f0720ebf437b1ee04e28..d8ea00af5d6c8ddf6884550c57da8172b835bdc0 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
 @@ -145,8 +145,12 @@ use codex_protocol::config_types::WindowsSandboxLevel;
@@ -1945,7 +1942,7 @@ index 984a9582cc931881eaa786f721a2c652840a8411..ac84eaf15f1a2a08a97aeae96c5c94b9
  use codex_protocol::request_permissions::RequestPermissionsEvent;
  use codex_protocol::user_input::ByteRange;
  use codex_protocol::user_input::TextElement;
-@@ -170,6 +174,7 @@ use ratatui::widgets::Clear;
+@@ -166,6 +170,7 @@ use ratatui::widgets::Clear;
  use ratatui::widgets::Paragraph;
  use ratatui::widgets::Widget;
  use ratatui::widgets::Wrap;
@@ -1953,7 +1950,7 @@ index 984a9582cc931881eaa786f721a2c652840a8411..ac84eaf15f1a2a08a97aeae96c5c94b9
  use tokio::sync::mpsc::UnboundedSender;
  use tracing::debug;
  use tracing::warn;
-@@ -188,6 +193,59 @@ const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
+@@ -184,6 +189,59 @@ const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
  const PARENT_OWNED_INPUT_MESSAGE: &str =
      "This sub-agent is controlled by its parent. Direct input is disabled.";
 
@@ -2010,9 +2007,9 @@ index 984a9582cc931881eaa786f721a2c652840a8411..ac84eaf15f1a2a08a97aeae96c5c94b9
 +    serde_json::from_str(without_start[..end_start].trim()).ok()
 +}
 +
- /// Choose the keybinding used to edit the most-recently queued message.
- ///
- /// Apple Terminal, Warp, and VSCode integrated terminals intercept or silently
+ fn normalize_thread_name(name: &str) -> Option<String> {
+     let trimmed = name.trim();
+     (!trimmed.is_empty()).then(|| trimmed.to_string())
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
 index ba0d2e4061f0d8aa4227dd5288b322dd6ef07bf0..cbe6eeb91786405fcfbb36f1c1e96513effd8b87 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
@@ -2130,7 +2127,7 @@ index 0000000000000000000000000000000000000000..e36b27f6c90fd7477707578ba77f7f68
 +---
 +• Agent message: analysis complete from /root/worker
 diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/chatwidget/tests/app_server.rs
-index c96ce55ca4f1f5e733cf11bf4187ca62343cef5f..b580c14c56829003603ff6aa4a91aa9f9d903e27 100644
+index 5853c4138f8e6b33bb039540d9a605891fd8517b..0e655c380fb11e12b5598057556f9ac29090fd56 100644
 --- a/codex-rs/tui/src/chatwidget/tests/app_server.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/app_server.rs
 @@ -1,8 +1,14 @@
@@ -2148,7 +2145,7 @@ index c96ce55ca4f1f5e733cf11bf4187ca62343cef5f..b580c14c56829003603ff6aa4a91aa9f
  use pretty_assertions::assert_eq;
 
  const SAFETY_BUFFERING_HEADER_TEXT: &str = "Giving this request a little extra thought";
-@@ -717,6 +723,165 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
+@@ -789,6 +795,165 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
      );
  }
 
@@ -2314,7 +2311,7 @@ index c96ce55ca4f1f5e733cf11bf4187ca62343cef5f..b580c14c56829003603ff6aa4a91aa9f
  #[tokio::test]
  async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered_prompt() {
      let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-@@ -784,11 +949,11 @@ async fn live_app_server_user_message_omits_unsupported_media() {
+@@ -856,11 +1021,11 @@ async fn live_app_server_user_message_omits_unsupported_media() {
          /*replay_kind*/ None,
      );
 
@@ -2329,7 +2326,7 @@ index c96ce55ca4f1f5e733cf11bf4187ca62343cef5f..b580c14c56829003603ff6aa4a91aa9f
  }
 
 diff --git a/codex-rs/tui/src/chatwidget/tests/composer_submission.rs b/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
-index 7302a406704352387742008af4619066ad9296fb..76aa2c013bd373f323aa9cbc2f896d93a9bff14a 100644
+index a5c107a4de9babbf2284b6c0546d75e608fafce3..1ba2d9af4f0aaa265ea82a34b0d5147c29edd5ab 100644
 --- a/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
 @@ -1732,7 +1732,8 @@ async fn output_free_ctrl_c_interrupt_keeps_prompt_and_opens_blank_composer() {
@@ -2343,10 +2340,10 @@ index 7302a406704352387742008af4619066ad9296fb..76aa2c013bd373f323aa9cbc2f896d93
          )
      );
 diff --git a/codex-rs/tui/src/chatwidget/tests/helpers.rs b/codex-rs/tui/src/chatwidget/tests/helpers.rs
-index 0414e60e7037ad8d81ae5fbbfef4dedcc8948b83..f1c7f3fba5f3ac1e5f814198ae7ac869f89419c8 100644
+index 7272f282a1d0b610ffa9019814403d410b9c9883..c044ba027df4fda76e534f76c294a8e0a256336e 100644
 --- a/codex-rs/tui/src/chatwidget/tests/helpers.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/helpers.rs
-@@ -381,7 +381,7 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
+@@ -382,7 +382,7 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
  pub(super) fn drain_insert_history(
      rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
  ) -> Vec<Vec<ratatui::text::Line<'static>>> {
@@ -2355,7 +2352,7 @@ index 0414e60e7037ad8d81ae5fbbfef4dedcc8948b83..f1c7f3fba5f3ac1e5f814198ae7ac869
  }
 
  pub(super) fn drain_insert_history_normalized(
-@@ -433,6 +433,13 @@ pub(super) fn drain_insert_history_transcript_normalized(
+@@ -434,6 +434,13 @@ pub(super) fn drain_insert_history_transcript_normalized(
      })
  }
 
@@ -2369,7 +2366,7 @@ index 0414e60e7037ad8d81ae5fbbfef4dedcc8948b83..f1c7f3fba5f3ac1e5f814198ae7ac869
  pub(super) fn drain_insert_history_with(
      rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
      render: impl Fn(&dyn HistoryCell) -> Vec<ratatui::text::Line<'static>>,
-@@ -461,6 +468,13 @@ pub(super) fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) ->
+@@ -462,6 +469,13 @@ pub(super) fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) ->
      s
  }
 
@@ -2462,7 +2459,7 @@ index 36e9b00ffcfab5c166dae5994ef9fe02e792dfe6..7ff3ab412f1cca4e12e9c30bdbc26eb3
 
  ■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 1c2308a4d1d88641fec5a46298744c553dccc1e2..47ae6b18744a050ceea4633dffef063234595d1b 100644
+index c3aa1ba65d6d4aac6949e1561301169d985ab296..cc2704a7995e60192215463c53976f629a8ffb4c 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 @@ -2154,7 +2154,7 @@ async fn single_line_final_answer_hides_working_status_snapshot() {
@@ -2502,7 +2499,7 @@ index d9829d554832c8eabac500e8f2603024842d6959..bd2acbd95dc0902f6968ed9ac894e0ac
                  "type": "plan", "id": id, "text": truncate(text, DEFAULT_OUTPUT_CHARS)
              }),
 diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
-index 07676e3d21d10be0c266779cfd94f8d90e6f3624..fbce264642da599f374c2903233d9343daa008a6 100644
+index f80f311c755afb2114c88a8eba3ab377cc93c8bd..2c198baced56e840a28fad86cb877e0165cb3c95 100644
 --- a/codex-rs/tui/src/history_cell/messages.rs
 +++ b/codex-rs/tui/src/history_cell/messages.rs
 @@ -5,12 +5,35 @@ use super::markdown_render_cache::MarkdownRenderCache;
@@ -2630,19 +2627,20 @@ index 07676e3d21d10be0c266779cfd94f8d90e6f3624..fbce264642da599f374c2903233d9343
              .max(/*other*/ 1);
 
          let style = history_prompt_style();
-@@ -242,9 +332,9 @@ impl HistoryCell for UserHistoryCell {
+@@ -242,10 +332,10 @@ impl HistoryCell for UserHistoryCell {
 
          lines.push(HyperlinkLine::new(Line::from("").style(style)));
          for source in lines.iter_mut().filter_map(|line| line.source.as_mut()) {
 -            source.right_reserve = 1;
 +            source.right_reserve = USER_MESSAGE_RIGHT_MARGIN;
+             source.copy_as_prose = true;
          }
 -        lines
 +        finish_user_message_lines(lines, width, available_width, style)
      }
 
      fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-@@ -263,6 +353,27 @@ impl HistoryCell for UserHistoryCell {
+@@ -264,6 +354,27 @@ impl HistoryCell for UserHistoryCell {
          }
          lines
      }
@@ -2775,7 +2773,7 @@ index 2d8a2fac39bcfa25f3e8f04d7fd24a07056f1d89..3734530c39ddc305bc4c1a0f25cd2889
 +
 +              [Image #1]
 diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
-index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18acea495b9 100644
+index 0be28aec0d49f1078b7cddf2c5e259566c217be9..31e1228bed6b27a9572c35abb8bfcd302b32b2a3 100644
 --- a/codex-rs/tui/src/history_cell/tests.rs
 +++ b/codex-rs/tui/src/history_cell/tests.rs
 @@ -231,6 +231,13 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -2801,7 +2799,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
              })
              .collect::<Vec<_>>()
              .join("\n")
-@@ -2372,7 +2381,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
+@@ -2391,7 +2400,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
      // Small width to force wrapping more clearly. Effective wrap width is width-2 due to the ▌ prefix and trailing space.
      let width: u16 = 12;
      let lines = cell.display_lines(width);
@@ -2810,7 +2808,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
 
      assert_eq!(render_lines(&cell.raw_lines()), ["_count_rows"]);
      insta::assert_snapshot!(rendered);
-@@ -2414,8 +2423,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
+@@ -2433,8 +2442,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
          linked_rows.iter().all(|line| {
              line.line
                  .spans
@@ -2824,7 +2822,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
          }),
          "wrapped URL rows must retain the user-message gutter: {linked_rows:?}"
      );
-@@ -2430,10 +2442,170 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
+@@ -2449,10 +2461,170 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 
      insta::assert_snapshot!(
          "user_history_cell_wraps_long_urls_inside_the_message_gutter",
@@ -2996,7 +2994,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
  #[test]
  fn user_history_cell_renders_remote_image_urls() {
      let cell = UserHistoryCell {
-@@ -2444,7 +2616,7 @@ fn user_history_cell_renders_remote_image_urls() {
+@@ -2463,7 +2635,7 @@ fn user_history_cell_renders_remote_image_urls() {
          remote_image_urls: vec!["https://example.com/example.png".to_string()],
      };
 
@@ -3005,7 +3003,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe these"));
-@@ -2501,7 +2673,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
+@@ -2520,7 +2692,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
          remote_image_urls: vec!["data:image/png;base64,aGVsbG8=".to_string()],
      };
 
@@ -3014,7 +3012,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe inline image"));
-@@ -2530,7 +2702,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
+@@ -2549,7 +2721,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
          ],
      };
 
@@ -3023,7 +3021,7 @@ index 5ce4b76560f66155121e9538eea33d2a0743f915..87eb45ac37946d9494b0fecd92ced18a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("[Image #2]"));
-@@ -2647,7 +2819,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
+@@ -2666,7 +2838,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
          .enumerate()
          .map(|(index, row)| {
              if index == 0 {
@@ -3368,7 +3366,7 @@ index 06805b0f76af09571213eb90927b80c2b89ae68b..d4a311ec7ae4db6825c26b5d71978541
  async fn skips_stale_listed_thread_before_valid_label() -> color_eyre::Result<()> {
      let temp_dir = TempDir::new()?;
 diff --git a/codex-rs/tui/src/pager_overlay/transcript.rs b/codex-rs/tui/src/pager_overlay/transcript.rs
-index af5f6aa9d53be7e72aeace2baf1cf0dea4ad0b12..01c552ab593605cf6e7cff2e5621402f3f548f4d 100644
+index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bfb98cd027 100644
 --- a/codex-rs/tui/src/pager_overlay/transcript.rs
 +++ b/codex-rs/tui/src/pager_overlay/transcript.rs
 @@ -7,6 +7,7 @@ use super::*;
@@ -3379,7 +3377,7 @@ index af5f6aa9d53be7e72aeace2baf1cf0dea4ad0b12..01c552ab593605cf6e7cff2e5621402f
  use crate::keymap::RuntimeKeymap;
  use crate::motion::MotionMode;
  use crate::transcript_view::TranscriptBookmark;
-@@ -307,7 +308,7 @@ impl TranscriptOverlay {
+@@ -321,7 +322,7 @@ impl TranscriptOverlay {
                  *highlight += added;
              }
          }
@@ -3388,7 +3386,7 @@ index af5f6aa9d53be7e72aeace2baf1cf0dea4ad0b12..01c552ab593605cf6e7cff2e5621402f
          self.view.history_loaded(&self.cells, index..index + added);
          index
      }
-@@ -322,7 +323,7 @@ impl TranscriptOverlay {
+@@ -336,7 +337,7 @@ impl TranscriptOverlay {
          self.pending_highlight = self
              .pending_highlight
              .filter(|index| *index < self.cells.len());
@@ -3397,7 +3395,7 @@ index af5f6aa9d53be7e72aeace2baf1cf0dea4ad0b12..01c552ab593605cf6e7cff2e5621402f
      }
 
      /// Grouping may change compact previews; retain the reader's revision before replacing cells.
-@@ -367,7 +368,7 @@ impl TranscriptOverlay {
+@@ -381,7 +382,7 @@ impl TranscriptOverlay {
              });
          }
          self.cells.splice(start..end, [consolidated]);
@@ -3406,7 +3404,7 @@ index af5f6aa9d53be7e72aeace2baf1cf0dea4ad0b12..01c552ab593605cf6e7cff2e5621402f
      }
 
      pub(crate) fn sync_live_tail(
-@@ -382,7 +383,17 @@ impl TranscriptOverlay {
+@@ -396,7 +397,17 @@ impl TranscriptOverlay {
      pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
          self.highlight_cell = cell.filter(|index| *index < self.cells.len());
          self.pending_highlight = self.highlight_cell;
@@ -3487,7 +3485,7 @@ index 97a0a6a700c94db2e941dcfbcdb2ee1b735370c1..36bbcdd12b2ce852b1308d27e115c31c
  fn transcript_overlay_snapshots_paginated_history_states() {
      let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
 diff --git a/codex-rs/tui/src/terminal_hyperlinks.rs b/codex-rs/tui/src/terminal_hyperlinks.rs
-index 6db9897f3f41f18fe18fb9dcb02329b76a058f0c..23809ffe838ee42e62bd1f346b4022c69cae5e00 100644
+index bea2472ad17215e065066230a784fe0049550956..f173393d058e50d69d906f74e8cb6c9722326fef 100644
 --- a/codex-rs/tui/src/terminal_hyperlinks.rs
 +++ b/codex-rs/tui/src/terminal_hyperlinks.rs
 @@ -9,6 +9,7 @@ mod source;
@@ -3499,7 +3497,7 @@ index 6db9897f3f41f18fe18fb9dcb02329b76a058f0c..23809ffe838ee42e62bd1f346b4022c6
  use std::num::NonZeroU16;
  use std::ops::Range;
 diff --git a/codex-rs/tui/src/terminal_hyperlinks/source.rs b/codex-rs/tui/src/terminal_hyperlinks/source.rs
-index 590714d51aaf1df811b1a0ad1344e3870f028459..85c9041bb701a0fede2ab2e47029f2d1ee81ad14 100644
+index 92039bf11a7e8f9ca8fc8bd5a3bcf42229a79879..365f64d93980a312e591ad8fe53d0b3c965fb7cd 100644
 --- a/codex-rs/tui/src/terminal_hyperlinks/source.rs
 +++ b/codex-rs/tui/src/terminal_hyperlinks/source.rs
 @@ -16,6 +16,14 @@ pub(crate) enum LineWrapPolicy {
@@ -3517,7 +3515,7 @@ index 590714d51aaf1df811b1a0ad1344e3870f028459..85c9041bb701a0fede2ab2e47029f2d1
  /// A displayed line's contiguous fragment of one original logical line.
  ///
  /// Wrapped fragments share `text`. `prefix_bytes` counts synthetic display bytes before
-@@ -35,6 +43,8 @@ pub(crate) struct LogicalLineSource {
+@@ -38,6 +46,8 @@ pub(crate) struct LogicalLineSource {
      pub(crate) continuation_indent: Line<'static>,
      /// Blank columns after wrapped content; they remain outside the copied source text.
      pub(crate) right_reserve: u16,
@@ -3526,7 +3524,7 @@ index 590714d51aaf1df811b1a0ad1344e3870f028459..85c9041bb701a0fede2ab2e47029f2d1
  }
 
  impl LogicalLineSource {
-@@ -50,6 +60,7 @@ impl LogicalLineSource {
+@@ -55,6 +65,7 @@ impl LogicalLineSource {
              wrap_policy: LineWrapPolicy::Word,
              continuation_indent: Line::default(),
              right_reserve: 0,
@@ -3534,7 +3532,7 @@ index 590714d51aaf1df811b1a0ad1344e3870f028459..85c9041bb701a0fede2ab2e47029f2d1
          }
      }
 
-@@ -108,6 +119,7 @@ impl LogicalLineSource {
+@@ -115,6 +126,7 @@ impl LogicalLineSource {
              wrap_policy: self.wrap_policy,
              continuation_indent: self.continuation_indent.clone(),
              right_reserve: self.right_reserve,
@@ -3685,7 +3683,7 @@ index aeb98978af575cdceb1b4452d09eda92fdf7bddc..ff56db6e93e9ff05dadfa539b6da46d3
      ]
  }
 diff --git a/codex-rs/tui/src/transcript_view/text.rs b/codex-rs/tui/src/transcript_view/text.rs
-index b1aa7f4552c45156cab14663ca3ac899e4763d12..0aff5f09209ec48a47c051afcdd61da8045c15d1 100644
+index 44877552ca4efa95efd5da03ea793e8f7185e02c..5a05bd828b955595d617336ed434e5676f1b49e0 100644
 --- a/codex-rs/tui/src/transcript_view/text.rs
 +++ b/codex-rs/tui/src/transcript_view/text.rs
 @@ -8,6 +8,7 @@
@@ -3696,7 +3694,7 @@ index b1aa7f4552c45156cab14663ca3ac899e4763d12..0aff5f09209ec48a47c051afcdd61da8
 
  #[path = "text_logical.rs"]
  mod logical;
-@@ -340,21 +341,64 @@ impl TextLayout {
+@@ -374,21 +375,64 @@ impl TextLayout {
          let width = width.max(/*other*/ 1);
          let mut text = String::new();
          let mut rows = Vec::new();

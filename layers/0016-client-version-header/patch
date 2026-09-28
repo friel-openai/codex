@@ -1,8 +1,8 @@
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index 9de61980f152727567269dfa768656e9ffea1b55..e851ea004d312d914696a8efb5d7852a5f599ec8 100644
+index e5d31ce3a91993647d31a443db0e3a93662b229f..319de6555d53edb0f8c5e37c8ef243acd39a0084 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
-@@ -98,6 +98,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
+@@ -97,6 +97,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
  pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
  pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -21,7 +21,7 @@ index 9de61980f152727567269dfa768656e9ffea1b55..e851ea004d312d914696a8efb5d7852a
  /// Wire protocol that the provider speaks.
  #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
  #[serde(rename_all = "lowercase")]
-@@ -525,9 +537,14 @@ other non-default provider fields are not supported"
+@@ -524,9 +536,14 @@ other non-default provider fields are not supported"
              wire_api: WireApi::Responses,
              query_params: None,
              http_headers: Some(
@@ -40,7 +40,7 @@ index 9de61980f152727567269dfa768656e9ffea1b55..e851ea004d312d914696a8efb5d7852a
              env_http_headers: Some(
                  [
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index c0c3971936531696f618fb435d9ec151117e22d5..699dad7ada0cb7a55dcc539fb7b16694e90ae566 100644
+index 2929adfd98d8f2be11d8f54d47d711fbfa2bc0de..a7ea8c83e2b2748379614e3c648d13b148ad4349 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 @@ -221,6 +221,37 @@ fn codex_backend_routes_require_codex_base_url() {

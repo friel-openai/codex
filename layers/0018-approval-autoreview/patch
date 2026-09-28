@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs b/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
-index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6aba9d0e53 100644
+index 808825c13f0c8894f225f271e632c99bd94efaa7..90ddd2bebc1e05b654ac6b3b7340b330eace1060 100644
 --- a/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
 +++ b/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
 @@ -33,6 +33,10 @@ use codex_app_server_protocol::UserInput;
@@ -13,7 +13,7 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
  use core_test_support::load_default_config_for_test;
  use core_test_support::responses;
  use core_test_support::skip_if_no_network;
-@@ -81,12 +85,15 @@ enum ReviewCheckpoint {
+@@ -75,12 +79,15 @@ enum ReviewCheckpoint {
      Valid,
      EmptyContent,
      DifferentReviewerHash,
@@ -23,15 +23,15 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
      EmptyReviewerHash,
  }
 
- #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
- #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "different sync hash preserves retained evidence")]
-+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UltrafastDifferentReviewerHash; "ultrafast Sol preserves retained evidence with different parent hash")]
- #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync hash preserves retained evidence")]
- #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync hash preserves retained evidence")]
- #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "legacy sync compatibility is unchanged")]
-@@ -126,8 +133,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+ #[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
+ #[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "different sync hash preserves retained evidence")]
++#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UltrafastDifferentReviewerHash; "ultrafast Sol preserves retained evidence with different parent hash")]
+ #[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync hash preserves retained evidence")]
+ #[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync hash preserves retained evidence")]
+ #[test_case(CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "disabled Luna reuse requires sync")]
+@@ -112,8 +119,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
-     let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
+     let requires_sync = !compatible;
      let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
 +    let use_ultrafast = matches!(
 +        review_checkpoint,
@@ -44,7 +44,7 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
          ReviewCheckpoint::UnknownReviewer => None,
          ReviewCheckpoint::EmptyReviewerHash => Some(""),
          ReviewCheckpoint::Valid | ReviewCheckpoint::EmptyContent => Some("matching"),
-@@ -159,6 +171,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -144,6 +156,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          ReviewCheckpoint::EmptyContent => checkpoint["encrypted_content"] = json!(""),
          ReviewCheckpoint::Valid
          | ReviewCheckpoint::DifferentReviewerHash
@@ -52,17 +52,26 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
          | ReviewCheckpoint::UnknownReviewer
          | ReviewCheckpoint::EmptyReviewerHash => {}
      }
-@@ -288,6 +301,9 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
-     if matches!(context_path, ContextPath::ThreadOwned) {
-         mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
-     }
+@@ -252,7 +265,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+     });
+     let (mcp_url, mcp_server) = start_mcp_server(/*sensitive_action*/ None).await?;
+     let codex_home = TempDir::new()?;
+-    let mock_config = MockResponsesConfig::new(&responses_url)
++    let mut mock_config = MockResponsesConfig::new(&responses_url)
+         .with_provider_name("OpenAI")
+         .with_provider_config("requires_openai_auth = true\nsupports_websockets = false")
+         .with_root_config("approvals_reviewer = \"auto_review\"\nmodel_auto_compact_token_limit = 1000000")
+@@ -264,6 +277,9 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+         .with_extra_config(&format!(
+             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
+         ));
 +    if use_ultrafast {
 +        mock_config = mock_config.with_extra_config("[auto_review]\nuse_ultrafast = true");
 +    }
      mock_config.write(codex_home.path())?;
      let config = load_default_config_for_test(&codex_home).await;
      let models = [
-@@ -297,6 +313,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -273,6 +289,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          ("resumed-parent", Some("matching")),
      ]
      .into_iter()
@@ -70,7 +79,7 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
      .map(|(model, hash)| {
          let mut info = codex_core::test_support::construct_model_info_offline(model, &config);
          info.comp_hash = hash.map(str::to_owned);
-@@ -431,6 +448,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -407,6 +424,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          let completed: TurnCompletedNotification =
              timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
          assert_eq!(completed.turn.status, TurnStatus::Completed);
@@ -84,8 +93,8 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
          if reject_sync_checkpoint && index > 0 {
              // The first review established a cached session before compaction. Neither
              // that session nor a new one may review unusable evidence, including after resume.
-@@ -746,20 +770,27 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
-             }
+@@ -684,20 +708,27 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+             assert!(line["payload"]["guardian_history"].is_null());
          }
      }
 -    let items = rollout
@@ -109,8 +118,8 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
 -            .filter(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
 +            .filter(|item| matches!(item, RolloutItem::RetainedContext(_)))
              .count(),
-         usize::from(matches!(context_path, ContextPath::ThreadOwned)),
-         "only the enabled path may persist a retained-answer event",
+         1,
+         "verified answers must be persisted",
      );
 -    for line in &items {
 -        if let RolloutItem::Compacted(checkpoint) = &line.item {
@@ -119,22 +128,19 @@ index 560d9628db487aca236f3a66e318ea623cef5562..9434cf796ac9c168cf574574df0e4d6a
              for envelope in checkpoint.replacement_history.iter().flatten() {
                  if matches!(
                      envelope.item,
-@@ -778,8 +809,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -715,7 +746,6 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+             }
          }
      }
-     if matches!(context_path, ContextPath::Legacy) {
--        for line in &items {
--            if let RolloutItem::Compacted(checkpoint) = &line.item {
-+        for item in &items {
-+            if let RolloutItem::Compacted(checkpoint) = item {
-                 assert_eq!(
-                     checkpoint
-                         .retained_context
+-
+     mcp_server.abort();
+     responses_server.abort();
+     Ok(())
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 9f059571a114ed7f0a6afc645e704ca91bfbd434..655cc88807d9bdb588c9617f245abd3408e3067d 100644
+index 03a5f6a889140cb4656b7d3c964f11aad8c49774..6416945852d5f06190410e5c2268f194ab91c378 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -580,6 +580,10 @@ pub struct AutoReviewToml {
+@@ -579,6 +579,10 @@ pub struct AutoReviewToml {
      pub extra_policy: Option<String>,
      /// Experimental full Guardian prompt template containing the tenant policy placeholder.
      pub experimental_policy_template: Option<String>,
@@ -146,7 +152,7 @@ index 9f059571a114ed7f0a6afc645e704ca91bfbd434..655cc88807d9bdb588c9617f245abd34
 
  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 6c8558b7f0b9214e77d15b6991a06a1106e7f64b..bcad99c8054500715be6eb6252cecbe9bcdd538d 100644
+index 693bd4eddc9b16551aeaed42b1bc4cbf3c0a3cae..71efe4a1fdbd27987eba958aff3edece6f8494ef 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -401,6 +401,11 @@
@@ -162,10 +168,10 @@ index 6c8558b7f0b9214e77d15b6991a06a1106e7f64b..bcad99c8054500715be6eb6252cecbe9
        },
        "type": "object"
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd61a666a9 100644
+index 0215f9986b9d830112e367685f51916456a62b80..885a0e5b6afcf3ef5296783e51cdc250b1062ed2 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -8380,6 +8380,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
+@@ -8424,6 +8424,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
  policy = "Use the user-configured guardian policy."
  extra_policy = "Use the user-configured additional policy."
  experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
@@ -173,7 +179,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
  "#,
      )
      .expect("TOML deserialization should succeed");
-@@ -8397,6 +8398,47 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
+@@ -8441,6 +8442,47 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
              Some("Configured template: {{ tenant_policy_config }}"),
          )
      );
@@ -221,7 +227,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
  }
 
  #[tokio::test]
-@@ -8409,6 +8451,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
+@@ -8453,6 +8495,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
              experimental_policy_template: Some(
                  "  Configured template: {{ tenant_policy_config }}  ".to_string(),
              ),
@@ -229,7 +235,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
          }),
          ..Default::default()
      };
-@@ -8465,6 +8508,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
+@@ -8509,6 +8552,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
                  policy: Some("Use the user-configured guardian policy.".to_string()),
                  extra_policy: Some("Use the user-configured additional policy.".to_string()),
                  experimental_policy_template: None,
@@ -237,7 +243,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
              }),
              ..Default::default()
          };
-@@ -8503,6 +8547,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
+@@ -8547,6 +8591,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
              policy: Some("   ".to_string()),
              extra_policy: Some("   ".to_string()),
              experimental_policy_template: None,
@@ -245,7 +251,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
          }),
          ..Default::default()
      };
-@@ -9930,6 +9975,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
+@@ -9974,6 +10019,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
              }),
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -254,7 +260,7 @@ index d275b34631dbaaaabe8b4be1c4b8c22b9b6c5d40..7ab378e22851abe37881a828792c05bd
      );
      Ok(())
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 870416a61d807800a61696c333036da0f2531f3c..f2c6e198d1b2bf9e405b90973f4418bc4ef4992f 100644
+index 4a6bf17ac4b1548186e0bee4e6ea1d0584da363a..c5814f13b207a1b8103886ee3963073376778768 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -707,6 +707,9 @@ pub struct Config {
@@ -267,7 +273,7 @@ index 870416a61d807800a61696c333036da0f2531f3c..f2c6e198d1b2bf9e405b90973f4418bc
      /// Whether to inject the `<permissions instructions>` developer block.
      pub include_permissions_instructions: bool,
 
-@@ -3285,6 +3288,7 @@ pub(crate) fn resolve_custom_models(
+@@ -3308,6 +3311,7 @@ pub(crate) fn resolve_custom_models(
                  routing_profile,
                  model_context_window: custom_model.model_context_window,
                  model_auto_compact_token_limit: custom_model.model_auto_compact_token_limit,
@@ -275,7 +281,7 @@ index 870416a61d807800a61696c333036da0f2531f3c..f2c6e198d1b2bf9e405b90973f4418bc
              },
          );
      }
-@@ -4187,6 +4191,10 @@ impl Config {
+@@ -4210,6 +4214,10 @@ impl Config {
                      auto_review.experimental_policy_template.as_deref(),
                  )
              });
@@ -286,7 +292,7 @@ index 870416a61d807800a61696c333036da0f2531f3c..f2c6e198d1b2bf9e405b90973f4418bc
          let personality = personality.or(cfg.personality);
 
          let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
-@@ -4539,6 +4547,7 @@ impl Config {
+@@ -4562,6 +4570,7 @@ impl Config {
              guardian_policy_config,
              guardian_extra_policy,
              guardian_policy_template,
@@ -295,10 +301,10 @@ index 870416a61d807800a61696c333036da0f2531f3c..f2c6e198d1b2bf9e405b90973f4418bc
              plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
              model_reasoning_summary: cfg.model_reasoning_summary,
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index de441feee53e47b3e72b92e0b9ce28501f151c9f..af2de6a3c5349c0b0a951d3948488bf313d5ab12 100644
+index a3e28cea27ab404992bbf00af703ff8abf744b46..55229640bb6280c3d48552d446e2f59396ce866a 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
-@@ -14,7 +14,11 @@ use codex_guardian_reviewer::GuardianReviewOutcome;
+@@ -13,7 +13,11 @@ use codex_guardian_reviewer::GuardianReviewOutcome;
  #[cfg(test)]
  use codex_guardian_reviewer::GuardianReviewSessionLimits;
  use codex_guardian_reviewer::ReviewModel;
@@ -307,9 +313,9 @@ index de441feee53e47b3e72b92e0b9ce28501f151c9f..af2de6a3c5349c0b0a951d3948488bf3
 +use codex_models_manager::ModelRoutingProfile;
  use codex_prompts::ResolvedModelMessages;
 +use codex_protocol::config_types::ServiceTier;
+ use codex_protocol::openai_models::GuardianScope;
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::InternalSessionSource;
- use codex_protocol::protocol::ReviewDecision;
 @@ -46,6 +50,9 @@ use super::review_session::build_guardian_review_session_config;
  use codex_guardian_reviewer::guardian_output_schema;
 
@@ -359,10 +365,10 @@ index de441feee53e47b3e72b92e0b9ce28501f151c9f..af2de6a3c5349c0b0a951d3948488bf3
          spawn_config.model_auto_compact_token_limit = None;
      }
 diff --git a/codex-rs/core/src/guardian/review_session.rs b/codex-rs/core/src/guardian/review_session.rs
-index 4b14ab23603228da11a3e3e46d61ed97f1f36b4b..3f0c3b0e89f59567412cc2617fa635ccd026b0d0 100644
+index 77ee19f210f617140ee7538123e60956895b5f9d..cf5f55c88040687f785f95910450e49a2fcaa3c1 100644
 --- a/codex-rs/core/src/guardian/review_session.rs
 +++ b/codex-rs/core/src/guardian/review_session.rs
-@@ -664,7 +664,12 @@ async fn run_review_on_session(
+@@ -671,7 +671,12 @@ async fn run_review_on_session(
          permission_profile: params.spawn_config.permissions.permission_profile().clone(),
          reasoning_summary: params.reasoning_summary,
          personality: params.personality,
@@ -377,10 +383,10 @@ index 4b14ab23603228da11a3e3e46d61ed97f1f36b4b..3f0c3b0e89f59567412cc2617fa635cc
          parent_response_id: params.parent_context.parent_response_id.clone(),
          schema: params.schema.clone(),
 diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
-index c1853720d17b03051c27d4e309c27fc7d59658bf..ef9f64c9a2774b64a298975ba5683a32a1eaf85d 100644
+index b4c6cbc06ed33f8059abda764612bdf244b25fff..66f0a4b83bd38d484a946c1fadd3b26560659aba 100644
 --- a/codex-rs/core/src/guardian/review_session_tests.rs
 +++ b/codex-rs/core/src/guardian/review_session_tests.rs
-@@ -700,8 +700,10 @@ fn token_usage_delta_never_reports_negative_usage() {
+@@ -694,8 +694,10 @@ fn token_usage_delta_never_reports_negative_usage() {
      );
  }
 
@@ -392,7 +398,7 @@ index c1853720d17b03051c27d4e309c27fc7d59658bf..ef9f64c9a2774b64a298975ba5683a32
      let (review_session, tx_event, rx_sub) = test_review_session().await;
      {
          let mut state = review_session.state.lock().await;
-@@ -712,7 +714,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -706,7 +708,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
                  transcript_entry_count: 0,
              });
      }
@@ -404,7 +410,7 @@ index c1853720d17b03051c27d4e309c27fc7d59658bf..ef9f64c9a2774b64a298975ba5683a32
 
      let review = tokio::spawn(async move {
          run_review_on_session(
-@@ -725,9 +730,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -719,9 +724,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
      });
      let submission = rx_sub.recv().await.expect("guardian submission");
      let id = submission.id;
@@ -424,7 +430,7 @@ index c1853720d17b03051c27d4e309c27fc7d59658bf..ef9f64c9a2774b64a298975ba5683a32
      reply
          .send(Ok(TurnInputSubmission::Started {
              turn_id: id.clone(),
-@@ -751,6 +765,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -745,6 +759,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
          panic!("expected submitted turn completion");
      };
      assert_eq!(last_agent_message.as_deref(), Some("fresh"));
@@ -457,7 +463,7 @@ index 7016c7ce34b288ccbc0dd13ccc66dea239510476..44c0e5cab366236da02b5b0ba457f274
          default_review_model_id,
          &available_models,
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bdfbfe5381 100644
+index dfa8c6ff413f86a4abaa1b986c30c5b50aa516a1..300b8e1b0f3888e22f3608de009d46c9d2b3beed 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
 @@ -22,6 +22,7 @@ use codex_config::NetworkDomainPermissionToml;
@@ -476,7 +482,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
  use core_test_support::responses::start_mock_server;
  use core_test_support::skip_if_no_network;
  use core_test_support::streaming_sse::StreamingSseChunk;
-@@ -2055,6 +2057,223 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
+@@ -2140,6 +2142,221 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
      Ok(())
  }
 
@@ -597,7 +603,6 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
 +        Arc::clone(&turn),
 +        guardian_exec_command_request("shell-ultrafast-first"),
 +        ApprovalRequestReasons::default(),
-+        guardian_output_schema(),
 +        /*external_cancel*/ None,
 +        /*max_attempts*/ 1,
 +    )
@@ -609,7 +614,6 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
 +                Arc::clone(&turn),
 +                guardian_exec_command_request("shell-ultrafast-second"),
 +                ApprovalRequestReasons::default(),
-+                guardian_output_schema(),
 +                /*external_cancel*/ None,
 +                /*max_attempts*/ 1,
 +            )
@@ -700,7 +704,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata()
  -> anyhow::Result<()> {
-@@ -3419,7 +3638,7 @@ async fn guardian_review_routes_required_actions(
+@@ -3495,7 +3712,7 @@ async fn guardian_review_routes_required_actions(
  #[tokio::test]
  async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
  {
@@ -709,7 +713,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
 
      let handle = std::thread::Builder::new()
          .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-@@ -3814,6 +4033,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
+@@ -3905,6 +4122,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
      );
  }
 
@@ -799,7 +803,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
  #[tokio::test]
  async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
      let server = start_mock_server().await;
-@@ -3903,6 +4205,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
+@@ -3994,6 +4294,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
  async fn guardian_review_session_config_isolates_parent_customizations() {
      let defaults = ResolvedModelMessages::bundled().auto_review();
      let mut parent_config = test_config().await;
@@ -808,7 +812,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
      let server: McpServerConfig =
          toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
      parent_config
-@@ -3914,6 +4218,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4005,6 +4307,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
          Feature::Plugins,
          Feature::GuardianV2,
          Feature::CodexHooks,
@@ -818,7 +822,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
      ];
      for feature in disabled_features {
          parent_config
-@@ -3925,6 +4232,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4016,6 +4321,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      parent_config.include_skill_instructions = true;
      parent_config.memories.use_memories = true;
      parent_config.memories.dedicated_tools = true;
@@ -833,7 +837,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
      parent_config.developer_instructions =
          Some("parent or managed config should not replace guardian policy".to_string());
      parent_config.notify = Some(vec![
-@@ -3954,14 +4269,25 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4045,14 +4358,25 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      assert!(!guardian_config.include_skill_instructions);
      assert!(!guardian_config.memories.use_memories);
      assert!(!guardian_config.memories.dedicated_tools);
@@ -860,7 +864,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
                  defaults.policy_template,
                  guardian_output_contract_prompt(),
              )
-@@ -4047,13 +4373,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+@@ -4138,13 +4462,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
              guardian_policy_config: Some(
                  "  Use the workspace-managed guardian policy.  ".to_string(),
              ),
@@ -884,7 +888,7 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
          ConfigOverrides {
              cwd: Some(workspace.path().to_path_buf()),
              ..Default::default()
-@@ -4076,12 +4411,16 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+@@ -4167,12 +4500,16 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
      .expect("guardian config");
 
      assert_eq!(guardian_config.developer_instructions, None);
@@ -903,10 +907,10 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
                      .auto_review()
                      .policy_template,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 56b50683c832a9e622e908b659cda7a50bd587ac..78494318eace76802035b3491b7fea096ec5db20 100644
+index 9f2b71da6bc4d714ebfcf083ded09c00bb083b5e..dfc5661b514bdcc0d2eb0d74b5693aa1868335ca 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2837,6 +2837,7 @@ impl Session {
+@@ -2828,6 +2828,7 @@ impl Session {
                  .with_user_layer_from(&next_config.config_layer_stack);
              config.tool_suggest =
                  resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
@@ -1270,10 +1274,10 @@ index 43c0b59bdcd56560e0359fee6461632967a8d92e..9dd3b50dadf78d14eaffe3a4e53a666c
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 41e940011574b62372b6c29158e3b06886ba0ca8..7c51ca56618517898abdb3d2c2b823d66ada5a3a 100644
+index b2cd882b6044141960333362ff6982156f566fd0..1f9e5a42eb686037097decc91a54e13a0908c236 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5746,6 +5746,7 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5775,6 +5775,7 @@ async fn turn_context_with_model_updates_model_fields() {
              Arc::clone(&settings.model_info),
              /*fast_mode_enabled*/ true,
          );
@@ -1281,7 +1285,7 @@ index 41e940011574b62372b6c29158e3b06886ba0ca8..7c51ca56618517898abdb3d2c2b823d6
      });
      Arc::make_mut(&mut turn_context.config).service_tier =
          turn_context.initial_settings.service_tier.clone();
-@@ -5757,11 +5758,13 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5786,11 +5787,13 @@ async fn turn_context_with_model_updates_model_fields() {
          .collaboration_mode
          .settings
          .reasoning_effort = Some(ReasoningEffortConfig::High);
@@ -1297,7 +1301,7 @@ index 41e940011574b62372b6c29158e3b06886ba0ca8..7c51ca56618517898abdb3d2c2b823d6
      turn_context.next_step_settings.store(Arc::clone(&current));
      let updated = turn_context
          .with_model("gpt-5.5".to_string(), &session.services.models_manager)
-@@ -5803,6 +5806,21 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5832,6 +5835,21 @@ async fn turn_context_with_model_updates_model_fields() {
          &turn_context.next_step_settings.load_full()
      ));
      assert!(!Arc::ptr_eq(&captured, &updated.initial_settings));
@@ -1320,7 +1324,7 @@ index 41e940011574b62372b6c29158e3b06886ba0ca8..7c51ca56618517898abdb3d2c2b823d6
          &updated.initial_settings,
          &updated.next_step_settings.load_full()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index fc48883eba2fdd5c5158885cc72d9285beb4ed94..6744667a45609bc06fda91cbad86fc2353f2f124 100644
+index 3fc993bbe0905fe82465e6924c8701781a2d2411..1acc2f11509c8ce60fdd6c9c7ac5745c2b05abde 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -160,6 +160,19 @@ pub(crate) struct McpStartupRequirements {
@@ -1579,7 +1583,7 @@ index fc48883eba2fdd5c5158885cc72d9285beb4ed94..6744667a45609bc06fda91cbad86fc23
                          info!("Turn error during model reroute compaction: {err:#}");
                          let error = err.to_codex_protocol_error();
                          sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
-@@ -1841,14 +1867,18 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1838,14 +1864,18 @@ async fn maybe_run_previous_model_inline_compact(
  /// the task's previous-turn configuration.
  async fn maybe_run_model_reroute_inline_compact(
      sess: &Arc<Session>,
@@ -1600,7 +1604,7 @@ index fc48883eba2fdd5c5158885cc72d9285beb4ed94..6744667a45609bc06fda91cbad86fc23
          routed_turn_context.model_info().comp_hash.as_deref(),
      ) {
          Some(CompactionReason::CompHashChanged)
-@@ -1873,10 +1903,12 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -1870,10 +1900,12 @@ async fn maybe_run_model_reroute_inline_compact(
                  .model_context_window()
                  .is_some_and(|context_window| active_context_tokens >= context_window),
          };
@@ -1617,10 +1621,10 @@ index fc48883eba2fdd5c5158885cc72d9285beb4ed94..6744667a45609bc06fda91cbad86fc23
                  .is_some_and(|(previous, routed)| previous > routed);
          (routed_limit_reached && is_model_downshift).then_some(CompactionReason::ModelDownshift)
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b608f15a17d 100644
+index 394b7f4bbc115f65699522ce8cde1eaf5d544ecd..43ac09809c03c148aa1862f08f2a3381097a0856 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -652,9 +652,20 @@ impl TurnContext {
+@@ -654,9 +654,20 @@ impl TurnContext {
          &self,
          model: String,
          models_manager: &SharedModelsManager,
@@ -1641,7 +1645,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
          let model_info = models_manager
              .get_model_info(model.as_str(), &config.to_models_manager_config())
              .await;
-@@ -663,7 +674,7 @@ impl TurnContext {
+@@ -665,7 +676,7 @@ impl TurnContext {
              .iter()
              .map(|preset| preset.effort.clone())
              .collect::<Vec<_>>();
@@ -1650,7 +1654,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
              if supported_reasoning_levels.contains(current_reasoning_effort) {
                  Some(current_reasoning_effort.clone())
              } else {
-@@ -687,17 +698,19 @@ impl TurnContext {
+@@ -689,17 +700,19 @@ impl TurnContext {
              )
              .await;
          let model_info = Arc::new(model_info);
@@ -1673,7 +1677,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
          let available_models = models_manager
-@@ -810,7 +823,7 @@ impl TurnContext {
+@@ -812,7 +825,7 @@ impl TurnContext {
          validation: RoutingCandidateValidation,
      ) -> Option<Self> {
          let mut routed = self
@@ -1682,7 +1686,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
              .await;
          let mut model_info = Arc::clone(&routed.initial_settings.model_info);
          if let Some(custom_model) = self.config.custom_models.get(model_profile) {
-@@ -852,7 +865,10 @@ impl TurnContext {
+@@ -854,7 +867,10 @@ impl TurnContext {
              {
                  return None;
              }
@@ -1694,7 +1698,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
                  Arc::make_mut(&mut model_info)
                      .service_tiers
                      .push(ModelServiceTier {
-@@ -880,11 +896,10 @@ impl TurnContext {
+@@ -882,11 +898,10 @@ impl TurnContext {
              /*developer_instructions*/ None,
          );
          selected.service_tier = service_tier;
@@ -1710,7 +1714,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
          config.service_tier = settings.service_tier.clone();
          routed.multi_agent_version =
              config.multi_agent_version_for_model(settings.model_info.multi_agent_version);
-@@ -1619,6 +1634,9 @@ impl Session {
+@@ -1624,6 +1639,9 @@ impl Session {
              .await;
          let mut refreshed = Arc::try_unwrap(refreshed)
              .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
@@ -1720,7 +1724,7 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
 
          crate::skills::preserve_implicit_skill_invocations(
              current.extension_data.as_ref(),
-@@ -1635,7 +1653,17 @@ impl Session {
+@@ -1640,7 +1658,17 @@ impl Session {
          if let (Some(profile_name), Some(candidate)) = (
              current.model_profile.as_deref(),
              current.model_routing_candidate.as_ref(),
@@ -1740,10 +1744,10 @@ index 73200e8a88b0a496accbdf00c3302ba2c6b5cf8a..7d1bcc057a1703a57f3a5cc13ac03b60
                  .with_unchecked_routing_candidate(
                      profile_name,
 diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
-index 9d1db4241fa32d8c276bd0ca6a91d9fa88aa5930..bafc2efa73f0c8bcd9bdc3335129e412779614af 100755
+index da74dcbe130931492cd7cdeea48f338038c9a2c0..9d1cb5d3bc732daa08b92d29c724cd7a078c9ac5 100755
 --- a/codex-rs/core/tests/suite/client_websockets.rs
 +++ b/codex-rs/core/tests/suite/client_websockets.rs
-@@ -119,6 +119,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
+@@ -123,6 +123,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
              }),
              model_context_window: None,
              model_auto_compact_token_limit: None,
@@ -1752,7 +1756,7 @@ index 9d1db4241fa32d8c276bd0ca6a91d9fa88aa5930..bafc2efa73f0c8bcd9bdc3335129e412
      )]);
      let mut primary_model = model_info_from_slug(ROUTED_WEBSOCKET_PRIMARY);
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index b03ecc58f58c740a6e6fa9248bb37d419741abe4..a2bf7445e287be4518ed0d1083ff98919d2c6405 100644
+index 1e11752bfe5b506ce647d16e27af8d1369d66782..1935220aaafbcac3542f79168bd828e9834de8dd 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -88,6 +88,10 @@ async fn guardian_history_survives_restart_and_user_fork(
@@ -1803,7 +1807,7 @@ index b79a09c1cf0f88fc6babd64b427780fdc3e32a32..ae6e45298210de7b8d9ac94041d5d44b
      )])
  }
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
-index 8a9bfc128be1dfa53a1c0582e92c94c450bd8355..42e2df24769e678ab512afd8c94a196f9390a74a 100644
+index 926c27efea156962c7cb8dbde364343b4a4414b1..c3f417572b2b6ebd8d90c40fdc5aeeb5665b711e 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
 +++ b/codex-rs/core/tests/suite/model_switching.rs
 @@ -837,6 +837,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
@@ -1815,10 +1819,10 @@ index 8a9bfc128be1dfa53a1c0582e92c94c450bd8355..42e2df24769e678ab512afd8c94a196f
      );
      let remote_model = test_model_info(
 diff --git a/codex-rs/core/tests/suite/step_settings.rs b/codex-rs/core/tests/suite/step_settings.rs
-index 28f0d4a9a5c61002372af3f204cffc82dfd3ab69..98869c4c92099b8e13bfda8c533826db2710d898 100644
+index c532200b1c7007fd5b88e8e3205fc1c51efd44e3..a4ea39831ee2531553f2a7547fde8a1f31331c77 100644
 --- a/codex-rs/core/tests/suite/step_settings.rs
 +++ b/codex-rs/core/tests/suite/step_settings.rs
-@@ -268,6 +268,89 @@ async fn apply_turn_settings(
+@@ -269,6 +269,89 @@ async fn apply_turn_settings(
      Ok(())
  }
 

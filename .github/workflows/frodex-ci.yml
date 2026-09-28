@@ -161,78 +161,24 @@ jobs:
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           set -euo pipefail
-          # These exact trees retain the recorded Rust correction-test results.
-          # The 0.157.1 replay adds only upstream Windows launch corrections;
-          # test shared launch code and changed fixtures without repeating every core test.
-          # Any other source tree restores the ordinary selection below.
-          feature_tree=$(git rev-parse HEAD^{tree})
-          if [[ "${feature_tree}" == 9bca9f524435fee153f68ec4c316b77d74129fa5 ||
-                "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
-            # Library tests do not instantiate every future through cli_main.
-            cargo build --manifest-path codex-rs/Cargo.toml \
-              --profile ci-test -p codex-cli --bin codex --locked
-            if [[ "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
-              cargo build --manifest-path codex-rs/Cargo.toml \
-                --profile ci-test --locked \
-                -p codex-rmcp-client --bin test_stdio_server \
-                -p codex-code-mode-host --bin codex-code-mode-host
-              export CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex"
-              export CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host"
-            fi
-            fork_tests=(
-              reference::external_legacy_capture::tests::paginated_capture_uses_metadata_only_root_cutoff_and_bounds_all_ancestors
-              reference::external_legacy_capture::tests::paginated_capture_counts_a_skipped_final_record_in_the_physical_root_cutoff
-              reference::external_legacy_capture::tests::paginated_capture_excludes_an_incomplete_final_record_from_the_root_cutoff
-              reference::external_legacy_capture::tests::captured_prefix_excludes_complete_records_appended_after_capture
-              reference::external_legacy_capture::tests::captured_prefix_excludes_a_trailing_record_completed_after_capture
-              reference::external_legacy_capture::tests::capture_verification_rejects_a_replacement_with_changed_prefix
-              reference::external_legacy_capture::tests::capture_verification_accepts_a_replacement_with_identical_prefix
-              reference::external_legacy_capture::tests::capture_verification_rejects_a_truncated_file
-              reference::external_legacy_capture::tests::capture_verification_rejects_a_same_length_prefix_mutation
-              local::segment::tests::external_writer_lock_rejects_segment_publication_and_fork_preparation
-              local::segment::tests::external_paginated_capture_copies_ancestry_without_retaining_history_base
-              app::tests::external_writer_fork_tests::external_writer_paginated_fork_rpc_preserves_history_cutoff_and_source_writer
-              app::tests::external_writer_fork_tests::external_writer_fork_opens_editable_thread_without_taking_source_lease
-            )
-            fork_filter=
-            for test_name in "${fork_tests[@]}"; do
-              fork_filter+="${fork_filter:+ | }test(=${test_name})"
-            done
-            just test --cargo-profile ci-test \
-              --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-              -p codex-core -p codex-thread-store -p codex-tui \
-              -p codex-app-server -p codex-rollout \
-              --lib --locked --no-tests fail -E "${fork_filter}"
-            if [[ "${feature_tree}" == b6ab05877e0f8bbf1afd3d46bdb1af8b4fad7f68 ]]; then
-              just test --cargo-profile ci-test \
-                --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-                -p codex-app-server-daemon --lib --locked --no-tests fail \
-                -E 'test(=backend::pid::tests::start_retries_stale_empty_pid_file_under_its_own_lock) | test(=backend::pid::tests::legacy_launch_clears_recovery_best_effort) | test(=backend::pid::tests::pid_record_captures_the_resolved_launch_binary)'
-              # Unoptimized persistence futures need the package tests' 32 MiB stack.
-              just --set rust_min_stack 33554432 test --cargo-profile ci-test \
-                --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-                -p codex-core -p codex-app-server --test all --locked --no-tests fail \
-                -E 'test(suite::mcp_optional_startup_grace::) | test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart) | test(guardians_retain_evidence_after_compaction_and_resume)'
-            fi
-            exit 0
-          fi
+          printf 'FRODEX_CI_IDENTITY source=%s tree=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          python3 -m unittest discover \
+            -s "${GITHUB_WORKSPACE}/.github/scripts" -p test_frodex_ci_selection.py
 
-          # Core unit tests start these exact workspace binaries. `--lib`
-          # does not build them, and assert_cmd requires explicit locations.
-          cargo build --manifest-path codex-rs/Cargo.toml \
-            --profile ci-test \
-            -p codex-rmcp-client --bin test_stdio_server \
-            -p codex-cli --bin codex \
-            -p codex-code-mode-host --bin codex-code-mode-host
-          export CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex"
-          export CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host"
-
-          just test --cargo-profile ci-test \
-            --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-            -p codex-core \
-            --lib
-          just test --cargo-profile ci-test \
-            --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
-            -p codex-app-server \
-            --test all \
-            -E 'test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart) | test(guardians_retain_evidence_after_compaction_and_resume)'
+          # Build all executables used by the selected tests in one Cargo graph.
+          cargo build --manifest-path codex-rs/Cargo.toml --profile ci-test --locked \
+            -p codex-cli -p codex-app-server -p codex-app-server-test-client \
+            -p codex-code-mode-host -p codex-rmcp-client \
+            --bin codex --bin codex-app-server --bin codex-app-server-test-client \
+            --bin codex-code-mode-host --bin test_stdio_server
+          env \
+            CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex" \
+            CARGO_BIN_EXE_codex-app-server="${CARGO_TARGET_DIR}/ci-test/codex-app-server" \
+            CARGO_BIN_EXE_codex-app-server-test-client="${CARGO_TARGET_DIR}/ci-test/codex-app-server-test-client" \
+            CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host" \
+            CARGO_BIN_EXE_test_stdio_server="${CARGO_TARGET_DIR}/ci-test/test_stdio_server" \
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/frodex_ci_selection.py" \
+              --source "$PWD" \
+              --config "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
+              --selection "${GITHUB_WORKSPACE}/.github/frodex-ci-selection.json"

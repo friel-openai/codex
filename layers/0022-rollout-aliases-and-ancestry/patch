@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index f85fd85b8d75eee91a9ea7f06066519d77cc24b9..04576cdd2ba15cb2e906e16692b5feb36964f9c6 100644
+index c9064180274165de3793a7fc1f29d4e7b16c1474..fcb76baf9c5b15c724f4c14728622b348e54154a 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2151,6 +2151,7 @@ dependencies = [
+@@ -2174,6 +2174,7 @@ dependencies = [
   "url",
   "uuid",
   "wiremock",
@@ -11,19 +11,19 @@ index f85fd85b8d75eee91a9ea7f06066519d77cc24b9..04576cdd2ba15cb2e906e16692b5feb3
 
  [[package]]
 diff --git a/codex-rs/app-server/Cargo.toml b/codex-rs/app-server/Cargo.toml
-index cde229a70e401a3ad2640f89daa5f7b891b4f3f9..85f79c224ac970af5d0e18e29f77f4ce6ce50e8c 100644
+index 9e498670c0d0b4f48fc5a91ed2c392f906689a2c..e85d282a68976b6d9f42198f5231bef361ed626e 100644
 --- a/codex-rs/app-server/Cargo.toml
 +++ b/codex-rs/app-server/Cargo.toml
-@@ -156,3 +156,4 @@ test-case = "3.3.1"
+@@ -159,3 +159,4 @@ tokio-rustls = { workspace = true }
  tokio-tungstenite = { workspace = true }
  tracing-opentelemetry = { workspace = true }
  wiremock = { workspace = true }
 +zstd = { workspace = true }
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index b770e4bcafb6b3af287602a25f8ead09b3161525..18b5de3f53f50083cc155d4105f775f4f602ccfa 100644
+index 6d9e515d65b52afa9481f22f236f9a1a069b36b5..b052effe1188e81b1511e52f6f081ea9a3412cf2 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -6498,10 +6498,7 @@ impl ThreadRequestProcessor {
+@@ -6515,10 +6515,7 @@ impl ThreadRequestProcessor {
                  .await
                  .map_err(thread_store_resume_read_error)?;
              if let Some(current_path) = current_thread.rollout_path.as_ref()
@@ -35,7 +35,7 @@ index b770e4bcafb6b3af287602a25f8ead09b3161525..18b5de3f53f50083cc155d4105f775f4
              {
                  return Err(invalid_request(format!(
                      "cannot resume paginated thread {} with stale path: requested {}, current {}; omit path and resume by thread id",
-@@ -6542,7 +6539,16 @@ impl ThreadRequestProcessor {
+@@ -6559,7 +6556,16 @@ impl ThreadRequestProcessor {
              .rollout_path
              .as_deref()
              .map(codex_rollout::plain_rollout_path);
@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index cb58800d865ccc2670be3db9ade40a47a586db95..45f55ce27b562ae15edbaa6974c48295e4a285f0 100644
+index d1451e2d895ce3f092fd58d695a76ac820f8b626..014586b10af37c2c1792cd7b619b11f92ad5c738 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -9494,6 +9494,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -9606,6 +9606,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,10 +271,10 @@ index cb58800d865ccc2670be3db9ade40a47a586db95..45f55ce27b562ae15edbaa6974c48295
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 56864d4e2b0fb588d34890e34563f491cee6ad06..3a2bc507a5d92225c518c5c174484a3ab24c49b6 100644
+index 6413a345a99cf765b64a4096dce5243068a078db..27e8dca4aa07098850489afc8bf79d8b5de2bb3f 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3205,7 +3205,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
+@@ -3234,7 +3234,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
  async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
      let codex_home = tempfile::tempdir().expect("create Codex home");
      let source_thread_id = ThreadId::default();
@@ -288,10 +288,10 @@ index 56864d4e2b0fb588d34890e34563f491cee6ad06..3a2bc507a5d92225c518c5c174484a3a
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index da0e9d21e5aeed0b0070540cd7c5616c31b11897..4f95dbccfe067efab64152dfcf8d7410ad701f92 100644
+index e56121317523104789ff12ea1aaeb7f9e42e34a1..f2cdc9603bb095301ae7945c9d0d84fad401a8d2 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1697,7 +1697,6 @@ impl ThreadManager {
+@@ -1737,7 +1737,6 @@ impl ThreadManager {
          &self,
          rollout_path: PathBuf,
      ) -> CodexResult<InitialHistory> {
@@ -299,7 +299,7 @@ index da0e9d21e5aeed0b0070540cd7c5616c31b11897..4f95dbccfe067efab64152dfcf8d7410
          let stored_thread = self
              .state
              .thread_store
-@@ -1708,7 +1707,7 @@ impl ThreadManager {
+@@ -1748,7 +1747,7 @@ impl ThreadManager {
              })
              .await
              .map_err(thread_store_rollout_read_error)?;
@@ -309,7 +309,7 @@ index da0e9d21e5aeed0b0070540cd7c5616c31b11897..4f95dbccfe067efab64152dfcf8d7410
 
      /// Fork an existing thread from already-loaded store history.
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index da5aedafa2c13d470f09634f4a911f61dc598a68..c81ad56789efd1cb21e9fa736ffe457ce26aca6e 100644
+index f1ab26355e2c947491012e58a3debf691d7ff72a..a3984205cb6cb12c71e29656ae34a95c915fc186 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -14,6 +14,8 @@ pub(crate) mod metadata;

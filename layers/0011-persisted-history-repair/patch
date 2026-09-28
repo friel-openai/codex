@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 97a6a1f9c4f111c6baa300fb53e088e291e0549c..838a063e4c9070960c4beb55e10dc91daaf4171c 100644
+index 3320deecf404ab629dda2393994c7c2ffd0cba85..0550b67cda838f29a34eade187ccf98b5db7e18d 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -4616,6 +4616,7 @@ dependencies = [
+@@ -4669,6 +4669,7 @@ dependencies = [
  name = "codex-thread-store"
  version = "0.154.0"
  dependencies = [
@@ -649,10 +649,10 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1f045de50 100644
+index ec3ac50d1fa5cd93bd6185a188f7eb13b188c43a..6234d7d490cf167d21db7b4b38832e8ac666da2e 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -453,6 +453,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -455,6 +455,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
          .get_thread(helper_thread_id)
          .await
          .expect("supervisor helper should be registered");
@@ -660,7 +660,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
      assert_eq!(
          helper_thread.session.prompt_cache_key(),
          parent.thread.session.prompt_cache_key(),
-@@ -508,31 +509,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -510,31 +511,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
              if name == "list_agents" && call_id == SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID
      )));
 
@@ -700,7 +700,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
  }
 
  fn spawn_agent_call(call_id: &str) -> ResponseItem {
-@@ -790,6 +774,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -792,6 +776,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          .get_thread(helper_thread_id)
          .await
          .expect("goal supervisor helper should be registered");
@@ -708,7 +708,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
      let helper_snapshot = helper_thread.config_snapshot().await;
      let helper_source = helper_snapshot.session_source.clone();
      let expected_path = AgentPath::root()
-@@ -820,32 +805,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -822,32 +807,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          &supervisor_prompt,
          GENERIC_SUBAGENT_HINT,
      );
@@ -750,7 +750,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -7772,18 +7741,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -7881,18 +7850,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .await
          .expect("child thread should archive");
 
@@ -822,7 +822,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
  }
 
  #[tokio::test]
-@@ -9896,18 +9917,52 @@ while True:
+@@ -10013,18 +10034,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -877,7 +877,7 @@ index 0d1c96a9dd7138cb413490d9c5b577e4946e6e65..2e818a56d023e227a52293494c3f52b1
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -9918,13 +9973,8 @@ while True:
+@@ -10035,13 +10090,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -5443,7 +5443,7 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
          .metadata
          .cwd
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index a96201c82016f54d5a60e861549cd00ad02758eb..347c59814c80f098e46300c362f3f6847d6ded4f 100644
+index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c9aa8c40a 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5624,7 +5624,7 @@ index a96201c82016f54d5a60e861549cd00ad02758eb..347c59814c80f098e46300c362f3f684
          })
      }
 
-@@ -1343,7 +1446,7 @@ mod tests {
+@@ -1347,7 +1450,7 @@ mod tests {
              .expect("recover recorder");
          drop(store);
 
@@ -5633,7 +5633,7 @@ index a96201c82016f54d5a60e861549cd00ad02758eb..347c59814c80f098e46300c362f3f684
          assert!(
              matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
          );
-@@ -2310,7 +2413,7 @@ mod tests {
+@@ -2314,7 +2417,7 @@ mod tests {
              drop(recorder);
 
              // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
