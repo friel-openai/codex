@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index b052effe1188e81b1511e52f6f081ea9a3412cf2..f5fecfe3cd46efcde8c5a0ff2811167342193661 100644
+index 8b9104e86e347809a5a6c782efb4857706bde790..1496a9573da0da2ec2a9d8dce5929069d34d7707 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -4889,13 +4889,21 @@ impl ThreadRequestProcessor {
+@@ -4943,13 +4943,21 @@ impl ThreadRequestProcessor {
          limit: Option<u32>,
          sort_direction: SortDirection,
      ) -> std::io::Result<LegacyHistoryWindow> {
@@ -27,7 +27,7 @@ index b052effe1188e81b1511e52f6f081ea9a3412cf2..f5fecfe3cd46efcde8c5a0ff28111673
                  has_older_reference: false,
              });
          }
-@@ -4942,7 +4950,10 @@ impl ThreadRequestProcessor {
+@@ -4996,7 +5004,10 @@ impl ThreadRequestProcessor {
          let mut partial_before_error = None;
          let mut last_successful_reference_limit: Option<usize> = None;
          loop {
@@ -39,7 +39,7 @@ index b052effe1188e81b1511e52f6f081ea9a3412cf2..f5fecfe3cd46efcde8c5a0ff28111673
                  Ok(materialized) => materialized,
                  Err(error) => {
                      if cursor.is_some()
-@@ -4954,7 +4965,10 @@ impl ThreadRequestProcessor {
+@@ -5008,7 +5019,10 @@ impl ThreadRequestProcessor {
                          let mut recovered = None;
                          while lower <= upper {
                              let reference_limit = lower + (upper - lower) / 2;
@@ -52,7 +52,7 @@ index b052effe1188e81b1511e52f6f081ea9a3412cf2..f5fecfe3cd46efcde8c5a0ff28111673
                                      let items = materialized
                                          .lines
 diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-index 40a70474eb89338b85a5d98e8b06e8b2bcd2b791..06233378d085dac09953a65aed02248ec8cd6055 100644
+index 597a1d750cada0dcb9a97e1f6193d3f64dba56da..e13c6e260c9bb3834f086cebf4518c9ad67d7670 100644
 --- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 +++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 @@ -67,6 +67,9 @@ use tokio::time::timeout;
@@ -395,7 +395,7 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 014586b10af37c2c1792cd7b619b11f92ad5c738..a165ddb095a45303ed2d2bba44b5e61d884b2312 100644
+index 2cb7e4e6a3666a3a3d0aced5f0d6b10978b8adf2..8ceef765f280c402c4cc9ce33e145001cacd239a 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -85,6 +85,7 @@ use codex_protocol::protocol::EventMsg;
@@ -440,7 +440,7 @@ index 014586b10af37c2c1792cd7b619b11f92ad5c738..a165ddb095a45303ed2d2bba44b5e61d
  use pretty_assertions::assert_eq;
  use serial_test::serial;
  use std::ffi::OsStr;
-@@ -9870,6 +9877,410 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+@@ -9876,6 +9883,411 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
      )
  }
 
@@ -598,6 +598,7 @@ index 014586b10af37c2c1792cd7b619b11f92ad5c738..a165ddb095a45303ed2d2bba44b5e61d
 +    let previous_turn_settings = SegmentPreviousTurnSettings {
 +        model: thread_settings.model.clone(),
 +        comp_hash: None,
++        cyber_access_program: None,
 +        realtime_active: None,
 +    };
 +    let checkpoint = {
@@ -1304,7 +1305,7 @@ index 973ab56b8ada4b79a95d86984c64b147e91d3456..26addb2d56315130bed3a944107e436a
          let (items, thread_id, _parse_errors) = Self::load_rollout_items(path).await?;
          let conversation_id = thread_id
 diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
-index 019048116ed11295412abcb4b7e1278959009cf3..2351a3db95ee22a235207ab6753264bfb9b816cb 100644
+index 206e5f2345daeaed49239f57bc96f7ef8574b1d5..5f9eb9efa055db2f90a67a25ace60e32f6c6a52e 100644
 --- a/codex-rs/rollout/src/recorder_tests.rs
 +++ b/codex-rs/rollout/src/recorder_tests.rs
 @@ -486,6 +486,64 @@ async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -
@@ -1465,7 +1466,7 @@ index fd3d76ed2918108356b272777fa3545cd877d487..c7b12247da9e48e273c4a813b5832357
          Err(error) => Err(thread_store_io_error(error)),
      }
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index 785c3f9ced50a79c070979ce25aef8e1f2da3bd8..2c3a8da15468ee798f6098542131b9d018b2b0b7 100644
+index 330802453e185458e9e7815aaea4ef7c509a5738..42578a7197519e103c6d2c57b81a078a9a690eda 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -54,6 +54,46 @@ use crate::local::test_support::test_config;
@@ -2670,10 +2671,10 @@ index 39fa80b9c248284053b0e0545f476ae4b9ca39ff..c7f92746052026099dfa3311bbc5850e
      Ok(planner.finish())
  }
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index 0c98b4a7c8ea9c6d1894b9c58682337a70e68365..7ca732873ae141024304752dcf009e2741562af1 100644
+index 53fc5df1732910738af13fe0aa5de31ba42e4b50..2fde2204ff7ce1e2f5da18ce44fd66632821d6a6 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -4893,6 +4893,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
+@@ -4897,6 +4897,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
      assert_context_dependent_migration_projection(&store, &fixture).await;
  }
 
@@ -2799,7 +2800,7 @@ index 0c98b4a7c8ea9c6d1894b9c58682337a70e68365..7ca732873ae141024304752dcf009e27
 +                thread_id,
 +                turn_id: None,
 +                include_archived: false,
-+                cursor,
++                position: cursor.map(ListItemsPosition::Cursor),
 +                page_size: 100,
 +                sort_direction: SortDirection::Asc,
 +                sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -2826,7 +2827,7 @@ index 0c98b4a7c8ea9c6d1894b9c58682337a70e68365..7ca732873ae141024304752dcf009e27
  #[tokio::test]
  async fn segmented_migration_preserves_low_suffix_legacy_item_ids() {
      let fixture = context_dependent_legacy_fixture_with_counts(
-@@ -10573,7 +10719,7 @@ async fn migration_reports_invalid_session_metadata() {
+@@ -10853,7 +10999,7 @@ async fn migration_reports_invalid_session_metadata() {
  }
 
  #[tokio::test]
@@ -2835,7 +2836,7 @@ index 0c98b4a7c8ea9c6d1894b9c58682337a70e68365..7ca732873ae141024304752dcf009e27
      let home = TempDir::new().expect("create Codex home");
      let thread_id = ThreadId::new();
      let path = write_rollout(
-@@ -10592,6 +10738,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
+@@ -10872,6 +11018,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
          ordinal: None,
          item: agent_message("kept answer"),
      };

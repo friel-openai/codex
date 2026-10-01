@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index 7566c0b609d159f0c1472630d942969509d936ae..8b7f69b43be5d9f9965ab416d1b980eb50eb73ea 100644
+index 435aeb9bf11221c1bc312795f9931c79582cf17d..c59e4ffc18435762588ad62656a50ec016142794 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 @@ -3117,12 +3117,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
@@ -69,10 +69,10 @@ index 7566c0b609d159f0c1472630d942969509d936ae..8b7f69b43be5d9f9965ab416d1b980eb
  }
 
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 71efe4a1fdbd27987eba958aff3edece6f8494ef..1187188fac36a0938e9c4c40bd4310e21646a444 100644
+index a0b5cddd09270b606c2f3899406d91dbee3759f2..de4ccd4f8256c02f8d6d83cecb5107742cd72ff9 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -2801,7 +2801,7 @@
+@@ -2830,7 +2830,7 @@
            "type": "boolean"
          },
          "enable_thread_adoption": {
@@ -82,10 +82,10 @@ index 71efe4a1fdbd27987eba958aff3edece6f8494ef..1187188fac36a0938e9c4c40bd4310e2
          },
          "enabled": {
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 885a0e5b6afcf3ef5296783e51cdc250b1062ed2..11324e6a14059fde4432493e6979e5e46f97edc5 100644
+index c1d248f25f0756a20118b9bd82ae78367b62631d..463bb1b8c9b79ec2ea6f22e30fc3343a3ca969a4 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -12598,9 +12598,11 @@ enabled = true
+@@ -12603,9 +12603,11 @@ enabled = true
      assert_eq!(
          (
              config.agent_max_threads,
@@ -98,7 +98,7 @@ index 885a0e5b6afcf3ef5296783e51cdc250b1062ed2..11324e6a14059fde4432493e6979e5e4
      );
 
      Ok(())
-@@ -12733,24 +12735,39 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -12738,24 +12740,39 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
  }
 
  #[test]
@@ -144,10 +144,10 @@ index 885a0e5b6afcf3ef5296783e51cdc250b1062ed2..11324e6a14059fde4432493e6979e5e4
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index c5814f13b207a1b8103886ee3963073376778768..2ff3e307b2bd07625bcadbf19e51ae577db4a9fd 100644
+index e9c5883ea2f603360be0e08d66fc652dc585db02..0624d6956b492924cfb3f8ae46e1aee0b656c368 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -254,8 +254,9 @@ impl Default for GhostSnapshotConfig {
+@@ -255,8 +255,9 @@ impl Default for GhostSnapshotConfig {
  /// files are *silently truncated* to this size so we do not take up too much of
  /// the context window.
  pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
@@ -159,7 +159,7 @@ index c5814f13b207a1b8103886ee3963073376778768..2ff3e307b2bd07625bcadbf19e51ae57
  pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
  pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
  pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-@@ -1342,7 +1343,7 @@ pub struct MultiAgentV2Config {
+@@ -1346,7 +1347,7 @@ pub struct MultiAgentV2Config {
      pub wait_agent_enabled: bool,
      pub disable_direct_message: bool,
      pub message_board_in_memory: bool,
@@ -168,7 +168,7 @@ index c5814f13b207a1b8103886ee3963073376778768..2ff3e307b2bd07625bcadbf19e51ae57
      pub enable_thread_adoption: bool,
      pub non_code_mode_only: bool,
  }
-@@ -1365,7 +1366,7 @@ impl MultiAgentV2Config {
+@@ -1369,7 +1370,7 @@ impl MultiAgentV2Config {
              wait_agent_enabled: true,
              disable_direct_message: false,
              message_board_in_memory: false,
@@ -221,10 +221,10 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 
      match &turn_context.session_source {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index cb8586656739a53ff775b73244dffe98e66bddaf..b286046d0252157ec9b79331dea06093a3f2c3ef 100644
+index 3def06882a7077e13180e7bc4ea9978ac192e485..9c2f22d61f5624a9e78fff80b0ba804c903bc521 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -12763,6 +12763,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+@@ -12914,6 +12914,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
          |config| {
              if enable_multi_agent_v2 {
                  let _ = config.features.enable(Feature::MultiAgentV2);
@@ -236,7 +236,7 @@ index cb8586656739a53ff775b73244dffe98e66bddaf..b286046d0252157ec9b79331dea06093
              }
              config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
              config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
-@@ -15593,16 +15598,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -15751,16 +15756,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
  async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
      let mut config = build_test_config(codex_home.path()).await;
@@ -258,7 +258,7 @@ index cb8586656739a53ff775b73244dffe98e66bddaf..b286046d0252157ec9b79331dea06093
      let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
          .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 23fefde9a5977212cf2b34965f200dd48f2fee4e..3c4f014dd0bc5620e07fa21a37a7cbeb22052fbf 100644
+index aabfe2d8f449221f9de34238d7ab7f9461dd7ce5..1dfa0987a30fe092fa780f38a77a85048b46a07f 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -1108,7 +1108,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
@@ -296,7 +296,7 @@ index 23fefde9a5977212cf2b34965f200dd48f2fee4e..3c4f014dd0bc5620e07fa21a37a7cbeb
      };
 
      let expected = FunctionCallError::RespondToModel(
-@@ -5129,12 +5130,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -5130,12 +5131,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
          .expect("closed children should load");
      assert_eq!(closed_children, Vec::<ThreadId>::new());
 
@@ -527,6 +527,24 @@ index e94db81946601a546f205dcc243518f3aaf1c55c..df55527d710a7d5f6d152db35fca3895
              config
                  .features
                  .enable(Feature::Collab)
+diff --git a/codex-rs/core/tests/suite/skills_extension.rs b/codex-rs/core/tests/suite/skills_extension.rs
+index ec7e757581cb08b15db61ea568bfa01c5941686d..5358902ba1a24eb876f3ad33369c389952496085 100644
+--- a/codex-rs/core/tests/suite/skills_extension.rs
++++ b/codex-rs/core/tests/suite/skills_extension.rs
+@@ -2913,6 +2913,13 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
+             config.cloud_skill_enabled = true;
+             config.model_provider.name = "Skills compaction test".to_string();
+             config.model_post_turn_compact_threshold_percent = 50;
++            // Keep unrelated Frodex agent defaults out of the skills request snapshot.
++            for feature in [Feature::MultiAgentV2, Feature::AgentPromptInjection] {
++                config
++                    .features
++                    .disable(feature)
++                    .expect("disable agent defaults for the skills snapshot");
++            }
+             config
+                 .features
+                 .enable(Feature::DeferredExecutor)
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
 index 7fae46311542f7afca9ece5a3748ee9abb8586bc..c9e1a3ec57447a0df79bb4da531885de022d6597 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
@@ -943,10 +961,10 @@ index 0bc845e44ec073fe530c18b068f849c494a85d86..a52657c3c8bff2313342b334de8ceae0
      pub enable_thread_adoption: Option<bool>,
      #[serde(skip_serializing_if = "Option::is_none")]
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index a2a8437bf4cff16558260f55c5d2e8049e23863b..93c9316aa9be9ad0572b46c50645b22935db635c 100644
+index 4f5a600168509a415b8496e4684ef7aa14278eda..c0008f45616dd5018d429e39bd769b1025c427b8 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -1324,7 +1324,7 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1339,7 +1339,7 @@ pub const FEATURES: &[FeatureSpec] = &[
          id: Feature::MultiAgentV2,
          key: "multi_agent_v2",
          stage: Stage::Stable,
@@ -955,7 +973,7 @@ index a2a8437bf4cff16558260f55c5d2e8049e23863b..93c9316aa9be9ad0572b46c50645b229
      },
      FeatureSpec {
          id: Feature::DeferMailboxPreemption,
-@@ -1347,8 +1347,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1362,8 +1362,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::AgentPromptInjection,
          key: "agent_prompt_injection",
@@ -966,7 +984,7 @@ index a2a8437bf4cff16558260f55c5d2e8049e23863b..93c9316aa9be9ad0572b46c50645b229
      },
      FeatureSpec {
          id: Feature::SpawnCsv,
-@@ -1689,12 +1689,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1704,12 +1704,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::GoalSupervisor,
          key: "goal_supervisor",

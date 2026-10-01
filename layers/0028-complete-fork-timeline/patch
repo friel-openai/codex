@@ -459,10 +459,10 @@ index c5a9b31c9f02a4e3f19390ceb2f17c9fa37cb147..6f66da3f8f698ed4afc49257e43b36d7
          "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
      ] {
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205dd970ea97 100644
+index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e597b6bc0 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-@@ -37,6 +37,8 @@ use crate::SortDirection;
+@@ -41,6 +41,8 @@ use crate::SortDirection;
  use crate::StoredTurnError;
  use crate::StoredTurnStatus;
  use crate::local::test_support::test_config;
@@ -471,7 +471,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
 
  #[tokio::test]
  async fn post_adoption_stock_checkpoint_can_restore_positive_completeness() {
-@@ -830,7 +832,7 @@ async fn list_items_pages_whole_thread_and_per_turn_rows() {
+@@ -1116,7 +1118,7 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
 
  #[tokio::test]
  async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
@@ -480,7 +480,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      let db = history_db(&store).await;
      for (item_id, ordinal) in [
          ("before", 10),
-@@ -902,6 +904,7 @@ INSERT INTO thread_realtime_items (
+@@ -1188,6 +1190,7 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime item");
      }
 
@@ -488,7 +488,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      let latest = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -987,7 +990,7 @@ INSERT INTO thread_realtime_items (
+@@ -1273,7 +1276,7 @@ INSERT INTO thread_realtime_items (
 
  #[tokio::test]
  async fn timeline_turn_boundaries_page_through_shared_ordinals() {
@@ -497,7 +497,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      let db = history_db(&store).await;
      let error = r#"{"message":"failed","codexErrorInfo":null,"additionalDetails":null}"#;
      for (turn_id, start, end, status, error_json) in [
-@@ -1017,6 +1020,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
+@@ -1303,6 +1306,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
      )
      .await;
 
@@ -505,7 +505,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      let all = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -1176,6 +1180,65 @@ INSERT INTO thread_realtime_items (
+@@ -1462,6 +1466,65 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime boundary");
      }
 
@@ -571,7 +571,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      let page = store
          .list_timeline(ListTimelineParams {
              thread_id: child_id,
-@@ -1203,7 +1266,844 @@ INSERT INTO thread_realtime_items (
+@@ -1489,7 +1552,844 @@ INSERT INTO thread_realtime_items (
              .iter()
              .map(crate::local::thread_history::realtime::entry_key)
              .collect::<Vec<_>>(),
@@ -1417,7 +1417,7 @@ index b97dd7dad69ee34cdd832a08134ba036a35f028b..31bbdc29c1443f04e5d62c013dc3205d
      );
  }
 
-@@ -3407,6 +4307,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+@@ -3747,6 +4647,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
      ))
  }
 

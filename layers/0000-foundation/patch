@@ -120,7 +120,7 @@ index 39fbef236c49beb1aed918807b821ed3c526ffa5..e4d43c76aac5f004209594e6b9bd3303
 
          for (k, v) in env_overrides {
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_revert.rs b/codex-rs/app-server/tests/suite/v2/thread_revert.rs
-index d69414f758409d704b446f68aa9da457678920d5..a321f6f24ca685a97175d0ea754a4f4029b77463 100644
+index 67b4be96de3ec636989b2e49ace2d93976797f6d..c18d929426ac172416ac8145391bd943bf4be25a 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_revert.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_revert.rs
 @@ -5,7 +5,6 @@ use app_test_support::create_final_assistant_message_sse_response;
@@ -131,7 +131,7 @@ index d69414f758409d704b446f68aa9da457678920d5..a321f6f24ca685a97175d0ea754a4f40
  use codex_app_server_protocol::AskForApproval;
  use codex_app_server_protocol::ClientInfo;
  use codex_app_server_protocol::ClientRequest;
-@@ -37,6 +36,7 @@ use codex_features::Feature;
+@@ -38,6 +37,7 @@ use codex_features::Feature;
  use codex_protocol::config_types::CollaborationMode;
  use codex_protocol::config_types::ModeKind;
  use codex_protocol::config_types::Settings;
@@ -139,7 +139,7 @@ index d69414f758409d704b446f68aa9da457678920d5..a321f6f24ca685a97175d0ea754a4f40
  use codex_protocol::openai_models::ReasoningEffort;
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::MultiAgentVersion;
-@@ -148,7 +148,21 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
+@@ -149,7 +149,21 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
      let config = load_default_config_for_test(&codex_home).await;
      let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
      model.multi_agent_version = Some(MultiAgentVersion::V2);
@@ -163,7 +163,7 @@ index d69414f758409d704b446f68aa9da457678920d5..a321f6f24ca685a97175d0ea754a4f40
          .with_codex_home(codex_home.path())
          .build()
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index 4d7984d57bc0f3adfa71fc092e25a4791ae822c7..6281d0eba3ba2cd08b6cff5e5b8c7d77f2c0dbfd 100644
+index bdd7771b3aadfd69f46698c14844a6d65e1e65ba..dc5a46921bf2d1c9dd22c6fbd7748b43ff495921 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -1131,12 +1131,16 @@ async fn cli_main(
@@ -405,7 +405,7 @@ index 705d48c1d5b43d749909bcc10c13c63632acda3a..04f64dff474a0cfd0b18f4f0a8bdbfa6
  #[path = "control_tests.rs"]
  mod tests;
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
-index 6f2cc44e719019d180db423a4e34c083418791b6..2782c7eb34eadc9db8bb5efb16ef9069505e5e2d 100644
+index cfa375c813c741ba67370f4458074bf6cbfae76e..63a243c817267e867c208a34dab88ddcb74019f5 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
 +++ b/codex-rs/core/src/agent/control/residency_tests.rs
 @@ -159,6 +159,7 @@ async fn spawn_v2_subagent(
@@ -472,7 +472,7 @@ index 9b642981a3505aba3b52f08a6f4475202688d9dd..130b5dfeaaed6edb67c22872f3666394
              .await?;
          let mut agent_metadata = agent_metadata;
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd36d2cc37 100644
+index ab18abebb8ecb62fe2f7ff92d608b5a0c9180557..25579a74d46706b31e28471e090cb7d08fff45b5 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -31,6 +31,8 @@ use crate::thread_manager::ForkSnapshot;
@@ -533,7 +533,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      async fn new_with_config(home: TempDir, config: Config) -> Self {
          let state_db = init_state_db(&config).await;
          let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-@@ -2345,6 +2375,29 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -2347,6 +2377,29 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          child_thread.config_snapshot().await.history_mode,
          ThreadHistoryMode::Legacy
      );
@@ -563,7 +563,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let history = child_thread.session.clone_history().await;
      let history_items = history.raw_items().cloned().collect::<Vec<_>>();
      let assistant_position = |history: &crate::context_manager::ContextManager| {
-@@ -2515,6 +2568,213 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -2517,6 +2570,213 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          .expect("parent shutdown should submit");
  }
 
@@ -777,7 +777,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
  #[tokio::test]
  async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
      let harness = AgentControlHarness::new().await;
-@@ -4458,7 +4718,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
+@@ -4461,7 +4721,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
          manager,
          control,
      };
@@ -786,7 +786,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let agent_path = AgentPath::from_string("/root/explorer".to_string())
          .expect("test agent path should be valid");
 
-@@ -4557,13 +4817,22 @@ async fn resume_thread_subagent_restores_stored_metadata() {
+@@ -4560,13 +4820,22 @@ async fn resume_thread_subagent_restores_stored_metadata() {
          .expect("resume should succeed");
      assert_eq!(resumed_thread_id, child_thread_id);
 
@@ -813,7 +813,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
          parent_thread_id: resumed_parent_thread_id,
          depth: resumed_depth,
-@@ -5060,7 +5329,7 @@ async fn shutdown_agent_tree_closes_descendants_when_started_at_child() {
+@@ -5063,7 +5332,7 @@ async fn shutdown_agent_tree_closes_descendants_when_started_at_child() {
 
  #[tokio::test]
  async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
@@ -822,7 +822,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
      let child_thread_id = harness
-@@ -5155,7 +5424,7 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
+@@ -5158,7 +5427,7 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
 
  #[tokio::test]
  async fn resume_closed_child_reopens_open_descendants() {
@@ -831,7 +831,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
      let child_thread_id = harness
-@@ -5252,7 +5521,7 @@ async fn resume_closed_child_reopens_open_descendants() {
+@@ -5255,7 +5524,7 @@ async fn resume_closed_child_reopens_open_descendants() {
 
  #[tokio::test]
  async fn resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdown() {
@@ -840,7 +840,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
      let child_thread_id = harness
-@@ -5343,7 +5612,7 @@ async fn resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdo
+@@ -5346,7 +5615,7 @@ async fn resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdo
 
  #[tokio::test]
  async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
@@ -849,7 +849,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
      let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
      let child_thread_id = harness
-@@ -5474,7 +5743,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -5477,7 +5746,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
 
  #[tokio::test]
  async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() {
@@ -859,7 +859,7 @@ index ceaeaa3213224e4243dca558a809bcaf11d18de6..f0379859ab1ae21230a6542eb965b4dd
 
      let child_thread_id = harness
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983db529d94 100644
+index f5ac495337fd8f29c08b0be8d5b75ba32185d7d2..4b5608314be248bcb5de31344722606f1fec0af2 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -201,6 +201,7 @@ fn session_telemetry_for_request(
@@ -915,7 +915,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
      last_request: Option<ResponsesApiRequest>,
      last_response_rx: Option<oneshot::Receiver<LastResponse>>,
      last_response_from_untraced_warmup: bool,
-@@ -435,6 +459,19 @@ impl WebsocketSession {
+@@ -425,6 +449,19 @@ impl WebsocketSession {
          };
      }
 
@@ -935,7 +935,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
      fn set_connection_reused(&self, connection_reused: bool) {
          *self
              .connection_reused
-@@ -450,6 +487,15 @@ impl WebsocketSession {
+@@ -440,6 +477,15 @@ impl WebsocketSession {
      }
  }
 
@@ -951,7 +951,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
  enum WebsocketStreamOutcome {
      Stream(ResponseStream),
      FallbackToHttp,
-@@ -503,6 +549,51 @@ impl ModelClient {
+@@ -493,6 +539,51 @@ impl ModelClient {
          http_client_factory: HttpClientFactory,
          workspace_routing: WorkspaceRoutingContext,
          request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
@@ -1003,7 +1003,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
      ) -> Self {
          let model_provider = create_model_provider(provider_info, auth_manager);
          let codex_api_key_env_enabled = model_provider
-@@ -522,9 +613,14 @@ impl ModelClient {
+@@ -512,9 +603,14 @@ impl ModelClient {
          let reasoning_effort_override_enabled = reasoning_effort_override_enabled
              && !crate::guardian::is_basic_session_source(&session_source)
              && !memory_consolidation;
@@ -1018,7 +1018,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
                  provider: model_provider,
                  workspace_routing,
                  auth_env_telemetry,
-@@ -541,7 +637,8 @@ impl ModelClient {
+@@ -531,7 +627,8 @@ impl ModelClient {
                  attestation_provider,
                  disable_websockets: AtomicBool::new(false),
                  agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
@@ -1028,7 +1028,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
              }),
              agent_identity_policy,
              prompt_cache_key_override: None,
-@@ -593,7 +690,10 @@ impl ModelClient {
+@@ -583,7 +680,10 @@ impl ModelClient {
              return format!("{source}:{parent_thread_id}");
          }
 
@@ -1040,7 +1040,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
      }
 
      // ChatGPT derives cache affinity from the Responses session-id header. Keep the
-@@ -638,6 +738,32 @@ impl ModelClient {
+@@ -628,6 +728,32 @@ impl ModelClient {
          })
      }
 
@@ -1073,7 +1073,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
      fn take_cached_websocket_session(&self) -> WebsocketSession {
          let mut cached_websocket_session = self
              .state
-@@ -1365,6 +1491,7 @@ impl ModelClientSession {
+@@ -1355,6 +1481,7 @@ impl ModelClientSession {
          ApiResponsesOptions {
              session_id: Some(self.client.responses_session_id(responses_metadata)),
              thread_id: Some(responses_metadata.thread_id.to_string()),
@@ -1081,7 +1081,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
              session_source: Some(self.client.state.session_source.clone()),
              extra_headers: {
                  let mut headers = build_responses_headers(
-@@ -1569,15 +1696,21 @@ impl ModelClientSession {
+@@ -1559,15 +1686,21 @@ impl ModelClientSession {
              responses_headers,
          } = params;
          let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
@@ -1111,7 +1111,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
          };
          let needs_new = self.websocket_session.connection.is_none() || reset_reason.is_some();
          // Resolving an external auth provider can change ownership during client setup.
-@@ -1588,11 +1721,18 @@ impl ModelClientSession {
+@@ -1578,11 +1711,18 @@ impl ModelClientSession {
          }
 
          if needs_new || owner_changed {
@@ -1135,7 +1135,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
              let new_conn = self
                  .client
                  .connect_websocket(
-@@ -1608,7 +1748,7 @@ impl ModelClientSession {
+@@ -1598,7 +1738,7 @@ impl ModelClientSession {
              self.websocket_session.connection = Some(new_conn);
              self.websocket_session.responses_headers = responses_headers.clone();
              self.websocket_session.auth_owner_generation = auth_owner_generation;
@@ -1144,7 +1144,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
              self.websocket_session
                  .set_connection_reused(/*connection_reused*/ false);
          } else {
-@@ -1777,6 +1917,8 @@ impl ModelClientSession {
+@@ -1771,6 +1911,8 @@ impl ModelClientSession {
                          inference_trace_attempt,
                          Arc::clone(&self.client.state.provider),
                          interceptors,
@@ -1153,7 +1153,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
                      );
                      return Ok(stream);
                  }
-@@ -2097,6 +2239,15 @@ impl ModelClientSession {
+@@ -2100,6 +2242,15 @@ impl ModelClientSession {
                  inference_trace_attempt,
                  Arc::clone(&self.client.state.provider),
                  interceptors,
@@ -1169,25 +1169,25 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
              );
              self.websocket_session.last_response_rx = Some(last_request_rx);
              return Ok(WebsocketStreamOutcome::Stream(stream));
-@@ -2349,6 +2500,8 @@ fn map_response_stream(
+@@ -2352,6 +2503,8 @@ fn map_response_stream(
      inference_trace_attempt: InferenceTraceAttempt,
      provider: SharedModelProvider,
      interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
 +    continuation_recorder: Option<ResponseContinuationRecorder>,
 +    request: Option<ResponsesApiRequest>,
  ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
-     let codex_api::ResponseStream {
-         rx_event,
-@@ -2364,6 +2517,8 @@ fn map_response_stream(
+     let upstream_request_id = api_stream.upstream_request_id.take();
+     let interrupt = api_stream.interrupt.take();
+@@ -2361,6 +2514,8 @@ fn map_response_stream(
          session_telemetry,
          inference_trace_attempt,
          provider,
 +        continuation_recorder,
 +        request,
-     )
- }
-
-@@ -2373,6 +2528,8 @@ fn map_response_events<S>(
+     );
+     stream.interrupt = interrupt;
+     (stream, last_response)
+@@ -2372,6 +2527,8 @@ fn map_response_events<S>(
      session_telemetry: SessionTelemetry,
      inference_trace_attempt: InferenceTraceAttempt,
      provider: SharedModelProvider,
@@ -1196,7 +1196,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
  ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
  where
      S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
-@@ -2443,11 +2600,26 @@ where
+@@ -2442,11 +2599,26 @@ where
                          &token_usage,
                          &items_added,
                      );
@@ -1228,7 +1228,7 @@ index f8faf45498d46c19dfb29f0bb1d9dcd957287eb9..2ad469b0bd533c0c28514151e0c06983
                      if tx_event
                          .send(Ok(ResponseEvent::Completed {
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad2c06112c 100644
+index 07d57f5536d674623d83ba1277738f9d68d89545..617a05bd857c863188566f86651eb68bc91837a8 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -1,7 +1,10 @@
@@ -1294,7 +1294,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
  #[tokio::test]
  async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
      use codex_client::HttpTransport;
-@@ -1334,6 +1368,359 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
+@@ -1345,6 +1379,359 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
      }
  }
 
@@ -1654,7 +1654,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
  async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
      let mut rollout = replay_bundle(temp.path())?;
      for _ in 0..50 {
-@@ -1388,7 +1775,10 @@ fn build_subagent_headers_sets_other_subagent_label() {
+@@ -1399,7 +1786,10 @@ fn build_subagent_headers_sets_other_subagent_label() {
  #[test]
  fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
      let parent_thread_id = ThreadId::new();
@@ -1666,7 +1666,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      let metadata = test_responses_metadata_for_client(
          &client,
          Some("turn-123"),
-@@ -1521,6 +1911,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
+@@ -1532,6 +1922,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
          test_session_telemetry(),
          attempt,
          test_model_provider(),
@@ -1675,7 +1675,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      );
 
      let observed = stream
-@@ -1572,6 +1964,8 @@ async fn response_stream_records_last_model_feedback_ids() {
+@@ -1583,6 +1975,8 @@ async fn response_stream_records_last_model_feedback_ids() {
          test_session_telemetry(),
          InferenceTraceAttempt::disabled(),
          test_model_provider(),
@@ -1684,7 +1684,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      );
 
      while stream.next().await.is_some() {}
-@@ -1795,6 +2189,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
+@@ -1806,6 +2200,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
          test_session_telemetry(),
          attempt,
          test_model_provider(),
@@ -1693,7 +1693,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      );
 
      // Fill the mapper channel with non-terminal events, then yield one output
-@@ -2067,6 +2463,8 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+@@ -2078,6 +2474,8 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
 
      let temp = TempDir::new()?;
      let attempt = started_inference_attempt(&temp)?;
@@ -1702,7 +1702,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      let (tx_event, rx_event) = tokio::sync::mpsc::channel(2);
      tx_event
          .send(Ok(ResponseEvent::OutputItemDone(output_message(
-@@ -2089,8 +2487,13 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+@@ -2101,8 +2499,13 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
          },
          test_session_telemetry(),
          attempt,
@@ -1717,7 +1717,7 @@ index fc88e15ec868db0a025598cadc945ed11d28eb32..1a0705fd72caa65f79e093397a1886ad
      );
      let mut delivered = Vec::new();
      while let Some(event) = stream.next().await {
-@@ -2100,6 +2503,10 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+@@ -2112,6 +2515,10 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
      }
      assert_eq!(delivered, vec![output_message("1", "transformed")]);
      assert_eq!(last_response.await?.items_added, delivered);
@@ -1741,7 +1741,7 @@ index 9d6b9656ba9fd559a7b4a1e8ca966cf154d47e2a..5b7705df6689f567e95f751f18fdd294
          environment_selections: parent_environments.to_selections(),
          thread_extension_init,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index f9fe78dbafc61b91db843ed7be1bfb8be9dc5edb..73f7f1aacf0ed3ea88517e4f287b3219f8e87132 100644
+index a937b39db0e4abb8067d28497f63839b8428e49d..fbe5410bbb24cdd511d5e1c6ffbe3d88de336ca2 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -53,6 +53,8 @@ use tracing::error;
@@ -1753,7 +1753,7 @@ index f9fe78dbafc61b91db843ed7be1bfb8be9dc5edb..73f7f1aacf0ed3ea88517e4f287b3219
 
  /// Controls whether compaction replacement history must include initial context.
  ///
-@@ -536,19 +538,55 @@ pub(crate) struct CompactedUserMessage<'a> {
+@@ -541,19 +543,55 @@ pub(crate) struct CompactedUserMessage<'a> {
 
  #[cfg(test)]
  pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUserMessage<'_>> {
@@ -1817,7 +1817,7 @@ index f9fe78dbafc61b91db843ed7be1bfb8be9dc5edb..73f7f1aacf0ed3ea88517e4f287b3219
  }
 
  fn compacted_user_message<'a>(
-@@ -559,7 +597,7 @@ fn compacted_user_message<'a>(
+@@ -564,7 +602,7 @@ fn compacted_user_message<'a>(
          return None;
      };
      let message = user.message();
@@ -1827,7 +1827,7 @@ index f9fe78dbafc61b91db843ed7be1bfb8be9dc5edb..73f7f1aacf0ed3ea88517e4f287b3219
      }
      Some(CompactedUserMessage {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index ff3b80573ae30dd9ad57bcd7ce5221341285c7d9..014c38389cd182d0afa5f400aa7201e887540aab 100644
+index fcc6064f18cb353feb08ef8ab6e26eef883f20b8..978698d20338c730daa843a7102e9e4b13fee827 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -588,10 +588,13 @@ fn is_retained_for_remote_compaction_v2(
@@ -1848,7 +1848,7 @@ index ff3b80573ae30dd9ad57bcd7ce5221341285c7d9..014c38389cd182d0afa5f400aa7201e8
          "developer" => {
              retain_client_developer_messages && is_client_authored_developer_message(envelope)
          }
-@@ -859,6 +862,11 @@ mod tests {
+@@ -860,6 +863,11 @@ mod tests {
              message("developer", "dev", /*phase*/ None),
              message("system", "sys", /*phase*/ None),
              message("user", "user", /*phase*/ None),
@@ -2018,10 +2018,10 @@ index 2595ce5bb9d08697234127c40ab46eabbee44adb..c9b53a63b6e81b6234b176cc51a801ab
  pub(crate) mod mcp;
  mod mcp_skill_dependencies;
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index 7b2bd83c23fa5fdbd3b8b42cb1742ff64beb4d76..793dbb91bb8358fc191d067fcaf5ee810c6f8be2 100644
+index 765fe5eda688f513bbca904bb6cb940c63715c35..12daa3629e2811a10afc052a457739c3a4053a0f 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
-@@ -244,6 +244,7 @@ impl Session {
+@@ -259,6 +259,7 @@ impl Session {
                  Some(self.mcp_elicitation_reviewer()),
              )
              .await;
@@ -2029,7 +2029,7 @@ index 7b2bd83c23fa5fdbd3b8b42cb1742ff64beb4d76..793dbb91bb8358fc191d067fcaf5ee81
              refresh_invalidation.published = true;
          }
      }
-@@ -381,16 +382,27 @@ impl Session {
+@@ -396,16 +397,27 @@ impl Session {
              .chain(&recovered_oauth_servers)
              .cloned()
              .collect::<Vec<_>>();
@@ -2062,7 +2062,7 @@ index 7b2bd83c23fa5fdbd3b8b42cb1742ff64beb4d76..793dbb91bb8358fc191d067fcaf5ee81
      }
 
      #[tracing::instrument(
-@@ -721,6 +733,7 @@ impl Session {
+@@ -736,6 +748,7 @@ impl Session {
              elicitation_reviewer,
          )
          .await;
@@ -2071,10 +2071,10 @@ index 7b2bd83c23fa5fdbd3b8b42cb1742ff64beb4d76..793dbb91bb8358fc191d067fcaf5ee81
 
      pub(crate) fn ready_selected_capability_roots(
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0752303e9 100644
+index 902d18377cb93e6bc378ebac9fc9b740cce65845..d26c022be7c0f467eaafa8baea72940416cd1cc2 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -40,6 +40,7 @@ use crate::image_preparation::ImagePreparationMode;
+@@ -41,6 +41,7 @@ use crate::image_preparation::ImagePreparationMode;
  use crate::image_preparation::ImageResizeNoticeMode;
  use crate::image_preparation::prepare_response_items as prepare_image_response_items;
  use crate::image_preparation::unified_image_budget_enabled;
@@ -2082,7 +2082,7 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
  use crate::parse_turn_item;
  use crate::realtime_conversation::RealtimeConversationManager;
  use crate::realtime_history::RealtimeEventOrder;
-@@ -463,6 +464,7 @@ pub(crate) struct SessionSpawnArgs {
+@@ -464,6 +465,7 @@ pub(crate) struct SessionSpawnArgs {
      /// Root sessions and non-thread-spawn subagents pass a disabled context;
      /// `Session::new` creates the root trace itself when rollout tracing is enabled.
      pub(crate) parent_rollout_thread_trace: ThreadTraceContext,
@@ -2090,7 +2090,7 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
      pub(crate) user_shell_override: Option<shell::Shell>,
      pub(crate) parent_trace: Option<W3cTraceContext>,
      pub(crate) environment_selections: Vec<TurnEnvironmentSelection>,
-@@ -567,6 +569,7 @@ impl Session {
+@@ -568,6 +570,7 @@ impl Session {
              inherited_exec_policy,
              inherited_environments,
              parent_rollout_thread_trace,
@@ -2098,7 +2098,7 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
              parent_trace: _,
              environment_selections,
              thread_extension_init,
-@@ -894,6 +897,7 @@ impl Session {
+@@ -895,6 +898,7 @@ impl Session {
              reserved_thread_id,
              environment_manager,
              inherited_environments,
@@ -2106,7 +2106,7 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
              analytics_events_client,
              image_store,
              thread_store,
-@@ -1394,6 +1398,16 @@ impl Session {
+@@ -1395,6 +1399,16 @@ impl Session {
          handlers::persist_thread_memory_mode_update(self, mode).await
      }
 
@@ -2123,7 +2123,7 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
      /// Flush rollout writes and return the final durability-barrier result.
      #[instrument(name = "session.flush_rollout", level = "trace", skip_all)]
      pub(crate) async fn flush_rollout(&self) -> std::io::Result<()> {
-@@ -5089,6 +5103,7 @@ pub(crate) fn emit_subagent_session_started(
+@@ -5139,6 +5153,7 @@ pub(crate) fn emit_subagent_session_started(
      let AppServerClientMetadata {
          client_name,
          client_version,
@@ -2132,10 +2132,10 @@ index 6d1580bcc43479b650c25dc9b0d93b162ad8b1ba..927b23d561255f2dc995d1eb4cbf67c0
      if (client_name.is_none() || client_version.is_none())
          && subagent_source.kind() != crate::guardian::GUARDIAN_REVIEWER_NAME
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f288997fccd8e 100644
+index 62be2d34e26cf3ec143852b186cd17b097e8acdd..e84c4907bfd845f28112aad40ce94f77dcc858c1 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -762,6 +762,7 @@ impl Session {
+@@ -764,6 +764,7 @@ impl Session {
          reserved_thread_id: Option<ThreadId>,
          environment_manager: Arc<EnvironmentManager>,
          inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -2143,7 +2143,7 @@ index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f2889
          analytics_events_client: Option<AnalyticsEventsClient>,
          image_store: Arc<dyn AttachmentStore>,
          thread_store: Arc<dyn ThreadStore>,
-@@ -1645,7 +1646,6 @@ impl Session {
+@@ -1648,7 +1649,6 @@ impl Session {
                      thread_store: &thread_extension_data,
                  }).await;
              }
@@ -2151,7 +2151,7 @@ index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f2889
              let executed_tool_calls = crate::state::ExecutedToolCalls::new(
                  &config.features,
                  &initial_history,
-@@ -1659,6 +1659,8 @@ impl Session {
+@@ -1662,6 +1662,8 @@ impl Session {
              );
              let reasoning_effort_override_enabled =
                  config.features.enabled(Feature::ReasoningEffortOverride) && !title_request;
@@ -2160,7 +2160,7 @@ index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f2889
              let services = SessionServices {
                  // Start with an empty connection set. The initialized set is
                  // published after SessionConfigured so MCP events follow it.
-@@ -1710,7 +1712,8 @@ impl Session {
+@@ -1713,7 +1715,8 @@ impl Session {
                  thread_store: Arc::clone(&thread_store),
                  attestation_provider: attestation_provider.clone(),
                  time_provider,
@@ -2170,7 +2170,7 @@ index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f2889
                      Some(Arc::clone(&auth_manager)),
                      if config.features.enabled(Feature::UseAgentIdentity) {
                          AgentIdentityAuthPolicy::ChatGptAuth
-@@ -1734,6 +1737,8 @@ impl Session {
+@@ -1737,6 +1740,8 @@ impl Session {
                      config.http_client_factory(),
                      workspace_routing.as_ref().clone(),
                      extensions.model_request_contributors().to_vec(),
@@ -2180,10 +2180,10 @@ index b6f39ac38a96b42d0753e5fb6885186569f00b88..12f3d519a5dbcbf587e8331c310f2889
                  .with_executed_tool_calls(executed_tool_calls.clone())
                  .with_restored_history(matches!(
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 1b43d3932c8293557741f60d67f09de6effc3e9f..b5c0cbef5ac27e8195fd6ddee3fabffd54da1f2d 100644
+index 156225736fb3991b674fa031deb07c4b16b224a9..032146ff27bce8e813cd8d7313a9f4b1775cf172 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -6236,6 +6236,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+@@ -6376,6 +6376,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
          /*reserved_thread_id*/ None,
          environment_manager,
          /*inherited_environments*/ None,
@@ -2191,7 +2191,7 @@ index 1b43d3932c8293557741f60d67f09de6effc3e9f..b5c0cbef5ac27e8195fd6ddee3fabffd
          /*analytics_events_client*/ None,
          crate::passthrough_image_store(),
          Arc::new(codex_thread_store::LocalThreadStore::new(
-@@ -6479,6 +6480,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6620,6 +6621,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
      let services = SessionServices {
          mcp_runtime,
          mcp_handler_cache: Default::default(),
@@ -2199,7 +2199,7 @@ index 1b43d3932c8293557741f60d67f09de6effc3e9f..b5c0cbef5ac27e8195fd6ddee3fabffd
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
          ),
-@@ -6784,6 +6786,7 @@ async fn make_session_with_config_and_rx(
+@@ -6926,6 +6928,7 @@ async fn make_session_with_config_and_rx(
          /*reserved_thread_id*/ None,
          environment_manager,
          /*inherited_environments*/ None,
@@ -2207,7 +2207,7 @@ index 1b43d3932c8293557741f60d67f09de6effc3e9f..b5c0cbef5ac27e8195fd6ddee3fabffd
          /*analytics_events_client*/ None,
          crate::passthrough_image_store(),
          Arc::new(codex_thread_store::LocalThreadStore::new(
-@@ -6916,6 +6919,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -7058,6 +7061,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          /*reserved_thread_id*/ None,
          environment_manager,
          /*inherited_environments*/ None,
@@ -2215,7 +2215,7 @@ index 1b43d3932c8293557741f60d67f09de6effc3e9f..b5c0cbef5ac27e8195fd6ddee3fabffd
          /*analytics_events_client*/ None,
          crate::passthrough_image_store(),
          Arc::new(codex_thread_store::LocalThreadStore::new(
-@@ -8751,6 +8755,7 @@ where
+@@ -8896,6 +8900,7 @@ where
      let services = SessionServices {
          mcp_runtime,
          mcp_handler_cache: Default::default(),
@@ -2279,7 +2279,7 @@ index ded1f878e89d15afd1342266a519091d6313111f..fe86cca6221fb2920f3794b7b9e8269b
      pub(crate) elicitations: ElicitationService,
      #[cfg_attr(not(unix), allow(dead_code))]
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index ddaa1f19cb3dcfefe666778840cada942ee4c37e..d9dce3169e610a8510077c1f56af61cce42c72bf 100644
+index db3d358ecfc98be333d11a9c774c32dc25fe91f6..61ac6ea1210d3b264e18485c0847964e9f6679e2 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -14,6 +14,7 @@ use crate::config::ThreadStoreConfig;
@@ -2722,7 +2722,7 @@ index 423935904acf25d95a348ef26334d161089b492f..485ede2edd07303412965f5818544308
 +    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
 +}
 diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
-index 4cffddd43c24681bb0099f05da9f8fae25e2e115..7949353c6617ba357ff75f43e3d9b2c92c44f8d3 100644
+index 0bfa07bd5587f6913b21d137874430a982824c15..033ea273d72394c313bf7338d70ed163b2164def 100644
 --- a/codex-rs/exec/src/lib.rs
 +++ b/codex-rs/exec/src/lib.rs
 @@ -220,6 +220,7 @@ struct ExecRunArgs {
@@ -3277,7 +3277,7 @@ index 4f7a3ab89fc91ad3c974f58ea8cd84c7ef74baee..20dba1c1fde2872068a83ce543520fb9
  mod mcp_required_exit;
  mod originator;
 diff --git a/codex-rs/tui/src/status/tests.rs b/codex-rs/tui/src/status/tests.rs
-index bb650530727ee9b739fc401e671efadec7c875b4..48dd65f502f05d1d853e606608ed99b80414a5af 100644
+index f501402ef3977155013f0ec659ed256b251a65f0..150a094ca02e853e9d8827eb289c977d904c40cf 100644
 --- a/codex-rs/tui/src/status/tests.rs
 +++ b/codex-rs/tui/src/status/tests.rs
 @@ -177,14 +177,24 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -3305,9 +3305,9 @@ index bb650530727ee9b739fc401e671efadec7c875b4..48dd65f502f05d1d853e606608ed99b8
 +}
 +
  fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
-     let frame_width = lines
-         .iter()
-@@ -236,7 +246,7 @@ fn buffer_to_text(buffer: &Buffer, width: u16) -> String {
+     lines
+         .into_iter()
+@@ -218,7 +228,7 @@ fn buffer_to_text(buffer: &Buffer, width: u16) -> String {
                  .to_string()
          })
          .collect::<Vec<_>>();

@@ -742,7 +742,7 @@ index 510f9e3380fa825dd6be0e003553ffba60eb008a..9c773d73a6a85d90f1662a073e76908f
  #[path = "gateway_oauth_tests.rs"]
  mod gateway_oauth;
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index 6281d0eba3ba2cd08b6cff5e5b8c7d77f2c0dbfd..a4aaed45408d3e22e71aa097ad37579b396e9074 100644
+index dc5a46921bf2d1c9dd22c6fbd7748b43ff495921..ac828a75160338ad370921382a66004b5d505354 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -1,3 +1,6 @@
@@ -752,24 +752,12 @@ index 6281d0eba3ba2cd08b6cff5e5b8c7d77f2c0dbfd..a4aaed45408d3e22e71aa097ad37579b
  use clap::Args;
  use clap::CommandFactory;
  use clap::Parser;
-diff --git a/codex-rs/code-mode-host/tests/stdio.rs b/codex-rs/code-mode-host/tests/stdio.rs
-index e9a0fa805a2a630312abfd382dd3c9e60a0b4597..3636f6b4198fa7719a487941ea3825ad0a9a0c2f 100644
---- a/codex-rs/code-mode-host/tests/stdio.rs
-+++ b/codex-rs/code-mode-host/tests/stdio.rs
-@@ -246,6 +246,7 @@ async fn interrupt_yields_observations_without_stopping_the_cell() {
-         description: String::new(),
-         kind: CodeModeToolKind::Function,
-         input_schema: None,
-+        input_schema_max_bytes: None,
-         output_schema: None,
-     }];
-     let signal = CancellationToken::new();
 diff --git a/scripts/frodex_admission.py b/scripts/frodex_admission.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220a27291b3
+index 0000000000000000000000000000000000000000..5922c56dc87cfa4dda1e44c20e08e45d83155f30
 --- /dev/null
 +++ b/scripts/frodex_admission.py
-@@ -0,0 +1,859 @@
+@@ -0,0 +1,991 @@
 +#!/usr/bin/env python3
 +"""Admit one packaged Frodex candidate without using ambient Codex state."""
 +
@@ -834,6 +822,15 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +    re.compile(rb'(?i)"(?:access_token|refresh_token|id_token)"\s*:'),
 +)
 +BWRAP_PROFILES = ("full", "reduced")
++# Bound each retained stream after redaction, not before matching credentials.
++DIAGNOSTIC_BYTES = 64 * 1024
++# AuthDotJson and AgentIdentityAuthRecord store these fields as metadata, not
++# credentials. Exact paths keep unknown nested credential fields redacted.
++AUTH_METADATA_FIELDS = {
++    ("auth_mode",),
++    ("last_refresh",),
++    ("agent_identity", "plan_type"),
++}
 +
 +
 +class AdmissionError(RuntimeError):
@@ -1147,6 +1144,44 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +    return {"basename": auth_source.name, "size": source_stat.st_size, "mode": "0600"}
 +
 +
++def auth_literals(path: Path) -> set[bytes]:
++    """Keep credential-bearing auth JSON strings in memory for redaction."""
++    if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
++        raise AdmissionError("cannot collect diagnostic redactions from auth JSON")
++    values = [((), json.loads(path.read_bytes()))]
++    literals: set[bytes] = set()
++    while values:
++        fields, value = values.pop()
++        if isinstance(value, dict):
++            values.extend(((*fields, key), child) for key, child in value.items())
++        elif isinstance(value, list):
++            values.extend(
++                ((*fields, index), child) for index, child in enumerate(value)
++            )
++        elif isinstance(value, str) and value and fields not in AUTH_METADATA_FIELDS:
++            literals.add(value.encode())
++            literals.add(json.dumps(value)[1:-1].encode())
++    return literals
++
++
++def diagnostic_text(payload: bytes, literals: set[bytes]) -> dict[str, Any]:
++    """Retain a bounded excerpt without partial credentials at the byte limit."""
++    for literal in sorted(literals, key=len, reverse=True):
++        payload = payload.replace(literal, b"[REDACTED]")
++    # Field-name patterns cannot delimit a value spanning multiple lines.
++    if any(
++        pattern.search(payload) for pattern in (SECRET_PATTERNS[0], SECRET_PATTERNS[-1])
++    ):
++        payload = b"[diagnostics withheld: credential field]"
++    for pattern in SECRET_PATTERNS:
++        payload = pattern.sub(b"[REDACTED]", payload)
++    payload = payload.decode("utf-8", errors="replace").encode("utf-8")
++    return {
++        "text": payload[:DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore"),
++        "truncated": len(payload) > DIAGNOSTIC_BYTES,
++    }
++
++
 +def interpolate(value: str, replacements: dict[str, str]) -> str:
 +    try:
 +        return value.format_map(replacements)
@@ -1312,6 +1347,7 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +    admission_root: Path,
 +    auth_source: Path | None,
 +    bwrap_profile: str | None,
++    secret_literals: set[bytes] | None = None,
 +) -> dict[str, Any]:
 +    name = require_string(case.get("name"), "case name")
 +    paths = case_paths(admission_root, name)
@@ -1365,58 +1401,89 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +            raise AdmissionError(f"case {name} environment values must be strings")
 +        environment[key] = interpolate(value, replacements)
 +
++    # Admission keeps this set in memory to scan all retained case metadata.
++    literals = secret_literals if secret_literals is not None else set()
++    api_key = environment.get("OPENAI_API_KEY")
++    if api_key:
++        literals.update((api_key.encode(), json.dumps(api_key)[1:-1].encode()))
 +    auth_evidence = None
 +    auth_destination = paths.home / "auth.json"
-+    if needs_auth:
-+        if auth_source is None:
-+            raise AdmissionError(f"case {name} requires --auth-source")
-+        auth_evidence = copy_auth(auth_source, auth_destination)
-+
-+    executed = (
-+        bwrap_command(command, admission_root, paths, network, bwrap_profile)
-+        if bwrap_profile is not None
-+        else command
-+    )
 +    started = time.monotonic()
-+    process = subprocess.Popen(
-+        executed,
-+        cwd=paths.work,
-+        env=environment,
-+        stdin=subprocess.DEVNULL,
-+        stdout=subprocess.PIPE,
-+        stderr=subprocess.PIPE,
-+        start_new_session=True,
-+    )
++    process = None
++    stdout = stderr = b""
 +    timed_out = False
++    error = None
++    report = None
++    redactions_available = True
 +    try:
-+        stdout, stderr = process.communicate(timeout=timeout_seconds)
-+    except subprocess.TimeoutExpired:
-+        timed_out = True
-+        os.killpg(process.pid, signal.SIGTERM)
++        if needs_auth:
++            if auth_source is None:
++                raise AdmissionError(f"case {name} requires --auth-source")
++            auth_evidence = copy_auth(auth_source, auth_destination)
++            # Read the exact copied source before the child can refresh it.
++            redactions_available = False
++            literals.update(auth_literals(auth_destination))
++            redactions_available = True
++        executed = (
++            bwrap_command(command, admission_root, paths, network, bwrap_profile)
++            if bwrap_profile is not None
++            else command
++        )
++        process = subprocess.Popen(
++            executed,
++            cwd=paths.work,
++            env=environment,
++            stdin=subprocess.DEVNULL,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            start_new_session=True,
++        )
 +        try:
-+            stdout, stderr = process.communicate(timeout=2)
++            stdout, stderr = process.communicate(timeout=timeout_seconds)
 +        except subprocess.TimeoutExpired:
++            timed_out = True
++            os.killpg(process.pid, signal.SIGTERM)
++            try:
++                stdout, stderr = process.communicate(timeout=2)
++            except subprocess.TimeoutExpired:
++                os.killpg(process.pid, signal.SIGKILL)
++                stdout, stderr = process.communicate()
++        if timed_out:
++            raise AdmissionError(f"case exceeded its {timeout_seconds}-second timeout")
++        if process.returncode != 0:
++            raise AdmissionError(f"case exited {process.returncode}")
++        report = validate_case_report(paths.report, case.get("report_schema"))
++    except Exception as failure:
++        error = failure
++    finally:
++        if process is not None and process.poll() is None:
 +            os.killpg(process.pid, signal.SIGKILL)
 +            stdout, stderr = process.communicate()
++        if auth_destination.exists() or auth_destination.is_symlink():
++            try:
++                # Refreshes can introduce credentials absent from the source.
++                literals.update(auth_literals(auth_destination))
++            except Exception:
++                redactions_available = False
++                error = AdmissionError("diagnostics withheld: unreadable auth JSON")
++            finally:
++                auth_destination.unlink()
++        elif needs_auth and auth_evidence is not None:
++            redactions_available = False
++            error = AdmissionError("diagnostics withheld: missing final auth JSON")
++    if report is not None:
++        payload = json.dumps(report).encode()
++        if any(literal in payload for literal in literals) or any(
++            pattern.search(payload) for pattern in SECRET_PATTERNS
++        ):
++            error = AdmissionError("case report contains authentication material")
 +    elapsed_ms = round((time.monotonic() - started) * 1000)
-+    if auth_destination.exists():
-+        auth_destination.unlink()
-+    if timed_out:
-+        raise AdmissionError(
-+            f"case {name} exceeded its {timeout_seconds}-second timeout"
-+        )
-+    if process.returncode != 0:
-+        raise AdmissionError(
-+            f"case {name} exited {process.returncode}; stdout_sha256={hashlib.sha256(stdout).hexdigest()} stderr_sha256={hashlib.sha256(stderr).hexdigest()}"
-+        )
-+
-+    report = validate_case_report(paths.report, case.get("report_schema"))
-+    return {
++    result = {
 +        "name": name,
-+        "passed": True,
++        "passed": error is None,
 +        "elapsed_ms": elapsed_ms,
 +        "timeout_seconds": timeout_seconds,
-+        "exit_status": process.returncode,
++        "exit_status": process.returncode if process is not None else None,
 +        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
 +        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
 +        "stdout_bytes": len(stdout),
@@ -1428,20 +1495,54 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +            else "host-process-group"
 +        ),
 +        "auth": auth_evidence,
-+        "report": report,
++        "report": report if error is None else None,
 +    }
++    if error is not None:
++        result["timed_out"] = timed_out
++        result["diagnostics"] = f"{name}.failure.json"
++        diagnostics = {
++            "schema_version": SCHEMA_VERSION,
++            "error_type": type(error).__name__,
++        }
++        for stream, payload in (
++            ("stdout", stdout),
++            ("stderr", stderr),
++            ("error", str(error).encode()),
++        ):
++            diagnostics[stream] = diagnostic_text(
++                payload
++                if redactions_available
++                else b"[diagnostics withheld: auth redactions unavailable]",
++                literals,
++            )
++        write_json(admission_root / "evidence" / result["diagnostics"], diagnostics)
++    return result
 +
 +
-+def secret_scan(root: Path) -> None:
++def secret_scan(root: Path, literals: set[bytes] | None = None) -> None:
++    rejected = False
 +    for path in root.rglob("*"):
++        if path.is_symlink():
++            path.unlink()
++            rejected = True
++            continue
 +        if not path.is_file():
 +            continue
 +        payload = path.read_bytes()
-+        for pattern in SECRET_PATTERNS:
-+            if pattern.search(payload):
-+                raise AdmissionError(
-+                    f"secret pattern detected in evidence file {path.name}"
-+                )
++        if any(pattern.search(payload) for pattern in SECRET_PATTERNS) or any(
++            literal in payload for literal in literals or ()
++        ):
++            # Unlink first so remediation never follows a rejected symlink.
++            path.unlink()
++            write_json(
++                path,
++                {"schema_version": SCHEMA_VERSION, "passed": False, "redacted": True},
++            )
++            rejected = True
++    if rejected:
++        raise AdmissionError(
++            "secret pattern detected in evidence; affected files redacted"
++        )
 +
 +
 +def write_json(path: Path, payload: Any) -> None:
@@ -1571,27 +1672,46 @@ index 0000000000000000000000000000000000000000..0324e8c809e4c32aae8e24e81a739220
 +    write_json(evidence / "owners.json", owners)
 +
 +    results: list[dict[str, Any]] = []
++    secret_literals: set[bytes] = set()
++    case_evidence = {
++        "schema_version": SCHEMA_VERSION,
++        "passed": False,
++        "cases": results,
++    }
 +    try:
-+        for case in cases:
++        write_json(evidence / "cases.json", case_evidence)
++        for index, case in enumerate(cases):
 +            if not isinstance(case, dict):
 +                raise AdmissionError("case entries must be objects")
-+            results.append(
-+                run_case(
++            try:
++                result = run_case(
 +                    case,
 +                    candidate,
 +                    source_repo,
 +                    root,
 +                    auth_source,
 +                    bwrap_profile,
++                    secret_literals,
 +                )
-+            )
-+        write_json(
-+            evidence / "cases.json",
-+            {"schema_version": SCHEMA_VERSION, "passed": True, "cases": results},
-+        )
++            except Exception:
++                # Setup errors may contain argv or environment values before
++                # run_case has collected every credential. Retain no raw text.
++                result = {
++                    "case_index": index,
++                    "passed": False,
++                    "error": "case setup failed",
++                }
++            results.append(result)
++            write_json(evidence / "cases.json", case_evidence)
++            if results[-1]["passed"] is not True:
++                raise AdmissionError("case failed; see retained evidence diagnostics")
 +    finally:
-+        cleanup_runtime(root, evidence)
-+    secret_scan(evidence)
++        try:
++            cleanup_runtime(root, evidence)
++        finally:
++            secret_scan(evidence, secret_literals)
++    case_evidence["passed"] = True
++    write_json(evidence / "cases.json", case_evidence)
 +    print(f"admitted {candidate.version} {candidate.archive_digest}")
 +    print(evidence)
 +    return 0
@@ -2271,10 +2391,10 @@ index 0000000000000000000000000000000000000000..42fc3ad0faeaae62aa282a935e67f713
 +    main()
 diff --git a/scripts/frodex_six_tool_smoke.py b/scripts/frodex_six_tool_smoke.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..bac786a4d68a3059be67e8f8490d8818ae8edee1
+index 0000000000000000000000000000000000000000..a0b72d65a1a5945418114341583b2467da4acfc7
 --- /dev/null
 +++ b/scripts/frodex_six_tool_smoke.py
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,218 @@
 +#!/usr/bin/env python3
 +"""Run one configured-model collaboration turn through an isolated app-server."""
 +
@@ -2423,10 +2543,19 @@ index 0000000000000000000000000000000000000000..bac786a4d68a3059be67e8f8490d8818
 +            ),
 +            "turn/start",
 +        )
-+        client.wait_for_notification(
++        completed = client.wait_for_notification(
 +            "turn/completed",
 +            predicate=lambda params: params.get("threadId") == thread_id,
 +        )
++        params = completed.get("params")
++        turn = params.get("turn") if isinstance(params, dict) else None
++        if not isinstance(turn, dict):
++            raise RuntimeError("turn/completed omitted turn")
++        if turn.get("status") != "completed" or turn.get("error") is not None:
++            raise RuntimeError(
++                f"turn/completed status={turn.get('status')!r} "
++                f"error={json.dumps(turn.get('error'), sort_keys=True)}"
++            )
 +
 +    with client_type(
 +        args.codex,
@@ -2852,16 +2981,17 @@ index 0000000000000000000000000000000000000000..c9f7535824cfc14c837f6db89cac400a
 +    raise SystemExit(main())
 diff --git a/scripts/test_frodex_admission.py b/scripts/test_frodex_admission.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..99788e4d67c1c3257ae56e91ec56adbcae659578
+index 0000000000000000000000000000000000000000..ffbe7df651620560705fd89be9f82e10d7c7d80f
 --- /dev/null
 +++ b/scripts/test_frodex_admission.py
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,887 @@
 +from __future__ import annotations
 +
 +import hashlib
 +import io
 +import json
 +import stat
++import subprocess
 +import tarfile
 +import tempfile
 +import unittest
@@ -3146,6 +3276,46 @@ index 0000000000000000000000000000000000000000..99788e4d67c1c3257ae56e91ec56adbc
 +        with self.assertRaisesRegex(admission.AdmissionError, "non-symlink"):
 +            admission.copy_auth(link, self.root / "other-auth.json")
 +
++    def test_auth_literals_exclude_only_known_metadata_fields(self) -> None:
++        path = self.root / "auth.json"
++        credentials = {
++            "OPENAI_API_KEY": "fixture-api-key",
++            "tokens": {
++                "access_token": "fixture-access-token",
++                "account_id": "fixture-account",
++            },
++            "agent_identity": {
++                "plan_type": "pro",
++                "agent_private_key": "fixture-private-key",
++            },
++            "unknown": {
++                "auth_mode": "fixture-nested-mode",
++                "last_refresh": "fixture-nested-refresh",
++            },
++            "extra": [{"plan_type": "fixture-nested-plan"}],
++        }
++        path.write_text(
++            json.dumps(
++                {
++                    "auth_mode": "chatgpt",
++                    "last_refresh": "2026-10-01T00:00:00Z",
++                    **credentials,
++                }
++            )
++        )
++        self.assertEqual(
++            admission.auth_literals(path),
++            {
++                b"fixture-api-key",
++                b"fixture-access-token",
++                b"fixture-account",
++                b"fixture-private-key",
++                b"fixture-nested-mode",
++                b"fixture-nested-refresh",
++                b"fixture-nested-plan",
++            },
++        )
++
 +    def test_secret_scan_rejects_bearer_material(self) -> None:
 +        evidence = self.root / "evidence"
 +        evidence.mkdir()
@@ -3154,6 +3324,524 @@ index 0000000000000000000000000000000000000000..99788e4d67c1c3257ae56e91ec56adbc
 +        )
 +        with self.assertRaisesRegex(admission.AdmissionError, "secret pattern"):
 +            admission.secret_scan(evidence)
++        self.assertNotIn("abcdefghijklmnop", (evidence / "cases.json").read_text())
++
++    def candidate(self) -> admission.Candidate:
++        return admission.Candidate(
++            version="1.2.3+frodex.0",
++            source_commit="a" * 40,
++            platform_name="linux-x86_64",
++            archive_digest="b" * 64,
++            archive_size=1,
++            root=self.root / "candidate",
++            codex=self.root / "candidate/codex",
++            code_mode_host=self.root / "candidate/codex-code-mode-host",
++            codex_digest="c" * 64,
++            code_mode_host_digest="d" * 64,
++        )
++
++    def case(self, **overrides) -> dict[str, object]:
++        return {
++            "name": "fixture",
++            "argv": ["fixture-command"],
++            "timeout_seconds": 1,
++            **overrides,
++        }
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_failed_case_retains_redacted_output_and_refreshed_auth(
++        self, popen: mock.Mock
++    ) -> None:
++        original = "fixture-original-opaque-token"
++        refreshed = "fixture-refreshed-opaque-token"
++        api_key = "fixture-api-key-without-known-prefix"
++        auth = self.root / "auth.json"
++        auth.write_text(json.dumps({"tokens": {"access_token": original}}))
++        process = popen.return_value
++        process.returncode = 7
++
++        def communicate(**kwargs):
++            copied = self.root / "cases/fixture/home/auth.json"
++            copied.write_text(json.dumps({"tokens": {"access_token": refreshed}}))
++            return (
++                f"{original} {refreshed} {api_key}\nuseful stdout\n".encode(),
++                b"Traceback: useful failure\nBearer abcdefghijklmnop\n",
++            )
++
++        process.communicate.side_effect = communicate
++        result = admission.run_case(
++            self.case(auth=True, network=True, env={"OPENAI_API_KEY": api_key}),
++            self.candidate(),
++            self.root,
++            self.root,
++            auth,
++            None,
++        )
++        self.assertFalse(result["passed"])
++        self.assertEqual(result["exit_status"], 7)
++        failure = self.root / "evidence" / result["diagnostics"]
++        retained = failure.read_text()
++        for literal in (original, refreshed, api_key, "abcdefghijklmnop"):
++            self.assertNotIn(literal, retained)
++        self.assertIn("useful stdout", retained)
++        self.assertIn("Traceback: useful failure", retained)
++        self.assertFalse((self.root / "cases/fixture/home/auth.json").exists())
++        self.assertEqual(stat.S_IMODE(failure.stat().st_mode), 0o600)
++        admission.secret_scan(failure.parent)
++
++    def test_redaction_precedes_truncation(self) -> None:
++        token = b"fixture-secret-spanning-the-byte-limit"
++        payload = b"x" * (admission.DIAGNOSTIC_BYTES - 3) + token + b"more output"
++        result = admission.diagnostic_text(payload, {token})
++        self.assertTrue(result["truncated"])
++        self.assertLessEqual(len(result["text"].encode()), admission.DIAGNOSTIC_BYTES)
++        self.assertNotIn("fix", result["text"])
++
++    def test_multiline_credential_field_withholds_stream(self) -> None:
++        result = admission.diagnostic_text(
++            b'{"access_token":\n"opaque-fixture-value"}', set()
++        )
++        self.assertEqual(
++            result,
++            {"text": "[diagnostics withheld: credential field]", "truncated": False},
++        )
++
++    def test_invalid_utf8_stays_within_diagnostic_byte_limit(self) -> None:
++        result = admission.diagnostic_text(b"\xff" * admission.DIAGNOSTIC_BYTES, set())
++        self.assertTrue(result["truncated"])
++        self.assertLessEqual(len(result["text"].encode()), admission.DIAGNOSTIC_BYTES)
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_successful_case_preserves_result_schema(self, popen: mock.Mock) -> None:
++        popen.return_value.returncode = 0
++        popen.return_value.communicate.return_value = (b"passed", b"")
++        with mock.patch.object(admission.time, "monotonic", side_effect=[1, 1.25]):
++            result = admission.run_case(
++                self.case(),
++                self.candidate(),
++                self.root,
++                self.root,
++                None,
++                None,
++            )
++        self.assertEqual(
++            result,
++            {
++                "name": "fixture",
++                "passed": True,
++                "elapsed_ms": 250,
++                "timeout_seconds": 1,
++                "exit_status": 0,
++                "stdout_sha256": hashlib.sha256(b"passed").hexdigest(),
++                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
++                "stdout_bytes": 6,
++                "stderr_bytes": 0,
++                "network": False,
++                "isolation_profile": "host-process-group",
++                "auth": None,
++                "report": None,
++            },
++        )
++        self.assertFalse((self.root / "evidence").exists())
++
++    def test_secret_scan_removes_symlink_without_rewriting_target(self) -> None:
++        target = self.root / "target"
++        target.write_text("must remain unchanged")
++        evidence = self.root / "evidence"
++        evidence.mkdir()
++        (evidence / "linked.json").symlink_to(target)
++        with self.assertRaises(admission.AdmissionError):
++            admission.secret_scan(evidence)
++        self.assertEqual(target.read_text(), "must remain unchanged")
++        self.assertFalse((evidence / "linked.json").is_symlink())
++
++    def test_secret_scan_redacts_literal_credentials_and_preserves_failure_json(
++        self,
++    ) -> None:
++        evidence = self.root / "evidence"
++        evidence.mkdir()
++        admission.write_json(
++            evidence / "cases.json", {"assertions": ["opaque-fixture-value"]}
++        )
++        with self.assertRaises(admission.AdmissionError):
++            admission.secret_scan(evidence, {b"opaque-fixture-value"})
++        self.assertEqual(
++            admission.load_json(evidence / "cases.json"),
++            {
++                "schema_version": 1,
++                "passed": False,
++                "redacted": True,
++            },
++        )
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_report_validation_failure_retains_redacted_exception(
++        self, popen: mock.Mock
++    ) -> None:
++        api_key = "fixture-api-key-for-error"
++        popen.return_value.returncode = 0
++        popen.return_value.communicate.return_value = (b"before validation", b"")
++        with mock.patch.object(
++            admission,
++            "validate_case_report",
++            side_effect=ValueError(f"bad report {api_key}"),
++        ):
++            result = admission.run_case(
++                self.case(env={"OPENAI_API_KEY": api_key}),
++                self.candidate(),
++                self.root,
++                self.root,
++                None,
++                None,
++            )
++        self.assertFalse(result["passed"])
++        self.assertEqual(result["exit_status"], 0)
++        diagnostics = admission.load_json(
++            self.root / "evidence" / result["diagnostics"]
++        )
++        self.assertEqual(
++            diagnostics["error"], {"text": "bad report [REDACTED]", "truncated": False}
++        )
++        self.assertEqual(diagnostics["error_type"], "ValueError")
++
++    @mock.patch("frodex_admission.os.killpg")
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_timeout_retains_output(self, popen: mock.Mock, killpg: mock.Mock) -> None:
++        process = popen.return_value
++        process.returncode = -9
++        process.pid = 12345
++        process.communicate.side_effect = [
++            subprocess.TimeoutExpired("fixture-command", 1),
++            subprocess.TimeoutExpired("fixture-command", 2),
++            (b"partial output", b"partial traceback"),
++        ]
++        result = admission.run_case(
++            self.case(),
++            self.candidate(),
++            self.root,
++            self.root,
++            None,
++            None,
++        )
++        self.assertTrue(result["timed_out"])
++        self.assertFalse(result["passed"])
++        self.assertEqual(killpg.call_count, 2)
++        diagnostics = admission.load_json(
++            self.root / "evidence" / result["diagnostics"]
++        )
++        self.assertEqual(diagnostics["stdout"]["text"], "partial output")
++
++    @mock.patch("frodex_admission.os.killpg")
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_communication_error_terminates_owned_process(
++        self, popen: mock.Mock, killpg: mock.Mock
++    ) -> None:
++        process = popen.return_value
++        process.pid = 12345
++        process.returncode = -9
++        process.poll.return_value = None
++        process.communicate.side_effect = [
++            OSError("fixture pipe failure"),
++            (b"", b"stopped"),
++        ]
++        result = admission.run_case(
++            self.case(),
++            self.candidate(),
++            self.root,
++            self.root,
++            None,
++            None,
++        )
++        self.assertFalse(result["passed"])
++        killpg.assert_called_once_with(process.pid, admission.signal.SIGKILL)
++        diagnostics = admission.load_json(
++            self.root / "evidence" / result["diagnostics"]
++        )
++        self.assertEqual(diagnostics["stderr"]["text"], "stopped")
++        self.assertEqual(diagnostics["error"]["text"], "fixture pipe failure")
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_unreadable_refreshed_auth_withholds_diagnostics(
++        self, popen: mock.Mock
++    ) -> None:
++        auth = self.root / "auth.json"
++        auth.write_text('{"fixture": "original"}')
++        popen.return_value.returncode = 1
++
++        def communicate(**kwargs):
++            (self.root / "cases/fixture/home/auth.json").write_text("not JSON")
++            return b"unknown-refreshed-credential", b"unknown-refreshed-credential"
++
++        popen.return_value.communicate.side_effect = communicate
++        result = admission.run_case(
++            self.case(auth=True, network=True),
++            self.candidate(),
++            self.root,
++            self.root,
++            auth,
++            None,
++        )
++        self.assertFalse(result["passed"])
++        retained = (self.root / "evidence" / result["diagnostics"]).read_text()
++        self.assertNotIn("unknown-refreshed-credential", retained)
++        self.assertIn("diagnostics withheld", retained)
++        self.assertFalse((self.root / "cases/fixture/home/auth.json").exists())
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_removed_auth_withholds_diagnostics(self, popen: mock.Mock) -> None:
++        auth = self.root / "auth.json"
++        auth.write_text('{"fixture": "original"}')
++        popen.return_value.returncode = 1
++
++        def communicate(**kwargs):
++            (self.root / "cases/fixture/home/auth.json").unlink()
++            return b"unknown-refreshed-credential", b"unknown-refreshed-credential"
++
++        popen.return_value.communicate.side_effect = communicate
++        result = admission.run_case(
++            self.case(auth=True, network=True),
++            self.candidate(),
++            self.root,
++            self.root,
++            auth,
++            None,
++        )
++        self.assertFalse(result["passed"])
++        retained = (self.root / "evidence" / result["diagnostics"]).read_text()
++        self.assertNotIn("unknown-refreshed-credential", retained)
++        self.assertIn("diagnostics withheld", retained)
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_successful_report_cannot_retain_literal_credentials(
++        self, popen: mock.Mock
++    ) -> None:
++        token = "fixture-api-key-in-report"
++        popen.return_value.returncode = 0
++        popen.return_value.communicate.return_value = (b"", b"")
++        with mock.patch.object(
++            admission, "validate_case_report", return_value={"assertions": [token]}
++        ):
++            result = admission.run_case(
++                self.case(env={"OPENAI_API_KEY": token}),
++                self.candidate(),
++                self.root,
++                self.root,
++                None,
++                None,
++            )
++        self.assertFalse(result["passed"])
++        self.assertIsNone(result["report"])
++        self.assertNotIn(token, json.dumps(result))
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_case_results_survive_failure_and_runtime_cleanup(
++        self, popen: mock.Mock
++    ) -> None:
++        archive = self.archive()
++        manifest = self.root / "manifest.json"
++        manifest.write_text(json.dumps(self.manifest(archive)))
++        owners = self.root / "owners.json"
++        owners.write_text("{}")
++        cases = self.root / "case-manifest.json"
++        cases.write_text(
++            json.dumps(
++                {
++                    "schema_version": 1,
++                    "cases": [
++                        self.case(name=name) for name in ("first", "second", "third")
++                    ],
++                }
++            )
++        )
++        run_root = self.root / "run"
++        run_root.mkdir()
++        first = mock.Mock(returncode=0)
++        first.communicate.return_value = (b"first passed", b"")
++        second = mock.Mock(returncode=1)
++        second.communicate.return_value = (b"second failed", b"failure traceback")
++        popen.side_effect = [first, second]
++        args = admission.build_parser().parse_args(
++            [
++                "--manifest",
++                str(manifest),
++                "--archive",
++                str(archive),
++                "--source-repo",
++                str(self.root),
++                "--expected-source",
++                "a" * 40,
++                "--expected-version",
++                "1.2.3+frodex.0",
++                "--owner-inventory",
++                str(owners),
++                "--queue-dir",
++                str(self.root),
++                "--cases",
++                str(cases),
++                "--platform",
++                "linux-x86_64",
++                "--no-bwrap",
++            ]
++        )
++        snapshots = []
++        write_json = admission.write_json
++
++        def record_write(path, payload):
++            write_json(path, payload)
++            if path.name == "cases.json":
++                snapshots.append(admission.load_json(path))
++
++        with (
++            mock.patch.object(admission, "verify_source_checkout"),
++            mock.patch.object(admission, "verify_candidate_version"),
++            mock.patch.object(admission, "verify_owner_inventory", return_value={}),
++            mock.patch.object(
++                admission, "ensure_admission_root", return_value=run_root
++            ),
++            mock.patch.object(admission, "write_json", side_effect=record_write),
++            mock.patch.object(
++                admission, "secret_scan", wraps=admission.secret_scan
++            ) as scan,
++            self.assertRaisesRegex(admission.AdmissionError, "retained evidence"),
++        ):
++            admission.admit(args)
++        self.assertEqual([len(snapshot["cases"]) for snapshot in snapshots], [0, 1, 2])
++        self.assertTrue(all(snapshot["passed"] is False for snapshot in snapshots))
++        self.assertEqual(
++            [case["passed"] for case in snapshots[-1]["cases"]], [True, False]
++        )
++        self.assertFalse((run_root / "cases").exists())
++        self.assertFalse((run_root / "candidate").exists())
++        self.assertTrue((run_root / "evidence/second.failure.json").exists())
++        cleanup = admission.load_json(run_root / "evidence/cleanup.json")
++        self.assertEqual(cleanup["removed"], ["cases", "candidate"])
++        scan.assert_called_once_with(run_root / "evidence", set())
++        self.assertEqual(popen.call_count, 2)
++
++    @mock.patch("frodex_admission.subprocess.Popen")
++    def test_authenticated_admission_preserves_chatgpt_owner_inventory(
++        self, popen: mock.Mock
++    ) -> None:
++        archive = self.archive()
++        manifest = self.root / "manifest.json"
++        manifest.write_text(json.dumps(self.manifest(archive)))
++        queue = self.root / "queued"
++        queue.mkdir()
++        (queue / "fixture.md").write_text("# Fixture\n")
++        inventory = {
++            "schema_version": 1,
++            "candidate_source": "a" * 40,
++            "queue_cutoff": {
++                "plans": ["fixture.md"],
++                "sha256": admission.queue_plan_digest(["fixture.md"]),
++            },
++            "owners": [
++                {"id": "frodex-chatgpt-responses-version-header", "required": False},
++                {
++                    "id": "strip-build-metadata-from-chatgpt-client-version",
++                    "required": False,
++                },
++            ],
++        }
++        owners = self.root / "owners.json"
++        owners.write_text(json.dumps(inventory))
++        cases = self.root / "case-manifest.json"
++        cases.write_text(
++            json.dumps(
++                {
++                    "schema_version": 1,
++                    "cases": [
++                        self.case(auth=True, network=True, report_schema="assertions")
++                    ],
++                }
++            )
++        )
++        auth = self.root / "fixture-auth.json"
++        auth.write_text(
++            json.dumps(
++                {
++                    "auth_mode": "chatgpt",
++                    "last_refresh": "2026-10-01T00:00:00Z",
++                    "OPENAI_API_KEY": None,
++                    "tokens": {
++                        "access_token": "fixture-original-access",
++                        "refresh_token": "fixture-original-refresh",
++                    },
++                }
++            )
++        )
++        run_root = self.root / "run"
++        run_root.mkdir()
++        process = popen.return_value
++        process.returncode = 0
++        report = {
++            "schema_version": 1,
++            "passed": True,
++            "assertions": ["chatgpt-client-version"],
++        }
++
++        def communicate(**kwargs):
++            copied = run_root / "cases/fixture/home/auth.json"
++            payload = json.loads(copied.read_text())
++            payload["tokens"]["access_token"] = "fixture-refreshed-access"
++            copied.write_text(json.dumps(payload))
++            (run_root / "cases/fixture/report.json").write_text(json.dumps(report))
++            return b"chatgpt fixture passed", b""
++
++        process.communicate.side_effect = communicate
++        args = admission.build_parser().parse_args(
++            [
++                "--manifest",
++                str(manifest),
++                "--archive",
++                str(archive),
++                "--source-repo",
++                str(self.root),
++                "--expected-source",
++                "a" * 40,
++                "--expected-version",
++                "1.2.3+frodex.0",
++                "--owner-inventory",
++                str(owners),
++                "--queue-dir",
++                str(queue),
++                "--cases",
++                str(cases),
++                "--auth-source",
++                str(auth),
++                "--platform",
++                "linux-x86_64",
++                "--no-bwrap",
++            ]
++        )
++        with (
++            mock.patch.object(admission, "verify_source_checkout"),
++            mock.patch.object(admission, "verify_candidate_version"),
++            mock.patch.object(
++                admission, "ensure_admission_root", return_value=run_root
++            ),
++            mock.patch.object(
++                admission, "secret_scan", wraps=admission.secret_scan
++            ) as scan,
++            mock.patch("sys.stdout", new_callable=io.StringIO),
++        ):
++            self.assertEqual(admission.admit(args), 0)
++        self.assertEqual(
++            admission.load_json(run_root / "evidence/owners.json"), inventory
++        )
++        results = admission.load_json(run_root / "evidence/cases.json")
++        self.assertTrue(results["passed"])
++        self.assertEqual(results["cases"][0]["report"], report)
++        self.assertFalse((run_root / "cases").exists())
++        self.assertFalse((run_root / "candidate").exists())
++        scan.assert_called_once_with(
++            run_root / "evidence",
++            {
++                b"fixture-original-access",
++                b"fixture-original-refresh",
++                b"fixture-refreshed-access",
++            },
++        )
 +
 +    @mock.patch("frodex_admission.shutil.which", return_value="/usr/bin/bwrap")
 +    def test_bwrap_profiles_make_pid_isolation_explicit(
@@ -3612,14 +4300,15 @@ index 0000000000000000000000000000000000000000..f4738bf5ede5ea4920da28f7a881c727
 +    unittest.main()
 diff --git a/scripts/test_frodex_six_tool_smoke.py b/scripts/test_frodex_six_tool_smoke.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..1aa6841a44439872a74be4f96a9e9573816cf475
+index 0000000000000000000000000000000000000000..4e5ec8a7bea1aa2bcec15e0af9afbf15cabd32b6
 --- /dev/null
 +++ b/scripts/test_frodex_six_tool_smoke.py
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,200 @@
 +import json
 +from pathlib import Path
 +import tempfile
 +import unittest
++from unittest import mock
 +
 +import frodex_six_tool_smoke as smoke
 +
@@ -3713,6 +4402,104 @@ index 0000000000000000000000000000000000000000..1aa6841a44439872a74be4f96a9e9573
 +        parent.write_text("", encoding="utf-8")
 +        with self.assertRaisesRegex(RuntimeError, "does not belong"):
 +            smoke.rollout_calls(parent, "parent-id")
++
++    def test_failed_turn_is_reported_before_resume_or_tool_order(self):
++        for turn in (
++            {"status": "failed", "error": {"message": "fixture model unavailable"}},
++            {"status": "interrupted", "error": None},
++            {"status": "completed", "error": {"message": "fixture unexpected error"}},
++        ):
++            with self.subTest(turn=turn):
++                client_type = mock.MagicMock()
++                client = client_type.return_value.__enter__.return_value
++                client.request.side_effect = [
++                    {"result": {}},
++                    {"result": {"thread": {"id": "parent-id"}}},
++                    {"result": {}},
++                ]
++                client.wait_for_notification.return_value = {
++                    "params": {"threadId": "parent-id", "turn": turn}
++                }
++                report = self.sessions / "report.json"
++                with (
++                    mock.patch.object(
++                        smoke, "load_app_server_client", return_value=client_type
++                    ),
++                    mock.patch.object(
++                        smoke.sys,
++                        "argv",
++                        [
++                            "smoke",
++                            "--codex",
++                            "/fixture/codex",
++                            "--source",
++                            "/fixture/source",
++                            "--model",
++                            "fixture-model",
++                            "--report",
++                            str(report),
++                        ],
++                    ),
++                    self.assertRaisesRegex(
++                        RuntimeError, f"turn/completed status='{turn['status']}'"
++                    ) as caught,
++                ):
++                    smoke.main()
++                if turn["error"] is not None:
++                    self.assertIn(turn["error"]["message"], str(caught.exception))
++                self.assertEqual(client_type.call_count, 1)
++                self.assertEqual(client.request.call_count, 3)
++                self.assertFalse(report.exists())
++
++    def test_completed_turn_preserves_success_report(self):
++        rollout = self.write_rollout("parent", "parent-id", self.parent_records)
++        client_type = mock.MagicMock()
++        client = client_type.return_value.__enter__.return_value
++        client.request.side_effect = [
++            {"result": {}},
++            {"result": {"thread": {"id": "parent-id"}}},
++            {"result": {}},
++            {"result": {}},
++            {"result": {"thread": {"id": "parent-id", "path": str(rollout)}}},
++        ]
++        client.wait_for_notification.return_value = {
++            "params": {
++                "threadId": "parent-id",
++                "turn": {"status": "completed", "error": None},
++            }
++        }
++        report = self.sessions / "report.json"
++        with (
++            mock.patch.object(
++                smoke, "load_app_server_client", return_value=client_type
++            ),
++            mock.patch.object(
++                smoke.sys,
++                "argv",
++                [
++                    "smoke",
++                    "--codex",
++                    "/fixture/codex",
++                    "--source",
++                    "/fixture/source",
++                    "--model",
++                    "fixture-model",
++                    "--report",
++                    str(report),
++                ],
++            ),
++        ):
++            self.assertEqual(smoke.main(), 0)
++        self.assertEqual(
++            json.loads(report.read_text()),
++            {
++                "schema_version": 1,
++                "passed": True,
++                "tools": [f"collaboration.{name}" for name in smoke.EXPECTED_TOOLS],
++                "thread_resume": True,
++                "canonical_results": True,
++            },
++        )
 +
 +
 +if __name__ == "__main__":

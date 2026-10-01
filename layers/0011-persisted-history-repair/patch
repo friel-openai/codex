@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 3320deecf404ab629dda2393994c7c2ffd0cba85..0550b67cda838f29a34eade187ccf98b5db7e18d 100644
+index 2073ee8b51042eb5f8f0253b056f63f0aa17d8d0..d661076500cd2de2d06da333fc991655f831f039 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -4669,6 +4669,7 @@ dependencies = [
+@@ -4683,6 +4683,7 @@ dependencies = [
  name = "codex-thread-store"
  version = "0.154.0"
  dependencies = [
@@ -649,7 +649,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ec3ac50d1fa5cd93bd6185a188f7eb13b188c43a..6234d7d490cf167d21db7b4b38832e8ac666da2e 100644
+index 1c84fb25c727bf213319bbbbf4852af8db0ee6c6..92fb0fb3786e8313ef44a60a12f62dcf5940fca6 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -455,6 +455,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
@@ -750,7 +750,7 @@ index ec3ac50d1fa5cd93bd6185a188f7eb13b188c43a..6234d7d490cf167d21db7b4b38832e8a
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -7881,18 +7850,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -7884,18 +7853,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .await
          .expect("child thread should archive");
 
@@ -822,7 +822,7 @@ index ec3ac50d1fa5cd93bd6185a188f7eb13b188c43a..6234d7d490cf167d21db7b4b38832e8a
  }
 
  #[tokio::test]
-@@ -10013,18 +10034,52 @@ while True:
+@@ -10016,18 +10037,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -877,7 +877,7 @@ index ec3ac50d1fa5cd93bd6185a188f7eb13b188c43a..6234d7d490cf167d21db7b4b38832e8a
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -10035,13 +10090,8 @@ while True:
+@@ -10038,13 +10093,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -5443,7 +5443,7 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
          .metadata
          .cwd
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c9aa8c40a 100644
+index ec70ca39cbfdccd7597eca8cdb48bfe3fd24b79a..918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5457,7 +5457,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
  mod helpers;
  mod list_threads;
  mod live_writer;
-@@ -206,15 +210,24 @@ struct LiveRecorderRecovery {
+@@ -209,15 +213,24 @@ struct LiveRecorderRecovery {
  /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
  /// entry supplies that half of the reservation until the in-process mutex is released.
  struct RolloutWriterReservation {
@@ -5484,7 +5484,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
  }
 
  #[derive(Default)]
-@@ -458,13 +471,59 @@ impl LocalThreadStore {
+@@ -461,13 +474,59 @@ impl LocalThreadStore {
          live_writer::rollout_path(self, thread_id).await
      }
 
@@ -5545,7 +5545,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
      }
 
      /// Freezes a thread only while the expected physical rollout remains selected.
-@@ -474,13 +533,50 @@ impl LocalThreadStore {
+@@ -477,13 +536,50 @@ impl LocalThreadStore {
          expected_rollout_id: codex_protocol::RolloutId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
@@ -5600,7 +5600,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
      }
 
      /// Freezes a paginated fork without reading history excluded from its response.
-@@ -701,13 +797,20 @@ impl LocalThreadStore {
+@@ -704,13 +800,20 @@ impl LocalThreadStore {
          thread_ids.dedup();
          let mut in_process_guards = Vec::with_capacity(thread_ids.len());
          for &thread_id in &thread_ids {
@@ -5624,7 +5624,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
          })
      }
 
-@@ -1347,7 +1450,7 @@ mod tests {
+@@ -1350,7 +1453,7 @@ mod tests {
              .expect("recover recorder");
          drop(store);
 
@@ -5633,7 +5633,7 @@ index a99b4e8b3af0de98d2c2678723cfe6ee33b89457..eba6576f2be6fd49663638961d568d9c
          assert!(
              matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
          );
-@@ -2314,7 +2417,7 @@ mod tests {
+@@ -2317,7 +2420,7 @@ mod tests {
              drop(recorder);
 
              // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
@@ -5736,7 +5736,7 @@ index 16e1d5cbeb77ed3bcdba0d76a9b4dff177f16f82..5d9f4697eaf3365f1d8ce541ab5b491a
          } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy) {
              read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path())
 diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
-index 3164752ebb8bb63a08eca378654586016c5e9353..c2d8cba80620afff7d62a3d73a4d3dca8a2c6641 100644
+index 18170d0ffacbc2931278e597eb7595f248b0f10e..61f599fa6435a8b8e8630daa867c23ece503c268 100644
 --- a/codex-rs/thread-store/src/local/paginated_fork.rs
 +++ b/codex-rs/thread-store/src/local/paginated_fork.rs
 @@ -18,6 +18,7 @@ use tokio::sync::Notify;
@@ -11724,7 +11724,7 @@ index 0000000000000000000000000000000000000000..86aacee66f12c047438785e621c11762
 +    assert_eq!(tokio::fs::read(second_path).await.unwrap(), source);
 +}
 diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
-index 6623d0b91b745f52b4d27f0e6afd155aaa193a7b..0cd9d08e30407fc3712bfb846b1f7af92f1a8098 100644
+index a17531bcf27ddfd65e0d9a45dc1b3376f9e62871..76dcc25547744b76e36c814fbdef92d504344735 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read.rs
 @@ -270,6 +270,7 @@ async fn indexed_same_thread_lineage(
@@ -11736,10 +11736,10 @@ index 6623d0b91b745f52b4d27f0e6afd155aaa193a7b..0cd9d08e30407fc3712bfb846b1f7af9
              filter_texts: Vec::new(),
          }],
 diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
-index fafeafd4461f0750d555364042afefd1ab24bc40..8544bbc503c0a0ef558869f36f2159e00ff65939 100644
+index 03e3113f18f669fde7e50bffefca87b579a5766a..e3cd4c9836362742135a0d86a32c0c73a54a1110 100644
 --- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
-@@ -861,6 +861,7 @@ mod tests {
+@@ -948,6 +948,7 @@ mod tests {
              rollout_path: PathBuf::from(path),
              start_ordinal,
              end_ordinal_exclusive,

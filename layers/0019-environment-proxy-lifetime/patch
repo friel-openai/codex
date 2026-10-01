@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index edd71e416f58bbae290616636c2423b60ef4d951..749822db991f922002d278e1cbd303637208e6c6 100644
+index c78a6ccd269402eeb2781aad26b9221b4049f56c..39262376ea7d9535a67d310dee89f87dc23c5b7e 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2366,6 +2366,7 @@ dependencies = [
+@@ -2367,6 +2367,7 @@ dependencies = [
   "codex-windows-sandbox",
   "dotenvy",
   "pathdiff",
@@ -547,7 +547,7 @@ index 3204d620326f2d1094bf48d64064ac4fa74b8a57..69c1ffc92125beea2d8e938e59ad10aa
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e166f2d17 100644
+index 3dc3e97d91245b3326637817570b06ead902db96..b685c2d21c95ad7e0e1a70ddc99d2d69329fb407 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -74,6 +74,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
@@ -558,7 +558,7 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
  use codex_network_proxy::NetworkPolicyDecider;
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::config_types::ShellEnvironmentPolicy;
-@@ -545,6 +546,7 @@ impl UnifiedExecProcessManager {
+@@ -540,6 +541,7 @@ impl UnifiedExecProcessManager {
              process,
              metrics_sidecar,
              permissions,
@@ -566,7 +566,7 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
          } = attempt;
          let process = Arc::new(process);
          if let Some(completion) = completion.as_ref() {
-@@ -618,6 +620,7 @@ impl UnifiedExecProcessManager {
+@@ -613,6 +615,7 @@ impl UnifiedExecProcessManager {
                  deferred_network_approval.clone(),
                  network_denial_monitor,
                  metrics_sidecar,
@@ -574,7 +574,7 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
                  Arc::clone(&output_buffer),
                  Arc::clone(&initial_exec_command_active),
              )
-@@ -1207,6 +1210,7 @@ impl UnifiedExecProcessManager {
+@@ -1202,6 +1205,7 @@ impl UnifiedExecProcessManager {
          network_approval: Option<DeferredNetworkApproval>,
          network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
          metrics_sidecar: Option<PluginMetricsSidecar>,
@@ -582,7 +582,7 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
          output_buffer: Arc<tokio::sync::Mutex<OutputBuffers>>,
          initial_exec_command_active: Arc<AtomicBool>,
      ) {
-@@ -1233,13 +1237,8 @@ impl UnifiedExecProcessManager {
+@@ -1228,13 +1232,8 @@ impl UnifiedExecProcessManager {
              store.processes.insert(process_id, entry);
              pruned_entry
          };
@@ -598,7 +598,7 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
          spawn_exit_watcher(
              Arc::clone(&process),
              context,
-@@ -1251,7 +1250,15 @@ impl UnifiedExecProcessManager {
+@@ -1246,7 +1245,15 @@ impl UnifiedExecProcessManager {
              started_at,
              network_denial_monitor,
              plugin_metrics_sidecar,
@@ -615,10 +615,10 @@ index d8433551e55d95e4b9450a427d7f97810e455190..e8f620cf9720d2ec7456da6b9dc7ac1e
 
      #[allow(clippy::too_many_arguments)]
 diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-index 5ce38c4930ad4648b3355017522ccb313707db77..4567f60035e7e802ede86731acb8645f3d17bff6 100644
+index 7edc743ce422bc2d1ef527f814ec9757a03a757e..9840d0b0879cd9164f555904c4d9143c44922482 100644
 --- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-@@ -222,6 +222,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
+@@ -223,6 +223,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
          exec_server_shell_snapshot: None,
          network: None,
          network_environment_id: None,

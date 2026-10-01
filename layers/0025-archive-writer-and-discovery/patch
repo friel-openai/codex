@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index f5fecfe3cd46efcde8c5a0ff2811167342193661..9f4b7e1625e280a9d4b64f05e8fea8cc5bc186f2 100644
+index 1496a9573da0da2ec2a9d8dce5929069d34d7707..cb2dfb196e2097125fe2e799de8aeab241d5c802 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2179,7 +2179,7 @@ impl ThreadRequestProcessor {
+@@ -2192,7 +2192,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index f5fecfe3cd46efcde8c5a0ff2811167342193661..9f4b7e1625e280a9d4b64f05e8fea8cc
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6553,6 +6553,28 @@ impl ThreadRequestProcessor {
+@@ -6607,6 +6607,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -53,10 +53,10 @@ index 3cdfcc80c941e4812641a72945ca353de9597544..0908e128260c8b6e7791a2e594373849
  mod thread_delete;
  mod thread_environments;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-index e7928f51b5a9df6c188fbd1878c60fdb70d1d3ac..0a9fd660801b859b8bbb6e58f4d171565496491b 100644
+index bd07b14abe79109342383aea97676954ae965691..1ce5e31a325a1db68679d7e3bcc68a7e176a19c2 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-@@ -206,6 +206,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -208,6 +208,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
      let codex_home = TempDir::new()?;
      MockResponsesConfig::new(&server.uri())
          .enable_feature(Feature::Collab)
@@ -64,7 +64,7 @@ index e7928f51b5a9df6c188fbd1878c60fdb70d1d3ac..0a9fd660801b859b8bbb6e58f4d17156
          .write(codex_home.path())?;
      let parent_id = create_fake_paginated_rollout(
          codex_home.path(),
-@@ -234,7 +235,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -236,7 +237,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -73,7 +73,7 @@ index e7928f51b5a9df6c188fbd1878c60fdb70d1d3ac..0a9fd660801b859b8bbb6e58f4d17156
          )
          .await?;
 
-@@ -604,7 +605,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
+@@ -574,7 +575,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -82,7 +82,7 @@ index e7928f51b5a9df6c188fbd1878c60fdb70d1d3ac..0a9fd660801b859b8bbb6e58f4d17156
          )
          .await?;
      state_db
-@@ -716,7 +717,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+@@ -686,7 +687,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -372,10 +372,10 @@ index cb43b44d6c1f36fd09088627fa589f588bf82cc3..08a7a741dd53b16fd6290a9db5fa48b4
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index c44b0b6416e5e1eccfbb075d59e1b1e5dbcfab6a..3a0179bcd9031fc5492e544dc8b3201283f9d068 100644
+index ee3737e6a23c473b3cdf4eef36e349823342be2a..36cd58a3c704c4e54c97b93fbd56b59f5d3dd6d7 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1099,12 +1099,12 @@ async fn select_thread_candidates(
+@@ -1119,12 +1119,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }
