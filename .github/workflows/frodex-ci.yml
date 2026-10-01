@@ -101,7 +101,7 @@ jobs:
 
       - name: Test release package validation and admission
         working-directory: ${{ steps.projection.outputs.path }}
-        run: PYTHONPATH=scripts python3 -m unittest test_frodex_package test_frodex_admission test_frodex_package_smoke
+        run: PYTHONPATH=scripts python3 -m unittest test_frodex_package test_frodex_admission test_frodex_package_smoke test_frodex_six_tool_smoke
 
       - name: Configure rusty_v8 artifacts
         shell: bash
@@ -157,7 +157,7 @@ jobs:
         with:
           tool: nextest@0.9.103
 
-      - name: Run core unit and Frodex runtime-recovery tests
+      - name: Run affected Frodex source tests
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           set -euo pipefail
@@ -166,12 +166,18 @@ jobs:
           python3 -m unittest discover \
             -s "${GITHUB_WORKSPACE}/.github/scripts" -p test_frodex_ci_selection.py
 
-          # This fixture-only correction needs two code-mode host tests.
-          # The prior 69 cases passed: https://github.com/friel-openai/codex/actions/runs/36480838887
+          # Selected integration tests launch executables from other Cargo packages.
           cargo build --manifest-path codex-rs/Cargo.toml --profile ci-test --locked \
-            -p codex-code-mode-host --bin codex-code-mode-host
+            -p codex-cli -p codex-app-server -p codex-app-server-test-client \
+            -p codex-code-mode-host -p codex-rmcp-client \
+            --bin codex --bin codex-app-server --bin codex-app-server-test-client \
+            --bin codex-code-mode-host --bin test_stdio_server
           env \
+            CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex" \
+            CARGO_BIN_EXE_codex-app-server="${CARGO_TARGET_DIR}/ci-test/codex-app-server" \
+            CARGO_BIN_EXE_codex-app-server-test-client="${CARGO_TARGET_DIR}/ci-test/codex-app-server-test-client" \
             CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host" \
+            CARGO_BIN_EXE_test_stdio_server="${CARGO_TARGET_DIR}/ci-test/test_stdio_server" \
             python3 "${GITHUB_WORKSPACE}/.github/scripts/frodex_ci_selection.py" \
               --source "$PWD" \
               --config "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
