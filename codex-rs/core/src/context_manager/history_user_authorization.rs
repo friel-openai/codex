@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use super::ContextManager;
 use crate::compact::is_summary_message;
-use crate::context::UserGoalUpdate;
 use crate::context::is_contextual_user_fragment;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
@@ -16,16 +15,11 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ReconciledRetainedContext;
 use codex_history::RetainedContext;
 use codex_history::RetainedInputSource;
+pub(super) use codex_history::RetainedMessageSource;
 use codex_history::RetainedUserMessage;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-
-/// Checkpoint items may have been shortened while preserving their original metadata.
-pub(super) enum RetainedMessageSource {
-    Original,
-    Checkpoint,
-}
 
 impl ContextManager {
     pub(super) fn has_legacy_user_messages(&self) -> bool {
@@ -93,11 +87,22 @@ impl ContextManager {
                     .as_ref()
                     .is_some_and(|metadata| metadata.inherited_user_message)
             }) {
-                let _ = self.record_retained_message(
+                let captured = self.record_retained_message(
                     &envelope.item,
                     envelope.metadata.as_ref(),
                     RetainedMessageSource::Checkpoint,
                 );
+                if let Some(saved) = envelope
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.retained_source.as_ref())
+                    && captured.as_ref().is_some_and(|captured| {
+                        captured.id == saved.id && captured.complete == saved.complete
+                    })
+                {
+                    // Adoption must not mint a new revision for the same saved evidence.
+                    Arc::make_mut(&mut self.retained_context).restore_source_revision(saved);
+                }
             }
         }
     }
@@ -147,61 +152,13 @@ impl ContextManager {
         }
         let mut captured = None;
         let inherited = metadata.is_some_and(|metadata| metadata.inherited_user_message);
-        if (!inherited || self.retain_inherited_user_messages)
-            && let ResponseItem::Message {
-                content,
-                phase,
-                internal_chat_message_metadata_passthrough,
-                ..
-            } = item
-        {
-            let mut complete = matches!(source, RetainedMessageSource::Original)
-                && (is_assistant
-                    || internal_chat_message_metadata_passthrough
-                        .as_ref()
-                        .and_then(|metadata| metadata.content_item_kinds.as_ref())
-                        .is_some_and(|kinds| {
-                            kinds.len() == content.len()
-                                && kinds.iter().all(|kind| {
-                                    kind.0.starts_with("user.")
-                                        && kind.0 != UserGoalUpdate::OMITTED_OBJECTIVE_KIND
-                                })
-                        }));
-            complete &= metadata
-                .and_then(|metadata| metadata.retained_source.as_ref())
-                .is_none_or(|source| source.complete);
-            let text = content
-                .iter()
-                .filter_map(|content| match content {
-                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                        Some(text.as_str())
-                    }
-                    _ => {
-                        complete = false;
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            // Keep the same bounded text that child reviewers receive before
-            // compaction, instead of letting storage discard a large source.
-            // Local instruction sections still omit incomplete originals whole.
-            let (text, truncated) = guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS);
-            complete &= !truncated;
-            let message = RetainedUserMessage {
-                phase: phase.clone(),
-                origin: codex_history::UserInputOrigin::from_message(item),
-                turn_id: item.turn_id().unwrap_or_default().to_owned(),
-                message_id: item.id().map(|id| id.as_str().to_owned()),
-                text,
-                complete,
-            };
-            let retained = Arc::make_mut(&mut self.retained_context);
-            captured = if is_assistant {
-                retained.record_assistant_message(message, metadata.into())
-            } else {
-                retained.record_user_message(message, metadata.into())
-            };
+        if !inherited || self.retain_inherited_user_messages {
+            captured = codex_history::record_retained_message(
+                Arc::make_mut(&mut self.retained_context),
+                item,
+                metadata,
+                source,
+            );
         }
         if !is_assistant {
             self.user_message_revision = self.user_message_revision.saturating_add(1);

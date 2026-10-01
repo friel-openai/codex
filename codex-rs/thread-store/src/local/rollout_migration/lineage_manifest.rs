@@ -17,6 +17,7 @@ use serde::Serialize;
 use super::RolloutMigrationKind;
 use super::lineage::LegacyLineageMigrationPlan;
 use super::lineage::LegacyLineagePredecessor;
+use super::lineage_stage::MeasuredLineageTarget;
 use super::lineage_stage::measure_legacy_lineage;
 use super::single_manifest::measure_single_rollout;
 use crate::ThreadStoreResult;
@@ -34,6 +35,9 @@ pub struct RolloutMigrationManifest {
     pub history_base_dependencies: Vec<RolloutMigrationHistoryBaseDependency>,
     pub reference_dependencies: Vec<RolloutMigrationReferenceDependency>,
     pub targets: Vec<RolloutMigrationLineageTarget>,
+    /// Detached review inputs counted once, independently of checkpoint reference count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_input_target: Option<RolloutMigrationLineageTarget>,
     pub source_bytes: u64,
     pub dependency_bytes: u64,
     /// Exact bytes written into private uncompressed target files before publication.
@@ -139,6 +143,9 @@ pub struct RolloutMigrationAdditionalFreeSpace {
     pub filesystem_metadata: &'static str,
     pub dry_run_decompression_temporary: &'static str,
     pub compressed_publication_temporary: &'static str,
+    /// Private replacement needed only when preserving bounded Desktop item IDs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_id_rewrite_temporary: Option<&'static str>,
 }
 
 /// Ordered durable phases used by apply and restart recovery.
@@ -160,6 +167,7 @@ pub(super) async fn build_lineage_manifest(
     let sources = plan
         .sources
         .iter()
+        .chain(&plan.authentication_sources)
         .map(|source| RolloutMigrationLineageSource {
             thread_id: source.thread_id,
             rollout_id: source.rollout_id,
@@ -224,25 +232,11 @@ pub(super) async fn build_lineage_manifest(
         })
         .collect::<Vec<_>>();
     let targets = measured
+        .targets
         .into_iter()
-        .map(|target| RolloutMigrationLineageTarget {
-            thread_id: target.thread_id,
-            rollout_id: target.rollout_id,
-            segment_id: target.segment_id,
-            compressed_on_publication: target
-                .final_path
-                .extension()
-                .is_some_and(|extension| extension == "zst"),
-            path: target.final_path,
-            history_base: target.history_base,
-            start_ordinal: target.start_ordinal,
-            end_ordinal_exclusive: target.end_ordinal_exclusive,
-            byte_count: target.byte_count,
-            record_count: target.record_count,
-            sha256: target.sha256,
-            selected: target.selected,
-        })
+        .map(measured_target_manifest)
         .collect::<Vec<_>>();
+    let review_input_target = measured.review_input_target.map(measured_target_manifest);
     let source_bytes = sources.iter().map(|source| source.byte_count).sum();
     let dependency_bytes = history_base_dependencies
         .iter()
@@ -253,7 +247,11 @@ pub(super) async fn build_lineage_manifest(
                 .map(|source| source.byte_count),
         )
         .sum();
-    let target_payload_bytes = targets.iter().map(|target| target.byte_count).sum();
+    let target_payload_bytes = targets
+        .iter()
+        .chain(&review_input_target)
+        .map(|target| target.byte_count)
+        .sum();
     Ok(RolloutMigrationManifest {
         version: LINEAGE_MANIFEST_VERSION,
         input_kind: RolloutMigrationManifestKind::SegmentedLineage,
@@ -263,6 +261,7 @@ pub(super) async fn build_lineage_manifest(
         history_base_dependencies,
         reference_dependencies,
         targets,
+        review_input_target,
         source_bytes,
         dependency_bytes,
         target_payload_bytes,
@@ -272,6 +271,9 @@ pub(super) async fn build_lineage_manifest(
             filesystem_metadata: "filesystem-dependent directory and allocation metadata",
             dry_run_decompression_temporary: "none for segmented lineage inputs",
             compressed_publication_temporary: "exact only after streaming compression",
+            generated_id_rewrite_temporary: (!plan.synthetic_item_id_remap.is_empty()).then_some(
+                "at most one uncompressed staged target during generated item ID rewriting",
+            ),
         },
         publication_phases: vec![
             RolloutMigrationPublicationPhase::Planned,
@@ -285,11 +287,32 @@ pub(super) async fn build_lineage_manifest(
     })
 }
 
+fn measured_target_manifest(target: MeasuredLineageTarget) -> RolloutMigrationLineageTarget {
+    RolloutMigrationLineageTarget {
+        thread_id: target.thread_id,
+        rollout_id: target.rollout_id,
+        segment_id: target.segment_id,
+        compressed_on_publication: target
+            .final_path
+            .extension()
+            .is_some_and(|extension| extension == "zst"),
+        path: target.final_path,
+        history_base: target.history_base,
+        start_ordinal: target.start_ordinal,
+        end_ordinal_exclusive: target.end_ordinal_exclusive,
+        byte_count: target.byte_count,
+        record_count: target.record_count,
+        sha256: target.sha256,
+        selected: target.selected,
+    }
+}
+
 pub(super) async fn build_single_manifest(
     path: &std::path::Path,
     kind: RolloutMigrationKind,
+    session_source: &codex_protocol::protocol::SessionSource,
 ) -> ThreadStoreResult<RolloutMigrationManifest> {
-    let measured = measure_single_rollout(path, kind).await?;
+    let measured = measure_single_rollout(path, kind, session_source).await?;
     let source = RolloutMigrationLineageSource {
         thread_id: measured.thread_id,
         rollout_id: measured.rollout_id,
@@ -328,6 +351,7 @@ pub(super) async fn build_single_manifest(
         history_base_dependencies: Vec::new(),
         reference_dependencies: Vec::new(),
         targets: vec![target],
+        review_input_target: None,
         additional_free_space: RolloutMigrationAdditionalFreeSpace {
             sqlite_projection: "filesystem-dependent SQLite page allocation",
             filesystem_metadata: "filesystem-dependent directory and allocation metadata",
@@ -341,6 +365,7 @@ pub(super) async fn build_single_manifest(
                 "none"
             },
             compressed_publication_temporary: "exact only after streaming compression",
+            generated_id_rewrite_temporary: None,
         },
         publication_phases: vec![
             RolloutMigrationPublicationPhase::Planned,

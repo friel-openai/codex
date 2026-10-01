@@ -643,6 +643,18 @@ impl ForkStartupItems {
         }
     }
 
+    /// Reuses a frozen parent model prefix while retaining child-owned startup items.
+    pub(crate) fn with_model_history_override_and_tail(
+        model_history_override: Vec<RolloutItem>,
+        tail: Vec<ResponseItem>,
+    ) -> Self {
+        Self {
+            tail,
+            model_history_override: Some(model_history_override),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn has_model_history_override(&self) -> bool {
         self.model_history_override.is_some()
     }
@@ -2021,7 +2033,11 @@ impl Session {
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
-                        Some(model_history) => model_history,
+                        Some(mut model_history) => {
+                            self.resolve_rollout_review_input(&mut model_history)
+                                .await?;
+                            model_history
+                        }
                         None => {
                             self.materialize_forked_history(
                                 &rollout_items,
@@ -2216,11 +2232,16 @@ impl Session {
         rollout_items: &[RolloutItem],
         materialization: ForkedHistoryMaterialization,
     ) -> CodexResult<Vec<RolloutItem>> {
-        if !rollout_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
-        {
-            return Ok(rollout_items.to_vec());
+        // Native full-history forks carry a history_base pointer, but resumed native history
+        // has already been reconstructed by the store. Only forks need native expansion here.
+        if !rollout_items.iter().any(|item| {
+            matches!(item, RolloutItem::RolloutReference(_))
+                || matches!(materialization, ForkedHistoryMaterialization::ModelContext)
+                    && matches!(item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some())
+        }) {
+            let mut items = rollout_items.to_vec();
+            self.resolve_rollout_review_input(&mut items).await?;
+            return Ok(items);
         }
         let (codex_home, history_mode) = {
             let state = self.state.lock().await;
@@ -2248,7 +2269,7 @@ impl Session {
                             .is_some()
             )
         });
-        match materialization {
+        let items: CodexResult<Vec<RolloutItem>> = match materialization {
             ForkedHistoryMaterialization::Recent => Ok(materialize_recent_rollout_lines_from(
                 codex_home.as_path(),
                 lines,
@@ -2271,7 +2292,10 @@ impl Session {
                     .map(|line| line.item)
                     .collect(),
             ),
-        }
+        };
+        let mut items = items?;
+        self.resolve_rollout_review_input(&mut items).await?;
+        Ok(items)
     }
 
     #[instrument(
@@ -2429,8 +2453,10 @@ impl Session {
                     HistoryReplacement::Reset,
                 );
             }
-            state.history.restore_review_context(
-                Some(&retained_context),
+            // Reconstruction has already applied admissions and rollbacks; admitting
+            // the model envelopes again would restore previously evicted evidence.
+            state.history.restore_replayed_review_context(
+                &retained_context,
                 guardian_history.as_ref(),
                 reviewer_compaction_hash,
             );
@@ -2507,11 +2533,19 @@ impl Session {
     ) -> CertifiedSegmentStateCheckpoint {
         let (info, rate_limits) = state.token_info_and_rate_limits();
         let window_ids = state.auto_compact_window_ids();
+        let mut replacement_history = state.clone_history().annotated_items().to_vec();
+        if let Some(last) = replacement_history.last_mut() {
+            // A cached fork can inherit recorder state newer than its response metadata.
+            // Construction does not acknowledge persistence; append may still fail.
+            last.metadata.get_or_insert_default().mcp_attribution =
+                Some(self.services.executed_tool_calls.mcp_attribution_snapshot());
+        }
         CertifiedSegmentStateCheckpoint::new(
             CompactedItem {
                 message: String::new(),
-                replacement_history: Some(state.clone_history().annotated_items().to_vec()),
+                replacement_history: Some(replacement_history),
                 retained_context: Some(state.history.retained_context().clone()),
+                retained_context_replay: None,
                 guardian_history: state.history.guardian_history_checkpoint(),
                 mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
                 compaction_response_id: None,
@@ -2533,6 +2567,7 @@ impl Session {
                     model: settings.model,
                     comp_hash: settings.comp_hash,
                     realtime_active: settings.realtime_active,
+                    cyber_access_program: settings.cyber_access_program,
                 }),
             state
                 .history
@@ -2540,7 +2575,7 @@ impl Session {
                 .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
             state.reference_context_item(),
             ThreadSettingsAppliedEvent {
-                thread_id: Some(self.conversation_id),
+                thread_id: Some(self.thread_id()),
                 thread_settings: state
                     .session_configuration
                     .thread_settings_snapshot(&state.session_configuration.environments),
@@ -5055,6 +5090,7 @@ impl Session {
             message,
             replacement_history: Some(items.clone()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
             compaction_response_id,
@@ -5097,9 +5133,10 @@ impl Session {
                     model: settings.model,
                     comp_hash: settings.comp_hash,
                     realtime_active: settings.realtime_active,
+                    cyber_access_program: settings.cyber_access_program,
                 });
         let thread_settings = ThreadSettingsAppliedEvent {
-            thread_id: Some(self.conversation_id),
+            thread_id: Some(self.thread_id()),
             thread_settings: state
                 .session_configuration
                 .thread_settings_snapshot(&state.session_configuration.environments),
@@ -5171,11 +5208,13 @@ impl Session {
         }
         state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
         state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
-        drop(state);
         if persisted_checkpoint {
+            // A settings update queued behind `state` must not observe the restart fence after
+            // checkpoint publication has committed. Clear the fence before releasing `state`.
             self.persistence_restart_required
                 .store(false, Ordering::Release);
         }
+        drop(state);
         if let Some(token_count) = recomputed_token_count {
             self.send_event_raw_with_persistence(
                 Event {

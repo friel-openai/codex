@@ -4,6 +4,8 @@ use chrono::DateTime;
 #[cfg(test)]
 use chrono::Utc;
 use codex_protocol::config_types::MultiAgentMode;
+#[cfg(test)]
+use codex_protocol::protocol::strip_user_message_prefix;
 
 #[cfg(test)]
 pub(crate) async fn read_summary_from_rollout(

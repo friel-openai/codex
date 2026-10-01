@@ -1068,7 +1068,9 @@ fn synthetic_supervisor_list_agents_items(page: ListedAgentsPage) -> Vec<Rollout
         RolloutItem::ResponseItem(
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                call_id: Some(SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string()),
+                name: None,
+                namespace: None,
                 output,
                 internal_chat_message_metadata_passthrough: None,
             }
