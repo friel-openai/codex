@@ -190,6 +190,11 @@ pub(crate) async fn run_turn(
     provider_startup: RunTurnProviderStartup,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    if sess.persistence_restart_required() {
+        return Err(CodexErr::Fatal(
+            "thread persistence requires a restart before another turn can begin".to_string(),
+        ));
+    }
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }

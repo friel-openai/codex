@@ -5,6 +5,7 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GUARDIAN_REVIEWER_NAME;
 use crate::plugins::plugins_manager_for_config;
 use crate::sandboxing::SandboxPermissions;
+use crate::session::ForkPersistence;
 use crate::session::step_context::StepContext;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::NewTurnContextOptions;
@@ -1317,6 +1318,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         conversation_history: InitialHistory::New,
         disabled_plugin_ids: None,
         requested_history_mode: None,
+        fork_startup_items: ForkStartupItems::default(),
         fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             GUARDIAN_REVIEWER_NAME.to_string(),
