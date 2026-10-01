@@ -2824,6 +2824,10 @@
           "description": "Disable the model's direct-message tools; spawning and automatic child results remain available.",
           "type": "boolean"
         },
+        "enable_thread_adoption": {
+          "description": "Expose same-thread adoption and subagent promotion only when explicitly enabled.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },

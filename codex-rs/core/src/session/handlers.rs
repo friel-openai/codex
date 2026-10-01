@@ -523,14 +523,16 @@ pub(super) async fn submission_loop(
                     thread_settings,
                     reply,
                 } => {
-                    let _settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
-                    match thread_settings::update(&sess, thread_settings).await {
+                    let settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
+                    let previous_execution_settings = thread_settings::execution_settings(&sess).await;
+                    let execution_settings_changed = match thread_settings::update(&sess, thread_settings).await {
                         Ok(snapshot) => {
                             // Reply first: the caller may hold a lock its event consumer needs.
                             if let Some(reply) = reply {
                                 let _ = reply.send(Ok(()));
                             }
                             thread_settings::emit_applied(&sess, sub.id.clone(), snapshot).await;
+                            thread_settings::execution_settings(&sess).await != previous_execution_settings
                         }
                         Err(error) => {
                             let message = format!("invalid thread settings override: {error}");
@@ -547,7 +549,13 @@ pub(super) async fn submission_loop(
                                 })
                                 .await;
                             }
+                            false
                         }
+                    };
+                    // Helper startup persists settings and cannot retain this permit.
+                    drop(settings_guard);
+                    if execution_settings_changed {
+                        crate::goal_supervisor::restart_active_helper_for_execution_settings_change(&sess).await;
                     }
                     false
                 }
