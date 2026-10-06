@@ -887,10 +887,10 @@ index 0000000000000000000000000000000000000000..1dc38feb7df0d92594259f676efbab64
 +        .expect("write rollout");
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 9c773d73a6a85d90f1662a073e76908fcad177be..25010c5fb8ac51dd561d5182ff5ff4ddf2c8efaf 100644
+index 1eb2c75de4d4c3cd96f5205efe50ac8311bdef62..ee9b8bf14a5a13f41057c0867e6a3489891cd843 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -150,6 +150,7 @@ mod thread_settings_update;
+@@ -151,6 +151,7 @@ mod thread_settings_update;
  mod thread_shell_command;
  mod thread_start;
  mod thread_status;
@@ -1916,7 +1916,7 @@ index 47d84e2a8e84a08b4971e7ce28b1cd102049c4d3..a1b8305c0a7659cd290b845d885c159a
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index df6f893718290e4ec17f0a470cc2bcf9b35653f8..9c27c4530c953a8877289768f254aa42e2face7f 100644
+index a7008deca4fb1ccee7fc9540f3e2fa197f209d30..ea8d87dd6fe45e703b8745c8016176ec91ea943c 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 @@ -653,6 +653,50 @@ fn create_history_rollout(
@@ -1970,7 +1970,7 @@ index df6f893718290e4ec17f0a470cc2bcf9b35653f8..9c27c4530c953a8877289768f254aa42
      Ok(ThreadId::from_string(&thread_id)?)
  }
 
-@@ -2848,7 +2892,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
+@@ -2863,7 +2907,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
          .iter()
          .map(|params| params["includeTurns"].as_bool().unwrap_or(false))
          .collect::<Vec<_>>();
@@ -1979,7 +1979,7 @@ index df6f893718290e4ec17f0a470cc2bcf9b35653f8..9c27c4530c953a8877289768f254aa42
 
      app_server.shutdown().await?;
      proxy.await??;
-@@ -2871,8 +2915,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
+@@ -2886,8 +2930,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
                  ThreadHistoryMode::Legacy,
                  "legacy background task",
              )?,

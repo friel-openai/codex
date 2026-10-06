@@ -2652,10 +2652,10 @@ index af3e0fcfdc5370d62b19caf577067aacef1ed427..ff51d90a2189dd2bb600cb750cc2f289
 -    assert!(paginate_live_agents(vec![agent], None, None).is_err());
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 23a0ec1e05f0601e0739c27da643742ef0007f43..5227f92756dc8144cb96d9ecaa59ceea5db94091 100644
+index f339614431270e36f35f23f9144c505e5361ba45..a0591c14288dc6b158145d29b419b04e8d347a41 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -117,10 +117,10 @@ pub struct ListedAgent {
+@@ -118,10 +118,10 @@ pub struct ListedAgent {
 
  /// Byte-bounded page shared by agent listing tools and supervisor startup context.
  #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2670,7 +2670,7 @@ index 23a0ec1e05f0601e0739c27da643742ef0007f43..5227f92756dc8144cb96d9ecaa59ceea
  }
 
  /// Result of a supervisor request to compact its authenticated direct parent.
-@@ -675,6 +675,83 @@ impl LocalAgentControl {
+@@ -676,6 +676,83 @@ impl LocalAgentControl {
          Ok(agents)
      }
 
@@ -2823,10 +2823,10 @@ index 95b22e7335f7242adf95fa290e02d2a660393d8a..750fa265209fbbf23071d6ecbc86a913
                  (receiver, submission_id)
              }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index d3d194a196c6cd80919b72dce09cd7c9b478053e..1c84fb25c727bf213319bbbbf4852af8db0ee6c6 100644
+index 69e555ed75b188563dc27f6347918a21b8618d10..5702da10c6c8bd43dbb3a28e6df559fdd9e869cc 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1447,15 +1447,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
+@@ -1448,15 +1448,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
              .collect::<Vec<_>>(),
          vec![root_thread_id],
      );
@@ -3177,10 +3177,10 @@ index 0000000000000000000000000000000000000000..f2b914c028cc901790390483f7a7eae8
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 354f2a9190d4be10889ce568ca6f4deab8775d6d..7424e9e41e522e5814420e31fbebbfdcdd0b483e 100644
+index 814b9af1a309289e4049ccb13fd8f1149e349a3d..5f573f6119408596850dbf75bb6833704004d74c 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1022,13 +1022,20 @@ impl Session {
+@@ -1027,13 +1027,20 @@ impl Session {
          }
          let configured_config = Arc::clone(&config);
          let configured_multi_agent_version = config.multi_agent_version_override();
@@ -3234,10 +3234,10 @@ index 0a7fe9cf7596a4670d8ca6bef8cc8af1ce5789bf..09532c0c3a21e98cfaa1a121542e79b0
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 500088e97f966103459f9f650d484933b0bdeeea..0bd2eb444679e6da1fa2adfa7643af071ee1ec8a 100644
+index 692ec301a40f53795749218001656fd91139815e..47de99d18909611b299a4cd5da488d861b38ff2a 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13320,6 +13320,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
+@@ -13343,6 +13343,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
      assert!(rx.try_recv().is_err());
  }
 
@@ -3247,7 +3247,7 @@ index 500088e97f966103459f9f650d484933b0bdeeea..0bd2eb444679e6da1fa2adfa7643af07
  async fn submit_steer_only(
      sess: &Arc<Session>,
      input: Vec<UserInput>,
-@@ -13963,9 +13966,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -13986,9 +13989,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
      );
  }
 
@@ -3268,7 +3268,7 @@ index 500088e97f966103459f9f650d484933b0bdeeea..0bd2eb444679e6da1fa2adfa7643af07
      let input = vec![TurnInput::UserInput {
          metadata: Default::default(),
          content: vec![UserInput::Text {
-@@ -14027,14 +14039,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
+@@ -14050,14 +14062,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
              let ResponseItem::Message { role, content, .. } = item else {
                  return false;
              };
@@ -3328,7 +3328,7 @@ index 85f1b485075f609d31999d6a1bc2c37d01ef6bbf..e2001e7b32c2a271335909b2db25b1bc
              per_turn_config.features.get(),
              crate::tools::tool_user_shell_type(user_shell),
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 9f7634462c544875f765914ee5b7c607db5b953e..40147c0003653695031ff1777dbee993b3de0687 100644
+index 27bc64f4322c949f0ef8bc33c7f4b5f344a9fd0f..60b9a9c5931ff31fb6cc4414fcc2eece8b7ccf51 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -73,6 +73,13 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
@@ -3505,7 +3505,7 @@ index 9f7634462c544875f765914ee5b7c607db5b953e..40147c0003653695031ff1777dbee993
          let (last_agent_message, abort_reason) = match task_result {
              Ok(last_agent_message) => (last_agent_message, None),
              Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-@@ -677,21 +749,37 @@ impl Session {
+@@ -678,21 +750,37 @@ impl Session {
                  (None, None)
              }
          };
@@ -3555,7 +3555,7 @@ index 9f7634462c544875f765914ee5b7c607db5b953e..40147c0003653695031ff1777dbee993
          let pending_input = self
              .input_queue
              .take_pending_input_for_turn_state(turn_state.as_ref())
-@@ -908,6 +996,7 @@ impl Session {
+@@ -909,6 +997,7 @@ impl Session {
          if cleared_active_turn {
              self.maybe_start_turn_for_pending_work().await;
          }
@@ -20221,7 +20221,7 @@ index b784c6abf3d4daa76299a64208f8492ec8acc955..da49f8cc6c16d9fe9e7c4d64a2544fed
 
  fn direct_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-index cb5863650e4f49500d51133a2eca9ea1d5147f3d..70d61e5b49ed1c271f21a0acca84f8492c5d19e3 100644
+index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac8ebd14f5 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 @@ -167,7 +167,17 @@ async fn handle_agent_start(
@@ -21269,10 +21269,10 @@ index 0000000000000000000000000000000000000000..70947b9789c34acd2bf7718f79b657f9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 175ec32b7f7ab8064c7f1919920416bfb0f08ad4..9c54b8b39296eb4e55ce49dce65f62803c8dd6b5 100644
+index c40f1139bd3e466deac586d598d4adb119dfa508..a1585f55239a12b10666b43a7331cbf8c0f1b969 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -61,6 +61,7 @@ mod code_mode_elicitation;
+@@ -64,6 +64,7 @@ mod code_mode_elicitation;
  mod code_mode_model_messages;
  mod codex_apps_protocol;
  mod codex_delegate;
@@ -21444,10 +21444,10 @@ index 1c42e52557ea328732b3da150a53168808415d3b..34636b850caf2668c9163eed76b57845
          std::fs::write(
              &role_path,
 diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
-index 5a036e1255397e86e78ee01de94c4221bde76146..eb96a31573c35d70c2efbd25ef855ff6ec21f622 100644
+index 247a393a7c32044aed24a49e0052ac487e53fb3f..7bb6b73fef5a8d2a7988094cb72f7b3602013d8c 100644
 --- a/codex-rs/models-manager/src/manager.rs
 +++ b/codex-rs/models-manager/src/manager.rs
-@@ -201,6 +201,21 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -204,6 +204,21 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
          presets
      }
 
@@ -21469,7 +21469,7 @@ index 5a036e1255397e86e78ee01de94c4221bde76146..eb96a31573c35d70c2efbd25ef855ff6
      /// List collaboration mode presets.
      ///
      /// Returns a static set of presets seeded with the configured model.
-@@ -214,6 +229,12 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -217,6 +232,12 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
          Ok(self.build_available_models(remote_models))
      }
 
@@ -21483,10 +21483,10 @@ index 5a036e1255397e86e78ee01de94c4221bde76146..eb96a31573c35d70c2efbd25ef855ff6
      /// Get the model identifier to use, refreshing according to the specified strategy.
      ///
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 33def71abd903e06f3fa7aa9332b54c543882fe8..60656bd31f437a8d16419c79b59a633d2f29b0ec 100644
+index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d0728f6f5 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -859,6 +859,72 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -862,6 +862,72 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
      );
  }
 
@@ -21559,7 +21559,7 @@ index 33def71abd903e06f3fa7aa9332b54c543882fe8..60656bd31f437a8d16419c79b59a633d
  #[tokio::test]
  async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
      let remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-@@ -972,6 +1038,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -975,6 +1041,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
      );
      assert_eq!(*manager.remote_models.read().await, cached);
 
@@ -21572,7 +21572,7 @@ index 33def71abd903e06f3fa7aa9332b54c543882fe8..60656bd31f437a8d16419c79b59a633d
      manager.replace_custom_models(HashMap::new());
      assert_eq!(
          manager.try_list_models().expect("unlocked catalog"),
-@@ -1817,6 +1889,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -1941,6 +2013,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["chatgpt-only", "api-model"]
      );
@@ -21585,7 +21585,7 @@ index 33def71abd903e06f3fa7aa9332b54c543882fe8..60656bd31f437a8d16419c79b59a633d
 
      auth_manager
          .set_external_auth(Arc::new(TestExternalApiKeyAuth))
-@@ -1833,6 +1911,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -1957,6 +2035,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["api-model"]
      );

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index ead5e9f419d07322552a56d3a0c84c099168e0b5..0a185ca2f0bb1fb2f527beebe765e717f5dcc656 100644
+index 5d5b1f92e58efc63ef24459db87c549285fc3119..1fe6dd1bb8f2f9aec2e7f421d440248997c53ded 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
 @@ -98,6 +98,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
@@ -21,7 +21,7 @@ index ead5e9f419d07322552a56d3a0c84c099168e0b5..0a185ca2f0bb1fb2f527beebe765e717
  /// Wire protocol that the provider speaks.
  #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
  #[serde(rename_all = "lowercase")]
-@@ -530,9 +542,14 @@ other non-default provider fields are not supported"
+@@ -531,9 +543,14 @@ other non-default provider fields are not supported"
              wire_api: WireApi::Responses,
              query_params: None,
              http_headers: Some(

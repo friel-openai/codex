@@ -2757,10 +2757,10 @@ index dfbf6de09d3b798424b981fb26cbc37b25b64426..6bc46624faf3f148abd41a2421fc390b
          .with_codex_home(codex_home.path())
          .without_auto_env()
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 4beb9f2b6ff929c052e0c7312f69c6dd93495df5..af8b40b74abb3edfcedd1f54676909275d58f1c1 100644
+index b5d13c4f3a36c0e3065072fac7c81362998925c7..e4ad17c5fc8e980a1ca9507f4b5b8ac76a82384d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -4010,6 +4010,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+@@ -4079,6 +4079,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
          "copied non-structural presentation and metadata records should not enter the child rollout"
      );
 
@@ -2790,7 +2790,7 @@ index 4beb9f2b6ff929c052e0c7312f69c6dd93495df5..af8b40b74abb3edfcedd1f5467690927
      let _ = harness
          .control
          .shutdown_live_agent(child_thread_id)
-@@ -4363,6 +4386,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -4432,6 +4455,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
      reference_params.parent_thread_id = Some(lineage_thread_id);
      reference_params.initial_rollout_ordinal = lineage_prepared
          .frozen_segment
@@ -2799,7 +2799,7 @@ index 4beb9f2b6ff929c052e0c7312f69c6dd93495df5..af8b40b74abb3edfcedd1f5467690927
          .next_rollout_ordinal
          .unwrap_or_default();
      store
-@@ -4377,7 +4402,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -4446,7 +4471,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .append_items(AppendThreadItemsParams {
              thread_id: reference_thread_id,
              items: vec![RolloutItem::RolloutReference(
@@ -2814,7 +2814,7 @@ index 4beb9f2b6ff929c052e0c7312f69c6dd93495df5..af8b40b74abb3edfcedd1f5467690927
          })
          .await
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index f237dc1288f20e7bdfca97e90e3a42e0aef9d562..f84dc9295997cac85950da9d712c5966577dd16e 100644
+index 024ff5619f911e85bb8eafdbc4abc393ebf1a1c6..a2bfa043800512819de8fdb47890638cf99d4128 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -748,6 +748,12 @@ async fn initial_rollout_ordinal(
@@ -2830,7 +2830,7 @@ index f237dc1288f20e7bdfca97e90e3a42e0aef9d562..f84dc9295997cac85950da9d712c5966
      if !items
          .iter()
          .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
-@@ -2004,9 +2010,14 @@ impl Session {
+@@ -2009,9 +2015,14 @@ impl Session {
              }
              InitialHistory::Forked(mut rollout_items) => {
                  let turn_context = self.new_default_turn().await;
@@ -2848,7 +2848,7 @@ index f237dc1288f20e7bdfca97e90e3a42e0aef9d562..f84dc9295997cac85950da9d712c5966
                  Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
                  let mut logical_rollout_items =
                      match fork_startup_items.model_history_override.take() {
-@@ -2106,8 +2117,14 @@ impl Session {
+@@ -2111,8 +2122,14 @@ impl Session {
                      self.state.lock().await.latest_token_usage_record =
                          Self::last_token_usage_record_from_rollout(&logical_rollout_items);
                  }
@@ -2865,7 +2865,7 @@ index f237dc1288f20e7bdfca97e90e3a42e0aef9d562..f84dc9295997cac85950da9d712c5966
                  if !startup_response_items.is_empty() {
                      let mut state = self.state.lock().await;
                      state.history.record_items(
-@@ -2121,39 +2138,40 @@ impl Session {
+@@ -2126,39 +2143,40 @@ impl Session {
                      .map(RolloutItem::ResponseItem)
                      .collect::<Vec<_>>();
 
@@ -3008,10 +3008,10 @@ index 0000000000000000000000000000000000000000..1543287c5014c57621224425ff6cc145
 +    );
 +}
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 5f91690fe35ffd9ced876c3a331be5af346709d4..c2b56002a229b2d976979a34984a3dfb0c75f025 100644
+index d29a1236842a9046de272fe7eecbd549e868bb7e..d818a4d214620e610ba2498addc9849903433162 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -1110,6 +1110,17 @@ impl Session {
+@@ -1111,6 +1111,17 @@ impl Session {
                  let live_thread = match &initial_history {
                      InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
                          let auth = persistence_auth.await;
@@ -3029,7 +3029,7 @@ index 5f91690fe35ffd9ced876c3a331be5af346709d4..c2b56002a229b2d976979a34984a3dfb
                          let reference_backed_subagent = is_paginated_subagent
                              && matches!(
                                  &initial_history,
-@@ -1117,12 +1128,23 @@ impl Session {
+@@ -1118,12 +1129,23 @@ impl Session {
                                      if items.iter().any(|item| matches!(
                                          item,
                                          RolloutItem::RolloutReference(_)
@@ -3057,7 +3057,7 @@ index 5f91690fe35ffd9ced876c3a331be5af346709d4..c2b56002a229b2d976979a34984a3dfb
                          } else {
                              None
                          };
-@@ -1146,7 +1168,9 @@ impl Session {
+@@ -1147,7 +1169,9 @@ impl Session {
                              multi_agent_version: initial_multi_agent_version,
                              history_mode: session_configuration.history_mode,
                              history_base: match &fork_persistence {
@@ -3068,7 +3068,7 @@ index 5f91690fe35ffd9ced876c3a331be5af346709d4..c2b56002a229b2d976979a34984a3dfb
                                  ForkPersistence::Referenced { history_base, .. } => *history_base,
                              },
                              subagent_history_start_ordinal,
-@@ -1179,6 +1203,7 @@ impl Session {
+@@ -1180,6 +1204,7 @@ impl Session {
                              && !items
                                  .iter()
                                  .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
@@ -3077,10 +3077,10 @@ index 5f91690fe35ffd9ced876c3a331be5af346709d4..c2b56002a229b2d976979a34984a3dfb
                              LiveThread::create_with_inherited_model_context(
                                  Arc::clone(&thread_store),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9ad958152 100644
+index 31f59db8445f002a89054d92ea34edcf4a65f764..bfffed6cdfd1a97db709e3429f5fabf5f01c83ea 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -4904,12 +4904,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+@@ -4926,12 +4926,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
          .await?
          .0;
      assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
@@ -3100,7 +3100,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
      );
      let child_response_items = child_rollout_items
          .iter()
-@@ -5160,7 +5162,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+@@ -5182,7 +5184,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
      assert!(
          child_rollout_items
              .iter()
@@ -3109,7 +3109,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
      );
      assert!(
          child_rollout_items
-@@ -6164,52 +6166,109 @@ async fn record_legacy_guardian_checkpoint(
+@@ -6186,52 +6188,109 @@ async fn record_legacy_guardian_checkpoint(
 
  #[tokio::test]
  async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
@@ -3248,7 +3248,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
      session
          .flush_rollout()
          .await
-@@ -6275,7 +6334,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
+@@ -6297,7 +6356,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
          RolloutItem::Compacted(item) => item.guardian_history.clone(),
          _ => None,
      });
@@ -3257,7 +3257,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
      assert!(replacement_items.iter().any(|item| {
          matches!(
              item,
-@@ -6383,6 +6442,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
+@@ -6405,6 +6464,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
          Some(expected_world_state)
      );
      assert_eq!(reconstructed.retained_context, expected_retained_context);
@@ -3265,7 +3265,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
  }
 
  #[tokio::test]
-@@ -6415,7 +6475,22 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
+@@ -6437,7 +6497,22 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
      };
      let (_, history_reset) = session.history_reset().await;
      let state_before_compaction = session.state.lock().await.checkpoint_mutation_snapshot();
@@ -3288,7 +3288,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
 
      let error = session
          .replace_compacted_history(
-@@ -6436,7 +6511,18 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
+@@ -6458,7 +6533,18 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
              },
          )
          .await
@@ -3308,7 +3308,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
      assert!(
          error
              .to_string()
-@@ -6469,6 +6555,16 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
+@@ -6491,6 +6577,16 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
          ),
          GuardianContextMode::Legacy
      );
@@ -3326,7 +3326,7 @@ index adce7ccb0b49222bbe133ef44c9f3fc87dbe7523..889d7fa5b27bd98b45a37df4b8cfb9e9
 
      session
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 43835c90598b9e578b4bba731dd3464e0ec85923..1b45d13efe5e3cc922d3bb1c0ba8c000123d2b43 100644
+index 0f97965f520a77feac16fe1f94e0affc297593de..12b57e4d18cb9d14b4d018e2ff8d4166bfc789de 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -297,6 +297,11 @@ struct ForkHistory {
@@ -6328,7 +6328,7 @@ index 06be073679c7c51abc1c80aa71a4edd8d1f88def..d7129dede1178ceaa460cf92fcdf8076
 
  fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a988447c9a 100644
+index 66b9c9b509c3ddea8850e4daac5b490774b2d409..7e38a72dc99a2d2610d1a9b2981ef213a0acfaad 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -12,6 +12,7 @@ mod model_context;
@@ -6339,15 +6339,15 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
  mod projects;
  mod read_thread;
  mod revert_thread;
-@@ -45,6 +46,7 @@ mod read_thread_tests;
- mod test_support;
+@@ -48,6 +49,7 @@ mod test_support;
+ mod timestamp_metadata_tests;
 
  use codex_app_server_protocol::ThreadHistoryBuilder;
 +use codex_protocol::RolloutId;
  use codex_protocol::ThreadId;
  use codex_protocol::protocol::HistoryPosition;
  use codex_protocol::protocol::ThreadHistoryMode;
-@@ -54,11 +56,13 @@ use codex_rollout::StateDbHandle;
+@@ -57,11 +59,13 @@ use codex_rollout::StateDbHandle;
  use codex_rollout::WriterLockCoordinator;
  use codex_state::SqliteConfig;
  use std::collections::HashMap;
@@ -6361,7 +6361,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
  use tokio::sync::Mutex;
  use tokio::sync::OnceCell;
  use tokio::sync::OwnedMutexGuard;
-@@ -134,11 +138,21 @@ use crate::UpdateProjectParams;
+@@ -137,11 +141,21 @@ use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
  use crate::UpdatedProject;
 
@@ -6383,7 +6383,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
  pub use rollout_migration::RolloutMigrationReport;
  pub use rollout_migration::RolloutMigrationStatus;
 
-@@ -165,6 +179,8 @@ pub struct LocalThreadStore {
+@@ -168,6 +182,8 @@ pub struct LocalThreadStore {
      state_db: Option<StateDbHandle>,
      thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
      thread_data_cleanup: Option<Arc<ThreadDataCleanup>>,
@@ -6392,7 +6392,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
  }
 
  type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()> + Send + Sync;
-@@ -212,10 +228,12 @@ struct LiveRecorderRecovery {
+@@ -215,10 +231,12 @@ struct LiveRecorderRecovery {
  /// Callers acquire the in-process mutexes first and the cross-process writer locks second, both in
  /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
  /// entry supplies that half of the reservation until the in-process mutex is released.
@@ -6406,7 +6406,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
      cross_process_guards: Vec<(ThreadId, WriterLockGuard)>,
  }
 
-@@ -333,6 +351,8 @@ impl LocalThreadStore {
+@@ -336,6 +354,8 @@ impl LocalThreadStore {
              state_db,
              thread_history_db: Arc::new(OnceCell::new()),
              thread_data_cleanup: None,
@@ -6415,7 +6415,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
          }
      }
 
-@@ -392,13 +412,55 @@ impl LocalThreadStore {
+@@ -395,13 +415,55 @@ impl LocalThreadStore {
          else {
              return Ok(false);
          };
@@ -6475,7 +6475,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
          let newest_turn = thread_history::list_turns(
              self,
              ListTurnsParams {
-@@ -418,6 +480,55 @@ impl LocalThreadStore {
+@@ -421,6 +483,55 @@ impl LocalThreadStore {
              .is_none_or(|turn| !turn.items.is_empty()))
      }
 
@@ -6531,7 +6531,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
      /// Returns the exact durable ordinal and byte offset of a projected thread.
      pub async fn projected_history_position(
          &self,
-@@ -445,12 +556,15 @@ impl LocalThreadStore {
+@@ -448,12 +559,15 @@ impl LocalThreadStore {
          }
          self.thread_history_db
              .get_or_try_init(|| async {
@@ -6551,7 +6551,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
      }
 
      /// Read a local rollout-backed thread by path.
-@@ -590,16 +704,19 @@ impl LocalThreadStore {
+@@ -593,16 +707,19 @@ impl LocalThreadStore {
          paginated_fork::prepare_without_response_history(self, params).await
      }
 
@@ -6572,7 +6572,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
          )
          .await
      }
-@@ -650,12 +767,14 @@ impl LocalThreadStore {
+@@ -653,12 +770,14 @@ impl LocalThreadStore {
      }
 
      /// Prepares the selected latest side fork without materializing projected response turns.
@@ -6587,7 +6587,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
      ) -> ThreadStoreResult<PreparedFork> {
          paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
              self,
-@@ -663,6 +782,7 @@ impl LocalThreadStore {
+@@ -666,6 +785,7 @@ impl LocalThreadStore {
              model_context,
              expected_position,
              expected_rollout_id,
@@ -6595,7 +6595,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
          )
          .await
      }
-@@ -812,7 +932,7 @@ impl LocalThreadStore {
+@@ -815,7 +935,7 @@ impl LocalThreadStore {
          Ok(RolloutWriterReservation {
              store_identity: Arc::as_ptr(&self.live_writer_locks) as usize,
              thread_ids,
@@ -6604,7 +6604,7 @@ index 918b9d3a6778b6ff8ebc6b9096f2ef1fcea07793..311c48329655fc8552f6ae381b0327a9
              cross_process_guards,
          })
      }
-@@ -1326,6 +1446,10 @@ impl ThreadStore for LocalThreadStore {
+@@ -1329,6 +1449,10 @@ impl ThreadStore for LocalThreadStore {
  mod tests {
      #[path = "acquisition_tests.rs"]
      mod acquisition_tests;
@@ -25300,7 +25300,7 @@ index 5d6460a1831b1280c5b717ed2a602117e727dc6e..f758babd182b07349c7d72eda0b459ab
  }
 
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index 7a5474292864e06146da916c4534f28b00937a9f..69394f8c56b8497ce0251d5a18b5240e0577890f 100644
+index 8ef201e7361a38499321b03e41368daf309276a2..412007cd0eae05978f35a9930d21c3fa6fbaa15f 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -294,6 +294,8 @@ impl FreezeRolloutSegmentParams {

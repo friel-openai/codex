@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index d661076500cd2de2d06da333fc991655f831f039..c78a6ccd269402eeb2781aad26b9221b4049f56c 100644
+index 9c90ab951e6b2cbe097be9844ec547c9ecb5cc28..bf08214e32b24f10b6f2948822d4d7d353cafdaa 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -3853,6 +3853,7 @@ dependencies = [
@@ -11336,10 +11336,10 @@ index 800527900f2f468b1a8c68e39c3b64c7e6eb9caf..281920e9d9e0c4b0263c07f446c89b16
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 0bd2eb444679e6da1fa2adfa7643af071ee1ec8a..7dda7ab1c50ece28822f8affbc57bdef05c6c91b 100644
+index 47de99d18909611b299a4cd5da488d861b38ff2a..e68dcbd689f694e6b89cdfa98e173dc899c11958 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -10487,6 +10487,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
+@@ -10509,6 +10509,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
      );
  }
 
@@ -11358,7 +11358,7 @@ index 0bd2eb444679e6da1fa2adfa7643af071ee1ec8a..7dda7ab1c50ece28822f8affbc57bdef
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 4f8abc4f57b0d016d46603415d4cb3bc17ed58d8..244aa4e572f320da1cc7ca332c8c2e8810bb274a 100644
+index ebf52fd0219fc03c85ede0958dc818e4b3323759..37c15cea38564b617675ea13627a7287540ff1cf 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1195,6 +1195,7 @@ impl ThreadManager {
@@ -13398,10 +13398,10 @@ index 4fdc08065b982a0a82f0120a5f6801f33d65924d..7640b668749a62c2a7212ce3a2cb2e94
          .expect("expected a Guardian request for the app MCP approval");
      assert!(guardian_request.body_contains_text("calendar_create_event"));
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 9c54b8b39296eb4e55ce49dce65f62803c8dd6b5..5f5fd173fbd35f1e3f2576b9dcce17e322e5b803 100644
+index a1585f55239a12b10666b43a7331cbf8c0f1b969..411600b405026e903b31b7abf37c3ffd955a98cd 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -119,6 +119,7 @@ mod json_result;
+@@ -122,6 +122,7 @@ mod json_result;
  mod live_cli;
  #[path = "managed_threads_tests.rs"]
  mod managed_threads;

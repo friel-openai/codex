@@ -371,7 +371,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
      Ok(())
  }
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index 63fb4a5e8e7e3e8e34aa7416e7194ea5294eb6c4..ea81f36a4961129698742135b618c3a149a47459 100644
+index 515de67972a0a21dcda9cf57a5385ff20bec9812..eeeea6b1c4dd1d7da68cfe48cab8922b71aaad37 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
 @@ -2,7 +2,10 @@ use codex_utils_absolute_path::test_support::PathExt;
@@ -1808,17 +1808,17 @@ index 63fb4a5e8e7e3e8e34aa7416e7194ea5294eb6c4..ea81f36a4961129698742135b618c3a1
      repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
          .await
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273143e22cf 100644
+index 6c05633effde2ef54e4224e1e86915055e528a99..d4d9e170c2dc79d350c94157dab41c5f3cdc0120 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -6,29 +6,30 @@
+@@ -7,27 +7,28 @@
  )]
 
  use crate::DbTelemetry;
 +use crate::migrations::repair_frodex_agent_path_migration_collision;
  use crate::migrations::repair_frodex_goal_supervisor_state_migration;
  use crate::migrations::repair_legacy_recency_migration_version;
- use crate::runtime::RuntimeDbInitError;
+ use crate::runtime::recovery::RuntimeDbInitError;
  use crate::telemetry;
  use crate::telemetry::DbKind;
 -use anyhow::Context;
@@ -1830,9 +1830,7 @@ index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273
  use sqlx::SqlitePool;
 +use sqlx::Transaction;
  use sqlx::migrate::Migrator;
- use sqlx::sqlite::SqliteAutoVacuum;
  use sqlx::sqlite::SqliteConnectOptions;
- use sqlx::sqlite::SqliteJournalMode;
  use sqlx::sqlite::SqlitePoolOptions;
  use sqlx::sqlite::SqliteSynchronous;
 -use std::fs::File;
@@ -1845,7 +1843,7 @@ index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273
 
  const LOGS_DB_FILENAME: &str = "logs_2.sqlite";
  const GOALS_DB_FILENAME: &str = "goals_1.sqlite";
-@@ -36,35 +37,140 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+@@ -35,35 +36,140 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
  const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
  const STATE_DB_FILENAME: &str = "state_5.sqlite";
  const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
@@ -2006,7 +2004,7 @@ index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273
  }
 
  #[derive(Clone, Copy)]
-@@ -290,10 +396,17 @@ impl SqliteConfig {
+@@ -302,10 +408,17 @@ impl SqliteConfig {
      ) -> anyhow::Result<SqlitePool> {
          let path = spec.path(self.home());
          let started = Instant::now();
@@ -2028,7 +2026,7 @@ index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273
          telemetry::record_init_result(
              telemetry_override,
              spec.kind,
-@@ -306,18 +419,11 @@ impl SqliteConfig {
+@@ -318,18 +431,11 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {

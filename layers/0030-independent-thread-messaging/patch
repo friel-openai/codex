@@ -82,7 +82,7 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 07451220c49df82e6675a019795d782f292ad78d..16d4db99829152fec4be84f54350add7546d2e0a 100644
+index d52a669a9e53b30f311ca0ea4ac7110815006974..811fefc1c6fdefbf26dedc942c8058ef197d2d51 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -12,6 +12,7 @@ use crate::compact::InitialContextInjection;

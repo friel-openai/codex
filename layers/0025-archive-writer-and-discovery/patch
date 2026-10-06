@@ -41,10 +41,10 @@ index 1496a9573da0da2ec2a9d8dce5929069d34d7707..cb2dfb196e2097125fe2e799de8aeab2
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 3cdfcc80c941e4812641a72945ca353de9597544..0908e128260c8b6e7791a2e594373849cc524f8e 100644
+index feaf433da99fe9aa9c1d7968f2378dcbe47af1b7..c04db8b349572d6455945234c56c8bb48d9d1576 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -125,6 +125,7 @@ mod session_end;
+@@ -126,6 +126,7 @@ mod session_end;
  mod skills_list;
  mod sleep;
  mod thread_archive;

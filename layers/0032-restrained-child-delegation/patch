@@ -337,10 +337,10 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 5f5fd173fbd35f1e3f2576b9dcce17e322e5b803..eb1f6903466595b72794ed5a72fa22e59de9fe6c 100644
+index 411600b405026e903b31b7abf37c3ffd955a98cd..8867f8a22d0e3e4aee2b9e085065aa29fcf74d45 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -88,6 +88,7 @@ mod guardian_cached_score;
+@@ -91,6 +91,7 @@ mod guardian_cached_score;
  mod guardian_checkpoint_migration;
  // Uses the same command-approval harness as guardian_review below.
  mod canonical_plugin_connectors;

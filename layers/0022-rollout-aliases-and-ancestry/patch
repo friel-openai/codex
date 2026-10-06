@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index dfa8a1c465f25d4141e058ad537f2e4da10a8632..7d3ec8fb8f390978c263b1cb6d8f76ad3d93a626 100644
+index 4dfc2603c47266923f6b9f916407cdc272f22aed..03455f30376a3964a362584cb729e29d91f96b65 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2175,6 +2175,7 @@ dependencies = [
@@ -54,10 +54,10 @@ index ed1dbba7e5d2c03187d59fe0685dd99ba9a88558..8b9104e86e347809a5a6c782efb48577
                  "rollout path does not select the current rollout for thread {}",
                  stored_thread.thread_id
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index a7f7d3ba6436f3c8e5a9b108b706febb32382122..3cdfcc80c941e4812641a72945ca353de9597544 100644
+index 6be947f699a3b6156825b3135cd9f98c68a96194..feaf433da99fe9aa9c1d7968f2378dcbe47af1b7 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -129,6 +129,7 @@ mod thread_attachments;
+@@ -130,6 +130,7 @@ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
  mod thread_fork;
@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 3e90944be50fd8acc4ee57d1c6acf460d63267c6..2cb7e4e6a3666a3a3d0aced5f0d6b10978b8adf2 100644
+index 165046d591af37c890fa8fe3ebdbcb8d48bf66ec..08fd481e533ac06abc91756584d6e8814d983b92 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -9612,6 +9612,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -9681,6 +9681,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,7 +271,7 @@ index 3e90944be50fd8acc4ee57d1c6acf460d63267c6..2cb7e4e6a3666a3a3d0aced5f0d6b109
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 0d75ab01850623baaef212600755a65ba1edd0c0..bb6d24c6ba07bd3b2ddbf70d745941235f8738cb 100644
+index 27b1a988f99c589068ee39543ce1a9f7e345be57..66427857703e4ed41c58f5e65dce21249c21ad0b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -3372,7 +3372,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
@@ -288,7 +288,7 @@ index 0d75ab01850623baaef212600755a65ba1edd0c0..bb6d24c6ba07bd3b2ddbf70d74594123
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 919953cba66e670b4021f85f0ba851276f27f787..6870cff819001e4735b8c959268ccd688ff382ec 100644
+index 98d7af9c6e476fa3190de3bb82f7e862c525229b..34c328a88bf869ad55e3567d5acd569b956183f8 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1737,7 +1737,6 @@ impl ThreadManager {

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index c18518d9f1915e5e67f86decfd418a48286be69c..dfa8a1c465f25d4141e058ad537f2e4da10a8632 100644
+index b05d6f3d282279b10b7e3eb68c9f6f557fe9ce5a..4dfc2603c47266923f6b9f916407cdc272f22aed 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2100,6 +2100,7 @@ dependencies = [
@@ -1396,10 +1396,10 @@ index 81bd0ae343b7084ab2a124d19d97635aded2402d..77a43a57730e09502274f54941baa34b
          &mut self,
          method: &str,
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 25010c5fb8ac51dd561d5182ff5ff4ddf2c8efaf..a7f7d3ba6436f3c8e5a9b108b706febb32382122 100644
+index ee9b8bf14a5a13f41057c0867e6a3489891cd843..6be947f699a3b6156825b3135cd9f98c68a96194 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -129,6 +129,7 @@ mod thread_attachments;
+@@ -130,6 +130,7 @@ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
  mod thread_fork;
@@ -1692,7 +1692,7 @@ index 04f924ffa8bacaf53d5048e00601ab205d5ca3ae..5d07949c13ae858596ca17712ee106b9
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 858ef914941640dc261cab64454bd85fef99fb48..919953cba66e670b4021f85f0ba851276f27f787 100644
+index b29318a7837e93aff5101f1e55c3a8fa7466fbbb..98d7af9c6e476fa3190de3bb82f7e862c525229b 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1869,7 +1869,9 @@ impl ThreadManager {
@@ -2377,7 +2377,7 @@ index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 2c82ad9c4a2689a41164757b0f57669d5defece6..1b9da6021af270c5021eeb243074c8881492141b 100644
+index 88c9dce69eddc25b2ada0730c897d6c98fb7e842..6fc9ad6f64b80fef0d0077d8a68ffa6a37f2d8f5 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -2388,7 +2388,7 @@ index 2c82ad9c4a2689a41164757b0f57669d5defece6..1b9da6021af270c5021eeb243074c888
  mod goal_supervisor_history_repair;
  mod goal_supervisor_runtime_repair;
  #[cfg(test)]
-@@ -190,6 +191,18 @@ type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()>
+@@ -193,6 +194,18 @@ type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()>
 
  type WriterLockGuard = Arc<codex_rollout::WriterLockGuard>;
 
@@ -2407,7 +2407,7 @@ index 2c82ad9c4a2689a41164757b0f57669d5defece6..1b9da6021af270c5021eeb243074c888
  struct LiveRecorderEntry {
      recorder: RolloutRecorder,
      /// Reopens the committed stable rollout before the next live operation.
-@@ -867,6 +880,68 @@ impl LocalThreadStore {
+@@ -870,6 +883,68 @@ impl LocalThreadStore {
          )
      }
 
@@ -2476,7 +2476,7 @@ index 2c82ad9c4a2689a41164757b0f57669d5defece6..1b9da6021af270c5021eeb243074c888
      pub(crate) async fn live_persistence_mode(
          &self,
          thread_id: ThreadId,
-@@ -894,17 +969,7 @@ impl LocalThreadStore {
+@@ -897,17 +972,7 @@ impl LocalThreadStore {
          self.writer_lock_coordinator
              .acquire(thread_id)
              .map(Arc::new)
@@ -2495,7 +2495,7 @@ index 2c82ad9c4a2689a41164757b0f57669d5defece6..1b9da6021af270c5021eeb243074c888
      }
 
      async fn acquire_writer_locks(
-@@ -921,6 +986,58 @@ impl LocalThreadStore {
+@@ -924,6 +989,58 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 
@@ -2690,7 +2690,7 @@ index f9f23f52ec7b412005facf96cb2a7ea7c87c4aca..c2f4bc48326882cbebea1be670f9620d
 
  #[tokio::test]
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index 69394f8c56b8497ce0251d5a18b5240e0577890f..dd25b7045d756144e98deee1d86f5e840d752d32 100644
+index 412007cd0eae05978f35a9930d21c3fa6fbaa15f..2c87349bf8e3e6f5f60eddca427111abb2679318 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -290,7 +290,7 @@ impl FreezeRolloutSegmentParams {
@@ -2755,10 +2755,10 @@ index 69394f8c56b8497ce0251d5a18b5240e0577890f..dd25b7045d756144e98deee1d86f5e84
              _source_reservation: Box::new(source_reservation),
          }
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 015410f2ae4da877195b3b9993be8777d809ada2..e661b82ac9dfb9bc312a38dcf3873458e3bc0d0f 100644
+index dac36e673903d0e0e89580985d8c0d35334e0d79..33351db8b10f709971133c9600eb0ec19926e831 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -574,12 +574,21 @@ impl App {
+@@ -575,12 +575,21 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2780,7 +2780,7 @@ index 015410f2ae4da877195b3b9993be8777d809ada2..e661b82ac9dfb9bc312a38dcf3873458
                          )
                          .await
                          {
-@@ -610,11 +619,20 @@ impl App {
+@@ -611,11 +620,20 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2801,7 +2801,7 @@ index 015410f2ae4da877195b3b9993be8777d809ada2..e661b82ac9dfb9bc312a38dcf3873458
                          )
                          .await
                          {
-@@ -2916,8 +2934,15 @@ impl App {
+@@ -2917,8 +2935,15 @@ impl App {
                  parent_thread_id,
                  placement,
              } => {
@@ -3439,10 +3439,10 @@ index 9cb912221be6fd58570a48202859b33e803250c4..35b972a442714dd39e27824c19754930
      Ok(())
  }
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index bc55f88b49f2f50d3dd24894081d504e89b8a197..6360ee88e3afcbe1e3e02d54abd91bce0c0e6fc2 100644
+index 1720e6cd337b576d0fbb408af58dcbabc21a9238..c285a33b9b675298f401f95c4f206a570dfde681 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -167,6 +167,7 @@ impl App {
+@@ -187,6 +187,7 @@ impl App {
          initial_prompt: Option<String>,
          initial_images: Vec<PathBuf>,
          session_selection: SessionSelection,
@@ -3450,7 +3450,7 @@ index bc55f88b49f2f50d3dd24894081d504e89b8a197..6360ee88e3afcbe1e3e02d54abd91bce
          feedback: codex_feedback::CodexFeedback,
          is_first_run: bool,
          should_prompt_windows_sandbox_nux_at_startup: bool,
-@@ -611,15 +612,25 @@ impl App {
+@@ -643,15 +644,25 @@ impl App {
                      &[("source", "cli_subcommand")],
                  );
                  let forked = match startup_draft
@@ -3485,7 +3485,7 @@ index bc55f88b49f2f50d3dd24894081d504e89b8a197..6360ee88e3afcbe1e3e02d54abd91bce
                      .await
                  {
                      Ok(forked) => forked,
-@@ -704,6 +715,7 @@ impl App {
+@@ -736,6 +747,7 @@ impl App {
                              &mut app_server,
                              side_config.clone(),
                              &target_session,
@@ -3494,10 +3494,10 @@ index bc55f88b49f2f50d3dd24894081d504e89b8a197..6360ee88e3afcbe1e3e02d54abd91bce
                      )
                      .await
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index 38407e5bd91b58872570ca94f9ef9454163ef3a9..ed30099755399ed454ff83e48a34b7f3cd9e377d 100644
+index 9ea526725b32f8591400477712fe94dc9579da24..1372a2587a052579208bf85945c223a120de7aaf 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-@@ -2613,6 +2613,97 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
+@@ -2629,6 +2629,97 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
      Ok(())
  }
 
@@ -3596,7 +3596,7 @@ index 38407e5bd91b58872570ca94f9ef9454163ef3a9..ed30099755399ed454ff83e48a34b7f3
  async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
      let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
 diff --git a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
-index 17155eb72bc7e090d89735039abeb8b6b0fcb8a4..e73e97ead6ada0b3080f30425c3cc9db61f3e7ab 100644
+index 22e27ed3f1fe0d12bb3525a89c2062ed4fafad33..b09ce84c2cf0c89158877aa1c3feb1395c040916 100644
 --- a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 +++ b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 @@ -24,6 +24,7 @@ async fn run_startup_for_test(
@@ -3608,10 +3608,10 @@ index 17155eb72bc7e090d89735039abeb8b6b0fcb8a4..e73e97ead6ada0b3080f30425c3cc9db
          /*is_first_run*/ false,
          /*should_prompt_windows_sandbox_nux_at_startup*/ false,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c0e178268 100644
+index bcb56b9ab82413edb5573cd3cfcc505cfe6ba65b..8cf3f7df34ca88ea5c8b7435cfb7e96dfddd414e 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
-@@ -148,6 +148,7 @@ use color_eyre::eyre::Result;
+@@ -152,6 +152,7 @@ use color_eyre::eyre::Result;
  use color_eyre::eyre::WrapErr;
  use std::collections::HashMap;
  use std::collections::HashSet;
@@ -3619,7 +3619,7 @@ index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c
  use std::path::PathBuf;
  use std::sync::Arc;
  use std::sync::Mutex;
-@@ -895,6 +896,76 @@ impl AppServerSession {
+@@ -899,6 +900,76 @@ impl AppServerSession {
          .await
      }
 
@@ -3696,7 +3696,7 @@ index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c
      #[expect(
          clippy::too_many_arguments,
          reason = "keep local preferences separate while the legacy Config parameter is still required"
-@@ -986,6 +1057,12 @@ impl AppServerSession {
+@@ -997,6 +1068,12 @@ impl AppServerSession {
                      .await
                      .map_err(|err| {
                          bootstrap_request_error("thread/fork failed during TUI bootstrap", err)
@@ -3709,7 +3709,7 @@ index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c
                      })?
              }
              Err(err) => {
-@@ -995,7 +1072,24 @@ impl AppServerSession {
+@@ -1006,7 +1083,24 @@ impl AppServerSession {
                  ));
              }
          };
@@ -3735,7 +3735,7 @@ index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c
          if presentation == ForkPresentation::Regular
              && !response.thread.ephemeral
              && let Err(error) = self
-@@ -1003,7 +1097,7 @@ impl AppServerSession {
+@@ -1014,7 +1108,7 @@ impl AppServerSession {
                      &mut response.thread,
                      /*turn_cursor*/ None,
                      /*item_cursor*/ None,
@@ -3744,7 +3744,7 @@ index e082be0347df3990c1a41cf76949981ffb8987a0..e4ac9ea61fdaa42ada8cca0f77faff9c
                      Some(local_settings),
                      HistoryHydrationScope::Initial,
                  )
-@@ -1015,19 +1109,13 @@ impl AppServerSession {
+@@ -1026,19 +1120,13 @@ impl AppServerSession {
                  "preserving the created fork after bounded history hydration failed"
              );
          }
@@ -3905,7 +3905,7 @@ index aef73cb4b8b423f4e4af28b9f68222514d683bb9..42db5f78a427a831ca0f4f9a0513b151
      .expect_err("NUL must fail shell quoting");
      assert!(err.contains("failed to quote fork command for Ghostty"));
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 8a1257a1c6ba4cd5ee17f39c0947920b0112ce29..2d6cf66c4504e968c4db107eaeac54b9b438dc54 100644
+index a2c4b22a419cdb86d1cb959503b7a7140f5ec932..f0f280debb36f6391b1ad6a5b0e1674911f755c4 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
 @@ -1478,6 +1478,23 @@ async fn run_ratatui_app(
@@ -4009,7 +4009,7 @@ index 8a1257a1c6ba4cd5ee17f39c0947920b0112ce29..2d6cf66c4504e968c4db107eaeac54b9
          }
      };
 
-@@ -2019,6 +2040,7 @@ async fn run_ratatui_app(
+@@ -2022,6 +2043,7 @@ async fn run_ratatui_app(
          prompt,
          shared,
          daemon_cli_executable,
@@ -4017,13 +4017,13 @@ index 8a1257a1c6ba4cd5ee17f39c0947920b0112ce29..2d6cf66c4504e968c4db107eaeac54b9
          ..
      } = cli;
      let images = shared.into_inner().images;
-@@ -2097,6 +2119,7 @@ async fn run_ratatui_app(
+@@ -2100,6 +2122,7 @@ async fn run_ratatui_app(
          prompt,
          images,
          session_selection,
 +        fork_handoff_socket,
          feedback,
-         should_show_trust_screen, // Proxy to: is it a first run in this directory?
+         is_first_run,
          should_prompt_windows_sandbox_nux_at_startup,
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
 index 2fb72529e1fda8bbb4a7eda3248aefd4344a8709..77c5ec62fe0fb9b73b1aeddcd8926c3074259f59 100644

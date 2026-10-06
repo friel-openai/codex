@@ -107,7 +107,26 @@
         "independent_thread::retention::tests::ancestor_assignments_do_not_consume_recent_message_slots",
         "independent_thread::retention::tests::independent_message_retention_rejects_regular_and_unbounded_outputs",
         "compact_remote_history::metadata_tests::independent_thread_input_is_not_replaced_by_truncated_tool_output",
-        "context::world_state::multi_agent_mode::tests::snapshots"
+        "context::world_state::multi_agent_mode::tests::snapshots",
+        "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
+        "agent::control::tests::pending_environment_failure_reaches_child_and_grandchild",
+        "agent::control::tests::spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated",
+        "guardian::input_budget::tests::compacted_review_restores_originals_once_and_persists_the_request_prefix",
+        "guardian::review_session::tests::run_review_preserves_evidence_during_parent_compaction",
+        "guardian::review_session::tests::encrypted_parent_compaction_requires_original_item_id::thread_owned",
+        "guardian::review_session::tests::encrypted_parent_compaction_requires_original_item_id::legacy_checkpoint"
+      ]
+    },
+    {
+      "package": "codex-models-manager",
+      "binary": "codex-models-manager",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "manager::tests::authoritative_catalog_preserves_configured_alias_metadata_and_replacement",
+        "manager::tests::authoritative_catalog_preserves_hidden_models_and_matches_exact_ids",
+        "manager::tests::authoritative_catalog_failure_invalidates_cache_until_refresh_succeeds",
+        "manager::tests::replacing_custom_models_preserves_authenticated_remote_catalog"
       ]
     },
     {
@@ -163,7 +182,9 @@
         "local::rollout_migration::tests::large_native_record_tests::migration_replays_large_native_checkpoint_with_finite_history_base",
         "local::rollout_migration::payload_decoder::tests::guarded_payload_decoder_preserves_delivered_assistant_context",
         "local::thread_history::read::tests::indexed_paginated_cursor_pages_never_open_projected_predecessors",
-        "local::thread_history::read::tests::item_anchors_reject_developer_messages_hidden_by_fork_filters"
+        "local::thread_history::read::tests::item_anchors_reject_developer_messages_hidden_by_fork_filters",
+        "local::update_thread_metadata::tests::update_thread_metadata_uses_live_rollout_path_for_external_resume",
+        "local::update_thread_metadata::tests::update_thread_metadata_recreates_missing_archived_sqlite_row_as_archived"
       ]
     },
     {
@@ -174,7 +195,13 @@
       "tests": [
         "startup_error_hook_tests::handled_startup_error_does_not_prevent_startup_retry",
         "startup_error_hook_tests::conflicting_error_hook_is_reported_on_each_startup_attempt",
-        "app::tests::safety_buffering::safety_retry_preserves_a_committed_steer_from_the_interrupted_turn"
+        "app::tests::safety_buffering::safety_retry_preserves_a_committed_steer_from_the_interrupted_turn",
+        "app::tests::active_reconnect::automatic_daemon_reconnect_rejects_changed_release_without_resuming",
+        "app::tests::active_reconnect::reconnect_restores_history_permissions_and_resumes_unsent_input",
+        "app_server_session::provider_selection_tests::starts_and_forks_use_server_provider_unless_explicitly_selected",
+        "app_server_session::rollout_history::tests::remote_resume_restores_saved_server_profile_without_permission_overrides",
+        "app::tests::fork_workspace_roots_tests::remote_fork_dispatch_preserves_server_workspace_roots",
+        "app::tests::session_lifecycle_requests::agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable"
       ]
     },
     {
@@ -188,7 +215,11 @@
         "runtime::goals::resumable_goal::tests::resume_preserves_stopped_goal_and_accounts_exactly_once",
         "runtime::goals::resumable_goal::tests::resume_rejects_changed_replaced_and_deleted_goals",
         "runtime::goals::resumable_goal::tests::resume_rejects_every_stale_snapshot_field",
-        "runtime::goals::resumable_goal::tests::resume_rejects_active_complete_and_exhausted_goals"
+        "runtime::goals::resumable_goal::tests::resume_rejects_active_complete_and_exhausted_goals",
+        "sqlite::tests::open_read_write_pool_initializes_fresh_database_settings",
+        "sqlite::tests::open_read_write_pool_preserves_existing_settings_under_write_lock",
+        "sqlite::tests::open_read_write_pool_preserves_wal_conversion_lock_error",
+        "sqlite::thread_history_migration_tests::concurrent_history_database_initialization_applies_each_migration_once"
       ]
     },
     {

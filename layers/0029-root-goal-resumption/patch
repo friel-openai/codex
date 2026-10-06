@@ -247,7 +247,7 @@ index b60ad3c35b3efe74f235b963e379d5e5a59a74ce..4ed23b12aa899b3f596bf29cd6799349
          self.inner.thread_id
      }
 diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-index efe2d42f568d40b74331661d1b875e6fb26902e6..4697e320b7e35ec205410f22a4038db16b2facf9 100644
+index 886dbf426f28b9114a911e10fe9164c1a7b66885..6be998de7376000cc8ad398af281b16695fa110c 100644
 --- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
 +++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
 @@ -52,6 +52,9 @@ use pretty_assertions::assert_eq;

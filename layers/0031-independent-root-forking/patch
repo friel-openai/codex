@@ -1831,7 +1831,7 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 03c9a2daaf77e37c3032b657fa0663c79714a1c7..5a8fb9db4339360d09f8039a49f909251acbbda6 100644
+index d2a98e5c068f6c62fdb8fcf3376a276a074185ca..b676a9285f72fc72d49d1829e8a426b6954acb19 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1124,6 +1124,11 @@ impl ThreadManager {

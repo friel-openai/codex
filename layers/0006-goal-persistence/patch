@@ -148,10 +148,10 @@ index cb35952df0f8ffea93caab6fa0dc00bc6ec46fa3..87d8ed5d2ece756951c52fa934f33f92
      crate_srcs = glob(["src/**/*.rs"]) + [
          "//codex-rs/ext/guardian-v2:src/sync_reviewer/reviewer_config.rs",
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 4f5c3703732b37329500e38278a239d63b36e46d..802a622324af9ed5a57c43a6719a059005a57272 100644
+index 4032462625a066f2e5c6565825fcec2d01004916..e08f6dbe5449c60c3769412485a73dc8ad237f51 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -872,6 +872,9 @@
+@@ -882,6 +882,9 @@
              "fast_mode": {
                "type": "boolean"
              },
@@ -161,7 +161,7 @@ index 4f5c3703732b37329500e38278a239d63b36e46d..802a622324af9ed5a57c43a6719a0590
              "goals": {
                "type": "boolean"
              },
-@@ -6977,6 +6980,9 @@
+@@ -6993,6 +6996,9 @@
          "fast_mode": {
            "type": "boolean"
          },
@@ -319,7 +319,7 @@ index 348fa7853c60e402ecd1c85c486bcb454fa31e29..86ed4a5b3fefecb34e4cf167f7a25208
      let ResponseItem::Message { role, content, .. } = item else {
          return false;
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 9060d9bd1ff39db4da133ed5b23a5a05e6ed248b..055881501a3ca48e6833fc13cd37108d04be7cba 100644
+index f13fec5ecca51c3f1d70af40739cdfe2b802cf56..35c7f5d0b0a3b374345bd2926feea9e83bc76311 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -12,6 +12,7 @@ use crate::compact::InitialContextInjection;
@@ -525,7 +525,7 @@ index 00c49be72ab87d111a925fa3ebfb0c594a1d525c..fce195a2d5f97a3f00ecdf010f6bf27d
      CompactedUserMessage {
          message: text.to_string(),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 00ffc568ce5db8ded9864a722def15adc55f76d2..f7e52540ebd5f1d65f82cd0abce679998fa94b3b 100644
+index a8f2682472ecb6473844319cb2d53548fdea7ca6..e72bbd974af9e4ba04758f0d8cdc6f1f4fb604b6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -309,7 +309,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
@@ -602,7 +602,7 @@ index 00ffc568ce5db8ded9864a722def15adc55f76d2..f7e52540ebd5f1d65f82cd0abce67999
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2546,6 +2585,11 @@ impl Session {
+@@ -2551,6 +2590,11 @@ impl Session {
          }
      }
 
@@ -615,10 +615,10 @@ index 00ffc568ce5db8ded9864a722def15adc55f76d2..f7e52540ebd5f1d65f82cd0abce67999
          let state = self.state.lock().await;
          state.session_configuration.provider.info().clone()
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 81278d3e86d42f61841a73b5161ae14cf34701f1..aa0e9ce1caaa9e473b1ed12f13f15aea2d3c979f 100644
+index 2256016d8e1674f7752d51f38a05c0ca1c6135b4..0ea8d22adbf62476d6a441a87284c3126885721b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -14311,6 +14311,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -14334,6 +14334,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
      assert!(prompt.contains("Prefer direct execution over coordination"));
  }
 
@@ -713,7 +713,7 @@ index 81278d3e86d42f61841a73b5161ae14cf34701f1..aa0e9ce1caaa9e473b1ed12f13f15aea
  #[tokio::test]
  async fn subagent_prompt_is_for_regular_subagents_only() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
-@@ -14335,6 +14423,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -14358,6 +14446,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
      )
      .await
      .expect("write subagent override");
@@ -732,7 +732,7 @@ index 81278d3e86d42f61841a73b5161ae14cf34701f1..aa0e9ce1caaa9e473b1ed12f13f15aea
 
      assert_eq!(
          load_root_agent_prompt(codex_home.path()).await,
-@@ -14344,6 +14444,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -14367,6 +14467,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
          load_subagent_prompt(codex_home.path()).await,
          "custom subagent"
      );
@@ -748,7 +748,7 @@ index 81278d3e86d42f61841a73b5161ae14cf34701f1..aa0e9ce1caaa9e473b1ed12f13f15aea
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index a5f147740be55185fa7e94fcf6e76a38bac20a0f..59bcbf91bfaa195a019cde12a002b4be6193498f 100644
+index a778bccb22ed6f07fad68739973675c39068ef40..0b8552ee984cbb94e13b4fc77fa0f3fecd584643 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -62,6 +62,7 @@ use crate::tasks::emit_compact_metric;
@@ -759,7 +759,7 @@ index a5f147740be55185fa7e94fcf6e76a38bac20a0f..59bcbf91bfaa195a019cde12a002b4be
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -3119,11 +3120,12 @@ async fn drain_in_flight(
+@@ -3144,11 +3145,12 @@ async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
      sess: Arc<Session>,
      step_context: &StepContext,
@@ -774,7 +774,7 @@ index a5f147740be55185fa7e94fcf6e76a38bac20a0f..59bcbf91bfaa195a019cde12a002b4be
                  mark_thread_memory_mode_polluted_if_external_context(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -3137,13 +3139,16 @@ async fn drain_in_flight(
+@@ -3162,13 +3164,16 @@ async fn drain_in_flight(
                  )
                  .await;
              }
@@ -792,7 +792,7 @@ index a5f147740be55185fa7e94fcf6e76a38bac20a0f..59bcbf91bfaa195a019cde12a002b4be
  }
 
  fn assign_missing_streamed_response_item_id(
-@@ -4039,10 +4044,14 @@ async fn try_run_sampling_request(
+@@ -4064,10 +4069,14 @@ async fn try_run_sampling_request(
      if workspace_cwd_call_seen && tool_call_count != 1 {
          step_context.reject_context_transition_mixed_with_sibling_tool();
      }
@@ -811,7 +811,7 @@ index a5f147740be55185fa7e94fcf6e76a38bac20a0f..59bcbf91bfaa195a019cde12a002b4be
      drop(tool_blocking_timing_guard);
 
      if should_emit_token_count {
-@@ -4053,6 +4062,10 @@ async fn try_run_sampling_request(
+@@ -4078,6 +4087,10 @@ async fn try_run_sampling_request(
          sess.send_token_count_event(&turn_context).await;
      }
 
@@ -1513,7 +1513,7 @@ index ff504060eee9426a38f9095ad5674e90fd6d5b9e..31e13ea40d6a29194acc70fbe3997837
 +    })
  }
 diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-index 4b41740f893b168c3ec421fe11ee762d0cd0500e..1ad4b272f82af9e6f07a95c6abd11bc7bdbf9e64 100644
+index e0a952d1a8b09978415488e7392c909b31df126e..abb0cf1f263ed80c9d83690ccbc1f97b15c9db12 100644
 --- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
 +++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
 @@ -24,6 +24,7 @@ use codex_extension_api::ToolCallSource;
@@ -2039,7 +2039,7 @@ index 4b41740f893b168c3ec421fe11ee762d0cd0500e..1ad4b272f82af9e6f07a95c6abd11bc7
      Ok(())
  }
 
-@@ -2061,3 +2216,26 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
+@@ -2062,3 +2217,26 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
          codex_state::ThreadGoalStatus::Complete => ThreadGoalStatus::Complete,
      }
  }
@@ -2067,10 +2067,10 @@ index 4b41740f893b168c3ec421fe11ee762d0cd0500e..1ad4b272f82af9e6f07a95c6abd11bc7
 +        .map_err(anyhow::Error::msg)
 +}
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index b6fb0aa54c66c484407a3d199231cc0f6938c068..c133a59ace9864e5221df74b6d303078cd529afe 100644
+index 43b655b54c3323527e021237e2123c08b427fc68..99699e500ff13bcf9384359c154595b3e15ace84 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -342,6 +342,8 @@ pub enum Feature {
+@@ -346,6 +346,8 @@ pub enum Feature {
      GuardianExt,
      /// Enable persisted thread goals and automatic goal continuation.
      Goals,
@@ -2079,7 +2079,7 @@ index b6fb0aa54c66c484407a3d199231cc0f6938c068..c133a59ace9864e5221df74b6d303078
      /// Add current context-window metadata to model-visible context.
      TokenBudget,
      /// Enables experimental context management.
-@@ -1699,6 +1701,16 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1715,6 +1717,16 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -2207,7 +2207,7 @@ index 5b7489e247cd2229beb77608540fce618b1d03c2..77f493832a74f168588f351c2890fad3
      fn feature_thread_source_serializes_as_its_app_owned_label() -> Result<()> {
          let source = ThreadSource::Feature("automation".to_string());
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
-index fa5a5e2803b93fc22fcfaf825de2276af13d5323..597b85c4a1ac4faec3a9a37d0b68e84fc3ad9e8c 100644
+index be969b08cdad261dd4990193c2277bdb68fdae4e..ff1114f72a7d32ab6f40eb19fc6979f228e2af6c 100644
 --- a/codex-rs/state/src/lib.rs
 +++ b/codex-rs/state/src/lib.rs
 @@ -71,7 +71,10 @@ pub use model::ThreadRelationFilter;
@@ -2228,7 +2228,7 @@ index fa5a5e2803b93fc22fcfaf825de2276af13d5323..597b85c4a1ac4faec3a9a37d0b68e84f
 +pub use runtime::ListActiveGoalSupervisorSchedulesParams;
  pub use runtime::MemoryStore;
  pub use runtime::RemoteControlEnrollmentRecord;
- pub use runtime::RuntimeDbBackup;
+ pub use runtime::SqliteIntegrityCheck;
 diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
 index efbb76cc09483a47a029cc942faa20214043f279..fae85a88d41caecc9abfc468586d3145646ceafd 100644
 --- a/codex-rs/state/src/migrations.rs
@@ -2519,7 +2519,7 @@ index efbb76cc09483a47a029cc942faa20214043f279..fae85a88d41caecc9abfc468586d3145
      pool: &SqlitePool,
      migrator: &Migrator,
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index f80ecc8f8356b94c1d77dc3ea936455c09c15b8a..63fb4a5e8e7e3e8e34aa7416e7194ea5294eb6c4 100644
+index 4f07d1c11b870d3e4fc4a9a3a5f027952cadbe94..515de67972a0a21dcda9cf57a5385ff20bec9812 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
 @@ -6,13 +6,17 @@ use sqlx::migrate::Migration;
@@ -2986,7 +2986,7 @@ index a1b900af9533dfc34bf65553066978f7c1364549..2af9ab9d044452acbdc8c50dfa8fd47d
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub struct ThreadMetadata {
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ffced31fa1 100644
+index 14fcd2d1678de5237d85b3ae009733514de1126d..36ee0137fcecb1e2fda054132591563f31ec3491 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
 @@ -21,11 +21,13 @@ use crate::model::epoch_millis_to_datetime;
@@ -3003,7 +3003,7 @@ index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ff
  use sqlx::QueryBuilder;
  use sqlx::Row;
  use sqlx::Sqlite;
-@@ -61,10 +63,13 @@ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
+@@ -62,10 +64,13 @@ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
  pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
  pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
  pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
@@ -3016,7 +3016,7 @@ index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ff
 +pub use goals::ListActiveGoalSupervisorSchedulesParams;
  pub use memories::MemoryStore;
  pub use queued_items::SqliteQueueStore;
- pub use recovery::RuntimeDbBackup;
+ pub use recovery::backup_runtime_db_for_fresh_start;
 @@ -200,6 +205,25 @@ impl StateRuntime {
                  return Err(err);
              }
@@ -3043,16 +3043,16 @@ index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ff
          let started = Instant::now();
          let backfill_state_result = ensure_backfill_state_row_in_pool(pool.as_ref()).await;
          crate::telemetry::record_init_result(
-@@ -253,7 +277,7 @@ impl StateRuntime {
-         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
+@@ -254,7 +278,7 @@ impl StateRuntime {
          let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
          let runtime = Arc::new(Self {
+             reclamation: reclamation::SqliteReclamationWorker::spawn(sqlite.clone()),
 -            thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
 +            thread_goals,
              memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
              memories_v2: Arc::new(tokio::sync::OnceCell::new()),
              thread_queue: SqliteQueueStore::new(queue_pool),
-@@ -352,6 +376,53 @@ async fn close_sqlite_pools(pools: &[&SqlitePool]) {
+@@ -354,6 +378,53 @@ async fn close_sqlite_pools(pools: &[&SqlitePool]) {
      }
  }
 
@@ -3106,7 +3106,7 @@ index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ff
  /// Open and migrate the rebuildable paginated thread-history database.
  pub async fn open_thread_history_db(sqlite: &SqliteConfig) -> anyhow::Result<SqlitePool> {
      let migrator = runtime_thread_history_migrator();
-@@ -463,12 +534,16 @@ mod tests {
+@@ -465,12 +536,16 @@ mod tests {
      use super::test_support::unique_temp_dir;
      use crate::DB_INIT_METRIC;
      use crate::DbTelemetry;
@@ -3123,7 +3123,7 @@ index 376ad682ed10c22f489b793c7db220784d7f9628..e24069ba04f4cf2825abe96eac9c02ff
      use std::collections::BTreeMap;
      use std::collections::BTreeSet;
      use std::path::Path;
-@@ -537,6 +612,461 @@ mod tests {
+@@ -539,6 +614,461 @@ mod tests {
              .expect("open sqlite pool")
      }
 
@@ -4815,24 +4815,24 @@ index 0b8a3baf8597a343b48a7e286c9511f6cdd0dbda..326979170be3b80fc336c565c567635d
      async fn thread_spawn_children_without_status_filter_lists_all_statuses() {
          let codex_home = unique_temp_dir();
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index f05caf1f7e36ead0e316ddf890415cf95a6b9e34..8c7605612e0ffe8f54e293b91c3027ac2a693fbc 100644
+index 4d1c9e9819861eff9ac7f84057716901a5d51039..6c05633effde2ef54e4224e1e86915055e528a99 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -6,10 +6,12 @@
+@@ -7,10 +7,12 @@
  )]
 
  use crate::DbTelemetry;
 +use crate::migrations::repair_frodex_goal_supervisor_state_migration;
  use crate::migrations::repair_legacy_recency_migration_version;
- use crate::runtime::RuntimeDbInitError;
+ use crate::runtime::recovery::RuntimeDbInitError;
  use crate::telemetry;
  use crate::telemetry::DbKind;
 +use anyhow::Context;
  use codex_utils_absolute_path::AbsolutePathBuf;
  use log::LevelFilter;
  use sqlx::ConnectOptions;
-@@ -21,6 +23,8 @@ use sqlx::sqlite::SqliteConnectOptions;
- use sqlx::sqlite::SqliteJournalMode;
+@@ -20,6 +22,8 @@ use sqlx::migrate::Migrator;
+ use sqlx::sqlite::SqliteConnectOptions;
  use sqlx::sqlite::SqlitePoolOptions;
  use sqlx::sqlite::SqliteSynchronous;
 +use std::fs::File;
@@ -4840,7 +4840,7 @@ index f05caf1f7e36ead0e316ddf890415cf95a6b9e34..8c7605612e0ffe8f54e293b91c3027ac
  use std::path::Path;
  use std::path::PathBuf;
  use std::time::Duration;
-@@ -32,6 +36,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+@@ -31,6 +35,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
  const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
  const STATE_DB_FILENAME: &str = "state_5.sqlite";
  const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
@@ -4877,7 +4877,7 @@ index f05caf1f7e36ead0e316ddf890415cf95a6b9e34..8c7605612e0ffe8f54e293b91c3027ac
 
  #[derive(Clone, Copy)]
  struct RuntimeDbSpec {
-@@ -272,7 +306,15 @@ impl SqliteConfig {
+@@ -284,7 +318,15 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {
@@ -5690,10 +5690,10 @@ index 0000000000000000000000000000000000000000..08c815cbf577a2b34aca16419db0e723
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 7f592de8579ad44704e0f9636168ce1e88f3e12a..640a52cee345b5a82420532a04085b41a6d26da1 100644
+index 2a5cda889304e2a7aec527fd742ec4dcef865bbe..2f958844d083731f8a8da57aa4f673cda0f40124 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -122,6 +122,7 @@ use crate::ThreadStoreError;
+@@ -125,6 +125,7 @@ use crate::ThreadStoreError;
  use crate::ThreadStoreFuture;
  use crate::ThreadStoreResult;
  use crate::TimelinePage;
@@ -5701,7 +5701,7 @@ index 7f592de8579ad44704e0f9636168ce1e88f3e12a..640a52cee345b5a82420532a04085b41
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -1110,6 +1111,27 @@ impl ThreadStore for LocalThreadStore {
+@@ -1113,6 +1114,27 @@ impl ThreadStore for LocalThreadStore {
          })
      }
 
@@ -5729,7 +5729,7 @@ index 7f592de8579ad44704e0f9636168ce1e88f3e12a..640a52cee345b5a82420532a04085b41
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1383,6 +1405,114 @@ mod tests {
+@@ -1386,6 +1408,114 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -5844,7 +5844,7 @@ index 7f592de8579ad44704e0f9636168ce1e88f3e12a..640a52cee345b5a82420532a04085b41
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -2860,6 +2990,21 @@ mod tests {
+@@ -2863,6 +2993,21 @@ mod tests {
          }))
      }
 
@@ -5897,7 +5897,7 @@ index b59fd763f48e19f4a9da5d68138d197a813f7eff..de678a24d2ecbd39220f6fc5bd9c23d3
      fn move_thread_to_section(
          &self,
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index 15fc2903834dde867672670c9912ff33e7dafc6a..41c6c0aec1436db1243f81051cb47008c8326fff 100644
+index 4a6dcf814549be0161b5efdb702680451a352d94..f9069ed5a9a25fe762560e1361e4c03c372bdca0 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -1,5 +1,6 @@
@@ -5907,7 +5907,7 @@ index 15fc2903834dde867672670c9912ff33e7dafc6a..41c6c0aec1436db1243f81051cb47008
 
  use chrono::DateTime;
  use chrono::Utc;
-@@ -1096,6 +1097,17 @@ pub struct UpdateThreadMetadataParams {
+@@ -1099,6 +1100,17 @@ pub struct UpdateThreadMetadataParams {
      pub include_archived: bool,
  }
 

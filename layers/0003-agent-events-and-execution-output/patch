@@ -1,5 +1,5 @@
 diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
-index d9a00901888e919e58ef075afd8f1c51ad6ffd62..e4f176c793c3ee4ac86d169fc6100e4e442a72e3 100644
+index 7640223e429f91c8b1265c05cc33607a6377c24c..a9f8e88ae7cd3d8157e40ca206f64df5eaf41bd6 100644
 --- a/codex-rs/analytics/src/reducer.rs
 +++ b/codex-rs/analytics/src/reducer.rs
 @@ -516,7 +516,9 @@ impl TurnToolCounts {
@@ -13,7 +13,7 @@ index d9a00901888e919e58ef075afd8f1c51ad6ffd62..e4f176c793c3ee4ac86d169fc6100e4e
          }
          self.total += 1;
      }
-@@ -2666,6 +2668,8 @@ pub(crate) fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
+@@ -2672,6 +2674,8 @@ pub(crate) fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
          | ThreadItem::SubAgentActivity { .. }
          | ThreadItem::ImageView { .. }
          | ThreadItem::Sleep(_)
@@ -419,10 +419,10 @@ index 6f58231e30fd1d2ecbfa440f8c84a5cb39435c18..6ef635be323b8bd6aa8c6c9c8532be89
      mcp: TestAppServer,
      thread_id: String,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index a048e741bb3e2687f862e0f90f81f89c7441b17b..ead22e26d70ec29706ec90ad726dedbf659bc9da 100644
+index 4e2fa339b00815ffec7d00e347a83eb2f1667075..78a7c0e5428f53b2dda2e0260fb27a0afe2d111d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -628,6 +628,24 @@ async fn on_event_updates_status_from_task_complete() {
+@@ -629,6 +629,24 @@ async fn on_event_updates_status_from_task_complete() {
      }
  }
 
@@ -755,7 +755,7 @@ index d5e1b9ba3e4059ab7d88751f70e7655415051002..3204d620326f2d1094bf48d64064ac4f
  async fn streaming_output_bounds_invalid_bytes() {
      let (session, turn, rx_event) = make_session_and_context_with_rx().await;
 diff --git a/codex-rs/git-utils/src/info.rs b/codex-rs/git-utils/src/info.rs
-index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec6218863898802 100644
+index 7f038304dbf5dcc4a71c40713d2b6bf054a3ff1e..a49a3b6a94784c692d3bdf7b72ff5990655af350 100644
 --- a/codex-rs/git-utils/src/info.rs
 +++ b/codex-rs/git-utils/src/info.rs
 @@ -3,6 +3,7 @@ use std::collections::HashSet;
@@ -786,7 +786,7 @@ index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec62188
  #[derive(Serialize, Deserialize, Clone, Debug)]
  pub struct GitDiffToRemote {
      pub sha: GitSha,
-@@ -117,6 +131,57 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
+@@ -120,6 +134,57 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
      Some(git_info)
  }
 
@@ -844,7 +844,7 @@ index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec62188
  /// Collect fetch remotes in a multi-root-friendly format: {"origin": "https://..."}.
  pub async fn get_git_remote_urls(cwd: &Path) -> Option<BTreeMap<String, SanitizedGitUrl>> {
      let is_git_repo = run_git_command_with_timeout(&["rev-parse", "--git-dir"], cwd)
-@@ -889,6 +954,83 @@ mod tests {
+@@ -892,6 +957,83 @@ mod tests {
          assert!(status.success(), "child test process failed: {status}");
      }
 
@@ -929,7 +929,7 @@ index 092acd0dab1d0a4a0bcc5c9198eb1e3a1589ac4d..9ca2df7f6029762c93bedf603ec62188
      fn canonicalize_git_remote_url_normalizes_github_variants() {
          for remote in [
 diff --git a/codex-rs/git-utils/src/lib.rs b/codex-rs/git-utils/src/lib.rs
-index 495a459fb0b9a9ac228a6c040b13477a6370f1da..df1049f9b794ec906b3910068e5389f1b11bccd0 100644
+index 1224d2ab03516cfca762b8bb2f31419e71cdcb84..2d12dd710a3de7c04a479e95b9530e0dd40e454c 100644
 --- a/codex-rs/git-utils/src/lib.rs
 +++ b/codex-rs/git-utils/src/lib.rs
 @@ -37,6 +37,7 @@ pub use fsmonitor::detect_fsmonitor_override;
@@ -940,7 +940,7 @@ index 495a459fb0b9a9ac228a6c040b13477a6370f1da..df1049f9b794ec906b3910068e5389f1
  pub use info::canonicalize_git_remote_url;
  pub use info::collect_git_info;
  pub use info::current_branch_name;
-@@ -44,6 +45,7 @@ pub use info::default_branch_name;
+@@ -45,6 +46,7 @@ pub use info::get_git_origin_url;
  pub use info::get_git_remote_urls;
  pub use info::get_git_remote_urls_assume_git_repo;
  pub use info::get_git_repo_root;
@@ -1069,10 +1069,10 @@ index f93fe61eb30d2675a768e82abccfd476d40dd56c..aea377cdefbc91f352b51811e3b10976
          | ThreadItem::Reasoning { .. }
          | ThreadItem::CommandExecution { .. }
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index de47e41f7b41180f4cbcb709deefbd52e89f1228..7bbfa57a5e6ffee11a00223ca42aeea6e0fd8301 100644
+index 37b5c788ad9f514e580c8302598abf8f6994bae1..2c51c2506de418874182c0021c6f6c7cf362ef14 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
-@@ -237,6 +237,7 @@ mod clipboard;
+@@ -238,6 +238,7 @@ mod clipboard;
  mod native_history;
  mod owned_transcript;
  mod pending_interactive_replay;
@@ -1080,7 +1080,7 @@ index de47e41f7b41180f4cbcb709deefbd52e89f1228..7bbfa57a5e6ffee11a00223ca42aeea6
  mod permission_shortcuts;
  mod pets;
  mod platform_actions;
-@@ -288,6 +289,7 @@ use self::side::SideParentStatus;
+@@ -289,6 +290,7 @@ use self::side::SideParentStatus;
  use self::side::SideParentStatusChange;
  use self::side::SideThreadState;
  use self::startup_prompts::*;
@@ -1088,7 +1088,7 @@ index de47e41f7b41180f4cbcb709deefbd52e89f1228..7bbfa57a5e6ffee11a00223ca42aeea6
  use self::thread_events::*;
 
  const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
-@@ -616,6 +618,8 @@ pub(crate) struct App {
+@@ -618,6 +620,8 @@ pub(crate) struct App {
      temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
      /// Track title generation across thread switches and deduplicate automatic requests.
      pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
@@ -1140,10 +1140,10 @@ index 8b29753b3ccf60979875cbf6b0d8ca729b19c352..8f905012ff404126c24fe16ae15dc687
 
      pub(super) async fn handle_feedback_submitted(
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index ae51fc91be1906e0be69f8e224eeee658dd39571..c96220e2b996cccf450c79466ef9098dda2daf49 100644
+index da28bf2cabfddaff93c358fbfbee7ef014426220..8ab092ddab86063a35dff599c43bfb76f84e1799 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -1189,6 +1189,20 @@ impl App {
+@@ -1190,6 +1190,20 @@ impl App {
              AppEvent::SubmitThreadOp { thread_id, op } => {
                  self.submit_thread_op(app_server, thread_id, op).await?;
              }
@@ -1249,7 +1249,7 @@ index 0000000000000000000000000000000000000000..bf0d534940a8a03e21f4d8d0393790a7
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
-index ea02b08dfed64ac07986c3bb51058100c40cd1b8..29a3663c3fcf01b38254ed4c70828fbba48c5d3b 100644
+index 5995bb79112ced7c45c1a2c5c14ddab2ad594e05..cc7337d71f2fe1c4508e66917ebeb524fa20f1db 100644
 --- a/codex-rs/tui/src/app/session_lifecycle.rs
 +++ b/codex-rs/tui/src/app/session_lifecycle.rs
 @@ -263,6 +263,7 @@ impl App {
@@ -1269,10 +1269,10 @@ index ea02b08dfed64ac07986c3bb51058100c40cd1b8..29a3663c3fcf01b38254ed4c70828fbb
          self.side_threads.clear();
          self.active_thread_id = None;
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 5d2ad0c09f33c7f106f9468aeda31654b28ed26e..41234ce23ef92c636d650252878994167f41c3ac 100644
+index 37add4bcf6658dedc99d2f6bab17209697d875f4..14323cdad5bbaa9afd669cdd46310803a676d959 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -814,6 +814,7 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -848,6 +848,7 @@ See the Codex keymap documentation for supported actions and examples."
              background_voice_error: None,
              temporary_structured_requests: HashMap::new(),
              pending_thread_titles: HashMap::new(),
@@ -1281,10 +1281,10 @@ index 5d2ad0c09f33c7f106f9468aeda31654b28ed26e..41234ce23ef92c636d65025287899416
              agent_navigation: AgentNavigationState::default(),
              agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index 92b07cd3590d20332ffb89e3f130389d97fe381b..f5e39c75ed2705446e150e0aa405048cfb78d022 100644
+index 135c411dd1130d7b7a2a9663f45f39e89340b435..e686401c8dc1fb659e0b627783e5b46df4b820cb 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -85,6 +85,7 @@ pub(crate) async fn make_test_app() -> App {
+@@ -87,6 +87,7 @@ pub(crate) async fn make_test_app() -> App {
          background_voice_error: None,
          temporary_structured_requests: HashMap::new(),
          pending_thread_titles: HashMap::new(),
@@ -1293,7 +1293,7 @@ index 92b07cd3590d20332ffb89e3f130389d97fe381b..f5e39c75ed2705446e150e0aa405048c
          agent_navigation: AgentNavigationState::default(),
          agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index 2d4031e67bf8e01874f1281bb4142a59486893d8..e40e2a09f2bcfdc022ec54f783eb4589fc45f11d 100644
+index 9c1af274ff270b2731c33b92cca09cbf85d35739..7b1cda4d4f71005f86a187ea89fe9d65b6ea4b98 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
 @@ -11,6 +11,8 @@ mod security_setup_tests;
@@ -1305,7 +1305,7 @@ index 2d4031e67bf8e01874f1281bb4142a59486893d8..e40e2a09f2bcfdc022ec54f783eb4589
  #[path = "tests/approvals_reviewer_error_tests.rs"]
  mod approvals_reviewer_error_tests;
  #[path = "tests/backend_banner_fallback_tests.rs"]
-@@ -6019,6 +6021,7 @@ async fn make_test_app() -> Box<App> {
+@@ -6065,6 +6067,7 @@ async fn make_test_app() -> Box<App> {
          temporary_structured_requests: HashMap::new(),
          pending_thread_titles: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
@@ -1313,7 +1313,7 @@ index 2d4031e67bf8e01874f1281bb4142a59486893d8..e40e2a09f2bcfdc022ec54f783eb4589
          agent_navigation: AgentNavigationState::default(),
          pending_server_profiles: HashMap::new(),
          agents_overview: Default::default(),
-@@ -6134,6 +6137,7 @@ pub(super) async fn make_test_app_with_channels() -> (
+@@ -6182,6 +6185,7 @@ pub(super) async fn make_test_app_with_channels() -> (
              temporary_structured_requests: HashMap::new(),
              pending_thread_titles: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
@@ -1697,7 +1697,7 @@ index b7d34f637f24c6d6b8ab4e5fb039511ca91ac239..6c4eed2d0f4bab0a81515a81fca16fd4
          let (sender, receiver) = mpsc::channel(capacity);
          Self {
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a73e3580ec 100644
+index 341eaa057c79398f24682301256f0407f6e79764..15e931ae60b2df1cbe93347e5f7c8ff4d525a675 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
 @@ -668,9 +668,9 @@ impl App {
@@ -1746,7 +1746,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
                                  break;
                              }
                          }
-@@ -1093,37 +1085,6 @@ impl App {
+@@ -1096,37 +1088,6 @@ impl App {
          }
      }
 
@@ -1784,7 +1784,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
      pub(super) async fn refresh_side_parent_status_from_store(&mut self, thread_id: ThreadId) {
          let Some(channel) = self.thread_event_channels.get(&thread_id) else {
              return;
-@@ -1244,7 +1205,13 @@ impl App {
+@@ -1246,7 +1207,13 @@ impl App {
              let channel = self.ensure_thread_channel(thread_id);
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
@@ -1799,7 +1799,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
              let mut guard = store.lock().await;
              if guard.session.is_none()
                  && let Some(session) = inferred_session
-@@ -1272,11 +1239,13 @@ impl App {
+@@ -1274,11 +1241,13 @@ impl App {
                  guard.push_notification(notification);
                  None
              };
@@ -1813,7 +1813,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
              )
          };
          if is_turn_started {
-@@ -1350,7 +1319,7 @@ impl App {
+@@ -1359,7 +1328,7 @@ impl App {
          } else if previous_pending_status.is_some() {
              self.clear_side_parent_action_status(thread_id);
          }
@@ -1822,7 +1822,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
          Ok(())
      }
 
-@@ -1441,10 +1410,14 @@ impl App {
+@@ -1450,10 +1419,14 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -1839,7 +1839,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
          };
          let request_status = SideParentStatus::for_request(&request);
 
-@@ -1470,7 +1443,7 @@ impl App {
+@@ -1479,7 +1452,7 @@ impl App {
          if let Some(status) = pending_status.or(request_status) {
              self.set_side_parent_status(thread_id, Some(status));
          }
@@ -1848,7 +1848,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
          Ok(())
      }
 
-@@ -1484,7 +1457,7 @@ impl App {
+@@ -1493,7 +1466,7 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -1857,7 +1857,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
              let mut guard = store.lock().await;
              let should_send = guard.active;
              // Active batch responses remain queued in the receiver across a concurrent detach, so
-@@ -1493,7 +1466,7 @@ impl App {
+@@ -1502,7 +1475,7 @@ impl App {
              if !should_send || !matches!(&event, HistoryLookupResponse::Batch { .. }) {
                  guard.push_buffered_event(ThreadBufferedEvent::HistoryEntryResponse(event.clone()));
              }
@@ -1866,7 +1866,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
          };
 
          if should_send {
-@@ -1511,6 +1484,7 @@ impl App {
+@@ -1520,6 +1493,7 @@ impl App {
                  }
              }
          }
@@ -1875,7 +1875,7 @@ index a3501c3a1bd5efd5930687625bde2db2d3c1b181..e7bf176ecbd7896645ac1040c11651a7
      }
 
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index 0d160fd8f5fe8f79052fa6b2270cb9cf5a163c9e..d7ceae1be0201fe862392a61d4105eafabba8269 100644
+index ce30da4ad01dd3f5b22ebab5ec7211df0340fbb3..aadd596b0081b5123d127b17a5b28b6b26bd899b 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
 @@ -31,6 +31,7 @@ use codex_app_server_protocol::PluginReadParams;
@@ -1894,7 +1894,7 @@ index 0d160fd8f5fe8f79052fa6b2270cb9cf5a163c9e..d7ceae1be0201fe862392a61d4105eaf
  use crate::app_command::AppCommand;
  use crate::app_server_session::AppServerStartedThread;
  use crate::bottom_pane::ApprovalRequest;
-@@ -417,6 +419,13 @@ pub(crate) enum AppEvent {
+@@ -419,6 +421,13 @@ pub(crate) enum AppEvent {
          prompt: UserMessage,
      },
 
@@ -1909,10 +1909,10 @@ index 0d160fd8f5fe8f79052fa6b2270cb9cf5a163c9e..d7ceae1be0201fe862392a61d4105eaf
      ThreadHistoryEntryResponse {
          thread_id: ThreadId,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 30e1ee1dfcc9a99c94000a1a6acc0ff2ef947494..df9dc79a8e97f8d81f846b93129a983adb33a4d2 100644
+index bfaeeffca97e003598ad034aac5270946b0af1da..7930e59e2b50df96437a2a80ff6aa01aeca04291 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
-@@ -2053,6 +2053,7 @@ pub(crate) fn thread_start_params_from_config(
+@@ -2071,6 +2071,7 @@ pub(crate) fn thread_start_params_from_config(
          developer_instructions: with_terminal_visualization_instructions(
              config, /*control_instructions*/ None,
          ),
@@ -1920,8 +1920,8 @@ index 30e1ee1dfcc9a99c94000a1a6acc0ff2ef947494..df9dc79a8e97f8d81f846b93129a983a
          ..ThreadStartParams::default()
      }
  }
-@@ -2988,6 +2989,7 @@ model = "gpt-5.1-codex"
-         assert_eq!(params.model_provider, Some(config.model_provider_id));
+@@ -3023,6 +3024,7 @@ model = "gpt-5.1-codex"
+         assert_eq!(params.model_provider, None);
          assert_eq!(params.thread_source, Some(ThreadSource::User));
          assert_eq!(params.dynamic_tools, None);
 +        assert!(params.experimental_raw_events);
@@ -1929,7 +1929,7 @@ index 30e1ee1dfcc9a99c94000a1a6acc0ff2ef947494..df9dc79a8e97f8d81f846b93129a983a
 
      #[tokio::test]
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 15778d90e5efe7e7e82f72731907c26f1327a68b..996f192c9876bf3e01307af6c317adc5a9ee8348 100644
+index 7fafd6dd45dc51581492a69e2542348c36323b30..2ed079b458bb68b9d6dd6e77722a41d98972a3d4 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
 @@ -145,8 +145,12 @@ use codex_protocol::config_types::WindowsSandboxLevel;
@@ -2329,10 +2329,10 @@ index e03e997d850205e7a380724f80cc240d2e00b614..1051fea6bef0a70f1deed20ee89ec375
  }
 
 diff --git a/codex-rs/tui/src/chatwidget/tests/composer_submission.rs b/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
-index 0646bb1bf690ad19e49fd57c9671f1af630ec38f..07f75d14cbbfc2824b5ff8626cc83af7da57dd1c 100644
+index 099806b8a633cdfc731141cbac257e337e30befc..0b3a7e904f13bae00c3e3ef5d7be8c60a2100e3b 100644
 --- a/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/composer_submission.rs
-@@ -1732,7 +1732,8 @@ async fn output_free_ctrl_c_interrupt_keeps_prompt_and_opens_blank_composer() {
+@@ -1733,7 +1733,8 @@ async fn output_free_ctrl_c_interrupt_keeps_prompt_and_opens_blank_composer() {
      insta::assert_snapshot!(
          "output_free_ctrl_c_interrupt_keeps_prompt_and_blank_composer",
          format!(
@@ -2462,7 +2462,7 @@ index b4b943060ab5b0831428013a9a8def0f3f5a2510..9d6f7dcf64e7e1d24a4230277a060ae0
 
  ■ Conversation interrupted - use /feedback if something went wrong
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index c3aa1ba65d6d4aac6949e1561301169d985ab296..cc2704a7995e60192215463c53976f629a8ffb4c 100644
+index abe4b6667fb3859f680d6fc0bf01d27085bfe68b..d5fa5aa5594906807890ed23a6691f3885f6753c 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 @@ -2154,7 +2154,7 @@ async fn single_line_final_answer_hides_working_status_snapshot() {
@@ -2776,7 +2776,7 @@ index 2d8a2fac39bcfa25f3e8f04d7fd24a07056f1d89..3734530c39ddc305bc4c1a0f25cd2889
 +
 +              [Image #1]
 diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
-index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a84420102f54b 100644
+index 9b0dc6034b51ec0da71a6bfd986bcd1f92af5da1..af280d5fb31c691a8c6545ff7bf6e49823aeb5c5 100644
 --- a/codex-rs/tui/src/history_cell/tests.rs
 +++ b/codex-rs/tui/src/history_cell/tests.rs
 @@ -231,6 +231,13 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -2802,7 +2802,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
              })
              .collect::<Vec<_>>()
              .join("\n")
-@@ -2329,7 +2338,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
+@@ -2324,7 +2333,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
      // Small width to force wrapping more clearly. Effective wrap width is width-2 due to the ▌ prefix and trailing space.
      let width: u16 = 12;
      let lines = cell.display_lines(width);
@@ -2811,7 +2811,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
 
      assert_eq!(render_lines(&cell.raw_lines()), ["_count_rows"]);
      insta::assert_snapshot!(rendered);
-@@ -2371,8 +2380,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
+@@ -2366,8 +2375,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
          linked_rows.iter().all(|line| {
              line.line
                  .spans
@@ -2825,7 +2825,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
          }),
          "wrapped URL rows must retain the user-message gutter: {linked_rows:?}"
      );
-@@ -2387,10 +2399,170 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
+@@ -2382,10 +2394,170 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 
      insta::assert_snapshot!(
          "user_history_cell_wraps_long_urls_inside_the_message_gutter",
@@ -2997,7 +2997,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
  #[test]
  fn user_history_cell_renders_remote_image_urls() {
      let cell = UserHistoryCell {
-@@ -2401,7 +2573,7 @@ fn user_history_cell_renders_remote_image_urls() {
+@@ -2396,7 +2568,7 @@ fn user_history_cell_renders_remote_image_urls() {
          remote_image_urls: vec!["https://example.com/example.png".to_string()],
      };
 
@@ -3006,7 +3006,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe these"));
-@@ -2458,7 +2630,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
+@@ -2453,7 +2625,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
          remote_image_urls: vec!["data:image/png;base64,aGVsbG8=".to_string()],
      };
 
@@ -3015,7 +3015,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe inline image"));
-@@ -2487,7 +2659,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
+@@ -2482,7 +2654,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
          ],
      };
 
@@ -3024,7 +3024,7 @@ index 03c953fad76c034555e27b8c71c27a7d76483c53..593f854e8020f4bbda59ab02b92a8442
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("[Image #2]"));
-@@ -2604,7 +2776,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
+@@ -2599,7 +2771,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
          .enumerate()
          .map(|(index, row)| {
              if index == 0 {
@@ -3369,7 +3369,7 @@ index 06805b0f76af09571213eb90927b80c2b89ae68b..d4a311ec7ae4db6825c26b5d71978541
  async fn skips_stale_listed_thread_before_valid_label() -> color_eyre::Result<()> {
      let temp_dir = TempDir::new()?;
 diff --git a/codex-rs/tui/src/pager_overlay/transcript.rs b/codex-rs/tui/src/pager_overlay/transcript.rs
-index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bfb98cd027 100644
+index 355821a1a66e0c750c6f0fc5e3d719c1f459eddb..8dc53e7fa5ae01aeab4278b0afd0f56009244c24 100644
 --- a/codex-rs/tui/src/pager_overlay/transcript.rs
 +++ b/codex-rs/tui/src/pager_overlay/transcript.rs
 @@ -7,6 +7,7 @@ use super::*;
@@ -3380,7 +3380,7 @@ index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bf
  use crate::keymap::RuntimeKeymap;
  use crate::motion::MotionMode;
  use crate::transcript_view::TranscriptBookmark;
-@@ -321,7 +322,7 @@ impl TranscriptOverlay {
+@@ -319,7 +320,7 @@ impl TranscriptOverlay {
                  *highlight += added;
              }
          }
@@ -3389,7 +3389,7 @@ index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bf
          self.view.history_loaded(&self.cells, index..index + added);
          index
      }
-@@ -336,7 +337,7 @@ impl TranscriptOverlay {
+@@ -334,7 +335,7 @@ impl TranscriptOverlay {
          self.pending_highlight = self
              .pending_highlight
              .filter(|index| *index < self.cells.len());
@@ -3398,7 +3398,7 @@ index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bf
      }
 
      /// Grouping may change compact previews; retain the reader's revision before replacing cells.
-@@ -381,7 +382,7 @@ impl TranscriptOverlay {
+@@ -379,7 +380,7 @@ impl TranscriptOverlay {
              });
          }
          self.cells.splice(start..end, [consolidated]);
@@ -3407,7 +3407,7 @@ index 19dd7dd834c97ef98d0e8b662e7851f2493fd57d..7522a86ec0cf7a8acde7792be78a34bf
      }
 
      pub(crate) fn sync_live_tail(
-@@ -396,7 +397,17 @@ impl TranscriptOverlay {
+@@ -394,7 +395,17 @@ impl TranscriptOverlay {
      pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
          self.highlight_cell = cell.filter(|index| *index < self.cells.len());
          self.pending_highlight = self.highlight_cell;

@@ -730,7 +730,7 @@ index 0000000000000000000000000000000000000000..8dc623b1ec1df1279b1e2722bc5426aa
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 510f9e3380fa825dd6be0e003553ffba60eb008a..9c773d73a6a85d90f1662a073e76908fcad177be 100644
+index 2efbac95da6bfdbf25ec0a1967db5a223dd4c8ef..1eb2c75de4d4c3cd96f5205efe50ac8311bdef62 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -52,6 +52,7 @@ mod experimental_feature_list;

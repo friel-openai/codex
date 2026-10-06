@@ -567,10 +567,10 @@ index b04aedcd33f3f9012f1f187ff0671d67afd8cc42..d755ed25f07188793be6bacef9ac8bdc
      let parent_thread_id = create_fake_rollout(
          codex_home.path(),
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e9696494fc2 100644
+index a4934570e5217134d589432118bc331d81c9a0f6..2e48199bee4ebec70aa8a9548aea4048d959b390 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -979,7 +979,7 @@ impl LocalAgentControl {
+@@ -986,7 +986,7 @@ impl LocalAgentControl {
          let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
              .then_some(ThreadHistoryMode::Paginated);
 
@@ -579,7 +579,7 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
          let mut supervisor_model_history = None;
          let (
              selected_capability_roots,
-@@ -996,17 +996,29 @@ impl LocalAgentControl {
+@@ -1003,17 +1003,29 @@ impl LocalAgentControl {
                      .as_any()
                      .is::<codex_thread_store::LocalThreadStore>() =>
              {
@@ -610,7 +610,7 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
                      .find_map(|item| match item {
                          RolloutItem::SessionMeta(meta_line) => {
                              Some(meta_line.meta.selected_capability_roots.clone())
-@@ -1015,7 +1027,7 @@ impl LocalAgentControl {
+@@ -1022,7 +1034,7 @@ impl LocalAgentControl {
                      })
                      .unwrap_or_default();
                  if is_goal_supervisor_helper {
@@ -619,7 +619,7 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
                      supervisor_model_history = Some(model_history);
                  }
                  let reference_rollout_items = reference_history.get_rollout_items().to_vec();
-@@ -1067,7 +1079,16 @@ impl LocalAgentControl {
+@@ -1074,7 +1086,16 @@ impl LocalAgentControl {
                      }
                  };
                  if is_goal_supervisor_helper {
@@ -637,7 +637,7 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
                      supervisor_model_history = Some(forked_rollout_items.clone());
                  }
                  (
-@@ -1265,9 +1286,21 @@ impl LocalAgentControl {
+@@ -1272,9 +1293,21 @@ impl LocalAgentControl {
              });
              if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
                  (reference_rollout_items, unsanitized_parent_history)
@@ -661,7 +661,7 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
              }
          }
          // Full forks reuse the parent's reference context instead of rebuilding it. If that
-@@ -1340,7 +1373,7 @@ impl LocalAgentControl {
+@@ -1347,7 +1380,7 @@ impl LocalAgentControl {
                          &parent_thread.session,
                          &goal_id,
                          &parent_goal,
@@ -671,10 +671,10 @@ index fd8103d93250278467a66ac03073d8e0cb4c6b7d..e768ef917d2e5dc455da9c365cf92e96
                      .await,
                  );
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 8ceef765f280c402c4cc9ce33e145001cacd239a..59d12f0846ab42b2c410dc26642fdb2cd048987c 100644
+index 4e12c33b490f8da125a118e61f606cb476221bfe..83e538c4a55c9381526a7bee933043b30b3492b1 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -4691,6 +4691,203 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -4760,6 +4760,203 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .expect("shutdown reopened full-history child");
  }
 
@@ -903,10 +903,10 @@ index 493a4b625704b66dbed93e7e9a879bdc0475a841..c5ac175adb7d1ab8a8917bdc7c8cccfa
          .goal_supervisor_runtime
          .snooze_records
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978ac192e485 100644
+index 66427857703e4ed41c58f5e65dce21249c21ad0b..8f9b93b1203160527a446b62620516e2a763b369 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -4546,19 +4546,75 @@ async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messag
+@@ -4568,19 +4568,75 @@ async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messag
      );
  }
 
@@ -984,7 +984,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
              ..Default::default()
          }),
      }]);
-@@ -4656,10 +4712,8 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -4678,10 +4734,8 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
 
      {
          let mut state = source.state.lock().await;
@@ -997,7 +997,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
          state.replace_shared_history(
              Arc::clone(&source_response_items),
              Some(reference_context_item.clone()),
-@@ -4667,6 +4721,16 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -4689,6 +4743,16 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
          state.set_token_info(Some(authoritative_tokens.clone()));
          state.last_started_turn_id = Some(authoritative_turn_id.clone());
          state.latest_token_usage_record = Some(authoritative_usage_record.clone());
@@ -1014,7 +1014,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
          state.set_rate_limits(authoritative_rate_limits.clone());
          state
              .history
-@@ -4754,6 +4818,11 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -4776,6 +4840,11 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
          assert_eq!(child_state.auto_compact_window_number(), 7);
          assert_eq!(child_state.auto_compact_window_ids(), window_ids);
          assert_eq!(child_state.history.history_version(), 1);
@@ -1026,7 +1026,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
          assert!(
              child_state
                  .history
-@@ -4798,6 +4867,14 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -4820,6 +4889,14 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
          checkpoint.latest_token_usage_record.as_ref(),
          Some(&authoritative_usage_record)
      );
@@ -1041,7 +1041,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
      assert!(child_rollout_items.iter().any(|item| {
          matches!(
              item,
-@@ -4808,6 +4885,126 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -4830,6 +4907,126 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
          )
      }));
 
@@ -1169,7 +1169,7 @@ index bb6d24c6ba07bd3b2ddbf70d745941235f8738cb..3def06882a7077e13180e7bc4ea9978a
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 6870cff819001e4735b8c959268ccd688ff382ec..03c9a2daaf77e37c3032b657fa0663c79714a1c7 100644
+index 34c328a88bf869ad55e3567d5acd569b956183f8..d2a98e5c068f6c62fdb8fcf3376a276a074185ca 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -210,6 +210,7 @@ type AgentControlFactory =
