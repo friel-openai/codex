@@ -15,30 +15,38 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::warn;
 
+/// Session-scoped LRU of loaded V1 and V2 agents that can be reconstructed from persisted rollout.
 #[derive(Default)]
-pub(super) struct V2Residency {
-    state: Mutex<V2ResidencyState>,
+pub(super) struct AgentResidency {
+    /// Loaded residents plus in-flight reservations for new or reloaded agents.
+    state: Mutex<AgentResidencyState>,
 }
 
+/// Mutable residency accounting protected by `AgentResidency::state`.
 #[derive(Default)]
-struct V2ResidencyState {
+struct AgentResidencyState {
+    /// Loaded agent IDs, ordered from least to most recently used.
     residents: VecDeque<ThreadId>,
+    /// Slots reserved before a thread has finished loading and can enter `residents`.
     pending_slots: usize,
 }
 
-pub(super) struct V2ResidencySlot {
-    residency: Arc<V2Residency>,
+/// A pending resident slot that must be committed after a thread loads successfully.
+pub(super) struct AgentResidencySlot {
+    /// Shared LRU that owns the pending slot.
+    residency: Arc<AgentResidency>,
+    /// Whether dropping this reservation must return the pending slot.
     active: bool,
 }
 
-impl V2ResidencySlot {
+impl AgentResidencySlot {
     pub(super) fn commit(mut self, thread_id: ThreadId) {
         self.residency.commit_slot(thread_id);
         self.active = false;
     }
 }
 
-impl Drop for V2ResidencySlot {
+impl Drop for AgentResidencySlot {
     fn drop(&mut self) {
         if self.active {
             self.residency.release_pending_slot();
@@ -47,21 +55,22 @@ impl Drop for V2ResidencySlot {
 }
 
 impl LocalAgentControl {
-    pub(super) async fn reserve_v2_residency_slot(
+    pub(super) async fn reserve_agent_residency_slot(
         &self,
         state: &Arc<ThreadManagerState>,
         config: &Config,
+        multi_agent_version: MultiAgentVersion,
         protected_thread_id: Option<ThreadId>,
-    ) -> CodexResult<V2ResidencySlot> {
+    ) -> CodexResult<AgentResidencySlot> {
         let capacity = config
-            .effective_agent_max_threads(MultiAgentVersion::V2)
+            .effective_agent_max_threads(multi_agent_version)
             .unwrap_or(usize::MAX);
-        Arc::clone(&self.runtime.residency)
-            .reserve_slot(state, capacity, protected_thread_id)
+        Arc::clone(&self.runtime.agent_residency)
+            .reserve_slot(self, state, capacity, protected_thread_id)
             .await
     }
 
-    pub(super) async fn touch_loaded_v2_residency(
+    pub(super) async fn touch_loaded_agent_residency(
         &self,
         state: &Arc<ThreadManagerState>,
         thread_id: ThreadId,
@@ -71,8 +80,8 @@ impl LocalAgentControl {
         }
     }
 
-    pub(super) fn forget_v2_residency(&self, thread_id: ThreadId) {
-        self.runtime.residency.remove(thread_id);
+    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+        self.runtime.agent_residency.remove(thread_id);
     }
 }
 
@@ -91,32 +100,43 @@ impl LocalAgentRuntime {
         if !Arc::ptr_eq(thread, &state.get_thread(thread_id).await?) {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        self.residency.touch(thread_id);
+        self.agent_residency.touch(thread_id);
         Ok(Some(guard))
     }
 }
 
-impl V2Residency {
+/// Result of scanning the current LRU once for an unloadable resident.
+enum EvictionResult {
+    Unloaded,
+    Retry,
+    Unavailable,
+}
+
+impl AgentResidency {
     async fn reserve_slot(
         self: Arc<Self>,
+        control: &LocalAgentControl,
         manager: &Arc<ThreadManagerState>,
         capacity: usize,
         protected_thread_id: Option<ThreadId>,
-    ) -> CodexResult<V2ResidencySlot> {
+    ) -> CodexResult<AgentResidencySlot> {
         loop {
             if self.try_reserve_pending_slot(capacity) {
-                return Ok(V2ResidencySlot {
+                return Ok(AgentResidencySlot {
                     residency: self,
                     active: true,
                 });
             }
-            if !self
-                .try_unload_one_resident(manager, protected_thread_id)
+            match self
+                .try_unload_one_resident(control, manager, protected_thread_id)
                 .await
             {
-                return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
-                    max_threads: capacity,
-                }));
+                EvictionResult::Unloaded | EvictionResult::Retry => {}
+                EvictionResult::Unavailable => {
+                    return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
+                        max_threads: capacity,
+                    }));
+                }
             }
         }
     }
@@ -135,9 +155,10 @@ impl V2Residency {
 
     async fn try_unload_one_resident(
         self: &Arc<Self>,
+        control: &LocalAgentControl,
         manager: &Arc<ThreadManagerState>,
         protected_thread_id: Option<ThreadId>,
-    ) -> bool {
+    ) -> EvictionResult {
         // Keep shutting-down workers counted until removal. Each runtime's write guard
         // excludes delivery and competing evictions without blocking unrelated workers.
         let candidates = self
@@ -146,6 +167,7 @@ impl V2Residency {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .residents
             .clone();
+        let mut pending_completion = None;
         for candidate_thread_id in candidates {
             if Some(candidate_thread_id) == protected_thread_id {
                 continue;
@@ -157,9 +179,17 @@ impl V2Residency {
                     Some(_) | None => {
                         // A reload cannot publish between the lookup and stale-entry removal.
                         self.remove(candidate_thread_id);
-                        return true;
+                        return EvictionResult::Unloaded;
                     }
                 }
+            };
+            let lifecycle = control
+                .runtime
+                .registry
+                .agent_lifecycle(candidate_thread_id)
+                .unwrap_or_default();
+            let Some(transition) = lifecycle.try_lock_transition() else {
+                continue;
             };
             let Ok(residency_guard) =
                 Arc::clone(&candidate_thread.residency_gate).try_write_owned()
@@ -174,20 +204,34 @@ impl V2Residency {
             {
                 continue;
             }
+            if lifecycle.completion_watcher_active() {
+                self.touch(candidate_thread_id);
+                drop(residency_guard);
+                drop(transition);
+                pending_completion = Some(lifecycle);
+                continue;
+            }
             // Once shutdown is submitted, cancellation cannot revoke it. The eviction task
-            // must keep delivery excluded and capacity reserved through registry removal.
+            // keeps both lifecycle and delivery excluded, and capacity reserved, through removal.
             let manager = Arc::clone(manager);
             let residency = Arc::clone(self);
             let eviction = tokio::spawn(async move {
+                let _transition = transition;
                 let _residency_guard = residency_guard;
                 candidate_thread.ensure_rollout_materialized().await;
-                if let Err(err) = candidate_thread.shutdown_and_wait().await {
+                if let Err(err) = candidate_thread.flush_rollout().await {
                     warn!(
-                        "failed to shut down v2 resident thread before unloading {candidate_thread_id}: {err}"
+                        "failed to flush resident thread before unloading {candidate_thread_id}: {err}"
                     );
                     return false;
                 }
                 let environments = candidate_thread.environment_selections().await;
+                if let Err(err) = candidate_thread.shutdown_and_wait().await {
+                    warn!(
+                        "failed to shut down resident thread before unloading {candidate_thread_id}: {err}"
+                    );
+                    return false;
+                }
                 let mut threads = manager.threads.write().await;
                 if threads
                     .get(&candidate_thread_id)
@@ -207,12 +251,17 @@ impl V2Residency {
                 true
             });
             match eviction.await {
-                Ok(true) => return true,
+                Ok(true) => return EvictionResult::Unloaded,
                 Ok(false) => {}
-                Err(err) => warn!("v2 resident eviction task failed: {err}"),
+                Err(err) => warn!("resident eviction task failed: {err}"),
             }
         }
-        false
+        if let Some(lifecycle) = pending_completion {
+            lifecycle.wait_for_completion_watcher().await;
+            EvictionResult::Retry
+        } else {
+            EvictionResult::Unavailable
+        }
     }
 
     fn touch(&self, thread_id: ThreadId) {
@@ -255,20 +304,54 @@ fn touch_resident(residents: &mut VecDeque<ThreadId>, thread_id: ThreadId) {
 }
 
 fn is_resident_candidate(thread: &CodexThread) -> bool {
-    thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-        && is_v2_resident_session_source(&thread.session_source)
+    is_resident_session_source(&thread.session_source)
 }
 
-pub(super) fn is_v2_resident_session_source(session_source: &SessionSource) -> bool {
+pub(super) fn is_resident_session_source(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
+        && !crate::goal_supervisor::is_goal_supervisor_helper_source(session_source)
 }
 
-async fn is_unloadable(thread: &CodexThread) -> bool {
+pub(super) async fn is_unloadable(thread: &CodexThread) -> bool {
+    let has_active_task = thread
+        .session
+        .active_turn
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active_turn| active_turn.task.is_some());
     matches!(
         thread.agent_status().await,
-        AgentStatus::Completed(_) | AgentStatus::Errored(_) | AgentStatus::Interrupted
-    ) && thread.session.active_turn.lock().await.is_none()
+        AgentStatus::Completed(_)
+            | AgentStatus::Errored(_)
+            | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
+    ) && !has_active_task
         && !thread.session.input_queue.has_pending_mailbox_items().await
+}
+
+impl LocalAgentControl {
+    /// Persist and stop a loaded agent without releasing its addressability metadata.
+    pub(super) async fn unload_agent_thread(
+        &self,
+        manager: &Arc<ThreadManagerState>,
+        thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let Ok(thread) = manager.get_thread(thread_id).await else {
+            return Ok(false);
+        };
+        thread.ensure_rollout_materialized().await;
+        thread.flush_rollout().await?;
+        let environments = thread.environment_selections().await;
+        thread.shutdown_and_wait().await?;
+        thread
+            .session
+            .services
+            .local_agent_runtime
+            .registry
+            .save_evicted_environments(thread_id, environments);
+        Ok(manager.remove_thread(&thread_id).await.is_some())
+    }
 }
 
 #[cfg(test)]

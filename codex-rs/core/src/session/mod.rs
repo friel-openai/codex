@@ -313,7 +313,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
     include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
 const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
-const GOAL_SUPERVISOR_ROLE_NAME: &str = "goal_supervisor";
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -383,7 +382,7 @@ pub(crate) async fn load_agent_role_prompt(
 
     let role_prompt = match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
-            if agent_role.as_deref() == Some(GOAL_SUPERVISOR_ROLE_NAME) =>
+            if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
         {
             load_supervisor_agent_prompt(&config.codex_home).await
         }
@@ -708,6 +707,19 @@ pub(crate) fn resolve_multi_agent_version(
         })
 }
 
+pub(crate) fn configured_or_persisted_multi_agent_version(
+    conversation_history: &InitialHistory,
+    configured_multi_agent_version: Option<MultiAgentVersion>,
+) -> Option<MultiAgentVersion> {
+    if configured_multi_agent_version == Some(MultiAgentVersion::Disabled) {
+        return configured_multi_agent_version;
+    }
+
+    conversation_history
+        .get_multi_agent_version()
+        .or(configured_multi_agent_version)
+}
+
 async fn initial_rollout_ordinal(
     history: &InitialHistory,
     history_mode: ThreadHistoryMode,
@@ -1008,7 +1020,12 @@ impl Session {
             token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         }
         let configured_config = Arc::clone(&config);
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
+        let configured_multi_agent_version = config.multi_agent_version_override();
+        let multi_agent_version = configured_or_persisted_multi_agent_version(
+            &conversation_history,
+            configured_multi_agent_version,
+        )
+        .or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
         let history_mode = conversation_history.get_history_mode(
@@ -1954,11 +1971,6 @@ impl Session {
                     .iter()
                     .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
-                let mut persisted_rollout_items = rollout_items
-                    .iter()
-                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
                         Some(model_history) => model_history,
@@ -2048,7 +2060,7 @@ impl Session {
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
-                let _startup_rollout_items = startup_response_items
+                let mut startup_rollout_items = startup_response_items
                     .into_iter()
                     .map(ResponseItemEnvelope::new)
                     .map(RolloutItem::ResponseItem)
@@ -2098,7 +2110,9 @@ impl Session {
                         persisted_rollout_items.push(thread_settings_applied);
                     }
                 }
-                self.persist_rollout_items(&persisted_rollout_items).await;
+                persisted_rollout_items.append(&mut startup_rollout_items);
+                self.persist_initial_rollout_items(&persisted_rollout_items)
+                    .await?;
 
                 // Agent spawn owns its final durability barrier so it can overlap the edge write.
                 let persist_context = match self.fork_persistence {
@@ -2583,6 +2597,11 @@ impl Session {
             })
             .await;
         }
+    }
+
+    pub(crate) async fn effective_session_config(&self) -> Config {
+        let state = self.state.lock().await;
+        self.build_effective_session_config(&state.session_configuration)
     }
 
     pub(crate) async fn session_source(&self) -> SessionSource {
@@ -5277,6 +5296,30 @@ impl Session {
             return false;
         }
         true
+    }
+
+    async fn persist_initial_rollout_items(&self, items: &[RolloutItem]) -> CodexResult<()> {
+        let Some(live_thread) = self.live_thread() else {
+            if self
+                .state
+                .lock()
+                .await
+                .session_configuration
+                .is_system_ephemeral()
+            {
+                return Ok(());
+            }
+            return Err(CodexErr::Fatal(format!(
+                "thread {} does not have a live rollout writer during startup",
+                self.thread_id()
+            )));
+        };
+        live_thread.append_items(items).await.map_err(|err| {
+            CodexErr::Fatal(format!(
+                "failed to persist initial history for thread {}: {err}",
+                self.thread_id()
+            ))
+        })
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {
