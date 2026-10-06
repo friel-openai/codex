@@ -510,7 +510,7 @@ pub(super) async fn load_for_fork(
             for segment in source_lineage.segments().iter().rev() {
                 let file =
                     codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
-                let mut scanner = match segment.end_byte_offset {
+                let mut scanner = match segment.jsonl_end_byte_offset {
                     Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
                     None => ReverseJsonlScanner::new(file)?,
                 };
@@ -645,15 +645,6 @@ async fn scan_model_context_from_lineage(
     lineage: RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
-    if lineage.segments().iter().any(|segment| {
-        segment
-            .rollout_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".zst"))
-    }) {
-        return scan_loaded_model_context_from_lineage(&lineage, session_meta).await;
-    }
     let scan = tokio::task::spawn_blocking(move || {
         scan_model_context_from_lineage_blocking(&lineage, session_meta)
     })
@@ -676,7 +667,7 @@ fn scan_model_context_from_lineage_blocking(
     let mut scan = ModelContextScan::default();
     'segments: for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
-        let mut scanner = match segment.end_byte_offset {
+        let mut scanner = match segment.jsonl_end_byte_offset {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
@@ -713,53 +704,6 @@ fn scan_model_context_from_lineage_blocking(
         }
     }
 
-    let mut items = scan.finish();
-    items.insert(0, RolloutItem::SessionMeta(session_meta));
-    Ok(items)
-}
-
-async fn scan_loaded_model_context_from_lineage(
-    lineage: &RolloutLineage,
-    session_meta: SessionMetaLine,
-) -> ThreadStoreResult<Vec<RolloutItem>> {
-    let mut scan = ModelContextScan::default();
-    'segments: for segment in lineage.segments().iter().rev() {
-        let (lines, _, parse_errors) =
-            codex_rollout::RolloutRecorder::load_rollout_lines(segment.rollout_path.as_path())
-                .await
-                .map_err(thread_store_io_error)?;
-        if parse_errors != 0 {
-            return Err(ThreadStoreError::Internal {
-                message: format!(
-                    "failed to scan paginated model context lineage: {} contains {parse_errors} invalid record(s)",
-                    segment.rollout_path.display()
-                ),
-            });
-        }
-        for line in lines.into_iter().rev() {
-            if let Some(ordinal) = line.ordinal
-                && (ordinal < segment.start_ordinal
-                    || segment
-                        .end_ordinal_exclusive
-                        .is_some_and(|end| ordinal >= end))
-            {
-                continue;
-            }
-            let mut item = line.item;
-            if matches!(&item, RolloutItem::SessionMeta(_)) {
-                break;
-            }
-            if matches!(&item, RolloutItem::RolloutReference(_))
-                || !segment.filter_rollout_item(&mut item)
-            {
-                continue;
-            }
-            match scan.push(item) {
-                ModelContextScanProgress::Continue => {}
-                ModelContextScanProgress::Complete => break 'segments,
-            }
-        }
-    }
     let mut items = scan.finish();
     items.insert(0, RolloutItem::SessionMeta(session_meta));
     Ok(items)

@@ -4568,19 +4568,75 @@ async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messag
     );
 }
 
+#[test_case(GuardianContextMode::Legacy; "legacy Guardian history")]
+#[test_case(GuardianContextMode::ThreadOwned; "thread-owned Guardian context")]
 #[tokio::test]
-async fn prepared_fork_preserves_parent_cached_model_state_without_copying_history()
--> anyhow::Result<()> {
+async fn prepared_fork_preserves_parent_cached_model_state_without_copying_history(
+    checkpoint_mode: GuardianContextMode,
+) -> anyhow::Result<()> {
     let (source, source_turn) = make_session_and_context().await;
     let (mut child, _child_turn) = make_session_and_context().await;
     attach_thread_persistence(&mut child).await;
 
+    let guardian_checkpoint = (checkpoint_mode == GuardianContextMode::Legacy).then(|| {
+        codex_history::GuardianHistoryCheckpoint(vec![
+            user_message("parent authorization retained outside model context").into(),
+        ])
+    });
+    let mut retained_context = codex_history::RetainedContext::default();
+    if checkpoint_mode == GuardianContextMode::ThreadOwned {
+        retained_context.record_user_message(
+            codex_history::RetainedUserMessage {
+                turn_id: "parent-authorization-turn".to_owned(),
+                message_id: Some("parent-authorization-message".to_owned()),
+                text: "Publish only to the private repository.".to_owned(),
+                complete: true,
+                origin: codex_history::UserInputOrigin::User,
+                phase: None,
+            },
+            codex_history::RetainedInputSource::Local(Some(3)),
+        );
+        retained_context.record(&codex_history::RetainedContextEvent::VerifiedAnswer {
+            answer: codex_history::VerifiedAnswer {
+                turn_id: "parent-authorization-turn".to_owned(),
+                call_id: "parent-publication-question".to_owned(),
+                questions: vec![codex_history::VerifiedQuestionAnswer {
+                    question: "May I publish?".to_owned(),
+                    answer: "Only privately.".to_owned(),
+                }],
+            },
+            acceptance_order: Some(4),
+        });
+    } else {
+        retained_context.mark_user_messages_incomplete();
+    }
+
     let source_turn = Arc::new(source_turn);
     let world_state = build_world_state_from_turn_context(&source, &source_turn).await;
+    let authoritative_attribution = McpAttribution {
+        status: McpAttributionStatus::Complete,
+        error_reason: None,
+        sources: vec![McpAttributionSource {
+            connector_id: None,
+            plugin_id: None,
+            server_name: "parent-server".to_owned(),
+            tool_name: "search".to_owned(),
+            first_turn_id: "parent-tool-turn".to_owned(),
+        }],
+    };
+    source
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_snapshot(&authoritative_attribution);
+    child
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_rollout_items(&[]);
     let source_response_items = Arc::new(vec![ResponseItemEnvelope {
         item: user_message("authoritative parent message"),
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
+            mcp_attribution: Some(McpAttribution::default()),
             ..Default::default()
         }),
     }]);
@@ -4678,10 +4734,8 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
 
     {
         let mut state = source.state.lock().await;
-        state.replace_shared_history(
-            Arc::clone(&source_response_items),
-            Some(reference_context_item.clone()),
-        );
+        state.history =
+            ContextManager::for_session(&SessionSource::Exec, &source_turn.config.features);
         state.replace_shared_history(
             Arc::clone(&source_response_items),
             Some(reference_context_item.clone()),
@@ -4689,6 +4743,16 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         state.set_token_info(Some(authoritative_tokens.clone()));
         state.last_started_turn_id = Some(authoritative_turn_id.clone());
         state.latest_token_usage_record = Some(authoritative_usage_record.clone());
+        state.history.restore_review_context(
+            (checkpoint_mode == GuardianContextMode::ThreadOwned).then_some(&retained_context),
+            guardian_checkpoint.as_ref(),
+            /*reviewer_compaction_hash*/ None,
+        );
+        assert_eq!(
+            state.history.guardian_history_checkpoint(),
+            guardian_checkpoint
+        );
+        assert_eq!(state.history.retained_context(), &retained_context);
         state.set_rate_limits(authoritative_rate_limits.clone());
         state
             .history
@@ -4776,6 +4840,11 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         assert_eq!(child_state.auto_compact_window_number(), 7);
         assert_eq!(child_state.auto_compact_window_ids(), window_ids);
         assert_eq!(child_state.history.history_version(), 1);
+        assert_eq!(
+            child_state.history.guardian_history_checkpoint(),
+            guardian_checkpoint
+        );
+        assert_eq!(child_state.history.retained_context(), &retained_context);
         assert!(
             child_state
                 .history
@@ -4820,6 +4889,14 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         checkpoint.latest_token_usage_record.as_ref(),
         Some(&authoritative_usage_record)
     );
+    assert_eq!(
+        checkpoint.guardian_history.as_ref(),
+        guardian_checkpoint.as_ref()
+    );
+    assert_eq!(
+        checkpoint.retained_context.as_ref(),
+        Some(&retained_context)
+    );
     assert!(child_rollout_items.iter().any(|item| {
         matches!(
             item,
@@ -4830,6 +4907,126 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         )
     }));
 
+    let (cold_child, _) = make_session_and_context().await;
+    cold_child
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_rollout_items(&[]);
+    cold_child
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: child.thread_id(),
+            history: Arc::new(child_rollout_items),
+            rollout_path: Some(child_rollout_path),
+        }))
+        .await?;
+    assert_eq!(
+        cold_child
+            .services
+            .executed_tool_calls
+            .mcp_attribution_snapshot(),
+        authoritative_attribution
+    );
+
+    Ok(())
+}
+
+#[test_case(None; "missing checkpoint")]
+#[test_case(Some(McpAttributionStatus::None); "explicit empty checkpoint")]
+#[test_case(Some(McpAttributionStatus::Complete); "complete attribution")]
+#[test_case(Some(McpAttributionStatus::AttributionError); "source attribution error")]
+#[tokio::test]
+async fn prepared_fork_restores_attribution_from_selected_shared_responses(
+    checkpoint_status: Option<McpAttributionStatus>,
+) -> anyhow::Result<()> {
+    let (mut child, _) = make_session_and_context().await;
+    attach_thread_persistence(&mut child).await;
+    let checkpoint = checkpoint_status.map(|status| McpAttribution {
+        error_reason: (status == McpAttributionStatus::AttributionError)
+            .then_some(McpAttributionErrorReason::SourceInvalid),
+        sources: if status == McpAttributionStatus::None {
+            Vec::new()
+        } else {
+            vec![McpAttributionSource {
+                connector_id: None,
+                plugin_id: None,
+                server_name: "selected-parent-server".to_owned(),
+                tool_name: "search".to_owned(),
+                first_turn_id: "selected-parent-turn".to_owned(),
+            }]
+        },
+        status,
+    });
+    let expected = checkpoint.clone().unwrap_or(McpAttribution {
+        status: McpAttributionStatus::AttributionError,
+        error_reason: Some(McpAttributionErrorReason::HistoryMissingCheckpoint),
+        sources: Vec::new(),
+    });
+    let shared_responses = Arc::new(vec![
+        ResponseItemEnvelope::new(user_message("selected parent question")),
+        ResponseItemEnvelope {
+            item: assistant_message("selected parent answer"),
+            metadata: checkpoint.map(|mcp_attribution| CodexHarnessMetadata {
+                mcp_attribution: Some(mcp_attribution),
+                ..Default::default()
+            }),
+        },
+    ]);
+    let sparse_metadata = vec![RolloutItem::ResponseItem(ResponseItemEnvelope {
+        item: user_message("selected parent question"),
+        metadata: Some(CodexHarnessMetadata {
+            mcp_attribution: Some(McpAttribution::default()),
+            ..Default::default()
+        }),
+    })];
+    child
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_rollout_items(&[]);
+    child
+        .record_initial_history_with_fork_startup_items(
+            InitialHistory::Forked(Vec::new()),
+            ForkStartupItems::with_model_history_override(
+                sparse_metadata,
+                Some(Arc::clone(&shared_responses)),
+                /*shared_model_state*/ None,
+            ),
+        )
+        .await?;
+    assert_eq!(
+        child
+            .services
+            .executed_tool_calls
+            .mcp_attribution_snapshot(),
+        expected
+    );
+    child.flush_rollout().await?;
+    let rollout_path = child.current_rollout_path().await?.expect("child rollout");
+    let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    let checkpoint = assert_contains_certified_segment_state_checkpoint(&rollout_items);
+    assert_eq!(
+        checkpoint
+            .replacement_history
+            .as_ref()
+            .and_then(|items| items.last())
+            .and_then(|item| item.metadata.as_ref())
+            .and_then(|metadata| metadata.mcp_attribution.as_ref()),
+        Some(&expected)
+    );
+    let (cold_child, _) = make_session_and_context().await;
+    cold_child
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: child.thread_id(),
+            history: Arc::new(rollout_items),
+            rollout_path: Some(rollout_path),
+        }))
+        .await?;
+    assert_eq!(
+        cold_child
+            .services
+            .executed_tool_calls
+            .mcp_attribution_snapshot(),
+        expected
+    );
     Ok(())
 }
 
