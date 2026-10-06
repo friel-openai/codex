@@ -765,6 +765,7 @@ impl Session {
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_thread_state: InheritedThreadState,
         analytics_events_client: Option<AnalyticsEventsClient>,
         image_store: Arc<dyn AttachmentStore>,
         thread_store: Arc<dyn ThreadStore>,
@@ -1660,7 +1661,6 @@ impl Session {
                     thread_store: &thread_extension_data,
                 }).await;
             }
-
             let executed_tool_calls = crate::state::ExecutedToolCalls::new(
                 &config.features,
                 &initial_history,
@@ -1674,6 +1674,8 @@ impl Session {
             );
             let reasoning_effort_override_enabled =
                 config.features.enabled(Feature::ReasoningEffortOverride) && !title_request;
+            let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
+            let mcp_tool_snapshot = inherited_thread_state.mcp_tool_snapshot();
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1725,7 +1727,8 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
+                mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
+                model_client: ModelClient::new_with_response_continuation(
                     Some(Arc::clone(&auth_manager)),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
@@ -1749,6 +1752,8 @@ impl Session {
                     config.http_client_factory(),
                     workspace_routing.as_ref().clone(),
                     extensions.model_request_contributors().to_vec(),
+                    prompt_cache_key_override,
+                    inherited_thread_state.response_continuation(),
                 )
                 .with_executed_tool_calls(executed_tool_calls.clone())
                 .with_restored_history(matches!(
