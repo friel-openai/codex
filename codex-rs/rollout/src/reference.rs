@@ -1410,10 +1410,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
     // A canonical persisted turn begins at `TurnStarted`, before its user response item. Record
     // that boundary so truncation cannot retain the opening event for an excluded turn.
     let mut active_turn_start = None;
+    let mut active_turn_id = None;
+    // Late terminal events target historical turns until rollback removes those turns.
+    let mut turn_ids = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         match &line.item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
                 active_turn_start = Some(index);
+                active_turn_id = Some(event.turn_id.as_str());
+                turn_ids.push(event.turn_id.as_str());
             }
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                 event_user_positions.push(active_turn_start.unwrap_or(index));
@@ -1426,11 +1431,27 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
             RolloutItem::ResponseItem(item) if item.is_user_message() => {
                 response_user_positions.push(active_turn_start.unwrap_or(index));
             }
-            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
-                active_turn_start = None;
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                if active_turn_id == Some(event.turn_id.as_str())
+                    || !turn_ids.contains(&event.turn_id.as_str())
+                {
+                    active_turn_start = None;
+                    active_turn_id = None;
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                if event.turn_id.as_deref().is_none_or(|turn_id| {
+                    active_turn_id == Some(turn_id) || !turn_ids.contains(&turn_id)
+                }) {
+                    active_turn_start = None;
+                    active_turn_id = None;
+                }
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                 let count = usize::try_from(rollback.num_turns).unwrap_or(usize::MAX);
+                active_turn_start = None;
+                active_turn_id = None;
+                turn_ids.truncate(turn_ids.len().saturating_sub(count));
                 event_user_positions.truncate(event_user_positions.len().saturating_sub(count));
                 response_user_positions
                     .truncate(response_user_positions.len().saturating_sub(count));
@@ -1458,7 +1479,14 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
     } else {
         event_user_positions
     };
-    if let Some(cutoff) = user_positions.get(nth_user_message).copied() {
+    // A turn started by attributed agent input has no user-message boundary.
+    // Match ThreadManager's selected-prefix snapshot: an out-of-range boundary
+    // excludes that unfinished turn, while a completed suffix stays intact.
+    if let Some(cutoff) = user_positions
+        .get(nth_user_message)
+        .copied()
+        .or(active_turn_start)
+    {
         lines.truncate(cutoff);
     }
 }

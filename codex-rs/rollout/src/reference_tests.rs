@@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnEnvironmentSelections;
@@ -1669,6 +1671,181 @@ async fn nth_user_message_excludes_corresponding_turn_started_and_suffix() -> io
 async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items() -> io::Result<()>
 {
     assert_nth_user_message_ignores_contextual_user_items(/*use_completed_user_items*/ false).await
+}
+
+#[tokio::test]
+async fn nth_user_message_preserves_exact_tool_output_only_turn_boundary() -> io::Result<()> {
+    let mut cases = Vec::new();
+    for nth_user_message in [1, usize::MAX] {
+        cases.push((nth_user_message, None, false));
+        for turn_id in ["completed-user-turn", "agent-input-turn", "unknown-turn"] {
+            cases.push((
+                nth_user_message,
+                Some(turn_complete_line(turn_id, /*ordinal*/ 6)),
+                turn_id != "completed-user-turn",
+            ));
+        }
+        for turn_id in [
+            Some("completed-user-turn"),
+            Some("agent-input-turn"),
+            Some("unknown-turn"),
+            None,
+        ] {
+            cases.push((
+                nth_user_message,
+                Some(RolloutLine {
+                    timestamp: "2026-07-13T00:00:02Z".to_string(),
+                    ordinal: Some(6),
+                    item: RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                        turn_id: turn_id.map(str::to_string),
+                        reason: TurnAbortReason::Interrupted,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    })),
+                }),
+                turn_id != Some("completed-user-turn"),
+            ));
+        }
+    }
+    for (nth_user_message, terminal, completed) in cases {
+        let home = TempDir::new()?;
+        let source_thread = ThreadId::new();
+        let source_segment = SegmentId::new();
+        let source_path = immutable_segment_path(
+            home.path(),
+            source_thread,
+            source_segment,
+            "2026-07-13T00-00-00",
+        );
+        let mut source = vec![
+            meta_line(source_thread, source_segment, /*ordinal*/ 0),
+            turn_started_line("completed-user-turn", /*ordinal*/ 1),
+            user_line("retained user", /*ordinal*/ 2),
+            turn_complete_line("completed-user-turn", /*ordinal*/ 3),
+            turn_started_line("agent-input-turn", /*ordinal*/ 4),
+            RolloutLine {
+                timestamp: "2026-07-13T00:00:01Z".to_string(),
+                ordinal: Some(5),
+                item: RolloutItem::ResponseItem(
+                    ResponseItem::FunctionCallOutput {
+                        id: None,
+                        call_id: None,
+                        name: Some("send_message_to_thread".to_string()),
+                        namespace: Some("frodex".to_string()),
+                        output: FunctionCallOutputPayload::from_text(
+                            "agent assignment".to_string(),
+                        ),
+                        internal_chat_message_metadata_passthrough: None,
+                    }
+                    .into(),
+                ),
+            },
+        ];
+        if let Some(terminal) = terminal {
+            source.push(terminal);
+        }
+        write_rollout(source_path.as_path(), &source)?;
+
+        let root_thread = ThreadId::new();
+        let root_segment = SegmentId::new();
+        let root_path = home.path().join("root.jsonl");
+        let root_meta = meta_line(root_thread, root_segment, /*ordinal*/ 10);
+        let local = agent_line("local", /*ordinal*/ 12);
+        let mut reference = reference_line(
+            source_path,
+            source_thread,
+            source_segment,
+            /*ordinal*/ 11,
+        );
+        let RolloutItem::RolloutReference(item) = &mut reference.item else {
+            unreachable!()
+        };
+        item.nth_user_message = Some(nth_user_message);
+        write_rollout(
+            root_path.as_path(),
+            &[root_meta.clone(), reference, local.clone()],
+        )?;
+
+        let lines = materialize_rollout_lines(home.path(), root_path.as_path()).await?;
+        let mut expected = vec![root_meta];
+        let end = if completed || nth_user_message == usize::MAX {
+            source.len()
+        } else {
+            4
+        };
+        expected.extend_from_slice(&source[1..end]);
+        expected.push(local);
+        assert_eq!(
+            serde_json::to_value(&lines)?,
+            serde_json::to_value(&expected)?,
+            "selected boundary {nth_user_message}, completed {completed}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn nth_user_message_preserves_rollback_after_unfinished_turn() -> io::Result<()> {
+    for num_turns in [0_u32, 1, 2] {
+        let home = TempDir::new()?;
+        let source_thread = ThreadId::new();
+        let source_segment = SegmentId::new();
+        let source_path = immutable_segment_path(
+            home.path(),
+            source_thread,
+            source_segment,
+            "2026-07-13T00-00-00",
+        );
+        let source = vec![
+            meta_line(source_thread, source_segment, /*ordinal*/ 0),
+            turn_started_line("completed-user-turn", /*ordinal*/ 1),
+            user_line("first user", /*ordinal*/ 2),
+            turn_complete_line("completed-user-turn", /*ordinal*/ 3),
+            turn_started_line("unfinished-user-turn", /*ordinal*/ 4),
+            user_line("second user", /*ordinal*/ 5),
+            RolloutLine {
+                timestamp: "2026-07-13T00:00:02Z".to_string(),
+                ordinal: Some(6),
+                item: RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                    num_turns,
+                })),
+            },
+        ];
+        write_rollout(source_path.as_path(), &source)?;
+
+        let root_thread = ThreadId::new();
+        let root_segment = SegmentId::new();
+        let root_path = home.path().join("root.jsonl");
+        let root_meta = meta_line(root_thread, root_segment, /*ordinal*/ 10);
+        let local = agent_line("local", /*ordinal*/ 12);
+        let mut reference = reference_line(
+            source_path,
+            source_thread,
+            source_segment,
+            /*ordinal*/ 11,
+        );
+        let RolloutItem::RolloutReference(item) = &mut reference.item else {
+            unreachable!()
+        };
+        item.nth_user_message = Some(2 - usize::try_from(num_turns).unwrap());
+        write_rollout(
+            root_path.as_path(),
+            &[root_meta.clone(), reference, local.clone()],
+        )?;
+
+        let lines = materialize_rollout_lines(home.path(), root_path.as_path()).await?;
+        let mut expected = vec![root_meta];
+        expected.extend_from_slice(&source[1..]);
+        expected.push(local);
+        assert_eq!(
+            serde_json::to_value(&lines)?,
+            serde_json::to_value(&expected)?,
+            "rollback {num_turns}"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
