@@ -25,6 +25,7 @@ impl Session {
             compaction_response_id: None,
             latest_token_usage_record: state.latest_token_usage_record.clone(),
             resume_metadata: None,
+            segment_state_checkpoint: None,
         })];
         if let Some(world_state) = history.world_state_checkpoint() {
             items.push(RolloutItem::WorldState(world_state));

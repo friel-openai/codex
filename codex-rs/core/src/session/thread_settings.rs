@@ -29,7 +29,7 @@ impl Session {
     }
 }
 
-/// Applies standalone thread settings. The caller holds the persistence permit through notification.
+/// Applies settings while the caller holds checkpoint admission and persistence through notification.
 pub(super) async fn update(
     session: &Session,
     overrides: ThreadSettingsOverrides,
