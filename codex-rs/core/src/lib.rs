@@ -79,6 +79,8 @@ pub use rollout_budget::RolloutBudgetReminder;
 mod agent_communication;
 mod agent_message_board;
 pub use agent_message_board::install_agent_message_board;
+mod independent_thread;
+pub use independent_thread::install as install_independent_thread_tools;
 mod attestation;
 mod codex_delegate;
 mod command_canonicalization;
