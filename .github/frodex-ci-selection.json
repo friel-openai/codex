@@ -65,7 +65,48 @@
         "context_manager::history::tests::fork_snapshot_detects_context_changes_without_response_item_changes",
         "session::tests::prepared_fork_preserves_parent_cached_model_state_without_copying_history::legacy_guardian_history",
         "session::tests::prepared_fork_preserves_parent_cached_model_state_without_copying_history::thread_owned_guardian_context",
-        "session::rollout_reconstruction_tests::review_input_resolution_follows_reconstruction_checkpoint"
+        "session::rollout_reconstruction_tests::review_input_resolution_follows_reconstruction_checkpoint",
+        "independent_thread::tests::prompt_limit_counts_utf8_bytes_and_rejects_blank_input",
+        "independent_thread::tests::encoded_message_limit_includes_attribution_and_json_escaping",
+        "independent_thread::fork::tests::arguments_preserve_the_approved_defaults",
+        "independent_thread::fork::tests::invalid_fork_arguments_are_rejected_before_creation::blank_section",
+        "independent_thread::fork::tests::invalid_fork_arguments_are_rejected_before_creation::encoded_attribution_limit",
+        "independent_thread::fork::tests::invalid_fork_arguments_are_rejected_before_creation::escaped_prompt_limit",
+        "independent_thread::fork::tests::fork_runs_from_completed_history_without_a_goal::legacy",
+        "independent_thread::fork::tests::fork_runs_from_completed_history_without_a_goal::paginated",
+        "independent_thread::fork::tests::fork_runs_from_completed_history_without_a_goal::failed_placement",
+        "independent_thread::fork::tests::rejected_start_returns_the_created_thread",
+        "independent_thread::fork::tests::subagent_cannot_fork_with_a_root_turn_context",
+        "independent_thread::fork::section::tests::remote_host_is_not_inferred_from_local_sidebar_key",
+        "independent_thread::fork::section::tests::failed_tool_response_is_not_decoded_as_success",
+        "independent_thread::fork::section::tests::placement_uses_client_routing_and_reports_move_result::confirmed",
+        "independent_thread::fork::section::tests::placement_uses_client_routing_and_reports_move_result::rejected",
+        "independent_thread::fork::section::tests::explicit_existing_section_overrides_inheritance::inherit_enabled",
+        "independent_thread::fork::section::tests::explicit_existing_section_overrides_inheritance::inherit_disabled",
+        "independent_thread::fork::section::tests::explicit_missing_section_is_created_before_placement::move_confirmed",
+        "independent_thread::fork::section::tests::explicit_missing_section_is_created_before_placement::move_rejected_after_creation",
+        "independent_thread::fork::section::tests::unconfirmed_creation_does_not_move::creation_rejected",
+        "independent_thread::fork::section::tests::unconfirmed_creation_does_not_move::creation_mismatch",
+        "independent_thread::fork::section::tests::duplicate_names_are_reported_without_mutation",
+        "independent_thread::fork::section::tests::missing_creation_capability_reports_failure",
+        "independent_thread::fork::section::tests::restricted_root_does_not_invoke_disallowed_desktop_tool::listing_denied",
+        "independent_thread::fork::section::tests::restricted_root_does_not_invoke_disallowed_desktop_tool::move_denied_after_allowed_listing",
+        "independent_thread::fork::section::tests::timed_out_request_finishes_pending_dynamic_call",
+        "independent_thread::fork::section::tests::opt_out_makes_no_desktop_request",
+        "independent_thread::fork::section::tests::missing_active_turn_returns_without_a_client_request",
+        "independent_thread::message::tests::idle_delivery_preserves_destination_and_persists_attribution::legacy",
+        "independent_thread::message::tests::idle_delivery_preserves_destination_and_persists_attribution::paginated",
+        "independent_thread::message::tests::active_delivery_preserves_running_task::steers_regular",
+        "independent_thread::message::tests::active_delivery_preserves_running_task::does_not_interrupt_review",
+        "independent_thread::message::tests::unloaded_foreign_and_subagent_destinations_are_rejected",
+        "independent_thread::message::tests::independent_and_ownership_tools_share_strict_frodex_namespace",
+        "independent_thread::message::tests::invalid_arguments_have_no_delivery_effect",
+        "independent_thread::retention::tests::compaction_retains_bounded_independent_messages_without_user_authority",
+        "independent_thread::retention::tests::compaction_keeps_independent_message_before_following_user_input",
+        "independent_thread::retention::tests::nested_independent_fork_retains_current_assignment_not_ancestor",
+        "independent_thread::retention::tests::ancestor_assignments_do_not_consume_recent_message_slots",
+        "independent_thread::retention::tests::independent_message_retention_rejects_regular_and_unbounded_outputs",
+        "compact_remote_history::metadata_tests::independent_thread_input_is_not_replaced_by_truncated_tool_output"
       ]
     },
     {
@@ -142,7 +183,11 @@
       "target": null,
       "tests": [
         "runtime::threads::tests::archived_thread_pages_use_ordered_indexes_without_sorting",
-        "runtime::threads::tests::list_threads_by_relation_filters_open_children_and_all_descendants"
+        "runtime::threads::tests::list_threads_by_relation_filters_open_children_and_all_descendants",
+        "runtime::goals::resumable_goal::tests::resume_preserves_stopped_goal_and_accounts_exactly_once",
+        "runtime::goals::resumable_goal::tests::resume_rejects_changed_replaced_and_deleted_goals",
+        "runtime::goals::resumable_goal::tests::resume_rejects_every_stale_snapshot_field",
+        "runtime::goals::resumable_goal::tests::resume_rejects_active_complete_and_exhausted_goals"
       ]
     },
     {
@@ -161,7 +206,12 @@
       "kind": "lib",
       "target": null,
       "tests": [
-        "segment_checkpoint::tests::checkpoint_without_previous_cyber_access_program_roundtrips"
+        "segment_checkpoint::tests::checkpoint_without_previous_cyber_access_program_roundtrips",
+        "reference::tests::nth_user_message_excludes_corresponding_turn_started_and_suffix",
+        "reference::tests::nth_user_message_uses_real_turn_events_instead_of_contextual_user_items",
+        "reference::tests::nth_user_message_preserves_exact_tool_output_only_turn_boundary",
+        "reference::tests::nth_user_message_preserves_rollback_after_unfinished_turn",
+        "reference::tests::nth_user_message_uses_completed_user_items_instead_of_contextual_user_items"
       ]
     },
     {
@@ -199,6 +249,27 @@
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::ultrafast_sol_preserves_retained_evidence_with_different_parent_hash",
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::empty_checkpoint_fails_closed",
         "suite::v2::thread_read::paginated_segmented_history_without_index_returns_latest_five_turns"
+      ]
+    },
+    {
+      "package": "codex-goal-extension",
+      "binary": "codex-goal-extension::goal_extension_backend",
+      "kind": "test",
+      "target": "goal_extension_backend",
+      "tests": [
+        "goal_resume_tests::resume_goal_tool_preserves_goal_and_emits_update",
+        "goal_resume_tests::resume_goal_tool_rejects_invalid_status_missing_goal_and_editing",
+        "goal_resume_tests::resume_goal_tool_only_available_to_persistent_roots",
+        "ephemeral_goal_tools_preserve_specs_but_reject_execution",
+        "goal_tools_hidden_for_review_subagents",
+        "goal_tools_hidden_for_other_helper_subagents",
+        "goal_tools_hidden_for_spawned_subagents",
+        "goal_tools_hidden_for_ephemeral_spawned_subagents",
+        "update_goal_rejects_resume_and_system_limit_statuses",
+        "goal_service_external_set_active_preserves_concurrent_usage",
+        "thread_resume_rehydrates_active_goal_idle_accounting",
+        "update_goal_can_stop_and_accounts_final_progress",
+        "installed_goal_tools_only_replace_complete_goal"
       ]
     },
     {

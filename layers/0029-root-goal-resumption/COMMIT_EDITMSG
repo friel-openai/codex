@@ -1,0 +1,5 @@
+Resume stopped root goals without changing their definition
+
+Expose frodex.resume_goal only for persistent roots. Require an explicit resumption instruction, compare the saved goal snapshot atomically, and preserve objective, limits and accounting. Reject completed, exhausted, active or stale goals and reuse the existing supervisor-resumption operation.
+
+Adapt goal resumption from abg-OAI/codex at 2e64612d658ec81292bdfe90a3c4f0a2738fea8a (0006-goal-resume); do not add goal editing.

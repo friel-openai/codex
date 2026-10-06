@@ -1,0 +1,5 @@
+Deliver attributed messages between independent loaded roots
+
+Install host-owned frodex.send_message_to_thread without extending agent-tree ownership. Atomically start an idle destination or steer its active turn, retain destination settings, and report acceptance rather than completion. Reject unloaded and non-root destinations and bound the complete encoded input before delivery.
+
+Persist agent input as attributed tool output, not user authorization. Retain bounded recent coordination messages through local and remote compaction without truncating their identity. Adapt the independent messaging behavior from abg-OAI/codex at 2e64612d658ec81292bdfe90a3c4f0a2738fea8a (0011-thread-messaging).

@@ -1,0 +1,1187 @@
+diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
+index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c73475163 100644
+--- a/codex-rs/app-server/src/extensions.rs
++++ b/codex-rs/app-server/src/extensions.rs
+@@ -73,6 +73,7 @@ pub(crate) fn thread_extensions(
+     }
+     codex_history_notes_extension::install(&mut builder, auth_manager.clone());
+     codex_core::install_agent_message_board(&mut builder, thread_manager.clone());
++    codex_core::install_independent_thread_tools(&mut builder, thread_manager.clone());
+     if let Some(state_db) = state_db {
+         codex_goal_extension::install_with_backend(
+             &mut builder,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index c61f89673136f92f00f7088b6d47f0e58e4a9299..8e526c1716a06eef07de297ad8d46395bf2e5c9f 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -11,6 +11,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
+ use crate::hook_runtime::PreCompactHookOutcome;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
++pub(crate) use crate::independent_thread::retention::is_independent_thread_message;
++pub(crate) use crate::independent_thread::retention::retain_independent_thread_messages;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::session::RequestEffortUsage;
+@@ -434,6 +436,7 @@ async fn run_compact_task_inner_impl(
+     let user_messages = collect_annotated_user_messages(history_items);
+
+     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
++    retain_independent_thread_messages(history_items, &mut new_history);
+     if let Some(summary_item) = new_history.last_mut() {
+         // This replacement history skips `record_conversation_items`; only the appended summary
+         // belongs to this compaction turn.
+diff --git a/codex-rs/core/src/compact_remote_history.rs b/codex-rs/core/src/compact_remote_history.rs
+index aa7cd7607eeebef75a295a4409aa8f25dc2b2d6d..ac909bdd6eab2e2f7c2e0f948175039f339b2008 100644
+--- a/codex-rs/core/src/compact_remote_history.rs
++++ b/codex-rs/core/src/compact_remote_history.rs
+@@ -126,6 +126,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
+ fn rewritten_output_for_context_window(
+     envelope: &ResponseItemEnvelope,
+ ) -> Option<ResponseItemEnvelope> {
++    if crate::compact::is_independent_thread_message(&envelope.item) {
++        return None;
++    }
+     let item = match &envelope.item {
+         ResponseItem::FunctionCallOutput {
+             id,
+diff --git a/codex-rs/core/src/compact_remote_history_tests.rs b/codex-rs/core/src/compact_remote_history_tests.rs
+index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b40b51aaaf 100644
+--- a/codex-rs/core/src/compact_remote_history_tests.rs
++++ b/codex-rs/core/src/compact_remote_history_tests.rs
+@@ -1,6 +1,31 @@
+ use super::*;
+ use codex_history::CodexHarnessMetadata;
+
++#[test]
++fn independent_thread_input_is_not_replaced_by_truncated_tool_output() {
++    let envelope = ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
++        id: Some(codex_protocol::ResponseItemId::new("delivery")),
++        call_id: None,
++        name: Some("send_message_to_thread".to_string()),
++        namespace: Some("frodex".to_string()),
++        output: FunctionCallOutputPayload::from_text(
++            serde_json::json!({
++                "source_thread_id": "00000000-0000-7000-8000-000000000001",
++                "input": "bounded request".repeat(100),
++            })
++            .to_string(),
++        ),
++        internal_chat_message_metadata_passthrough: None,
++    });
++    assert!(rewritten_output_for_context_window(&envelope).is_none());
++    let processed = crate::context_manager::ContextManager::process_response_item_for_history(
++        &envelope.item,
++        None,
++        codex_utils_output_truncation::TruncationPolicy::Tokens(1),
++    );
++    assert_eq!(processed, envelope.item);
++}
++
+ #[test]
+ fn rewritten_output_preserves_harness_metadata() {
+     let envelope = ResponseItemEnvelope {
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 07451220c49df82e6675a019795d782f292ad78d..16d4db99829152fec4be84f54350add7546d2e0a 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -12,6 +12,7 @@ use crate::compact::InitialContextInjection;
+ use crate::compact::build_compaction_initial_context;
+ use crate::compact::compaction_status_from_result;
+ use crate::compact::insert_initial_context_before_last_real_user_or_summary;
++use crate::compact::retain_independent_thread_messages;
+ use crate::compact::retain_subagent_assignment_and_recent_messages;
+ use crate::compact_model_fallback::record_model_fallback;
+ use crate::compact_model_fallback::should_retry_with_current_model;
+@@ -333,8 +334,9 @@ async fn run_remote_compact_task_inner_impl(
+             RetainedImageBudget::Disabled
+         },
+     );
++    let previous_history = sess.clone_history().await;
++    retain_independent_thread_messages(previous_history.annotated_items(), &mut compacted_history);
+     if let Some(agent_path) = turn_context.session_source.get_agent_path() {
+-        let previous_history = sess.clone_history().await;
+         retain_subagent_assignment_and_recent_messages(
+             previous_history.annotated_items(),
+             &mut compacted_history,
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 1ada20281679106d99ef013e44f37b76837f8c8e..bee8598c0304f8fd72cd05d8ce29eebb61fb2713 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -517,6 +517,11 @@ impl ContextManager {
+         metadata: Option<&CodexHarnessMetadata>,
+         policy: TruncationPolicy,
+     ) -> ResponseItem {
++        // Independent-thread inputs already have a bounded prompt and must retain their
++        // runtime attribution and complete assignment across history replay.
++        if crate::compact::is_independent_thread_message(item) {
++            return item.clone();
++        }
+         let mut processed = item.clone();
+         if let ResponseItem::FunctionCallOutput { output, .. }
+         | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed
+diff --git a/codex-rs/core/src/independent_thread/message.rs b/codex-rs/core/src/independent_thread/message.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f314bce9f4d40c4e1b60017949e380b02391c4f8
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/message.rs
+@@ -0,0 +1,209 @@
++//! Attributed agent-output delivery between loaded roots in one app-server.
++//! Destination admission owns the atomic idle/start or active/steer decision.
++
++use std::collections::BTreeMap;
++use std::sync::Arc;
++
++use codex_protocol::ThreadId;
++use codex_protocol::models::FunctionCallOutputPayload;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::turn_input::TurnInput;
++use codex_protocol::turn_input::TurnInputSubmission;
++use codex_protocol::turn_input::TurnStartOptions;
++use codex_tools::JsonSchema;
++use codex_tools::JsonToolOutput;
++use codex_tools::ResponsesApiNamespace;
++use codex_tools::ResponsesApiNamespaceTool;
++use codex_tools::ResponsesApiTool;
++use codex_tools::ToolName;
++use codex_tools::ToolOutput;
++use codex_tools::ToolSpec;
++use serde::Deserialize;
++use serde::Serialize;
++
++use super::Host;
++use super::encode_input;
++use super::invalid;
++use super::validate_prompt;
++use crate::TurnInputRequest;
++use crate::function_tool::FunctionCallError;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::context::boxed_tool_output;
++use crate::tools::handlers::parse_arguments;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use crate::tools::registry::ToolRegistry;
++
++pub(super) fn register(session: &Session, turn: &TurnContext, registry: &mut ToolRegistry) {
++    if !turn.session_source.is_non_root_agent()
++        && let Some(host) = session.services.thread_extension_data.get::<Host>()
++    {
++        registry.add(Handler { host });
++    }
++}
++
++/// Weak host access keeps delivery local without keeping the manager alive.
++struct Handler {
++    host: Arc<Host>,
++}
++
++/// Model-controlled destination and content; sender identity is never an argument.
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Args {
++    thread_id: String,
++    prompt: String,
++}
++
++/// Input acceptance is not evidence that the recipient completed the request.
++#[derive(Serialize)]
++struct Receipt {
++    thread_id: ThreadId,
++    source_thread_id: ThreadId,
++    turn_id: String,
++    status: Delivery,
++}
++
++/// The destination's atomic admission decision.
++#[derive(Serialize)]
++#[serde(rename_all = "snake_case")]
++enum Delivery {
++    Started,
++    Steered,
++}
++
++impl Handler {
++    async fn handle_call(
++        &self,
++        invocation: ToolInvocation,
++    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++        let ToolPayload::Function { arguments } = &invocation.payload else {
++            return Err(invalid(
++                "send_message_to_thread requires function arguments",
++            ));
++        };
++        let args: Args = parse_arguments(arguments)?;
++        let thread_id = ThreadId::from_string(&args.thread_id).map_err(invalid)?;
++        validate_prompt(&args.prompt)?;
++        if invocation
++            .session
++            .session_source()
++            .await
++            .is_non_root_agent()
++        {
++            return Err(invalid(
++                "only root threads may send independent thread messages",
++            ));
++        }
++        let manager = self
++            .host
++            .manager
++            .upgrade()
++            .ok_or_else(|| invalid("messaging host is shutting down"))?;
++        let destination = manager.get_thread(thread_id).await.map_err(|error| invalid(format!(
++            "destination must be loaded in this app-server process; resume it in the host first: {error}"
++        )))?;
++        if destination
++            .session
++            .session_source()
++            .await
++            .is_non_root_agent()
++        {
++            return Err(invalid(
++                "destination must be a root thread; use collaboration tools for subagents",
++            ));
++        }
++        let source_thread_id = invocation.session.thread_id();
++        let source_thread_name = if let Ok(source) = manager.get_thread(source_thread_id).await {
++            source
++                .read_thread(true, false)
++                .await
++                .ok()
++                .and_then(|thread| thread.name)
++                .filter(|name| name.len() <= 256)
++        } else {
++            None
++        };
++        // A standalone tool output is agent content, not a user request or a grant
++        // of the sender's authority. Runtime admission assigns its durable item ID.
++        let message = ResponseItem::FunctionCallOutput {
++            id: None,
++            call_id: None,
++            name: Some("send_message_to_thread".to_string()),
++            namespace: Some("frodex".to_string()),
++            output: FunctionCallOutputPayload::from_text(encode_input(
++                source_thread_id,
++                source_thread_name.as_deref(),
++                &args.prompt,
++            )?),
++            internal_chat_message_metadata_passthrough: None,
++        };
++        let submitted = destination
++            .start_or_steer_turn(
++                TurnInputRequest::new(TurnInput::ResponseItem(message)).on_start(
++                    TurnStartOptions {
++                        turn_trigger: Some("frodex_thread_message".to_string()),
++                        ..Default::default()
++                    },
++                ),
++            )
++            .await
++            .map_err(invalid)?;
++        let (status, turn_id) = match submitted {
++            TurnInputSubmission::Started { turn_id } => (Delivery::Started, turn_id),
++            TurnInputSubmission::Steered { turn_id } => (Delivery::Steered, turn_id),
++            TurnInputSubmission::NotSubmitted { reason } => {
++                return Err(invalid(format!("message was not submitted: {reason:?}")));
++            }
++        };
++        Ok(boxed_tool_output(JsonToolOutput::new(
++            serde_json::to_value(Receipt {
++                thread_id,
++                source_thread_id,
++                turn_id,
++                status,
++            })
++            .map_err(invalid)?,
++        )))
++    }
++}
++
++impl ToolExecutor<ToolInvocation> for Handler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::namespaced("frodex", "send_message_to_thread")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        ToolSpec::Namespace(ResponsesApiNamespace {
++            name: "frodex".to_string(),
++            description: "Tools for spawning and managing sub-agents.".to_string(),
++            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                name: "send_message_to_thread".to_string(),
++                description: "Send attributed agent output to a root thread already loaded in this app-server process. Starts an idle thread or steers an active turn without interrupting it; preserves destination settings. Use only for user-authorized communication. The receipt confirms acceptance, not completion. Other processes and subagents are unsupported; resume unloaded threads in the host first. Do not automatically retry uncertain delivery. Keep prompts concise (maximum 10,000 UTF-8 bytes); review prompts over 1,000 bytes for unnecessary copied context.".to_string(),
++                strict: false,
++                defer_loading: None,
++                parameters: JsonSchema::object(BTreeMap::from([
++                    ("thread_id".to_string(), JsonSchema::string(Some("Loaded destination root thread ID.".to_string()))),
++                    ("prompt".to_string(), JsonSchema::string(Some("Agent message. The JSON-encoded message including sender attribution must fit 10000 UTF-8 bytes.".to_string()))),
++                ]), Some(vec!["thread_id".to_string(), "prompt".to_string()]), Some(false.into())),
++                output_schema: None,
++            })],
++        })
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(self.handle_call(invocation))
++    }
++}
++
++impl CoreToolRuntime for Handler {}
++
++#[cfg(test)]
++#[path = "message_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..69e457bcb61dd92b653ffa316e79aae863cadb79
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/message_tests.rs
+@@ -0,0 +1,424 @@
++use super::*;
++use crate::CodexAppsToolsCache;
++use crate::ThreadManager;
++use crate::build_models_manager;
++use crate::init_state_db;
++use crate::session::step_context::StepContext;
++use crate::session::tests::make_session_and_context;
++use crate::state::TaskKind;
++use crate::tasks::SessionTask;
++use crate::tasks::SessionTaskResult;
++use crate::thread_manager::NewThread;
++use crate::thread_manager::StartThreadOptions;
++use crate::thread_manager::thread_store_from_config;
++use crate::tools::context::ToolCallSource;
++use crate::turn_diff_tracker::TurnDiffTracker;
++use codex_extension_api::ExtensionRegistryBuilder;
++use codex_login::AuthManager;
++use codex_login::CodexAuth;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_response_created;
++use core_test_support::responses::mount_sse_once;
++use core_test_support::responses::sse;
++use core_test_support::test_codex::run_test_with_large_stack;
++use serde_json::json;
++use std::time::Duration;
++use tokio::sync::Mutex;
++use tokio_util::sync::CancellationToken;
++use wiremock::MockServer;
++
++#[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
++#[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
++fn idle_delivery_preserves_destination_and_persists_attribution(
++    history_mode: ThreadHistoryMode,
++) -> anyhow::Result<()> {
++    run_test_with_large_stack("idle independent message", move || async move {
++        let server = MockServer::start().await;
++        let response = mount_sse_once(
++            &server,
++            sse(vec![
++                ev_response_created("message-response"),
++                ev_assistant_message("message-answer", "received"),
++                ev_completed("message-response"),
++            ]),
++        )
++        .await;
++        let host = TestHost::new(&server, history_mode).await?;
++        let before = host.destination.thread.config_snapshot().await;
++        let receipt = host
++            .send(host.destination.thread_id, "handoff-marker")
++            .await?;
++        assert_eq!(receipt["status"], "started");
++        assert_eq!(
++            receipt["source_thread_id"],
++            host.source.thread_id.to_string()
++        );
++        tokio::time::timeout(Duration::from_secs(10), async {
++            loop {
++                if let EventMsg::TurnComplete(event) =
++                    host.destination.thread.next_event().await?.msg
++                {
++                    assert_eq!(event.turn_id, receipt["turn_id"].as_str().unwrap());
++                    assert!(event.error.is_none());
++                    break;
++                }
++            }
++            anyhow::Ok(())
++        })
++        .await??;
++        let request = response.single_request().body_json();
++        let delivered = request["input"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|item| item["type"] == "function_call_output" && item["namespace"] == "frodex")
++            .expect("delivery retains tool-output provenance");
++        assert_eq!(delivered["name"], "send_message_to_thread");
++        let content: serde_json::Value =
++            serde_json::from_str(delivered["output"].as_str().unwrap())?;
++        assert_eq!(
++            content["source_thread_id"],
++            host.source.thread_id.to_string()
++        );
++        assert_eq!(content["input"], "handoff-marker");
++        let after = host.destination.thread.config_snapshot().await;
++        assert_eq!(after.model, before.model);
++        assert_eq!(after.approval_policy, before.approval_policy);
++        assert_eq!(after.cwd(), before.cwd());
++        assert_eq!(after.ephemeral, before.ephemeral);
++        assert!(
++            request
++                .to_string()
++                .contains("destination-instructions-marker")
++        );
++        assert!(!request.to_string().contains("sender-instructions-marker"));
++        host.destination.thread.flush_rollout().await?;
++        let saved = host.destination.thread.read_thread(true, true).await?;
++        assert!(saved.rollout_path.is_some());
++        // Thread reads must expose the sender even after the model turn completes.
++        let saved_json = serde_json::to_string(&saved)?;
++        assert!(saved_json.contains("handoff-marker"));
++        assert!(saved_json.contains(&host.source.thread_id.to_string()));
++        host.shutdown().await
++    })
++}
++
++#[test_case::test_case(TaskKind::Regular, true; "steers regular")]
++#[test_case::test_case(TaskKind::Review, false; "does not interrupt review")]
++fn active_delivery_preserves_running_task(kind: TaskKind, steerable: bool) -> anyhow::Result<()> {
++    run_test_with_large_stack("active independent message", move || async move {
++        let server = MockServer::start().await;
++        let host = TestHost::new(&server, ThreadHistoryMode::Legacy).await?;
++        let (_, mut context) = make_session_and_context().await;
++        context.sub_id = "active-destination-turn".to_string();
++        host.destination
++            .thread
++            .session
++            .spawn_task(Arc::new(context), Vec::new(), WaitingTask(kind))
++            .await;
++        let result = host
++            .send(host.destination.thread_id, "steering-marker")
++            .await;
++        if steerable {
++            let receipt = result?;
++            assert_eq!(receipt["status"], "steered");
++            assert_eq!(receipt["turn_id"], "active-destination-turn");
++        } else {
++            assert!(
++                result
++                    .unwrap_err()
++                    .to_string()
++                    .contains("ActiveTurnNotSteerable")
++            );
++        }
++        let pending = host
++            .destination
++            .thread
++            .session
++            .input_queue
++            .get_pending_input(&host.destination.thread.session.active_turn)
++            .await
++            .0;
++        assert_eq!(pending.len(), usize::from(steerable));
++        if steerable {
++            let crate::session::TurnInput::FunctionCallOutput(output) = &pending[0] else {
++                panic!("steering must retain tool-output provenance");
++            };
++            assert!(
++                matches!(&output.item, ResponseItem::FunctionCallOutput { namespace: Some(namespace), .. } if namespace == "frodex")
++            );
++        }
++        assert!(
++            host.destination
++                .thread
++                .session
++                .active_turn
++                .lock()
++                .await
++                .is_some()
++        );
++        assert!(server.received_requests().await.unwrap().is_empty());
++        host.shutdown().await
++    })
++}
++
++#[test]
++fn unloaded_foreign_and_subagent_destinations_are_rejected() -> anyhow::Result<()> {
++    run_test_with_large_stack("independent message boundaries", || async {
++        let server = MockServer::start().await;
++        let host = TestHost::new(&server, ThreadHistoryMode::Legacy).await?;
++        let foreign = TestHost::new(&server, ThreadHistoryMode::Legacy).await?;
++        assert!(
++            host.send(foreign.destination.thread_id, "not delivered")
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("loaded in this app-server process")
++        );
++        let child = host
++            .manager
++            .start_thread(StartThreadOptions {
++                session_source: Some(SessionSource::SubAgent(SubAgentSource::Other(
++                    "helper".to_string(),
++                ))),
++                ..StartThreadOptions::new(host.turn.config.as_ref().clone())
++            })
++            .await?;
++        assert!(
++            host.send(child.thread_id, "not delivered")
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("destination must be a root thread")
++        );
++        // Even a handler retained from a root turn must check the current caller.
++        assert!(
++            host.invoke_for(
++                &child,
++                json!({"thread_id": host.destination.thread_id, "prompt": "not sent"})
++            )
++            .await
++            .unwrap_err()
++            .to_string()
++            .contains("only root threads")
++        );
++        child.thread.shutdown_and_wait().await?;
++        host.destination.thread.shutdown_and_wait().await?;
++        host.manager
++            .remove_thread(&host.destination.thread_id)
++            .await;
++        assert!(
++            host.send(host.destination.thread_id, "not resumed")
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("resume it in the host first")
++        );
++        assert!(
++            host.manager
++                .get_thread(host.destination.thread_id)
++                .await
++                .is_err()
++        );
++        assert!(server.received_requests().await.unwrap().is_empty());
++        host.source.thread.shutdown_and_wait().await?;
++        foreign.shutdown().await
++    })
++}
++
++#[test]
++fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Result<()> {
++    run_test_with_large_stack("independent tool registration", || async {
++        let server = MockServer::start().await;
++        let mut host = TestHost::new(&server, ThreadHistoryMode::Legacy).await?;
++        let turn = Arc::get_mut(&mut host.turn).expect("unique test turn");
++        let config = Arc::make_mut(&mut turn.config);
++        config.tool_registry.error_on_tool_collisions = true;
++        config.tool_registry.turn_metadata_includes_tool_info = true;
++        config.multi_agent_v2.enable_thread_adoption = true;
++        config
++            .features
++            .enable(codex_features::Feature::MultiAgentV2)
++            .expect("multi agent feature");
++        turn.multi_agent_version = config.multi_agent_version_from_features();
++        let step = StepContext::for_test(Arc::clone(&host.turn));
++        let router = crate::tools::spec_plan::build_tool_router(
++            &host.source.thread.session,
++            &host.turn,
++            host.turn.model_info(),
++            &step.environments,
++            &step.mcp,
++            false,
++            &host.turn.extension_data,
++            None,
++        )?;
++        let names = router.registered_tool_names_for_test();
++        for name in [
++            "adopt_agent",
++            "promote_agent",
++            "close_agent",
++            "send_message_to_thread",
++        ] {
++            assert!(
++                names.contains(&ToolName::namespaced("frodex", name)),
++                "missing {name}"
++            );
++        }
++        assert!(server.received_requests().await.unwrap().is_empty());
++        host.shutdown().await
++    })
++}
++
++#[test]
++fn invalid_arguments_have_no_delivery_effect() -> anyhow::Result<()> {
++    run_test_with_large_stack("independent message validation", || async {
++        let server = MockServer::start().await;
++        let host = TestHost::new(&server, ThreadHistoryMode::Legacy).await?;
++        for arguments in [
++            json!({"thread_id": host.destination.thread_id, "prompt": " \n\t"}),
++            json!({"thread_id": "not-a-thread", "prompt": "hello"}),
++            json!({"thread_id": host.destination.thread_id, "prompt": "hello", "source_thread_id": "forged"}),
++            json!({"thread_id": host.destination.thread_id, "prompt": "hello", "model": "override"}),
++            json!({"thread_id": host.destination.thread_id, "prompt": "x".repeat(10_001)}),
++            json!({"thread_id": host.destination.thread_id, "prompt": "x".repeat(10_000)}),
++            json!({"thread_id": host.destination.thread_id, "prompt": "\0".repeat(2_000)}),
++        ] {
++            assert!(host.invoke(arguments).await.is_err());
++        }
++        assert!(server.received_requests().await.unwrap().is_empty());
++        host.shutdown().await
++    })
++}
++
++/// Isolated persisted roots using the production host capability and a mock model.
++struct TestHost {
++    _fixture: Session,
++    manager: Arc<ThreadManager>,
++    source: NewThread,
++    destination: NewThread,
++    turn: Arc<TurnContext>,
++}
++
++impl TestHost {
++    async fn new(server: &MockServer, history_mode: ThreadHistoryMode) -> anyhow::Result<Self> {
++        let (fixture, turn) = make_session_and_context().await;
++        let mut config = turn.config.as_ref().clone();
++        config.ephemeral = false;
++        config.model_provider.base_url = Some(server.uri());
++        config.model_provider.supports_websockets = false;
++        let state = init_state_db(&config).await.expect("test state database");
++        let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++        let manager = Arc::new_cyclic(|manager| {
++            let mut builder = ExtensionRegistryBuilder::default();
++            crate::independent_thread::install(&mut builder, manager.clone());
++            ThreadManager::new(
++                &config,
++                Arc::clone(&auth),
++                build_models_manager(&config, Arc::clone(&auth)),
++                CodexAppsToolsCache::default(),
++                SessionSource::Exec,
++                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++                Arc::new(builder.build()),
++                Arc::new(crate::test_support::EmptyUserInstructionsProvider),
++                None,
++                crate::passthrough_image_store(),
++                thread_store_from_config(&config, Some(state)),
++                None,
++                "message-test".to_string(),
++                None,
++                None,
++            )
++        });
++        config.developer_instructions = Some("sender-instructions-marker".to_string());
++        let source = manager
++            .start_thread(StartThreadOptions {
++                history_mode: Some(history_mode),
++                ..StartThreadOptions::new(config.clone())
++            })
++            .await?;
++        config.developer_instructions = Some("destination-instructions-marker".to_string());
++        let destination = manager
++            .start_thread(StartThreadOptions {
++                history_mode: Some(history_mode),
++                ..StartThreadOptions::new(config)
++            })
++            .await?;
++        Ok(Self {
++            _fixture: fixture,
++            manager,
++            source,
++            destination,
++            turn: Arc::new(turn),
++        })
++    }
++
++    async fn invoke(&self, arguments: serde_json::Value) -> anyhow::Result<serde_json::Value> {
++        self.invoke_for(&self.source, arguments).await
++    }
++
++    async fn invoke_for(
++        &self,
++        source: &NewThread,
++        arguments: serde_json::Value,
++    ) -> anyhow::Result<serde_json::Value> {
++        let mut registry = ToolRegistry::default();
++        register(&source.thread.session, &self.turn, &mut registry);
++        let handler = registry
++            .remove(&ToolName::namespaced("frodex", "send_message_to_thread"))
++            .expect("root messaging registered");
++        let output = handler
++            .handle(ToolInvocation {
++                session: Arc::clone(&source.thread.session),
++                step_context: StepContext::for_test(Arc::clone(&self.turn)),
++                turn: Arc::clone(&self.turn),
++                cancellation_token: CancellationToken::new(),
++                tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
++                call_id: "message-call".to_string(),
++                tool_name: ToolName::namespaced("frodex", "send_message_to_thread"),
++                source: ToolCallSource::Direct,
++                payload: ToolPayload::Function {
++                    arguments: arguments.to_string(),
++                },
++            })
++            .await?;
++        Ok(serde_json::from_str(&output.log_output())?)
++    }
++
++    async fn send(&self, destination: ThreadId, prompt: &str) -> anyhow::Result<serde_json::Value> {
++        self.invoke(json!({"thread_id": destination, "prompt": prompt}))
++            .await
++    }
++
++    async fn shutdown(self) -> anyhow::Result<()> {
++        self.source.thread.shutdown_and_wait().await?;
++        self.destination.thread.shutdown_and_wait().await?;
++        Ok(())
++    }
++}
++
++/// Holds the recipient turn open until ordinary cancellation.
++struct WaitingTask(TaskKind);
++
++impl SessionTask for WaitingTask {
++    fn kind(&self) -> TaskKind {
++        self.0
++    }
++    fn span_name(&self) -> &'static str {
++        "session_task.independent_message_test"
++    }
++    async fn run(
++        self: Arc<Self>,
++        _session: Arc<Session>,
++        _ctx: Arc<TurnContext>,
++        _input: Vec<crate::session::TurnInput>,
++        cancellation_token: CancellationToken,
++    ) -> SessionTaskResult {
++        cancellation_token.cancelled().await;
++        Ok(None)
++    }
++}
+diff --git a/codex-rs/core/src/independent_thread/mod.rs b/codex-rs/core/src/independent_thread/mod.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1363da5ef175f3b6faab0164d6d1d0b35601476
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/mod.rs
+@@ -0,0 +1,99 @@
++//! Host-installed tools for independent root threads, outside agent-tree ownership.
++
++mod message;
++pub(crate) mod retention;
++
++use std::sync::Arc;
++use std::sync::Weak;
++
++use codex_extension_api::ExtensionFuture;
++use codex_extension_api::ExtensionRegistryBuilder;
++use codex_extension_api::ThreadLifecycleContributor;
++use codex_extension_api::ThreadStartInput;
++use codex_protocol::ThreadId;
++use serde::Serialize;
++
++use crate::ThreadManager;
++use crate::config::Config;
++use crate::function_tool::FunctionCallError;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use crate::tools::registry::ToolRegistry;
++
++/// Installs process-local coordination without retaining the manager through its threads.
++pub fn install(builder: &mut ExtensionRegistryBuilder<Config>, manager: Weak<ThreadManager>) {
++    builder.thread_lifecycle_contributor(Arc::new(Host { manager }));
++}
++
++/// Access to the host registry; current root membership is checked at invocation.
++struct Host {
++    manager: Weak<ThreadManager>,
++}
++
++impl ThreadLifecycleContributor<Config> for Host {
++    fn on_thread_start<'a>(
++        &'a self,
++        input: ThreadStartInput<'a, Config>,
++    ) -> ExtensionFuture<'a, ()> {
++        Box::pin(async move {
++            // A child can later be promoted to an independent root. Store the capability,
++            // but do not expose or execute either operation while it remains a child.
++            input.thread_store.insert(Host {
++                manager: self.manager.clone(),
++            });
++        })
++    }
++}
++
++pub(crate) fn register(session: &Session, turn: &TurnContext, registry: &mut ToolRegistry) {
++    message::register(session, turn, registry);
++}
++
++/// Bound persisted agent input before creating a thread or accepting a delivery.
++fn validate_prompt(prompt: &str) -> Result<(), FunctionCallError> {
++    if prompt.trim().is_empty() {
++        return Err(invalid("prompt must not be empty"));
++    }
++    if prompt.len() > 10_000 {
++        return Err(invalid("prompt must not exceed 10000 UTF-8 bytes"));
++    }
++    Ok(())
++}
++
++/// Agent-authored input with identity supplied by the process rather than tool arguments.
++#[derive(Serialize)]
++struct AttributedInput<'a> {
++    source_thread_id: ThreadId,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    source_thread_name: Option<&'a str>,
++    input: &'a str,
++}
++
++/// Bound the actual stored fragment, including JSON escaping and sender attribution.
++fn encode_input(
++    source_thread_id: ThreadId,
++    source_thread_name: Option<&str>,
++    prompt: &str,
++) -> Result<String, FunctionCallError> {
++    validate_prompt(prompt)?;
++    let text = serde_json::to_string(&AttributedInput {
++        source_thread_id,
++        source_thread_name,
++        input: prompt,
++    })
++    .map_err(invalid)?;
++    if text.len() > 10_000 {
++        return Err(invalid(
++            "JSON-encoded attribution and prompt must not exceed 10000 UTF-8 bytes",
++        ));
++    }
++    Ok(text)
++}
++
++fn invalid(error: impl std::fmt::Display) -> FunctionCallError {
++    FunctionCallError::RespondToModel(error.to_string())
++}
++
++#[cfg(test)]
++#[path = "prompt_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/independent_thread/prompt_tests.rs b/codex-rs/core/src/independent_thread/prompt_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..26d336c4fb2e9e2fd6b48c9e0344d3a16ebb2057
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/prompt_tests.rs
+@@ -0,0 +1,35 @@
++use super::encode_input;
++use super::validate_prompt;
++use codex_protocol::ThreadId;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn prompt_limit_counts_utf8_bytes_and_rejects_blank_input() {
++    assert!(validate_prompt(&"x".repeat(10_000)).is_ok());
++    assert!(validate_prompt(&"x".repeat(10_001)).is_err());
++    assert!(validate_prompt(&"\u{1f680}".repeat(2_500)).is_ok());
++    assert!(validate_prompt(&"\u{1f680}".repeat(2_501)).is_err());
++    assert!(validate_prompt(" \t\n").is_err());
++}
++
++#[test]
++fn encoded_message_limit_includes_attribution_and_json_escaping() {
++    let source = ThreadId::new();
++    let overhead = encode_input(source, None, "x").unwrap().len() - 1;
++    assert_eq!(
++        encode_input(source, None, &"x".repeat(10_000 - overhead))
++            .unwrap()
++            .len(),
++        10_000
++    );
++    assert!(encode_input(source, None, &"x".repeat(10_001 - overhead)).is_err());
++    assert!(encode_input(source, None, &"\0".repeat(2_000)).is_err());
++    assert!(
++        encode_input(
++            source,
++            Some(&"n".repeat(256)),
++            &"x".repeat(10_000 - overhead)
++        )
++        .is_err()
++    );
++}
+diff --git a/codex-rs/core/src/independent_thread/retention.rs b/codex-rs/core/src/independent_thread/retention.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..61fcc2386bdb96997760348b424b14bbcaffaba0
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/retention.rs
+@@ -0,0 +1,85 @@
++//! Bounded preservation of independent-thread assignments without user authority.
++
++#[cfg(test)]
++#[path = "retention_tests.rs"]
++mod tests;
++
++use crate::compact::content_items_to_text;
++use crate::compact::is_summary_message;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::models::ResponseItem;
++
++/// Recognizes admitted independent-thread input without treating it as user authorization.
++pub(crate) fn is_independent_thread_message(item: &ResponseItem) -> bool {
++    let ResponseItem::FunctionCallOutput {
++        id: Some(_),
++        call_id: None,
++        name: Some(name),
++        namespace: Some(namespace),
++        output,
++        ..
++    } = item
++    else {
++        return false;
++    };
++    if namespace != "frodex" || !matches!(name.as_str(), "fork_thread" | "send_message_to_thread") {
++        return false;
++    }
++    let Some(text) = output.body.to_text() else {
++        return false;
++    };
++    // Names alone must not exempt arbitrary output from history budgets. Native
++    // deliveries have a bounded prompt and a runtime-supplied source thread ID.
++    if text.len() > 10_000 {
++        return false;
++    }
++    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
++        return false;
++    };
++    value
++        .get("input")
++        .and_then(serde_json::Value::as_str)
++        .is_some_and(|input| input.len() <= 10_000)
++        && value
++            .get("source_thread_id")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|source| codex_protocol::ThreadId::from_string(source).is_ok())
++}
++
++/// Preserve the current fork assignment and three recent peer messages as agent output.
++/// The per-call input limit bounds retained content. Existing user-message order is unchanged,
++/// and retained messages are inserted before their next surviving history item when possible.
++pub(crate) fn retain_independent_thread_messages(
++    previous_history: &[ResponseItemEnvelope],
++    compacted_history: &mut Vec<ResponseItemEnvelope>,
++) {
++    let assignment = previous_history.iter().rposition(|item| {
++        is_independent_thread_message(&item.item)
++            && matches!(&item.item, ResponseItem::FunctionCallOutput { name: Some(name), .. } if name == "fork_thread")
++    });
++    let mut indices = previous_history.iter().enumerate().rev()
++        .filter(|(_, item)| is_independent_thread_message(&item.item)
++            && matches!(&item.item, ResponseItem::FunctionCallOutput { name: Some(name), .. } if name == "send_message_to_thread"))
++        .take(3).map(|(index, _)| index).collect::<Vec<_>>();
++    if let Some(assignment) = assignment {
++        indices.push(assignment);
++    }
++    indices.sort_unstable();
++    indices.dedup();
++    if indices.is_empty() {
++        return;
++    }
++    compacted_history.retain(|item| !is_independent_thread_message(&item.item));
++    for index in indices {
++        let insertion = previous_history[index + 1..].iter().find_map(|following| {
++            compacted_history.iter().position(|item| item.item == following.item)
++        }).unwrap_or_else(|| {
++            compacted_history.last().filter(|item| {
++                matches!(&item.item, ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. })
++                    || matches!(&item.item, ResponseItem::Message { role, content, .. }
++                        if role == "user" && content_items_to_text(content).is_some_and(|text| is_summary_message(&text)))
++            }).map_or(compacted_history.len(), |_| compacted_history.len() - 1)
++        });
++        compacted_history.insert(insertion, previous_history[index].clone());
++    }
++}
+diff --git a/codex-rs/core/src/independent_thread/retention_tests.rs b/codex-rs/core/src/independent_thread/retention_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd12504c02d
+--- /dev/null
++++ b/codex-rs/core/src/independent_thread/retention_tests.rs
+@@ -0,0 +1,151 @@
++use super::*;
++use crate::compact::collect_annotated_user_messages;
++use codex_protocol::ResponseItemId;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::FunctionCallOutputPayload;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn independent_thread_input(name: &str, index: usize) -> ResponseItemEnvelope {
++    ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
++        id: Some(ResponseItemId::with_suffix("delivery", index)),
++        call_id: None,
++        name: Some(name.to_string()),
++        namespace: Some("frodex".to_string()),
++        output: FunctionCallOutputPayload::from_text(
++            json!({
++                "source_thread_id": "00000000-0000-7000-8000-000000000001",
++                "input": format!("assignment-{index}"),
++            })
++            .to_string(),
++        ),
++        internal_chat_message_metadata_passthrough: None,
++    })
++}
++
++#[test]
++fn compaction_retains_bounded_independent_messages_without_user_authority() {
++    let history = (0..6)
++        .map(|index| {
++            independent_thread_input(
++                if index == 0 {
++                    "fork_thread"
++                } else {
++                    "send_message_to_thread"
++                },
++                index,
++            )
++        })
++        .collect::<Vec<_>>();
++    let mut compacted = Vec::new();
++    retain_independent_thread_messages(&history, &mut compacted);
++    assert_eq!(
++        compacted,
++        vec![
++            history[0].clone(),
++            history[3].clone(),
++            history[4].clone(),
++            history[5].clone()
++        ]
++    );
++    assert!(
++        compacted
++            .iter()
++            .all(|item| matches!(&item.item, ResponseItem::FunctionCallOutput { .. }))
++    );
++    assert!(collect_annotated_user_messages(&compacted).is_empty());
++    let items = compacted
++        .iter()
++        .map(|envelope| &envelope.item)
++        .collect::<Vec<_>>();
++    let serialized = serde_json::to_string(&items).unwrap();
++    let restored: Vec<ResponseItem> = serde_json::from_str(&serialized).unwrap();
++    let restored = restored
++        .into_iter()
++        .map(ResponseItemEnvelope::new)
++        .collect::<Vec<_>>();
++    let mut compacted_again = Vec::new();
++    retain_independent_thread_messages(&restored, &mut compacted_again);
++    assert_eq!(compacted_again, compacted);
++}
++
++#[test]
++fn compaction_keeps_independent_message_before_following_user_input() {
++    let delivery = independent_thread_input("send_message_to_thread", 1);
++    let user = ResponseItemEnvelope::new(ResponseItem::Message {
++        id: Some(ResponseItemId::new("later-user")),
++        role: "user".to_string(),
++        content: vec![ContentItem::InputText {
++            text: "newer user request".to_string(),
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    });
++    let history = vec![delivery.clone(), user.clone()];
++    let mut compacted = vec![user.clone()];
++    retain_independent_thread_messages(&history, &mut compacted);
++    assert_eq!(compacted, vec![delivery, user]);
++}
++
++#[test]
++fn nested_independent_fork_retains_current_assignment_not_ancestor() {
++    let history = vec![
++        independent_thread_input("fork_thread", 0),
++        independent_thread_input("fork_thread", 1),
++        independent_thread_input("send_message_to_thread", 2),
++        independent_thread_input("send_message_to_thread", 3),
++        independent_thread_input("send_message_to_thread", 4),
++        independent_thread_input("send_message_to_thread", 5),
++    ];
++    let mut compacted = Vec::new();
++    retain_independent_thread_messages(&history, &mut compacted);
++    assert_eq!(
++        compacted,
++        vec![
++            history[1].clone(),
++            history[3].clone(),
++            history[4].clone(),
++            history[5].clone()
++        ]
++    );
++}
++
++#[test]
++fn ancestor_assignments_do_not_consume_recent_message_slots() {
++    let history = vec![
++        independent_thread_input("send_message_to_thread", 0),
++        independent_thread_input("send_message_to_thread", 1),
++        independent_thread_input("fork_thread", 2),
++        independent_thread_input("fork_thread", 3),
++    ];
++    let mut compacted = Vec::new();
++    retain_independent_thread_messages(&history, &mut compacted);
++    assert_eq!(
++        compacted,
++        vec![history[0].clone(), history[1].clone(), history[3].clone()]
++    );
++}
++
++#[test]
++fn independent_message_retention_rejects_regular_and_unbounded_outputs() {
++    let mut message = independent_thread_input("send_message_to_thread", 1);
++    assert!(is_independent_thread_message(&message.item));
++    if let ResponseItem::FunctionCallOutput { call_id, .. } = &mut message.item {
++        *call_id = Some("ordinary-tool-call".to_string());
++    }
++    assert!(!is_independent_thread_message(&message.item));
++    if let ResponseItem::FunctionCallOutput {
++        call_id, output, ..
++    } = &mut message.item
++    {
++        *call_id = None;
++        *output = FunctionCallOutputPayload::from_text(
++            json!({
++                "source_thread_id": "00000000-0000-7000-8000-000000000001",
++                "input": "x".repeat(10_001),
++            })
++            .to_string(),
++        );
++    }
++    assert!(!is_independent_thread_message(&message.item));
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index b070f0a4288262404e138f3165e7d60ca3a98e1c..c8794ac69a4822962bfe7c660e26acde8cbdb9fa 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -79,6 +79,8 @@ pub use rollout_budget::RolloutBudgetReminder;
+ mod agent_communication;
+ mod agent_message_board;
+ pub use agent_message_board::install_agent_message_board;
++mod independent_thread;
++pub use independent_thread::install as install_independent_thread_tools;
+ mod attestation;
+ mod codex_delegate;
+ mod command_canonicalization;
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 526e26d1ee19d040821384600fe0919c53763d10..121e1fe5455765e86b9181092834175fdd9756dd 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(
+     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
+     add_core_tool_sources(&context, &mut registry);
+
++    crate::independent_thread::register(session, turn_context, &mut registry);
++
+     let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
+         mcp,
+         &turn_context.config,

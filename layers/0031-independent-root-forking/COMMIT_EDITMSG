@@ -1,0 +1,5 @@
+Fork independent root threads from completed history
+
+Keep persistent fork history and inherited thread settings while starting an attributed assignment. Report assignment and optional Desktop placement failures without retrying thread creation.
+
+Preserve Legacy reference boundaries for unfinished turns, historical terminal events, and rollback.
