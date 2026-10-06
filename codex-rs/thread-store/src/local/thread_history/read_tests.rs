@@ -2438,6 +2438,8 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        resume_metadata: None,
+        segment_state_checkpoint: None,
     });
     let mut file = fs::OpenOptions::new()
         .append(true)
