@@ -527,6 +527,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
 fn supervisor_tools_do_not_mark_parameters_encrypted() {
     for tool in [
         create_supervisor_close_self_tool(),
+        create_supervisor_followup_parent_tool(),
         create_supervisor_compact_parent_context_tool(),
         create_supervisor_snooze_tool(),
     ] {
@@ -547,6 +548,50 @@ fn supervisor_tools_do_not_mark_parameters_encrypted() {
             );
         }
     }
+}
+
+#[test]
+fn supervisor_followup_parent_tool_requires_only_plaintext_message() {
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        parameters,
+        output_schema,
+        ..
+    }) = create_supervisor_followup_parent_tool()
+    else {
+        panic!("followup_parent should be a function tool");
+    };
+    assert_eq!(name, "followup_parent");
+    assert_eq!(
+        serde_json::to_value(&parameters).expect("serialize supervisor parameters"),
+        json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Actionable guidance to send to the supervised parent thread."
+                }
+            },
+            "required": ["message"],
+            "additionalProperties": false
+        }),
+    );
+    assert_eq!(
+        output_schema
+            .expect("followup_parent output schema")
+            .to_value(),
+        json!({
+            "type": "object",
+            "properties": {
+                "delivered": {
+                    "type": "boolean",
+                    "description": "Whether the guidance was delivered to the supervised parent."
+                }
+            },
+            "required": ["delivered"],
+            "additionalProperties": false
+        }),
+    );
 }
 
 #[test]
@@ -593,7 +638,7 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
 }
 
 #[test]
-fn list_agents_tool_includes_path_prefix_and_agent_fields() {
+fn list_agents_tool_preserves_upstream_path_filter_and_canonical_agent_fields() {
     let ToolSpec::Function(ResponsesApiTool {
         parameters,
         output_schema,
@@ -610,27 +655,20 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
         .properties
         .as_ref()
         .expect("list_agents should use object params");
-    assert!(properties.contains_key("path_prefix"));
-    assert!(properties.contains_key("cursor"));
-    assert!(properties.contains_key("limit"));
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["path_prefix"]
+    );
     assert_eq!(
         properties
             .get("path_prefix")
             .and_then(|schema| schema.description.as_deref()),
-        Some(
-            "Task-path prefix filter without a trailing slash. Omit to list all current subagents."
-        )
+        Some("Task-path prefix filter without a trailing slash. Omit to list all live agents.")
     );
     assert_eq!(
         output_schema.expect("list_agents output schema").to_value()["properties"]["agents"]["items"]
             ["required"],
-        json!([
-            "agent_id",
-            "parent_agent_id",
-            "agent_name",
-            "agent_status",
-            "last_task_message"
-        ])
+        json!(["agent_name", "agent_status"])
     );
 }
 

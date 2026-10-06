@@ -1985,43 +1985,39 @@ impl TestAppServerBuilder {
                 )
             }
         };
-        let attribution_settings_server = if mock_chatgpt_backend
-            || codex_home.join("auth.json").is_file()
-        {
-            let config_path = codex_home.join("config.toml");
-            let config = std::fs::read_to_string(&config_path)?;
-            if config
-                .lines()
-                .any(|line| line.trim_start().starts_with("chatgpt_base_url"))
-            {
-                None
+        let attribution_settings_server =
+            if mock_chatgpt_backend || codex_home.join("auth.json").is_file() {
+                let config_path = codex_home.join("config.toml");
+                let config = std::fs::read_to_string(&config_path)?;
+                if config
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("chatgpt_base_url"))
+                {
+                    None
+                } else {
+                    let settings_server = MockServer::start().await;
+                    crate::mount_workspace_routing(&settings_server).await;
+                    core_test_support::responses::mount_empty_cloud_config_bundle(&settings_server)
+                        .await;
+                    Mock::given(method("GET"))
+                        .and(path("/backend-api/wham/settings/user"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "commit_attribution_enabled": false,
+                        })))
+                        .mount(&settings_server)
+                        .await;
+                    std::fs::write(
+                        &config_path,
+                        format!(
+                            "chatgpt_base_url = \"{}/backend-api\"\n{config}",
+                            settings_server.uri()
+                        ),
+                    )?;
+                    Some(settings_server)
+                }
             } else {
-                let settings_server = MockServer::start().await;
-                crate::mount_workspace_routing(&settings_server).await;
-                Mock::given(method("GET"))
-                    .and(path("/backend-api/wham/config/bundle"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-                    .mount(&settings_server)
-                    .await;
-                Mock::given(method("GET"))
-                    .and(path("/backend-api/wham/settings/user"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "commit_attribution_enabled": false,
-                    })))
-                    .mount(&settings_server)
-                    .await;
-                std::fs::write(
-                    &config_path,
-                    format!(
-                        "chatgpt_base_url = \"{}/backend-api\"\n{config}",
-                        settings_server.uri()
-                    ),
-                )?;
-                Some(settings_server)
-            }
-        } else {
-            None
-        };
+                None
+            };
         let (auto_env, delayed_exec_server) = match environment {
             TestAppServerEnvironment::Auto => {
                 let environments_toml = codex_home.join("environments.toml");

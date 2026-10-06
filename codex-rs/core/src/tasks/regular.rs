@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use codex_async_utils::OrCancelExt;
 use codex_extension_api::TurnStartPhase;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::TurnInput;
@@ -20,12 +21,19 @@ use tracing::trace_span;
 use super::SessionTask;
 use super::SessionTaskResult;
 
+/// Runs one user turn, including continuations for accepted input that arrives
+/// while the turn is being finalized.
+///
+/// MCP servers and plugins explicitly required by any input remain required
+/// for every model request in that user turn.
 #[derive(Default)]
-pub(crate) struct RegularTask;
+pub(crate) struct RegularTask {
+    mcp_startup_requirements: Mutex<McpStartupRequirements>,
+}
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -36,6 +44,30 @@ impl SessionTask for RegularTask {
 
     fn span_name(&self) -> &'static str {
         "session_task.turn"
+    }
+
+    fn supports_pending_input_continuation(&self) -> bool {
+        true
+    }
+
+    async fn run_pending_input_continuation(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        // Startup and TurnStarted already ran. run_turn consumes accepted input through
+        // the normal hooks with the retained task's current workspace and settings.
+        let mut mcp_startup_requirements = self.mcp_startup_requirements.lock().await;
+        run_turn(
+            session,
+            ctx,
+            Vec::new(),
+            &mut mcp_startup_requirements,
+            RunTurnProviderStartup::Ready(None),
+            cancellation_token,
+        )
+        .await
     }
 
     async fn run(
@@ -106,31 +138,38 @@ impl SessionTask for RegularTask {
             .await;
             return Ok(None);
         };
-        let mut next_input = input;
-        let mut mcp_startup_requirements = McpStartupRequirements::default();
-        let mut provider_startup = Some(provider_startup);
-        loop {
-            let last_agent_message = run_turn(
-                Arc::clone(&sess),
-                Arc::clone(&ctx),
-                next_input,
-                &mut mcp_startup_requirements,
-                provider_startup
-                    .take()
-                    .unwrap_or(RunTurnProviderStartup::Ready(None)),
-                cancellation_token.child_token(),
-            )
-            .instrument(run_turn_span.clone())
-            .await?;
-            // Terminal errors are already reported. Let task completion preserve pending
-            // input instead of restarting the failed turn for that same input.
-            if ctx.terminal_error.lock().await.is_some() {
-                return Ok(last_agent_message);
-            }
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return Ok(last_agent_message);
-            }
-            next_input = Vec::new();
+        let mut mcp_startup_requirements = self.mcp_startup_requirements.lock().await;
+        // Finalization owns the atomic pending-input check and selects the active task's
+        // latest context for continuation after workspace or model-routing replacements.
+        run_turn(
+            sess,
+            ctx,
+            input,
+            &mut mcp_startup_requirements,
+            provider_startup,
+            cancellation_token,
+        )
+        .instrument(run_turn_span)
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn regular_task_retains_mcp_requirements_for_late_steer_continuation() {
+        let task = RegularTask::new();
+        {
+            let mut requirements = task.mcp_startup_requirements.lock().await;
+            requirements.remember_for_test("original-server", "original-plugin");
         }
+
+        let requirements = task.mcp_startup_requirements.lock().await;
+        assert!(
+            requirements.contains_for_test("original-server", "original-plugin"),
+            "a continuation on the same RegularTask must retain the original turn's explicit MCP requirements"
+        );
     }
 }
