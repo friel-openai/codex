@@ -106,7 +106,8 @@
         "independent_thread::retention::tests::nested_independent_fork_retains_current_assignment_not_ancestor",
         "independent_thread::retention::tests::ancestor_assignments_do_not_consume_recent_message_slots",
         "independent_thread::retention::tests::independent_message_retention_rejects_regular_and_unbounded_outputs",
-        "compact_remote_history::metadata_tests::independent_thread_input_is_not_replaced_by_truncated_tool_output"
+        "compact_remote_history::metadata_tests::independent_thread_input_is_not_replaced_by_truncated_tool_output",
+        "context::world_state::multi_agent_mode::tests::snapshots"
       ]
     },
     {
@@ -234,7 +235,19 @@
         "suite::mcp_agent_tree::explicit_root_refresh_replaces_the_shared_tree_connection",
         "suite::skills_extension::production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_resume",
         "suite::pending_input::steer_during_stream_retry_skips_backoff",
-        "suite::model_routing_streaming::steer_during_partial_response_retry_preserves_checkpoint_and_skips_backoff"
+        "suite::model_routing_streaming::steer_during_partial_response_retry_preserves_checkpoint_and_skips_backoff",
+        "suite::child_delegation::fresh_child_defaults_to_direct_work_without_disabling_tools::bundled_root_default",
+        "suite::child_delegation::fresh_child_defaults_to_direct_work_without_disabling_tools::inherited_configured_hint",
+        "suite::child_delegation::fresh_child_defaults_to_direct_work_without_disabling_tools::inherited_empty_hint",
+        "suite::child_delegation::fresh_child_defaults_to_direct_work_without_disabling_tools::inherited_catalog_hint",
+        "suite::child_delegation::cold_resumed_child_supersedes_saved_proactive_mode",
+        "suite::multi_agent_mode::live_effort_change_keeps_proactive_mode_without_reappending_usage_hint",
+        "suite::multi_agent_mode::mode_hints_override_reasoning_effort::configured_hint_overrides_catalog",
+        "suite::multi_agent_mode::mode_hints_override_reasoning_effort::catalog_hint_overrides_reasoning_effort",
+        "suite::multi_agent_mode::catalog_proactive_mode_applies_across_reasoning_efforts::high_uses_proactive_override",
+        "suite::multi_agent_mode::empty_configured_mode_hint_emits_no_mode_message::explicit_mode",
+        "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_drops_inherited_multi_agent_mode_instructions",
+        "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_replaces_parent_proactive_policy_after_effort_changes"
       ]
     },
     {

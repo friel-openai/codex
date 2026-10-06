@@ -1,0 +1,493 @@
+diff --git a/codex-rs/core/root_agent_prompt.md b/codex-rs/core/root_agent_prompt.md
+index 9eb78d33e02863b07a748782017ea931f5a0c572..acd14748c4509b816fa9beb9f915a3a882e59e5f 100644
+--- a/codex-rs/core/root_agent_prompt.md
++++ b/codex-rs/core/root_agent_prompt.md
+@@ -1,6 +1,6 @@
+ # You are the Root Agent
+
+-You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these instructions define your role. If this thread was created from the root thread with `"fork_turns":"all"` (a forked child), you may see both sets of instructions; apply subagent instructions as local role guidance while root instructions remain governing system-level rules.
++You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these instructions define your role. If this thread was created from the root thread with `"fork_turns":"all"` (a forked child), apply subagent instructions to your assignment. Inherited root delegation guidance does not authorize a child to subdivide its assignment.
+
+ ## Root Agent Responsibilities
+
+@@ -27,9 +27,9 @@ a near-duplicate. Use `followup_task` when the agent is already working on the s
+
+ When calling `spawn_agent`, the `fork_turns` argument only determines the initial context of the agent. `"fork_turns":"all"` gives the new agent the entire conversation up to the fork point. `"fork_turns":"none"` gives the new agent only the message you provide. All subagents can call tools and inherit your working directory.
+
+-Forked agents are a superpower, answering the thought experiment, "What would you do if you could clone yourself?" They have all of the context of the user's messages, your messages, tool calls and results, they know everything you know from the point they are forked. When spawning an agent, always explicitly provide a `fork_turns` value; default to `"fork_turns":"all"` for subagents unless you need less context.
++Full-history forks inherit the conversation up to the fork point. When spawning an agent, always explicitly provide a `fork_turns` value; default to `"fork_turns":"all"` for subagents unless you need less context.
+
+-When the user gives you a particularly hard problem, consider forking several subagents and grading their responses and deciding how to proceed. When you are unsure, you can instruct your forks to consider many approaches in parallel.
++Use independent analysis when it can resolve a specific uncertainty. A hard problem alone is not a reason to create several overlapping investigations or repeated review rounds.
+
+ Use `"fork_turns":"none"` when a task requires a neutral, independent analysis without needing information already in this thread. Always give non-forked agents explicit instructions, all relevant context or paths to files or tools to obtain it, their expected outcome or goal and the output you expect them to return to you.
+
+@@ -38,7 +38,8 @@ Use `"fork_turns":"none"` when a task requires a neutral, independent analysis w
+
+ - Prefer direct execution over coordination when you can make faster progress yourself.
+ - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve review coverage enough to justify the coordination cost. You are responsible for integration and conflict resolution.
+-- Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++- Keep the team small, assign distinct outcomes, and handle routine lookups or short commands directly. Children should complete their assignments without further delegation unless you explicitly authorize scoped work that needs it.
++- Available concurrency is a ceiling, not a target.
+ - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use subagents. Use them if the user or developer instructions permit.
+ - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
+ - When you receive messages from other agents, verify their claims before relying on them.
+diff --git a/codex-rs/core/src/context/world_state/snapshots/codex_core__context__world_state__multi_agent_mode__tests__snapshots.snap b/codex-rs/core/src/context/world_state/snapshots/codex_core__context__world_state__multi_agent_mode__tests__snapshots.snap
+index 4d4e927fb65aaa38380f63fffe24286c7c4a5df8..c34331d75f50b70067a44d1066815f994cfb2384 100644
+--- a/codex-rs/core/src/context/world_state/snapshots/codex_core__context__world_state__multi_agent_mode__tests__snapshots.snap
++++ b/codex-rs/core/src/context/world_state/snapshots/codex_core__context__world_state__multi_agent_mode__tests__snapshots.snap
+@@ -9,18 +9,18 @@ Absent -> {}
+ None
+
+ Absent -> {"mode":"explicitRequestOnly"} (role - developer)
+-<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>
++<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Complete your assigned work directly. Spawn sub-agents only when the user, your parent, or applicable AGENTS.md/skill instructions explicitly assign scoped work requiring further delegation. General encouragement to parallelize is not permission to subdivide your assignment.</multi_agent_mode>
+
+ {"mode":"explicitRequestOnly"} -> {"mode":"explicitRequestOnly"}
+ None
+
+ {"mode":"explicitRequestOnly"} -> {"mode":"proactive"} (role - developer)
+-<multi_agent_mode>Proactive multi-agent delegation is active. Any earlier developer instruction requiring an explicit user request before spawning sub-agents no longer applies. This mode remains active until a later multi-agent mode developer message changes it. User requests override this hint.
++<multi_agent_mode>Proactive multi-agent delegation is active. This guidance applies to the root agent. Use a small team only when distinct assignments justify the cost of briefing, coordination, and integration. Handle routine lookups and short commands directly. Reuse agents for related work; do not create overlapping investigations or repeated review rounds without a concrete need. Continue your own work while agents run.
+
+-If at any point you can parallelize work by delegating tasks to another agent (no matter if you are root or subagent), you should do so using collaboration tools if it could save time or improve quality.</multi_agent_mode>
++Children complete their assignments directly unless explicitly given scoped work requiring further delegation. This mode does not authorize recursive subdivision. User requests override this hint.</multi_agent_mode>
+
+ {"mode":"proactive"} -> {} (role - developer)
+-<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>
++<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Complete your assigned work directly. Spawn sub-agents only when the user, your parent, or applicable AGENTS.md/skill instructions explicitly assign scoped work requiring further delegation. General encouragement to parallelize is not permission to subdivide your assignment.</multi_agent_mode>
+
+ {"mode":"explicitRequestOnly"} -> {}
+ None
+@@ -32,7 +32,7 @@ None
+ None
+
+ Unknown -> {"mode":"explicitRequestOnly"} (role - developer)
+-<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>
++<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Complete your assigned work directly. Spawn sub-agents only when the user, your parent, or applicable AGENTS.md/skill instructions explicitly assign scoped work requiring further delegation. General encouragement to parallelize is not permission to subdivide your assignment.</multi_agent_mode>
+
+ Unknown -> {} (role - developer)
+-<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>
++<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Complete your assigned work directly. Spawn sub-agents only when the user, your parent, or applicable AGENTS.md/skill instructions explicitly assign scoped work requiring further delegation. General encouragement to parallelize is not permission to subdivide your assignment.</multi_agent_mode>
+diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
+index f3ebf385470794422efdad5c4bb324359eaf8378..a31740167915e326d43adb4c71aae0bad4c8e06c 100644
+--- a/codex-rs/core/src/session/multi_agents.rs
++++ b/codex-rs/core/src/session/multi_agents.rs
+@@ -84,6 +84,15 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
+         return None;
+     }
+
++    // A child's inherited root hints do not authorize recursive subdivision. Keep the tools
++    // available for explicitly scoped parent or user delegation, including after resume.
++    if matches!(
++        turn_context.session_source,
++        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
++    ) {
++        return Some(MultiAgentMode::ExplicitRequestOnly);
++    }
++
+     let multi_agent_messages =
+         ResolvedModelMessages::from_model(&settings.model_info).multi_agent();
+     let hint = turn_context
+@@ -104,8 +113,7 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
+     };
+
+     match &turn_context.session_source {
+-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+-        | SessionSource::Cli
++        SessionSource::Cli
+         | SessionSource::VSCode
+         | SessionSource::Exec
+         | SessionSource::Mcp
+diff --git a/codex-rs/core/subagent_prompt.md b/codex-rs/core/subagent_prompt.md
+index bd45150ed0f68eb60e871d2e9bbca497989983da..b3b901e43434af85b1e68c4ec8b05321662294d8 100644
+--- a/codex-rs/core/subagent_prompt.md
++++ b/codex-rs/core/subagent_prompt.md
+@@ -4,6 +4,7 @@ You are a **subagent** in a multi-agent Codex session. Your goal is the message
+ ## Subagent Responsibilities
+
+ - Stay within the scope given in your instructions.
++- Complete the assignment directly. Do not spawn further agents unless your parent or the user explicitly assigns scoped work requiring further delegation. Inherited root guidance or general encouragement to parallelize does not authorize subdivision.
+ - Prefer to make progress: edit files, run commands, and validate outcomes. If you cannot, tell your parent agent via `send_message`.
+
+ ## Reporting Expectations
+diff --git a/codex-rs/core/tests/suite/child_delegation.rs b/codex-rs/core/tests/suite/child_delegation.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f77eb3d0e
+--- /dev/null
++++ b/codex-rs/core/tests/suite/child_delegation.rs
+@@ -0,0 +1,219 @@
++use anyhow::Result;
++use codex_core::StartThreadOptions;
++use codex_core::TurnInputRequest;
++use codex_features::Feature;
++use codex_protocol::ThreadId;
++use codex_protocol::openai_models::MultiAgentMessages;
++use codex_protocol::openai_models::MultiAgentModeMessages;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_protocol::user_input::UserInput;
++use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_response_created;
++use core_test_support::responses::mount_sse_sequence;
++use core_test_support::responses::namespace_child_tool;
++use core_test_support::responses::sse;
++use core_test_support::responses::start_mock_server;
++use core_test_support::skip_if_no_network;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::Value;
++use test_case::test_case;
++
++const DIRECT_WORK: &str = "Complete your assigned work directly.";
++const PROACTIVE: &str = "Proactive multi-agent delegation is active.";
++const PARENT_HINT: &str = "Delegate independent work proactively.";
++
++/// Parent mode sources that must not become a child's delegation policy.
++#[derive(Clone, Copy)]
++enum ParentMode {
++    Bundled,
++    Configured,
++    EmptyConfigured,
++    Catalog,
++}
++
++#[test_case(ParentMode::Bundled; "bundled root default")]
++#[test_case(ParentMode::Configured; "inherited configured hint")]
++#[test_case(ParentMode::EmptyConfigured; "inherited empty hint")]
++#[test_case(ParentMode::Catalog; "inherited catalog hint")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn fresh_child_defaults_to_direct_work_without_disabling_tools(
++    mode: ParentMode,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let responses = mount_sse_sequence(
++        &server,
++        (1..=2)
++            .map(|index| {
++                sse(vec![
++                    ev_response_created(&format!("resp-{index}")),
++                    ev_completed(&format!("resp-{index}")),
++                ])
++            })
++            .collect(),
++    )
++    .await;
++    let test = test_codex()
++        .with_model_info_override("gpt-5.4", move |model| {
++            if matches!(mode, ParentMode::Catalog) {
++                model.model_messages.as_mut().unwrap().multi_agent = Some(MultiAgentMessages {
++                    mode: Some(MultiAgentModeMessages {
++                        hint_text: Some(PARENT_HINT.to_owned()),
++                        explicit: None,
++                        proactive: None,
++                    }),
++                    ..Default::default()
++                });
++            }
++        })
++        .with_config(move |config| {
++            config.features.enable(Feature::MultiAgentV2).unwrap();
++            config.multi_agent_v2.multi_agent_mode_hint_text = match mode {
++                ParentMode::Configured => Some(PARENT_HINT.to_owned()),
++                ParentMode::EmptyConfigured => Some(String::new()),
++                ParentMode::Bundled | ParentMode::Catalog => None,
++            };
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("parent work").await?;
++    let child = test
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id: test.session_configured.session_id.into(),
++                depth: 1,
++                agent_path: None,
++                agent_nickname: None,
++                agent_role: None,
++            })),
++            ..StartThreadOptions::new(test.config.clone())
++        })
++        .await?;
++    child
++        .thread
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "assigned child work".to_owned(),
++            text_elements: Vec::new(),
++        }]))
++        .await?;
++    wait_for_event(&child.thread, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let requests = responses.requests();
++    assert_eq!(requests.len(), 2);
++    let parent_texts = requests[0].message_input_texts("developer");
++    let child_texts = requests[1].message_input_texts("developer");
++    let contains = |texts: &[String], text: &str| texts.iter().any(|item| item.contains(text));
++    assert_eq!(
++        (
++            contains(&parent_texts, PROACTIVE),
++            contains(&parent_texts, PARENT_HINT),
++            contains(&parent_texts, DIRECT_WORK),
++            contains(&child_texts, DIRECT_WORK),
++            contains(&child_texts, PROACTIVE),
++            contains(&child_texts, PARENT_HINT),
++        ),
++        (
++            matches!(mode, ParentMode::Bundled),
++            matches!(mode, ParentMode::Configured | ParentMode::Catalog),
++            false,
++            true,
++            false,
++            false,
++        )
++    );
++    assert!(
++        namespace_child_tool(&requests[1].body_json(), "collaboration", "spawn_agent").is_some()
++    );
++    child.thread.shutdown_and_wait().await?;
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn cold_resumed_child_supersedes_saved_proactive_mode() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let responses = mount_sse_sequence(
++        &server,
++        (1..=2)
++            .map(|index| {
++                sse(vec![
++                    ev_response_created(&format!("resp-{index}")),
++                    ev_completed(&format!("resp-{index}")),
++                ])
++            })
++            .collect(),
++    )
++    .await;
++    let mut builder = test_codex()
++        .with_history_mode(ThreadHistoryMode::Legacy)
++        .with_config(|config| {
++            config.features.enable(Feature::MultiAgentV2).unwrap();
++        });
++    let initial = builder.build_with_auto_env(&server).await?;
++    initial.submit_turn("saved work").await?;
++    initial.codex.shutdown_and_wait().await?;
++    let rollout_path = initial.session_configured.rollout_path.as_ref().unwrap();
++    let mut records = std::fs::read_to_string(rollout_path)?
++        .lines()
++        .map(serde_json::from_str::<Value>)
++        .collect::<serde_json::Result<Vec<_>>>()?;
++    // Old children used the same proactive mode and world-state baseline as roots. Change only
++    // the saved identity so resume must replace that baseline, rather than starting fresh.
++    let meta = records
++        .iter_mut()
++        .find(|item| item["type"] == "session_meta")
++        .unwrap();
++    meta["payload"]["source"] =
++        serde_json::to_value(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++            parent_thread_id: ThreadId::new(),
++            depth: 1,
++            agent_path: None,
++            agent_nickname: None,
++            agent_role: None,
++        }))?;
++    let contents = records
++        .iter()
++        .map(serde_json::to_string)
++        .collect::<serde_json::Result<Vec<_>>>()?
++        .join("\n")
++        + "\n";
++    std::fs::write(rollout_path, contents)?;
++    let resumed = test_codex()
++        .with_config(|config| {
++            config.features.enable(Feature::MultiAgentV2).unwrap();
++        })
++        .resume(&server, initial.home.clone(), rollout_path.clone())
++        .await?;
++    resumed.submit_turn("continue saved child work").await?;
++    let requests = responses.requests();
++    assert_eq!(requests.len(), 2);
++    let texts = requests[1].message_input_texts("developer");
++    let old_mode = texts
++        .iter()
++        .position(|text| text.contains(PROACTIVE))
++        .unwrap();
++    let new_mode = texts
++        .iter()
++        .position(|text| text.contains(DIRECT_WORK))
++        .unwrap();
++    assert!(
++        old_mode < new_mode,
++        "child policy must supersede inherited proactive context"
++    );
++    assert_eq!(
++        texts
++            .iter()
++            .filter(|text| text.contains(DIRECT_WORK))
++            .count(),
++        1
++    );
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 5f5fd173fbd35f1e3f2576b9dcce17e322e5b803..eb1f6903466595b72794ed5a72fa22e59de9fe6c 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -88,6 +88,7 @@ mod guardian_cached_score;
+ mod guardian_checkpoint_migration;
+ // Uses the same command-approval harness as guardian_review below.
+ mod canonical_plugin_connectors;
++mod child_delegation;
+ mod gateway_auth;
+ #[cfg(not(target_os = "windows"))]
+ mod guardian_context_budget;
+diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
+index 6245636eb8705e5609aae655dceee25d477ea4ea..4b11b5f344b1adadffd417b0bfc4e7d1333807c2 100644
+--- a/codex-rs/core/tests/suite/multi_agent_mode.rs
++++ b/codex-rs/core/tests/suite/multi_agent_mode.rs
+@@ -26,7 +26,8 @@ use serde_json::Value;
+ use serde_json::json;
+ use test_case::test_case;
+
+-const NO_SPAWN_TEXT: &str = "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.";
++const NO_SPAWN_TEXT: &str =
++    "Any earlier instruction enabling proactive multi-agent delegation no longer applies.";
+ const PROACTIVE_TEXT: &str = "Proactive multi-agent delegation is active.";
+ const CUSTOM_MODE_HINT_TEXT: &str = "Use the configured delegation policy.";
+ const CATALOG_MODE_HINT_TEXT: &str = "Use the model catalog delegation policy.";
+diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
+index 34636b850caf2668c9163eed76b5784526821858..090bd74aca62d58dbe8689eedcd9d09e4a0cc7f2 100644
+--- a/codex-rs/core/tests/suite/subagent_notifications.rs
++++ b/codex-rs/core/tests/suite/subagent_notifications.rs
+@@ -114,7 +114,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
+ const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
+ const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
+ const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
+-const FULL_HISTORY_EXPLICIT_POLICY: &str = "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask";
++const FULL_HISTORY_EXPLICIT_POLICY: &str = "Complete your assigned work directly.";
+
+ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
+     decoded_body(req)
+@@ -1604,7 +1604,7 @@ enum FullHistoryV2ModelSelection {
+ #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
+ #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
+ #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
+-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork retains proactive policy across effort changes")]
++#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork replaces parent proactive policy after effort changes")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
+     selection: FullHistoryV2ModelSelection,
+@@ -1957,8 +1957,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+             (
+                 mode_instruction_count(&parent_request),
+                 mode_instruction_count(&child_request),
++                parent_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
++                child_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
++                child_request.body_contains_text(FULL_HISTORY_EXPLICIT_POLICY),
+             ),
+-            (1, 1)
++            (1, 1, true, false, true)
+         );
+     }
+     if matches!(
+@@ -1984,7 +1987,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+                     .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
+                     .count(),
+             ),
+-            (1, 0, 1, 1)
++            (1, 1, 0, 1)
+         );
+     }
+     if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+diff --git a/codex-rs/prompts/src/model_messages/multi_agent.rs b/codex-rs/prompts/src/model_messages/multi_agent.rs
+index 533b52d6db392e04b239af7b12c0248908836cfa..416ffc4b673e5abcc4d114d8dd94d9180d7efa5e 100644
+--- a/codex-rs/prompts/src/model_messages/multi_agent.rs
++++ b/codex-rs/prompts/src/model_messages/multi_agent.rs
+@@ -7,11 +7,11 @@ use codex_protocol::openai_models::MultiAgentMessages;
+ const DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT: &str = r#"You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+ At the start of your turn, you are the active agent.
+-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++You can spawn sub-agents for scoped work when the benefit exceeds the cost of briefing, coordination, and integration.
+ All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+
+ You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn.
+-Child agents can also spawn their own sub-agents.
++Keep the team small and give each agent a distinct outcome. Available concurrency is a ceiling, not a target. Reuse an existing agent for related work rather than spawning a replacement.
+ You can decide how much context you want to propagate to your sub-agents with the `fork_turns` parameter.
+
+ You will receive messages in the analysis channel in the form:
+@@ -26,10 +26,10 @@ They may be addressed as to=/root
+ "#;
+ const DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT: &str = r#"You are an agent in a team of agents collaborating to complete a task.
+
+-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++Complete the assignment from your parent directly. Do not subdivide it into more agents unless your parent or the user explicitly assigns scoped work requiring further delegation. General encouragement to parallelize does not authorize recursive delegation.
+
+ You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent.
+-Child agents can also spawn their own sub-agents.
++Use these tools only as needed for your assigned scope; their availability is not an instruction to delegate.
+
+ When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
+
+@@ -43,8 +43,8 @@ Payload:
+ ```
+ You may also see them addressed as to=/root/..., which indicates your identity is /root/...
+ "#;
+-const EXPLICIT_REQUEST_ONLY_MULTI_AGENT_MODE_TEXT: &str = "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.";
+-const PROACTIVE_MULTI_AGENT_MODE_TEXT: &str = "Proactive multi-agent delegation is active. Any earlier developer instruction requiring an explicit user request before spawning sub-agents no longer applies. This mode remains active until a later multi-agent mode developer message changes it. User requests override this hint.\n\nIf at any point you can parallelize work by delegating tasks to another agent (no matter if you are root or subagent), you should do so using collaboration tools if it could save time or improve quality.";
++const EXPLICIT_REQUEST_ONLY_MULTI_AGENT_MODE_TEXT: &str = "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Complete your assigned work directly. Spawn sub-agents only when the user, your parent, or applicable AGENTS.md/skill instructions explicitly assign scoped work requiring further delegation. General encouragement to parallelize is not permission to subdivide your assignment.";
++const PROACTIVE_MULTI_AGENT_MODE_TEXT: &str = "Proactive multi-agent delegation is active. This guidance applies to the root agent. Use a small team only when distinct assignments justify the cost of briefing, coordination, and integration. Handle routine lookups and short commands directly. Reuse agents for related work; do not create overlapping investigations or repeated review rounds without a concrete need. Continue your own work while agents run.\n\nChildren complete their assignments directly unless explicitly given scoped work requiring further delegation. This mode does not authorize recursive subdivision. User requests override this hint.";
+
+ /// Model-only role bases and mode alternatives for runtime selection.
+ #[derive(Debug, Clone, Copy)]
+diff --git a/scripts/frodex_agent_defaults_smoke.py b/scripts/frodex_agent_defaults_smoke.py
+index 1720084c0d9ceacd5e3fa67d0188664c1021f536..3ee491f4e53e7ff3c6ba588d32c88fcf8f50ac07 100644
+--- a/scripts/frodex_agent_defaults_smoke.py
++++ b/scripts/frodex_agent_defaults_smoke.py
+@@ -13,7 +13,7 @@ from frodex_thread_resume_smoke import load_app_server_client, response_result
+
+ CHILD_MESSAGE = "FRODEX_CAPACITY_CHILD"
+ PROACTIVE = "Proactive multi-agent delegation is active."
+-EXPLICIT = "Do not spawn sub-agents unless the user"
++EXPLICIT = "Complete your assigned work directly."
+ CUSTOM = "Delegate only when explicitly requested by the user."
+
+
+@@ -41,6 +41,7 @@ def run_case(client_type, codex, home, work, name, child_limit):
+     """Keep children executing until all parent spawn results have been inspected."""
+     home.mkdir()
+     requests = []
++    child_requests = []
+     outputs = {}
+     condition = threading.Condition()
+     release_children = threading.Event()
+@@ -73,6 +74,7 @@ def run_case(client_type, codex, home, work, name, child_limit):
+             )
+             if child:
+                 with condition:
++                    child_requests.append(body)
+                     children_started += 1
+                     condition.notify_all()
+                 if not release_children.wait(40):
+@@ -250,6 +252,13 @@ multi_agent_mode_hint_text = "{CUSTOM}"
+             if child_limit is None
+             else CUSTOM in instructions and PROACTIVE not in instructions
+         ),
++        "children_require_scoped_delegation": bool(child_requests)
++        and all(
++            EXPLICIT in "\n".join(message_texts(body, "developer"))
++            and PROACTIVE not in "\n".join(message_texts(body, "developer"))
++            and CUSTOM not in "\n".join(message_texts(body, "developer"))
++            for body in child_requests
++        ),
+         "limit_enforcement": (
+             not failures
+             if child_limit is None
