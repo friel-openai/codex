@@ -342,16 +342,88 @@ async fn ephemeral_goal_tools_preserve_specs_but_reject_execution() -> anyhow::R
 #[tokio::test]
 async fn goal_tools_hidden_for_review_subagents() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
+    for persistent_thread_state_available in [true, false] {
+        let tools = installed_tools_with_start(
+            Arc::clone(&runtime),
+            ThreadId::new(),
+            SessionSource::SubAgent(SubAgentSource::Review),
+            persistent_thread_state_available,
+        )
+        .await;
+
+        assert_eq!(Vec::<String>::new(), tool_names(&tools));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_tools_hidden_for_other_helper_subagents() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    for source in [
+        SubAgentSource::Compact,
+        SubAgentSource::MemoryConsolidation,
+        SubAgentSource::Other("goal_supervisor".to_string()),
+        SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some("goal_supervisor".to_string()),
+        },
+    ] {
+        for persistent_thread_state_available in [true, false] {
+            let tools = installed_tools_with_start(
+                Arc::clone(&runtime),
+                ThreadId::new(),
+                SessionSource::SubAgent(source.clone()),
+                persistent_thread_state_available,
+            )
+            .await;
+
+            assert_eq!(
+                Vec::<String>::new(),
+                tool_names(&tools),
+                "{source:?}, persistent_thread_state_available={persistent_thread_state_available}",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_tools_hidden_for_spawned_subagents() -> anyhow::Result<()> {
+    assert_goal_tools_hidden_for_spawned_subagent(/*persistent_thread_state_available*/ true).await
+}
+
+#[tokio::test]
+async fn goal_tools_hidden_for_ephemeral_spawned_subagents() -> anyhow::Result<()> {
+    assert_goal_tools_hidden_for_spawned_subagent(/*persistent_thread_state_available*/ false).await
+}
+
+async fn assert_goal_tools_hidden_for_spawned_subagent(
+    persistent_thread_state_available: bool,
+) -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     let tools = installed_tools_with_start(
-        runtime,
+        Arc::clone(&runtime),
         thread_id,
-        SessionSource::SubAgent(SubAgentSource::Review),
-        /*persistent_thread_state_available*/ true,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        persistent_thread_state_available,
     )
     .await;
 
     assert_eq!(Vec::<String>::new(), tool_names(&tools));
+    assert_eq!(
+        None,
+        runtime.thread_goals().get_thread_goal(thread_id).await?
+    );
     Ok(())
 }
 
@@ -599,7 +671,7 @@ async fn parallel_tool_finish_accounts_active_goal_progress_once() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn spawned_descendant_usage_exhausts_root_goal_budget_once() -> anyhow::Result<()> {
+async fn spawned_descendant_usage_exhausts_legacy_root_goal_budget_once() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
@@ -614,14 +686,13 @@ async fn spawned_descendant_usage_exhausts_root_goal_budget_once() -> anyhow::Re
     grandchild
         .start_turn("grandchild-turn", &TokenUsage::default())
         .await;
-    let tools = harness.tools();
-    tool_by_name(&tools, "create_goal")
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({ "objective": "account for the entire agent tree", "token_budget": 62 }),
-        ))
-        .await?;
+    seed_legacy_budgeted_active_goal(
+        runtime.as_ref(),
+        &harness,
+        thread_id,
+        /*token_budget*/ 62,
+    )
+    .await?;
 
     harness
         .record_token_usage(
