@@ -382,7 +382,7 @@ async fn run_remote_compact_task_inner_impl(
             reviewer_compaction_hash,
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(compaction_turn_context).await;
 
     if reporting.defers_lifecycle() {

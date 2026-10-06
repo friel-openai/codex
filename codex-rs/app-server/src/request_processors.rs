@@ -364,8 +364,8 @@ use codex_core::path_utils;
 #[cfg(test)]
 use codex_core::read_head_for_summary;
 use codex_core::sandboxing::SandboxPermissions;
-use codex_core::truncate_rollout_after_turn_id;
-use codex_core::truncate_rollout_before_turn_id;
+use codex_core::user_message_count_before_turn_id;
+use codex_core::user_message_count_through_turn_id;
 use codex_core::validate_environment_ids_and_cwds;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
