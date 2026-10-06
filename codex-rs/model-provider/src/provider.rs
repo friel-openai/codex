@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
@@ -320,6 +322,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager;
 
     /// Creates a model manager with caching disabled.
@@ -346,9 +349,17 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         config_model_catalog: Option<ModelsResponse>,
         cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         drop(cache);
-        self.models_manager_without_cache(config_model_catalog)
+        let model_catalog = config_model_catalog
+            .or_else(|| codex_models_manager::bundled_models_response().ok())
+            .unwrap_or_default();
+        Arc::new(StaticModelsManager::new_with_custom_models(
+            self.auth_manager(),
+            model_catalog,
+            custom_models,
+        ))
     }
 }
 
@@ -422,11 +433,13 @@ impl ConfiguredModelProvider {
         &self,
         config_model_catalog: Option<ModelsResponse>,
         cache: ModelsCacheConfig,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         if let Some(model_catalog) = config_model_catalog {
-            return Arc::new(StaticModelsManager::new(
+            return Arc::new(StaticModelsManager::new_with_custom_models(
                 self.auth_manager.clone(),
                 model_catalog,
+                custom_models,
             ));
         }
         let endpoint = Arc::new(OpenAiModelsEndpoint::new(
@@ -436,14 +449,22 @@ impl ConfiguredModelProvider {
         ));
         let auth_manager = self.auth_manager.clone();
         let manager = match cache {
-            ModelsCacheConfig::Disk { codex_home } => {
-                OpenAiModelsManager::new(codex_home, endpoint, auth_manager)
-            }
+            ModelsCacheConfig::Disk { codex_home } => OpenAiModelsManager::new_with_custom_models(
+                codex_home,
+                endpoint,
+                auth_manager,
+                custom_models,
+            ),
             ModelsCacheConfig::Disabled => {
                 OpenAiModelsManager::new_without_cache(endpoint, auth_manager)
             }
             ModelsCacheConfig::Custom(cache) => {
-                OpenAiModelsManager::new_with_cache(cache, endpoint, auth_manager)
+                OpenAiModelsManager::new_with_cache_and_custom_models(
+                    cache,
+                    endpoint,
+                    auth_manager,
+                    custom_models,
+                )
             }
         };
         match &self.info.model_catalog_url {
@@ -598,23 +619,37 @@ impl ModelProvider for ConfiguredModelProvider {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.create_models_manager(config_model_catalog, ModelsCacheConfig::Disk { codex_home })
+        self.create_models_manager(
+            config_model_catalog,
+            ModelsCacheConfig::Disk { codex_home },
+            custom_models,
+        )
     }
 
     fn models_manager_without_cache(
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
-        self.create_models_manager(config_model_catalog, ModelsCacheConfig::Disabled)
+        self.create_models_manager(
+            config_model_catalog,
+            ModelsCacheConfig::Disabled,
+            HashMap::new(),
+        )
     }
 
     fn models_manager_with_cache(
         &self,
         config_model_catalog: Option<ModelsResponse>,
         cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.create_models_manager(config_model_catalog, ModelsCacheConfig::Custom(cache))
+        self.create_models_manager(
+            config_model_catalog,
+            ModelsCacheConfig::Custom(cache),
+            custom_models,
+        )
     }
 }
 
@@ -1248,8 +1283,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let manager = provider.models_manager(
+            test_codex_home(),
+            /*config_model_catalog*/ None,
+            Default::default(),
+        );
         let uncached_manager =
             provider.models_manager_without_cache(/*config_model_catalog*/ None);
 
@@ -1361,6 +1399,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             Some(ModelsResponse {
                 models: vec![configured_model],
             }),
+            Default::default(),
         );
 
         let catalog = manager
@@ -1416,8 +1455,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                     provider_info.clone(),
                     auth.clone().map(AuthManager::from_auth_for_testing),
                 );
-                let manager =
-                    provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+                let manager = provider.models_manager(
+                    test_codex_home(),
+                    /*config_model_catalog*/ None,
+                    Default::default(),
+                );
                 manager.set_api_key_model_discovery_enabled(enabled);
                 let refresh_strategy = if enabled {
                     RefreshStrategy::Online
