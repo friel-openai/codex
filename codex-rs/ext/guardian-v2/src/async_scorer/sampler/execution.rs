@@ -94,9 +94,11 @@ impl SamplingExecution {
                 | ApiError::ContextWindowExceeded
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
+                | ApiError::UsageLimitReached(_)
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
                 | ApiError::InvalidPrompt { .. }
+                | ApiError::ModelUnavailable { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
                 | ApiError::BioPolicy { .. },

@@ -5,6 +5,7 @@ use crate::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use crate::config::CustomModelConfig;
 use crate::config::ModelsManagerConfig;
 use crate::model_info;
+use arc_swap::ArcSwap;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_http_client::HttpClientFactory;
@@ -170,8 +171,11 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Return the auth manager used for picker filtering.
     fn auth_manager(&self) -> Option<&AuthManager>;
 
-    /// Return configured user-defined model aliases.
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig>;
+    /// Return one consistent snapshot of the configured user-defined model aliases.
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>>;
+
+    /// Replace the user-defined model aliases after their configuration has been validated.
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>);
 
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
@@ -180,8 +184,8 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         let mut presets: Vec<ModelPreset> = remote_models.iter().cloned().map(Into::into).collect();
         let mut existing_models: HashSet<String> =
             presets.iter().map(|preset| preset.model.clone()).collect();
-        let mut custom_presets = self
-            .custom_models()
+        let custom_models = self.custom_models_snapshot();
+        let mut custom_presets = custom_models
             .iter()
             .filter(|(alias, _custom_model)| existing_models.insert((*alias).clone()))
             .map(|(alias, custom_model)| {
@@ -255,10 +259,11 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         Box::pin(
             async move {
                 let remote_models = self.get_remote_models().await;
+                let custom_models = self.custom_models_snapshot();
                 let custom_model = config
                     .custom_models
                     .get(model)
-                    .or_else(|| self.custom_models().get(model));
+                    .or_else(|| custom_models.get(model));
                 construct_model_info_from_candidates_with_custom(
                     model,
                     &remote_models,
@@ -313,7 +318,7 @@ impl CatalogSource {
 #[derive(Debug)]
 pub struct OpenAiModelsManager {
     remote_models: RwLock<ModelsCacheEntry>,
-    custom_models: HashMap<String, CustomModelConfig>,
+    custom_models: ArcSwap<HashMap<String, CustomModelConfig>>,
     cache: Option<Arc<dyn ModelsCache>>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
@@ -325,7 +330,7 @@ pub struct OpenAiModelsManager {
 #[derive(Debug)]
 pub struct StaticModelsManager {
     remote_models: Vec<ModelInfo>,
-    custom_models: HashMap<String, CustomModelConfig>,
+    custom_models: ArcSwap<HashMap<String, CustomModelConfig>>,
     auth_manager: Option<Arc<AuthManager>>,
 }
 
@@ -405,7 +410,7 @@ impl OpenAiModelsManager {
                 identity: endpoint_client.identity(),
                 models: load_remote_models_from_file().unwrap_or_default(),
             }),
-            custom_models,
+            custom_models: ArcSwap::from_pointee(custom_models),
             cache,
             api_key_model_discovery_enabled: AtomicBool::new(false),
             endpoint_client,
@@ -436,7 +441,7 @@ impl StaticModelsManager {
     ) -> Self {
         Self {
             remote_models: model_catalog.models,
-            custom_models,
+            custom_models: ArcSwap::from_pointee(custom_models),
             auth_manager,
         }
     }
@@ -524,10 +529,11 @@ impl ModelsManager for OpenAiModelsManager {
     ) -> ModelsManagerFuture<'a, ModelInfo> {
         Box::pin(async move {
             let models = self.get_remote_models().await;
+            let custom_models = self.custom_models_snapshot();
             let custom_model = config
                 .custom_models
                 .get(model)
-                .or_else(|| self.custom_models().get(model));
+                .or_else(|| custom_models.get(model));
             if custom_model.is_some() {
                 return construct_model_info_from_candidates_with_custom(
                     model,
@@ -549,8 +555,12 @@ impl ModelsManager for OpenAiModelsManager {
         })
     }
 
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        &self.custom_models
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.custom_models.load_full()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.custom_models.store(Arc::new(custom_models));
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -895,8 +905,12 @@ impl ModelsManager for StaticModelsManager {
         self.auth_manager.as_deref()
     }
 
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        &self.custom_models
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.custom_models.load_full()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.custom_models.store(Arc::new(custom_models));
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
