@@ -46,6 +46,10 @@ mod send_message;
 mod spawn;
 pub(crate) mod wait;
 
+#[cfg(test)]
+#[path = "multi_agents_v2_tests.rs"]
+mod tests;
+
 pub(crate) async fn emit_sub_agent_activity(
     session: &crate::session::session::Session,
     turn: &crate::session::turn_context::TurnContext,
@@ -59,13 +63,15 @@ pub(crate) async fn emit_sub_agent_activity(
 fn agent_message_from_tool(
     message: String,
     source: &crate::tools::context::ToolCallSource,
-) -> AgentMessage {
-    if matches!(
-        source,
-        crate::tools::context::ToolCallSource::DirectPlaintextMessage
-    ) {
-        AgentMessage::Plaintext(message)
-    } else {
-        AgentMessage::Encrypted(message)
+) -> Result<AgentMessage, FunctionCallError> {
+    match source {
+        crate::tools::context::ToolCallSource::Direct => Ok(AgentMessage::Encrypted(message)),
+        crate::tools::context::ToolCallSource::DirectPlaintextMessage => {
+            Ok(AgentMessage::Plaintext(message))
+        }
+        crate::tools::context::ToolCallSource::CodeMode { .. } => Err(FunctionCallError::RespondToModel(
+            "collaboration tools with encrypted message arguments cannot be called from code mode; call the tool directly instead"
+                .to_string(),
+        )),
     }
 }
