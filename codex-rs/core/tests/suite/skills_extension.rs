@@ -2913,6 +2913,13 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
             config.cloud_skill_enabled = true;
             config.model_provider.name = "Skills compaction test".to_string();
             config.model_post_turn_compact_threshold_percent = 50;
+            // Keep unrelated Frodex agent defaults out of the skills request snapshot.
+            for feature in [Feature::MultiAgentV2, Feature::AgentPromptInjection] {
+                config
+                    .features
+                    .disable(feature)
+                    .expect("disable agent defaults for the skills snapshot");
+            }
             config
                 .features
                 .enable(Feature::DeferredExecutor)
