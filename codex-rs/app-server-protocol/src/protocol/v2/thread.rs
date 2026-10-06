@@ -1401,8 +1401,9 @@ pub struct ThreadListParams {
     /// Omitted or empty lists leave originators unrestricted.
     #[ts(optional = nullable)]
     pub originators: Option<Vec<String>>,
-    /// Optional archived filter; when set to true, only archived threads are returned.
-    /// If false or null, only non-archived threads are returned.
+    /// Optional archived filter. `true` returns archived threads and `false` returns active threads.
+    /// When omitted from a current-agent relation request, both archive states are returned;
+    /// ordinary thread lists treat omission as `false`.
     #[ts(optional = nullable)]
     pub archived: Option<bool>,
     /// Omit to include every section, set to `null` for unsectioned threads,
@@ -1438,12 +1439,16 @@ pub struct ThreadListParams {
     /// Optional substring filter for the extracted thread title.
     #[ts(optional = nullable)]
     pub search_term: Option<String>,
-    /// Optional direct parent thread filter. Mutually exclusive with `ancestorThreadId`.
+    /// Optional direct parent filter over the loaded thread's canonical current-agent membership.
+    /// Persisted spawn edges and historical transcript activity do not create current members.
+    /// Mutually exclusive with `ancestorThreadId`.
     #[experimental("thread/list.parentThreadId")]
     #[ts(optional = nullable)]
     pub parent_thread_id: Option<String>,
-    /// Optional ancestor thread filter. Returns spawned descendants at any depth, excluding the
-    /// ancestor itself. Mutually exclusive with `parentThreadId`.
+    /// Optional ancestor filter over the loaded thread's canonical current-agent membership.
+    /// Returns current descendants at any depth, excludes the ancestor itself, and ignores
+    /// persisted spawn edges and historical transcript activity. An unloaded thread has no current
+    /// members. Mutually exclusive with `parentThreadId`.
     #[experimental("thread/list.ancestorThreadId")]
     #[ts(optional = nullable)]
     pub ancestor_thread_id: Option<String>,
@@ -1629,6 +1634,9 @@ pub struct ThreadLoadedListParams {
     /// Optional page size; defaults to no limit.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
+    /// Optional ancestor thread filter for spawned descendants.
+    #[ts(optional = nullable)]
+    pub ancestor_thread_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
