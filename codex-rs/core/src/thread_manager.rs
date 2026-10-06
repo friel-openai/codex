@@ -1124,6 +1124,11 @@ impl ThreadManager {
         self.state.thread_created_tx.subscribe()
     }
 
+    /// Announces a tool-created independent root to the host's event listeners.
+    pub(crate) fn notify_independent_thread_created(&self, thread_id: ThreadId) {
+        self.state.notify_thread_created(thread_id);
+    }
+
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
         let thread = self.state.get_thread(thread_id).await?;
         if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
