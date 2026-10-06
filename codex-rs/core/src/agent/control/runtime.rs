@@ -12,6 +12,7 @@ use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
 use arc_swap::ArcSwapOption;
 use codex_extension_api::ThreadInstructionsProvider;
+use codex_mcp::McpConnectionPool;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use std::sync::Arc;
@@ -28,6 +29,8 @@ pub(crate) struct LocalAgentRuntime {
     /// Captured at construction so delegates retain their manager's allocation policy.
     pub(super) thread_id_generator: ThreadIdGenerator,
     pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
+    /// MCP processes shared across controller rebinding and compatible descendant startup.
+    pub(super) mcp_connection_pool: McpConnectionPool,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     pub(super) rollout_budget: Arc<RolloutBudget>,
     /// The user-selected root routing tier, shared by the entire agent tree.
@@ -52,6 +55,7 @@ impl LocalAgentRuntime {
             registry: Arc::default(),
             agent_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
+            mcp_connection_pool: McpConnectionPool::default(),
             rollout_budget: Arc::default(),
             root_service_tier: Arc::new(ArcSwapOption::from(None)),
             shared_thread_instructions_provider: Arc::default(),
@@ -105,6 +109,10 @@ impl AgentControlInit {
 }
 
 impl LocalAgentRuntime {
+    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
+        &self.mcp_connection_pool
+    }
+
     pub(crate) fn generate_thread_id(&self) -> ThreadId {
         (self.thread_id_generator)()
     }
