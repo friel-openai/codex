@@ -7,6 +7,7 @@ use super::*;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::SessionHeaderHistoryCell;
 use crate::history_cell::SessionInfoCell;
+use crate::history_cell::UserHistoryCell;
 use crate::keymap::RuntimeKeymap;
 use crate::motion::MotionMode;
 use crate::transcript_view::TranscriptBookmark;
@@ -319,7 +320,7 @@ impl TranscriptOverlay {
                 *highlight += added;
             }
         }
-        self.view.set_highlight(self.highlight_cell);
+        self.sync_view_highlight();
         self.view.history_loaded(&self.cells, index..index + added);
         index
     }
@@ -334,7 +335,7 @@ impl TranscriptOverlay {
         self.pending_highlight = self
             .pending_highlight
             .filter(|index| *index < self.cells.len());
-        self.view.set_highlight(self.highlight_cell);
+        self.sync_view_highlight();
     }
 
     /// Grouping may change compact previews; retain the reader's revision before replacing cells.
@@ -379,7 +380,7 @@ impl TranscriptOverlay {
             });
         }
         self.cells.splice(start..end, [consolidated]);
-        self.view.set_highlight(self.highlight_cell);
+        self.sync_view_highlight();
     }
 
     pub(crate) fn sync_live_tail(
@@ -394,7 +395,17 @@ impl TranscriptOverlay {
     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
         self.highlight_cell = cell.filter(|index| *index < self.cells.len());
         self.pending_highlight = self.highlight_cell;
-        self.view.set_highlight(self.highlight_cell);
+        self.sync_view_highlight();
+    }
+
+    // Prompt-navigation emphasis belongs only to user messages, even if regrouping changes the
+    // selected cell. Keep the navigation index separate so scrolling still reaches that cell.
+    fn sync_view_highlight(&mut self) {
+        self.view.set_highlight(self.highlight_cell.filter(|index| {
+            self.cells
+                .get(*index)
+                .is_some_and(|cell| cell.as_any().is::<UserHistoryCell>())
+        }));
     }
 
     /// Apply prompt navigation before scrolling, even when both keys precede the next draw.
