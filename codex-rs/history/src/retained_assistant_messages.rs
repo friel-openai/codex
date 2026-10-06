@@ -47,6 +47,8 @@ impl RetainedContext {
         message.bound();
         let empty = message.complete && message.text.is_empty();
         let inherited = source == RetainedInputSource::Inherited;
+        // Worker checkpoints omit parent answers. Match restore's answer gap at admission.
+        self.verified_answers_incomplete |= inherited;
         // A confirmed delivery is a distinct rollout fact even when the bounded live
         // window immediately evicts it. Only a currently retained identical entry
         // can be identified as a duplicate here.

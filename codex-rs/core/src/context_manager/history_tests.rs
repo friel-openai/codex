@@ -379,6 +379,72 @@ fn checkpoint_replayed_messages_keep_legacy_review_when_the_source_survives() {
     assert_eq!(history.retained_context(), &retained);
 }
 
+#[test_case(true; "restored transcript")]
+#[test_case(false; "missing transcript")]
+fn replayed_guardian_history_preserves_independent_review(restore_transcript: bool) {
+    let mut features = codex_features::Features::with_defaults();
+    features.disable(Feature::GuardianReuseParentCompaction);
+    let mut history =
+        ContextManager::for_session(&SessionSource::Cli, &ManagedFeatures::from(features));
+    let parent_items = vec![
+        assistant_msg("Stale parent evidence."),
+        serde_json::from_value(serde_json::json!({
+            "type": "compaction", "id": "parent", "encrypted_content": "opaque checkpoint"
+        }))
+        .expect("parent checkpoint"),
+    ];
+    history.replace(parent_items.clone());
+    let restored = ResponseItemEnvelope {
+        item: user_input_text_msg("Keep the original instruction."),
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(7),
+            ..Default::default()
+        }),
+    };
+    let replayed = restore_transcript.then(|| {
+        let mut transcript = TranscriptHistory::new(/*generation*/ 3);
+        transcript.record(&restored);
+        transcript
+    });
+    history.restore_replayed_guardian_history(replayed);
+
+    let mut expected = restore_transcript
+        .then_some(restored)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let snapshot = history.conversation_history_snapshot();
+    assert_eq!(
+        GuardianContextMode::from_history(snapshot.as_ref()),
+        GuardianContextMode::Independent,
+    );
+    assert_eq!(snapshot.items().cloned().collect::<Vec<_>>(), parent_items);
+    assert_eq!(
+        snapshot.review_items().cloned().collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|entry| entry.item.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        history.guardian_history_checkpoint(),
+        Some(GuardianHistoryCheckpoint(expected.clone())),
+    );
+
+    let suffix = ResponseItemEnvelope {
+        item: assistant_msg("New assistant evidence."),
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(8),
+            ..Default::default()
+        }),
+    };
+    history.replay_annotated_item(&suffix, TruncationPolicy::Tokens(10_000));
+    expected.push(suffix);
+    assert_eq!(
+        history.guardian_history_checkpoint(),
+        Some(GuardianHistoryCheckpoint(expected)),
+    );
+}
+
 #[test_case(None; "no retained checkpoint")]
 #[test_case(Some(serde_json::json!({
     "verified_answers": [], "incomplete": false
@@ -999,6 +1065,10 @@ fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
     let captured = child.clone();
     assert_eq!(captured.history_version(), 1);
     assert_eq!(captured.reset_version, 1);
+    assert_eq!(
+        captured.guardian_review_context_revision,
+        parent.guardian_review_context_revision,
+    );
     assert!(Arc::ptr_eq(&parent.items, &captured.items));
 
     child.replace(vec![assistant_msg("new child window")]);
@@ -1014,12 +1084,12 @@ fn fork_snapshot_detects_context_changes_without_response_item_changes() {
     let mut original = ContextManager::new();
     original.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("parent"))]);
     let mut review_history = TranscriptHistory::new(1);
-    review_history.record(&assistant_msg("review evidence"));
+    review_history.record(&assistant_msg("review evidence").into());
     original.review_history = Some(review_history);
     original.guardian_review_mode = GuardianContextMode::Legacy;
     assert!(original.has_same_fork_metadata(&original.clone()));
 
-    let changes: [fn(&mut ContextManager); 6] = [
+    let changes: [fn(&mut ContextManager); 7] = [
         |history| {
             history.reserve_input_order();
         },
@@ -1027,12 +1097,13 @@ fn fork_snapshot_detects_context_changes_without_response_item_changes() {
         |history| history.retain_inherited_user_messages = true,
         |history| history.reset_version += 1,
         |history| history.user_message_revision += 1,
+        |history| history.guardian_review_context_revision += 1,
         |history| {
             history
                 .review_history
                 .as_mut()
                 .expect("legacy reviewer evidence")
-                .record(&assistant_msg("new review evidence"));
+                .record(&assistant_msg("new review evidence").into());
         },
     ];
     for change in changes {
