@@ -41,6 +41,7 @@ use crate::analytics::GoalAnalytics;
 use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
+use crate::resume::ResumeGoalTool;
 use crate::runtime::ActiveGoalStopReason;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
@@ -150,6 +151,7 @@ where
                         enabled,
                         tools_available_for_thread,
                         tools_visible_for_thread,
+                        resume_available_for_thread: !input.session_source.is_non_root_agent(),
                         root_accounting_state,
                     },
                 )
@@ -571,13 +573,21 @@ where
                 self.metrics.clone(),
             ),
         ];
-        tools
+        let mut tools: Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> = tools
             .into_iter()
             .map(|mut tool| {
                 tool.execution_allowed = runtime.tools_available();
                 Arc::new(tool) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
             })
-            .collect()
+            .collect();
+        if runtime.resume_available() {
+            tools.push(Arc::new(ResumeGoalTool {
+                runtime,
+                state_dbs: Arc::clone(&self.state_dbs),
+                event_emitter: self.event_emitter.clone(),
+            }));
+        }
+        tools
     }
 }
 
