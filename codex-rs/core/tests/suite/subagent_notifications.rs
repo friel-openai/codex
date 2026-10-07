@@ -117,7 +117,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
 const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
 const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
 const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
-const FULL_HISTORY_EXPLICIT_POLICY: &str = "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask";
+const FULL_HISTORY_EXPLICIT_POLICY: &str = "Complete your assigned work directly.";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
@@ -1607,7 +1607,7 @@ enum FullHistoryV2ModelSelection {
 #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
 #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
 #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork retains proactive policy across effort changes")]
+#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork replaces parent proactive policy after effort changes")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
     selection: FullHistoryV2ModelSelection,
@@ -1960,8 +1960,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             (
                 mode_instruction_count(&parent_request),
                 mode_instruction_count(&child_request),
+                parent_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
+                child_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
+                child_request.body_contains_text(FULL_HISTORY_EXPLICIT_POLICY),
             ),
-            (1, 1)
+            (1, 1, true, false, true)
         );
     }
     if matches!(
@@ -1987,7 +1990,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                     .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                     .count(),
             ),
-            (1, 0, 1, 1)
+            (1, 1, 0, 1)
         );
     }
     if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
