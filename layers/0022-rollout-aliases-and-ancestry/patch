@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 4dfc2603c47266923f6b9f916407cdc272f22aed..03455f30376a3964a362584cb729e29d91f96b65 100644
+index fc8697362d491cc0b37617fde910f596326e6de9..91be848bcd7c04c5d9c3de620db8b2e16677ec32 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2175,6 +2175,7 @@ dependencies = [
+@@ -2181,6 +2181,7 @@ dependencies = [
   "url",
   "uuid",
   "wiremock",
@@ -11,19 +11,19 @@ index 4dfc2603c47266923f6b9f916407cdc272f22aed..03455f30376a3964a362584cb729e29d
 
  [[package]]
 diff --git a/codex-rs/app-server/Cargo.toml b/codex-rs/app-server/Cargo.toml
-index af1603977cad44181a92796c2cf89cc6dc8299af..81f8eb90b569b6a24f481ab7cd22b2c1e7decd9d 100644
+index ab6bf3a231b322e34581950f65f68e4c115bf0f7..3b7f8c5a80fcc1e8bb6c09cda401fb78655c6659 100644
 --- a/codex-rs/app-server/Cargo.toml
 +++ b/codex-rs/app-server/Cargo.toml
-@@ -160,3 +160,4 @@ tokio-rustls = { workspace = true }
+@@ -161,3 +161,4 @@ tokio-rustls = { workspace = true }
  tokio-tungstenite = { workspace = true }
  tracing-opentelemetry = { workspace = true }
  wiremock = { workspace = true }
 +zstd = { workspace = true }
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index ed1dbba7e5d2c03187d59fe0685dd99ba9a88558..8b9104e86e347809a5a6c782efb4857706bde790 100644
+index 8ce375ea33f5dd8f71fc2f81ccabee5e2285fff1..84b1ee6618e8f76258a1b3d4715c94f3e1c00961 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -6569,10 +6569,7 @@ impl ThreadRequestProcessor {
+@@ -6582,10 +6582,7 @@ impl ThreadRequestProcessor {
                  .await
                  .map_err(thread_store_resume_read_error)?;
              if let Some(current_path) = current_thread.rollout_path.as_ref()
@@ -35,7 +35,7 @@ index ed1dbba7e5d2c03187d59fe0685dd99ba9a88558..8b9104e86e347809a5a6c782efb48577
              {
                  return Err(invalid_request(format!(
                      "cannot resume paginated thread {} with stale path: requested {}, current {}; omit path and resume by thread id",
-@@ -6613,7 +6610,16 @@ impl ThreadRequestProcessor {
+@@ -6626,7 +6623,16 @@ impl ThreadRequestProcessor {
              .rollout_path
              .as_deref()
              .map(codex_rollout::plain_rollout_path);
@@ -54,10 +54,10 @@ index ed1dbba7e5d2c03187d59fe0685dd99ba9a88558..8b9104e86e347809a5a6c782efb48577
                  "rollout path does not select the current rollout for thread {}",
                  stored_thread.thread_id
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 6be947f699a3b6156825b3135cd9f98c68a96194..feaf433da99fe9aa9c1d7968f2378dcbe47af1b7 100644
+index 9c15732671a3bcf0eb82dc021405fb8c8f02a8a7..46c85c5bebbba92bffda27e804d1cd7b1f0bc3ed 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -130,6 +130,7 @@ mod thread_attachments;
+@@ -135,6 +135,7 @@ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
  mod thread_fork;
@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 165046d591af37c890fa8fe3ebdbcb8d48bf66ec..08fd481e533ac06abc91756584d6e8814d983b92 100644
+index e30f2fd68901ad817004fe7da116a35101c2d128..b7b106ba8f80fd1bc930170bde6ab6776e8615ce 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -9681,6 +9681,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -9808,6 +9808,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,10 +271,10 @@ index 165046d591af37c890fa8fe3ebdbcb8d48bf66ec..08fd481e533ac06abc91756584d6e881
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 27b1a988f99c589068ee39543ce1a9f7e345be57..66427857703e4ed41c58f5e65dce21249c21ad0b 100644
+index 82c94fd01984d8918f20c6efeeab173562b934ca..b171fcc1c0c88a3bc37501f7d52d8570fde353b3 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3372,7 +3372,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
+@@ -3647,7 +3647,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
  async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
      let codex_home = tempfile::tempdir().expect("create Codex home");
      let source_thread_id = ThreadId::default();
@@ -288,10 +288,10 @@ index 27b1a988f99c589068ee39543ce1a9f7e345be57..66427857703e4ed41c58f5e65dce2124
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 98d7af9c6e476fa3190de3bb82f7e862c525229b..34c328a88bf869ad55e3567d5acd569b956183f8 100644
+index 7642ce3bc7c389f8da2334167a7f03a8c6c77815..c648a66f77cbbb45706c8da58f6fa326c121f1ea 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1737,7 +1737,6 @@ impl ThreadManager {
+@@ -1745,7 +1745,6 @@ impl ThreadManager {
          &self,
          rollout_path: PathBuf,
      ) -> CodexResult<InitialHistory> {
@@ -299,7 +299,7 @@ index 98d7af9c6e476fa3190de3bb82f7e862c525229b..34c328a88bf869ad55e3567d5acd569b
          let stored_thread = self
              .state
              .thread_store
-@@ -1748,7 +1747,7 @@ impl ThreadManager {
+@@ -1756,7 +1755,7 @@ impl ThreadManager {
              })
              .await
              .map_err(thread_store_rollout_read_error)?;
@@ -309,7 +309,7 @@ index 98d7af9c6e476fa3190de3bb82f7e862c525229b..34c328a88bf869ad55e3567d5acd569b
 
      /// Fork an existing thread from already-loaded store history.
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index f1ab26355e2c947491012e58a3debf691d7ff72a..a3984205cb6cb12c71e29656ae34a95c915fc186 100644
+index 9fa7d934847fb86a36ea8fe61a9fb321444450b7..06b36830773df4d79d14e570dcb7dd1592b3e2c8 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -14,6 +14,8 @@ pub(crate) mod metadata;
@@ -322,10 +322,10 @@ index f1ab26355e2c947491012e58a3debf691d7ff72a..a3984205cb6cb12c71e29656ae34a95c
  pub(crate) mod policy;
  pub(crate) mod recorder;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index 48769436e99beca683e69d85f9c78699b83186ff..ee3737e6a23c473b3cdf4eef36e349823342be2a 100644
+index 3482a045b2e55732717518874bd7b9bfea4582f1..b50dfcb0e6dce3b34dd9fd73413cd7b50862aa7b 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1101,10 +1101,14 @@ async fn select_thread_candidates(
+@@ -1177,10 +1177,14 @@ async fn select_thread_candidates(
          let thread_id =
              ThreadId::from_string(&thread_uuid.to_string()).map_err(io::Error::other)?;
          if let Some(selected_path) = selected_paths.get(&thread_id) {
@@ -602,10 +602,10 @@ index 0fb33b926a5609e43902736e2baa1ee731356020..d9025c32882957ff210001f714ddab9d
  async fn duplicate_physical_rollouts_union_direct_references_once() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
-index 16a01a2e5d506b02955c244fc6981408d7fa7119..f4b91407d83d8ae4a69db37cb7a9de6b8af33713 100644
+index b404ec0eae019c5d6711a0b12e77eb3e30ac0fbd..3135ccc708c5a900dd73189e6ea8aac3fecee071 100644
 --- a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
-@@ -927,7 +927,13 @@ async fn scan_reference(
+@@ -933,7 +933,13 @@ async fn scan_reference(
          if !active.insert(path.clone()) {
              return Err(cycle_error(path.as_path()));
          }
@@ -620,7 +620,7 @@ index 16a01a2e5d506b02955c244fc6981408d7fa7119..f4b91407d83d8ae4a69db37cb7a9de6b
              validate_legacy_initial_repair_path(
                  store.config.codex_home.as_path(),
                  thread_id,
-@@ -1617,7 +1623,11 @@ async fn load_frame(
+@@ -1623,7 +1629,11 @@ async fn load_frame(
      if !active.insert(resolved_path.clone()) {
          return Err(cycle_error(resolved_path.as_path()));
      }
@@ -634,78 +634,26 @@ index 16a01a2e5d506b02955c244fc6981408d7fa7119..f4b91407d83d8ae4a69db37cb7a9de6b
              store.config.codex_home.as_path(),
              thread_id,
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index 43185a374ae0e74b913abb5a5a965ec379568651..c2a19e8d80abb3744a31a9b26a855f5f8a19171a 100644
+index 59afcddf41081f76f732edb5f2c8c361cdb9fc4f..26bc5141b9f77c05888b67892b97b39af94bfdce 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
-@@ -79,18 +79,42 @@ pub(super) async fn resume_thread(
-     }
-     if let Some(requested_path) = params.rollout_path.as_deref()
-         && let Some(selected_path) = selected_rollout_path(store, params.thread_id).await?
--        && codex_rollout::plain_rollout_path(requested_path)
--            != codex_rollout::plain_rollout_path(selected_path.as_path())
-     {
--        return Err(ThreadStoreError::InvalidRequest {
--            message: format!(
--                "rollout path does not select the current rollout for thread {}",
--                params.thread_id
--            ),
--        });
-+        let requested_path = codex_rollout::existing_rollout_path(requested_path)
-+            .await
-+            .unwrap_or_else(|| requested_path.to_path_buf());
-+        let selected_path = codex_rollout::existing_rollout_path(&selected_path)
-+            .await
-+            .unwrap_or(selected_path);
-+        if codex_rollout::plain_rollout_path(
-+            super::helpers::scoped_reference_rollout_path(
-+                store.config.codex_home.as_path(),
-+                &requested_path,
-+            )?
-+            .as_path(),
-+        ) != codex_rollout::plain_rollout_path(
-+            super::helpers::scoped_reference_rollout_path(
-+                store.config.codex_home.as_path(),
-+                selected_path.as_path(),
-+            )?
-+            .as_path(),
-+        ) {
-+            return Err(ThreadStoreError::InvalidRequest {
-+                message: format!(
-+                    "rollout path does not select the current rollout for thread {}: requested {}, selected {}",
-+                    params.thread_id,
-+                    requested_path.display(),
-+                    selected_path.display()
-+                ),
-+            });
-+        }
-     }
-     let has_supplied_history = params.history.is_some();
--    let history_mode = if let Some(history) = params.history.as_deref() {
-+    let history_mode = if let Some(history) = params.history.as_deref().filter(|history| {
-+        history
-+            .iter()
-+            .any(|item| matches!(item, RolloutItem::SessionMeta(_)))
-+    }) {
-         canonical_history_mode_from_rollout_items(history)
-     } else if let Some(rollout_path) = params.rollout_path.as_ref() {
-         super::read_thread::read_thread_by_rollout_path(
-@@ -134,6 +158,11 @@ pub(super) async fn resume_thread(
-                 })?
-         }
-     };
-+    // StoredThread keeps a logical plain name; the checkpoint scanner needs the
-+    // physical suffix to choose its compressed reader before append materialization.
-+    let rollout_path = codex_rollout::existing_rollout_path(&rollout_path)
-+        .await
-+        .unwrap_or(rollout_path);
-     let supplied_empty_placeholder = has_supplied_history
+@@ -130,6 +130,37 @@ pub(super) async fn resume_thread(
          && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
      #[cfg(test)]
-@@ -144,6 +173,16 @@ pub(super) async fn resume_thread(
-             .map_err(|error| ThreadStoreError::Internal {
-                 message: format!("failed to resume local thread recorder: {error}"),
-             })?;
-+        if session_meta.meta.history_mode != history_mode {
+     selection_tests::pause_before_history_access(params.thread_id).await;
++    let history_mode = if !supplied_empty_placeholder {
++        let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to resume local thread recorder: {error}"),
++            })?;
++        if let Some(history) = params.history.as_deref().filter(|history| {
++            history
++                .iter()
++                .any(|item| matches!(item, RolloutItem::SessionMeta(_)))
++        }) && session_meta.meta.history_mode
++            != canonical_history_mode_from_rollout_items(history)
++        {
 +            return Err(ThreadStoreError::InvalidRequest {
 +                message: format!(
 +                    "thread {} history format changed before resume; reload the thread",
@@ -713,15 +661,25 @@ index 43185a374ae0e74b913abb5a5a965ec379568651..c2a19e8d80abb3744a31a9b26a855f5f
 +                ),
 +            });
 +        }
-+        #[cfg(test)]
-+        selection_tests::pause_before_writer_lock(params.thread_id).await;
-         let rollout_id =
-             super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
-                 rollout_path.as_path(),
-@@ -199,6 +238,21 @@ pub(super) async fn resume_thread(
-     // Supplied empty histories and external files can bypass reserved repair. Recheck every
-     // resume after obtaining the writer lock; flushing an old recorder would reselect its file.
-     require_selected_rollout_path(store, params.thread_id, rollout_path.as_path()).await?;
++        session_meta.meta.history_mode
++    } else {
++        canonical_history_mode_from_rollout_items(
++            params
++                .history
++                .as_deref()
++                .expect("supplied placeholder history"),
++        )
++    };
++    #[cfg(test)]
++    selection_tests::pause_before_writer_lock(params.thread_id).await;
+     let (rollout_path, mut history_access) = if !supplied_empty_placeholder {
+         super::model_context::prepare_history_access(store, params.thread_id, rollout_path).await?
+     } else {
+@@ -185,7 +216,21 @@ pub(super) async fn resume_thread(
+             .items,
+         ),
+     };
+-    let history_mode = canonical_history_mode_from_rollout_items(&history);
 +    // Migration can replace the same filename while resume waits for writer ownership.
 +    // Path selection alone does not establish that the supplied history still matches its format.
 +    if !supplied_empty_placeholder {
@@ -740,7 +698,7 @@ index 43185a374ae0e74b913abb5a5a965ec379568651..c2a19e8d80abb3744a31a9b26a855f5f
      super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
      let cwd = params
          .metadata
-@@ -243,15 +297,22 @@ pub(super) async fn resume_thread(
+@@ -230,15 +275,22 @@ pub(super) async fn resume_thread(
          };
      let rollout_id = match codex_rollout::rollout_id_from_path(rollout_path.as_path()) {
          Some(rollout_id) => rollout_id,
@@ -771,18 +729,41 @@ index 43185a374ae0e74b913abb5a5a965ec379568651..c2a19e8d80abb3744a31a9b26a855f5f
      };
      let segmented_legacy_projection_complete = if segmented_rollout {
          Some(if store.state_db().await.is_none() {
-@@ -295,8 +356,7 @@ pub(super) async fn require_selected_rollout_path(
+@@ -281,24 +333,14 @@ pub(super) async fn require_selected_rollout_path(
+     thread_id: ThreadId,
      expected: &std::path::Path,
  ) -> ThreadStoreResult<()> {
-     if let Some(selected) = selected_rollout_path(store, thread_id).await?
--        && codex_rollout::plain_rollout_path(expected)
+-    if let Some(selected) = selected_rollout_path(store, thread_id).await? {
+-        let selected = codex_rollout::existing_rollout_path(&selected)
+-            .await
+-            .unwrap_or(selected);
+-        let selected = tokio::fs::canonicalize(&selected).await.unwrap_or(selected);
+-        let expected = codex_rollout::existing_rollout_path(expected)
+-            .await
+-            .unwrap_or_else(|| expected.to_path_buf());
+-        let expected = tokio::fs::canonicalize(&expected).await.unwrap_or(expected);
+-        if codex_rollout::plain_rollout_path(&expected)
 -            != codex_rollout::plain_rollout_path(&selected)
+-        {
+-            return Err(ThreadStoreError::Conflict {
+-                message: format!(
+-                    "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
+-                ),
+-            });
+-        }
++    if let Some(selected) = selected_rollout_path(store, thread_id).await?
 +        && !codex_rollout::rollout_paths_match(expected, &selected).await
-     {
-         return Err(ThreadStoreError::Conflict {
-             message: format!(
++    {
++        return Err(ThreadStoreError::Conflict {
++            message: format!(
++                "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
++            ),
++        });
+     }
+     Ok(())
+ }
 diff --git a/codex-rs/thread-store/src/local/live_writer_selection_tests.rs b/codex-rs/thread-store/src/local/live_writer_selection_tests.rs
-index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf4936991ac8c385 100644
+index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..98c892ea99a9b8272915cb37375d7abbce92a30a 100644
 --- a/codex-rs/thread-store/src/local/live_writer_selection_tests.rs
 +++ b/codex-rs/thread-store/src/local/live_writer_selection_tests.rs
 @@ -28,6 +28,19 @@ use crate::ThreadStoreError;
@@ -805,7 +786,7 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
 
  pub(super) async fn pause_before_history_access(thread_id: ThreadId) {
      let pause = RESUME_PAUSES
-@@ -81,6 +94,180 @@ fn write_rollout(path: &Path, thread_id: ThreadId, text: &str) -> Vec<RolloutIte
+@@ -81,6 +94,183 @@ fn write_rollout(path: &Path, thread_id: ThreadId, text: &str) -> Vec<RolloutIte
      items
  }
 
@@ -826,6 +807,7 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
 +    let error = store
 +        .resume_thread(ResumeThreadParams {
 +            thread_id,
++            history_revision: None,
 +            rollout_path: Some(path.clone()),
 +            history: Some(Arc::new(history)),
 +            include_archived: false,
@@ -879,6 +861,7 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
 +    let resume_store = store.clone();
 +    let params = ResumeThreadParams {
 +        thread_id,
++        history_revision: None,
 +        rollout_path: Some(path.clone()),
 +        history: Some(Arc::new(history)),
 +        include_archived: false,
@@ -949,6 +932,7 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
 +        store
 +            .resume_thread(ResumeThreadParams {
 +                thread_id,
++                history_revision: None,
 +                rollout_path: Some(if requested_is_compressed {
 +                    compressed
 +                } else {
@@ -986,7 +970,7 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
  #[tokio::test]
  async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
      let home = tempfile::tempdir().expect("home");
-@@ -114,6 +301,21 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
+@@ -114,6 +304,21 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
          .await
          .expect("select first");
      let store = LocalThreadStore::new(config, Some(db));
@@ -1008,6 +992,22 @@ index e1c3cb4fc7e29a63a6213db2ea5a7c9b57b348c0..e5b342923b0d7e2da173cf1daf493699
      let persistence = ThreadPersistenceMetadata {
          cwd: Some(home.path().to_path_buf()),
          model_provider: "test-provider".to_string(),
+@@ -128,6 +333,7 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
+     let resume_store = store.clone();
+     let params = ResumeThreadParams {
+         thread_id,
++        history_revision: None,
+         rollout_path: Some(first.clone()),
+         history: Some(Arc::new(first_history)),
+         include_archived: false,
+@@ -192,6 +398,7 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
+     store
+         .resume_thread(ResumeThreadParams {
+             thread_id,
++            history_revision: None,
+             rollout_path: None,
+             history: None,
+             include_archived: false,
 diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
 index 0445a20797d84c2393e470f7ff5b512b197b4c61..bb9505c5d3cc638624314c32795c0784022b9c82 100644
 --- a/codex-rs/thread-store/src/local/paginated_fork.rs
@@ -1110,7 +1110,7 @@ index 0445a20797d84c2393e470f7ff5b512b197b4c61..bb9505c5d3cc638624314c32795c0784
          ),
          (ForkResponseHistory::ModelContext, _, _) => (Arc::clone(&model_context), None),
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b496b89a2 100644
+index 468bbe60bc8a56871529c494b1205e32c786e0df..d5722d91abf4ad8dd252f11f48a5aa268ef08f17 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
 @@ -25,6 +25,7 @@ use super::RolloutWriterReservation;
@@ -1130,7 +1130,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
  pub(super) struct PreparedForkLineage {
      pub(super) lineage: RolloutLineage,
      pub(super) model_context: Vec<RolloutItem>,
-@@ -300,19 +301,20 @@ impl LocalThreadStore {
+@@ -285,19 +286,20 @@ impl LocalThreadStore {
          Ok((lineage, source_projection_was_missing))
      }
 
@@ -1156,7 +1156,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
          include_full_history: bool,
      ) -> ThreadStoreResult<Option<PreparedForkLineage>> {
          let source =
-@@ -348,10 +350,10 @@ impl LocalThreadStore {
+@@ -333,10 +335,10 @@ impl LocalThreadStore {
          )
          .await?;
          if segments.iter().any(|segment| {
@@ -1171,7 +1171,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
          }) {
              return Ok(None);
          }
-@@ -370,6 +372,19 @@ impl LocalThreadStore {
+@@ -355,6 +357,19 @@ impl LocalThreadStore {
          else {
              return Ok(None);
          };
@@ -1191,7 +1191,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
          Ok(Some(PreparedForkLineage {
              lineage,
              model_context,
-@@ -397,9 +412,15 @@ impl LocalThreadStore {
+@@ -382,9 +397,15 @@ impl LocalThreadStore {
          let mut model_context_complete = false;
          let mut canonical_session_meta = None;
          let mut full_history_segments = include_full_history.then(Vec::new);
@@ -1208,7 +1208,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
              let rollout_path = codex_rollout::existing_rollout_path(segment.rollout_path.as_path())
                  .await
                  .unwrap_or_else(|| segment.rollout_path.clone());
-@@ -408,7 +429,8 @@ impl LocalThreadStore {
+@@ -393,7 +414,8 @@ impl LocalThreadStore {
                  rollout_path.as_path(),
                  "Codex home",
              )?;
@@ -1218,7 +1218,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
                  codex_rollout::materialize_rollout_for_reference(rollout_path.as_path())
                      .await
                      .map_err(|err| ThreadStoreError::Internal {
-@@ -416,11 +438,54 @@ impl LocalThreadStore {
+@@ -401,11 +423,54 @@ impl LocalThreadStore {
                              "failed to materialize referenced rollout {}: {err}",
                              rollout_path.display()
                          ),
@@ -1275,7 +1275,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
              let mut lines = parsed
                  .iter()
                  .map(|(_, line)| line.clone())
-@@ -583,16 +648,15 @@ impl LocalThreadStore {
+@@ -568,16 +633,15 @@ impl LocalThreadStore {
                      })?;
              // A previously computed boundary is reusable only when it still names the same
              // immutable segment under the combined writer reservation.
@@ -1295,7 +1295,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
                          .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
                          .join(segment.thread_id.to_string());
                      let immutable_segment_id = materialized_path
-@@ -1542,6 +1606,13 @@ async fn trim_to_history_position(
+@@ -1527,6 +1591,13 @@ async fn trim_to_history_position(
      let bytes = tokio::fs::read(segment.rollout_path.as_path())
          .await
          .map_err(lineage_io_error)?;
@@ -1309,7 +1309,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
      let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
          malformed_lineage(
              end.thread_id,
-@@ -1557,16 +1628,14 @@ async fn trim_to_history_position(
+@@ -1542,16 +1613,14 @@ async fn trim_to_history_position(
      if end_byte_offset != 0 && bytes.get(end_byte_offset.saturating_sub(1)) != Some(&b'\n') {
          // Snapshot stabilization can change physical line lengths while preserving ordinals.
          // Recover a stale offset only when it no longer lands between complete JSONL records.
@@ -1332,7 +1332,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
      if end.end_byte_offset != ordinal_end_byte_offset {
          let ordinal_end_byte_offset = usize::try_from(ordinal_end_byte_offset).map_err(|_| {
              malformed_lineage(
-@@ -1575,7 +1644,14 @@ async fn trim_to_history_position(
+@@ -1560,7 +1629,14 @@ async fn trim_to_history_position(
              )
          })?;
          let valid_unordinaled_suffix = end_byte_offset < ordinal_end_byte_offset
@@ -1348,7 +1348,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
                  .split_inclusive(|byte| *byte == b'\n')
                  .all(|line| {
                      codex_rollout::rollout_ordinal_from_slice(line)
-@@ -1590,9 +1666,7 @@ async fn trim_to_history_position(
+@@ -1575,9 +1651,7 @@ async fn trim_to_history_position(
      }
      // The recorded offset remains authoritative when unordinaled records were appended after the
      // selected boundary; ordinal-only reconstruction cannot recover that earlier cutoff.
@@ -1360,7 +1360,7 @@ index 551a14ee1823b80b3c2416d5ef1c92a543da499a..ee09d167f3391d03ee31cf5e1bd5980b
 
  async fn trim_to_ordinal(
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
-index 3e889720a1c4dee984873eeca022bee656b92983..f7903dcd472f210c8b308292020e9ec0b9e65018 100644
+index 3056da464abeca94fa3c1cf6cd92c0eda66e04dd..73cd5b88ccc23df4e4f3a2e41ac5ba8625633575 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
 @@ -432,7 +432,7 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
@@ -1673,7 +1673,7 @@ index e87dea9fbfdfb2a468ef61c436a7b71cd7e19511..10e173c4d55d3a353077812a3e00eae2
      let publication =
          publish_history_repair_replacement(home.path(), path.as_path(), replacement.as_slice())
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index a862e31ed52302fb7e69894af3e20e8ce4f96215..cbacedc3a905626def2b40453cb66b09d3c52166 100644
+index f65f3f5856eaf02684ba948b075c3a3ead3b9e6a..16bc440db56732dbcbbee4226898ca35f7c4ae70 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -75,6 +75,79 @@ use crate::ThreadPersistenceMode;
@@ -1790,10 +1790,10 @@ index 7dce27fbeb7dc58bb19a948be7fa1195be41fb7d..38f27190dc0467cc01436a6675574ccb
      .await
      .expect("seed complete projection checkpoint");
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index c2f4bc48326882cbebea1be670f9620dc0e3751c..a07ead2c15d3d2b5f73fb4c4aa2741461f9a7989 100644
+index 7271e268cf3f8bcf00368abaa3545202940266d4..d1076456a17b007a8f6a2531ff022933770d17b6 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-@@ -1795,6 +1795,130 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
+@@ -1796,6 +1796,130 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
      assert_eq!((turn_ordinal, next_ordinal), (5, 8));
  }
 

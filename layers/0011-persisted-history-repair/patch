@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index c6d73936d5bb9b9bb193d5bb9bbe1df27579275c..9c90ab951e6b2cbe097be9844ec547c9ecb5cc28 100644
+index f0b1f5fb3a43bfde8fb3496cbd79311371de41d0..dc8940e8971ad7b8b639c3ac4f3e480bd1308316 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -4683,6 +4683,7 @@ dependencies = [
+@@ -4702,6 +4702,7 @@ dependencies = [
  name = "codex-thread-store"
  version = "0.154.0"
  dependencies = [
@@ -649,7 +649,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 5702da10c6c8bd43dbb3a28e6df559fdd9e869cc..db0d99162f0349326cebc321d87a5827dd3c2f4c 100644
+index 12abfa834f7b0c146a70286575b65fe6659faa96..9b359cff5dea0c00f955260378ea207442900457 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -456,6 +456,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
@@ -750,7 +750,7 @@ index 5702da10c6c8bd43dbb3a28e6df559fdd9e869cc..db0d99162f0349326cebc321d87a5827
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -7953,18 +7922,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -7985,18 +7954,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .await
          .expect("child thread should archive");
 
@@ -822,7 +822,7 @@ index 5702da10c6c8bd43dbb3a28e6df559fdd9e869cc..db0d99162f0349326cebc321d87a5827
  }
 
  #[tokio::test]
-@@ -10085,18 +10106,52 @@ while True:
+@@ -10212,18 +10233,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -877,7 +877,7 @@ index 5702da10c6c8bd43dbb3a28e6df559fdd9e869cc..db0d99162f0349326cebc321d87a5827
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -10107,13 +10162,8 @@ while True:
+@@ -10234,13 +10289,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -925,7 +925,7 @@ index 81bae27c3455c4e411c0d0bcce8fc2e98a23d90c..b9215474067f81b5960917c0dd5c217d
  tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
  uuid = { workspace = true }
 diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
-index da69eeee1c464dae5fac85a9d2ea5d1bfd35f49c..49fdb47e7b56317ee80eb719badd106b73c5d304 100644
+index a900b2f02448f9dd1a2ca8b2f33bf9815f2ae8ec..8ada41cb5153ac93bf1653e99cf910045f934f03 100644
 --- a/codex-rs/thread-store/src/local/delete_thread.rs
 +++ b/codex-rs/thread-store/src/local/delete_thread.rs
 @@ -48,13 +48,22 @@ pub(super) async fn delete_thread(
@@ -5318,7 +5318,7 @@ index 0000000000000000000000000000000000000000..1b3798604529e140cc1fb887a7a41c8e
 +        .expect("dropping access releases clean writer lock");
 +}
 diff --git a/codex-rs/thread-store/src/local/helpers.rs b/codex-rs/thread-store/src/local/helpers.rs
-index 91ecd3820efd1db1a8cdaa225c55232d5e3e2765..aaab9632891db5006acb38b32b858d42a7d37e50 100644
+index de615bff4d9e76286fcc6142ad3bc0808e1788ab..be8b408e480ac361675f518d8038db259260ccce 100644
 --- a/codex-rs/thread-store/src/local/helpers.rs
 +++ b/codex-rs/thread-store/src/local/helpers.rs
 @@ -61,7 +61,8 @@ pub(super) fn scoped_rollout_path(
@@ -5342,13 +5342,13 @@ index 91ecd3820efd1db1a8cdaa225c55232d5e3e2765..aaab9632891db5006acb38b32b858d42
          codex_rollout::SESSIONS_SUBDIR,
          codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8d1f88def 100644
+index 6aeacbe990d2788a63cfdd4f3448c83906ec8e4d..cad14d9d07d133a68cb05c311b1a6cf812d26751 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
-@@ -68,9 +68,11 @@ pub(super) async fn resume_thread(
+@@ -67,9 +67,11 @@ pub(super) async fn resume_thread(
      store: &LocalThreadStore,
      params: ResumeThreadParams,
- ) -> ThreadStoreResult<()> {
+ ) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
 -    let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
 +    // Keep the duplicate-writer error ahead of history inspection.
      store.ensure_live_recorder_absent(params.thread_id).await?;
@@ -5356,70 +5356,22 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
 +    if let Some(history) = params.history.as_deref() {
 +        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(history)?;
 +    }
-     if let Some(requested_path) = params.rollout_path.as_deref()
-         && let Some(selected_path) = selected_rollout_path(store, params.thread_id).await?
-         && codex_rollout::plain_rollout_path(requested_path)
-@@ -109,13 +111,15 @@ pub(super) async fn resume_thread(
-     };
-     let rollout_path = match (params.rollout_path, params.history) {
-         (Some(rollout_path), _history) => rollout_path,
--        (None, history) => {
-+        (None, _history) => {
-             let thread = super::read_thread::read_thread(
-                 store,
-                 ReadThreadParams {
-                     thread_id: params.thread_id,
-                     include_archived: params.include_archived,
--                    include_history: history.is_none(),
-+                    // History is consumed only after the active checkpoint decision below. Path
-+                    // discovery must not traverse predecessors first.
-+                    include_history: false,
-                 },
-             )
-             .await?;
-@@ -126,6 +130,64 @@ pub(super) async fn resume_thread(
-                 })?
+     let has_requested_path = params.rollout_path.is_some();
+     let has_supplied_history = params.history.is_some();
+     let rollout_path = match params.rollout_path {
+@@ -120,19 +122,62 @@ pub(super) async fn resume_thread(
+             });
          }
-     };
+     }
 +    let supplied_empty_placeholder = has_supplied_history
 +        && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
-+    let mut history_access = if !supplied_empty_placeholder {
-+        let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
-+            .await
-+            .map_err(|error| ThreadStoreError::Internal {
-+                message: format!("failed to resume local thread recorder: {error}"),
-+            })?;
-+        let rollout_id =
-+            super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
-+                rollout_path.as_path(),
-+                params.thread_id,
-+                session_meta.meta.id,
-+            )?;
-+        if super::model_context::scan_projected_active_model_context(
-+            store,
-+            rollout_id,
-+            rollout_path.as_path(),
-+            &session_meta,
-+        )
-+        .await?
-+        .is_some()
-+        {
-+            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
-+                store,
-+                params.thread_id,
-+                rollout_path.as_path(),
-+            )
-+            .await?
-+        } else {
-+            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
-+                store,
-+                params.thread_id,
-+                rollout_path.as_path(),
-+            )
-+            .await?
-+        }
++    let (rollout_path, mut history_access) = if !supplied_empty_placeholder {
++        super::model_context::prepare_history_access(store, params.thread_id, rollout_path).await?
 +    } else {
-+        super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess::clean()
++        (
++            rollout_path,
++            super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess::clean(),
++        )
 +    };
 +    let _live_writer_guard = if history_access.is_reserved() {
 +        None
@@ -5439,11 +5391,45 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
 +    } else {
 +        store.acquire_writer_lock(params.thread_id)?
 +    };
-     let cwd = params
-         .metadata
-         .cwd
++    // Repair may have waited for a concurrent rotation. Validate selection again while owned.
++    if let Some(selected_path) = selected_rollout_path(store, params.thread_id).await? {
++        let selected_path = codex_rollout::existing_rollout_path(&selected_path)
++            .await
++            .unwrap_or(selected_path);
++        let selected_path = tokio::fs::canonicalize(&selected_path)
++            .await
++            .unwrap_or(selected_path);
++        if codex_rollout::plain_rollout_path(&rollout_path)
++            != codex_rollout::plain_rollout_path(&selected_path)
++        {
++            return Err(ThreadStoreError::InvalidRequest {
++                message: format!(
++                    "rollout path does not select the current rollout for thread {}",
++                    params.thread_id
++                ),
++            });
++        }
++    }
+     let history = match params.history {
+         Some(history)
+             if !matches!(
+                 history.first(),
+                 Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == params.thread_id
+-            ) =>
+-        {
+-            history
+-        }
++            ) => history,
+         Some(history)
+             if params.history_revision.is_some()
+-                && params.history_revision
+-                    == super::history_revision::read(&rollout_path).await =>
++                && params.history_revision == super::history_revision::read(&rollout_path).await =>
+         {
+             history
+         }
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b490774b2d409 100644
+index 905e833dd00fc50c8afd79f39d61c7eacb409970..e371d2704408e188a9ef6a1a35de4ccbb2e90b83 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5455,9 +5441,9 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
 +#[cfg(test)]
 +mod goal_supervisor_runtime_repair_tests;
  mod helpers;
+ mod history_revision;
  mod list_threads;
- mod live_writer;
-@@ -212,15 +216,24 @@ struct LiveRecorderRecovery {
+@@ -214,15 +218,24 @@ struct LiveRecorderRecovery {
  /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
  /// entry supplies that half of the reservation until the in-process mutex is released.
  struct RolloutWriterReservation {
@@ -5484,7 +5470,7 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
  }
 
  #[derive(Default)]
-@@ -464,13 +477,59 @@ impl LocalThreadStore {
+@@ -466,13 +479,59 @@ impl LocalThreadStore {
          live_writer::rollout_path(self, thread_id).await
      }
 
@@ -5545,7 +5531,7 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
      }
 
      /// Freezes a thread only while the expected physical rollout remains selected.
-@@ -480,13 +539,50 @@ impl LocalThreadStore {
+@@ -482,13 +541,50 @@ impl LocalThreadStore {
          expected_rollout_id: codex_protocol::RolloutId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
@@ -5600,7 +5586,7 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
      }
 
      /// Freezes a paginated fork without reading history excluded from its response.
-@@ -707,13 +803,20 @@ impl LocalThreadStore {
+@@ -709,13 +805,20 @@ impl LocalThreadStore {
          thread_ids.dedup();
          let mut in_process_guards = Vec::with_capacity(thread_ids.len());
          for &thread_id in &thread_ids {
@@ -5624,7 +5610,7 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
          })
      }
 
-@@ -1353,7 +1456,7 @@ mod tests {
+@@ -1358,7 +1461,7 @@ mod tests {
              .expect("recover recorder");
          drop(store);
 
@@ -5633,7 +5619,7 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
          assert!(
              matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
          );
-@@ -2320,7 +2423,7 @@ mod tests {
+@@ -2331,7 +2434,7 @@ mod tests {
              drop(recorder);
 
              // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
@@ -5643,40 +5629,65 @@ index c82db17d1d5f237e03d42f60dfcf95ae30e88099..66b9c9b509c3ddea8850e4daac5b4907
                  .acquire(thread_id)
                  .expect("writer lock must be released");
 diff --git a/codex-rs/thread-store/src/local/model_context.rs b/codex-rs/thread-store/src/local/model_context.rs
-index 16e1d5cbeb77ed3bcdba0d76a9b4dff177f16f82..5d9f4697eaf3365f1d8ce541ab5b491add0d0ae5 100644
+index b40bf5f5446863622adb19576c5edb0add8ed73a..bff7478dac5d9ccf6472ef59d90e82c56c4e9f2b 100644
 --- a/codex-rs/thread-store/src/local/model_context.rs
 +++ b/codex-rs/thread-store/src/local/model_context.rs
-@@ -54,10 +54,10 @@ pub(super) async fn load_latest_model_context(
+@@ -54,11 +54,98 @@ pub(super) async fn load_latest_model_context(
      .ok_or_else(|| ThreadStoreError::InvalidRequest {
          message: format!("no rollout found for thread id {}", params.thread_id),
      })?;
 -    let path = resolved.path;
-+    let mut path = resolved.path;
-     let rollout_id = resolved.rollout_id;
+-
++    let (path, _history_access) =
++        prepare_history_access(store, params.thread_id, resolved.path).await?;
+     load_from_rollout_path(store, params.thread_id, &path).await
+ }
 
--    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
++/// Retains repair ownership until the reader finishes or transfers the writer to a recorder.
++pub(super) async fn prepare_history_access(
++    store: &LocalThreadStore,
++    thread_id: codex_protocol::ThreadId,
++    mut path: std::path::PathBuf,
++) -> ThreadStoreResult<(
++    std::path::PathBuf,
++    super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess,
++)> {
 +    let mut session_meta = codex_rollout::read_session_meta_line(path.as_path())
-         .await
-         .map_err(|err| ThreadStoreError::Internal {
-             message: format!("failed to read session metadata {}: {err}", path.display()),
-@@ -73,13 +73,72 @@ pub(super) async fn load_latest_model_context(
-         });
-     }
-
++        .await
++        .map_err(|err| ThreadStoreError::Internal {
++            message: format!("failed to read session metadata {}: {err}", path.display()),
++        })?;
++    if session_meta.meta.id != thread_id {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: format!(
++                "rollout at {} belongs to thread {}, not {}",
++                path.display(),
++                session_meta.meta.id,
++                thread_id
++            ),
++        });
++    }
++
++    let rollout_id =
++        super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
++            &path,
++            thread_id,
++            session_meta.meta.id,
++        )?;
 +    let projected_active =
 +        scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?;
 +    let used_active_checkpoint = projected_active.is_some();
 +    let mut history_access = if used_active_checkpoint {
 +        super::goal_supervisor_runtime_repair::repair_active_history_before_access(
 +            store,
-+            params.thread_id,
++            thread_id,
 +            path.as_path(),
 +        )
 +        .await?
 +    } else {
 +        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
 +            store,
-+            params.thread_id,
++            thread_id,
 +            path.as_path(),
 +        )
 +        .await?
@@ -5695,14 +5706,14 @@ index 16e1d5cbeb77ed3bcdba0d76a9b4dff177f16f82..5d9f4697eaf3365f1d8ce541ab5b491a
 +            message: format!("failed to read session metadata {}: {err}", path.display()),
 +        })?;
 +
-+    let mut projected_after_repair =
++    let projected_after_repair =
 +        scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?;
 +    if used_active_checkpoint && projected_after_repair.is_none() {
 +        drop(history_access);
 +        history_access =
 +            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
 +                store,
-+                params.thread_id,
++                thread_id,
 +                path.as_path(),
 +            )
 +            .await?;
@@ -5714,27 +5725,31 @@ index 16e1d5cbeb77ed3bcdba0d76a9b4dff177f16f82..5d9f4697eaf3365f1d8ce541ab5b491a
 +                    path.display()
 +                ),
 +            })?;
-+        session_meta = codex_rollout::read_session_meta_line(path.as_path())
-+            .await
-+            .map_err(|err| ThreadStoreError::Internal {
-+                message: format!("failed to read session metadata {}: {err}", path.display()),
-+            })?;
-+        projected_after_repair =
-+            scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?;
 +    }
-+    let _history_access = history_access;
++    Ok((path, history_access))
++}
 +
-     let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
-         || (matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy)
-             && session_meta.meta.segment_id.is_some())
-     {
--        if let Some(items) =
--            scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?
--        {
-+        if let Some(items) = projected_after_repair {
-             items
-         } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy) {
-             read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path())
++/// Reads the exact selected rollout while the caller retains writer or repair ownership.
+ pub(super) async fn load_from_rollout_path(
+     store: &LocalThreadStore,
+     thread_id: codex_protocol::ThreadId,
+@@ -80,7 +167,6 @@ pub(super) async fn load_from_rollout_path(
+             ),
+         });
+     }
+-
+     let rollout_id =
+         super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+             path,
+@@ -99,7 +185,7 @@ pub(super) async fn load_from_rollout_path(
+             read_thread::load_history_items(store.config.codex_home.as_path(), path).await?
+         } else {
+             let lineage = store
+-                .resolve_rollout_lineage_from_path(thread_id, path.to_path_buf())
++                .resolve_rollout_lineage_from_path(thread_id, path)
+                 .await?;
+             scan_model_context_from_lineage(lineage, session_meta).await?
+         }
 diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
 index 18170d0ffacbc2931278e597eb7595f248b0f10e..61f599fa6435a8b8e8630daa867c23ece503c268 100644
 --- a/codex-rs/thread-store/src/local/paginated_fork.rs
@@ -6222,7 +6237,7 @@ index 18170d0ffacbc2931278e597eb7595f248b0f10e..61f599fa6435a8b8e8630daa867c23ec
 
  fn canonical_same_thread_reference(
 diff --git a/codex-rs/thread-store/src/local/read_thread.rs b/codex-rs/thread-store/src/local/read_thread.rs
-index 861a54f9f0938583933141caf8556db4f5803cf1..4906e982225309487dbe8f571ba474a6a760cc64 100644
+index d99be293cd07e681425f1e906d00f81b11d512f9..0484009a80d018c14333e4dc77a7e5f8e0891320 100644
 --- a/codex-rs/thread-store/src/local/read_thread.rs
 +++ b/codex-rs/thread-store/src/local/read_thread.rs
 @@ -288,11 +288,26 @@ async fn attach_history_if_requested(
@@ -6250,14 +6265,14 @@ index 861a54f9f0938583933141caf8556db4f5803cf1..4906e982225309487dbe8f571ba474a6
 +                path.display()
 +            ),
 +        })?;
+     let before = super::history_revision::read(&path).await;
      let items = load_history_items(store.config.codex_home.as_path(), &path).await?;
-     thread.history = Some(StoredThreadHistory { thread_id, items });
-     Ok(())
+     let after = super::history_revision::read(&path).await;
 diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
-index 5aeebce31ee4bdbc53d261feec0b92be88cdec73..4b74b9ab82068984e80cc583ae258d509b0b526b 100644
+index 424a0f54c16525be706817bb1e392447246ff5ad..a10575b8c311dec8c5ff6132f943103f209db807 100644
 --- a/codex-rs/thread-store/src/local/revert_thread.rs
 +++ b/codex-rs/thread-store/src/local/revert_thread.rs
-@@ -100,6 +100,9 @@ pub(super) async fn revert(
+@@ -102,6 +102,9 @@ pub(super) async fn revert(
          )
          .await?;
      }
@@ -6268,7 +6283,7 @@ index 5aeebce31ee4bdbc53d261feec0b92be88cdec73..4b74b9ab82068984e80cc583ae258d50
          store,
          thread_id,
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db30066f0787b7 100644
+index 6f535bff8e42c16a86ab4e4ad99bed25af7e483e..59704361a448c108472ed539a0f232e6f9654540 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
 @@ -37,6 +37,12 @@ pub(super) struct RolloutLineageSegment {
@@ -6284,17 +6299,29 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      pub(super) end_byte_offset: Option<u64>,
      pub(super) filter_texts: Vec<String>,
  }
-@@ -83,6 +89,46 @@ impl LocalThreadStore {
-         })
+@@ -65,27 +71,38 @@ impl LocalThreadStore {
+             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
+                 .await?
+                 .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
+-        self.resolve_rollout_lineage_from_path(requested_thread_id, resolved.path)
++        self.resolve_rollout_lineage_from_path(requested_thread_id, &resolved.path)
+             .await
      }
 
+-    /// Reconstructs the exact rollout selected under writer ownership during resume.
 +    /// Resolves the lineage rooted at one explicit physical rollout rather than the thread's
 +    /// currently selected rollout.
-+    pub(super) async fn resolve_rollout_lineage_from_path(
-+        &self,
-+        requested_thread_id: ThreadId,
+     pub(super) async fn resolve_rollout_lineage_from_path(
+         &self,
+         requested_thread_id: ThreadId,
+-        path: PathBuf,
 +        rollout_path: &Path,
-+    ) -> ThreadStoreResult<RolloutLineage> {
+     ) -> ThreadStoreResult<RolloutLineage> {
+-        let rollout_id = thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
+-            &path,
+-            requested_thread_id,
+-            ThreadHistoryMode::Paginated,
+-        )?;
 +        let resolved_path = codex_rollout::existing_rollout_path(rollout_path)
 +            .await
 +            .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
@@ -6310,28 +6337,17 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
 +        let plain_path = codex_rollout::plain_rollout_path(resolved_path.as_path());
 +        let rollout_id = codex_rollout::rollout_id_from_path(plain_path.as_path())
 +            .unwrap_or(requested_thread_id);
-+        let mut active_paths = HashSet::new();
-+        let segments = resolve_path(
-+            self,
-+            requested_thread_id,
-+            rollout_id,
+         let mut active_paths = HashSet::new();
+         let segments = resolve_path(
+             self,
+             requested_thread_id,
+             rollout_id,
+-            path,
 +            resolved_path,
-+            /*end*/ None,
-+            /*inherited_filter_texts*/ None,
-+            /*graph_depth*/ 0,
-+            &mut active_paths,
-+        )
-+        .await?;
-+        Ok(RolloutLineage {
-+            root_rollout_id: rollout_id,
-+            segments,
-+        })
-+    }
-+
-     pub(super) async fn resolve_rollout_lineage_for_reference(
-         &self,
-         requested_thread_id: ThreadId,
-@@ -167,6 +213,55 @@ impl LocalThreadStore {
+             /*end*/ None,
+             /*inherited_filter_texts*/ None,
+             /*graph_depth*/ 0,
+@@ -182,6 +199,55 @@ impl LocalThreadStore {
          }
      }
 
@@ -6387,7 +6403,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      async fn materialize_rollout_lineage_for_reference(
          &self,
          requested_thread_id: ThreadId,
-@@ -258,6 +353,7 @@ impl LocalThreadStore {
+@@ -273,6 +339,7 @@ impl LocalThreadStore {
                          .len(),
                  ),
              };
@@ -6395,7 +6411,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
              segment.rollout_path = materialized_path;
          }
          Ok(lineage)
-@@ -380,6 +476,21 @@ impl RolloutLineageSegment {
+@@ -395,6 +462,21 @@ impl RolloutLineageSegment {
          self.rollout_id
      }
 
@@ -6417,7 +6433,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      pub(super) fn start_ordinal(&self) -> u64 {
          self.start_ordinal
      }
-@@ -640,12 +751,15 @@ async fn resolve_path_iteratively(
+@@ -655,12 +737,15 @@ async fn resolve_path_iteratively(
              .await
              .map_err(lineage_io_error)?
              .len();
@@ -6433,7 +6449,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
              end_byte_offset: Some(file_len),
              filter_texts: pending.filter_texts,
          });
-@@ -728,12 +842,8 @@ async fn trim_to_history_position(
+@@ -743,12 +828,8 @@ async fn trim_to_history_position(
      segment.rollout_path = codex_rollout::existing_rollout_path(segment.rollout_path.as_path())
          .await
          .ok_or_else(|| malformed_lineage(end.thread_id, "missing source rollout"))?;
@@ -6448,7 +6464,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
          segment.end_byte_offset = None;
          return Ok(());
      }
-@@ -758,6 +868,7 @@ async fn trim_to_history_position(
+@@ -773,6 +854,7 @@ async fn trim_to_history_position(
          segment.end_byte_offset =
              byte_offset_for_ordinal(segment.rollout_path.as_path(), end.end_ordinal_exclusive)
                  .await?;
@@ -6456,7 +6472,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
          return Ok(());
      }
      let ordinal_end_byte_offset =
-@@ -790,6 +901,7 @@ async fn trim_to_history_position(
+@@ -805,6 +887,7 @@ async fn trim_to_history_position(
      // The recorded offset remains authoritative when unordinaled records were appended after the
      // selected boundary; ordinal-only reconstruction cannot recover that earlier cutoff.
      segment.end_byte_offset = Some(end.end_byte_offset);
@@ -6464,7 +6480,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      Ok(())
  }
 
-@@ -833,6 +945,7 @@ async fn trim_to_ordinal(
+@@ -848,6 +931,7 @@ async fn trim_to_ordinal(
      segment.end_ordinal_exclusive = Some(end_ordinal_exclusive);
      segment.end_byte_offset =
          byte_offset_for_ordinal(segment.rollout_path.as_path(), end_ordinal_exclusive).await?;
@@ -6472,7 +6488,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      Ok(())
  }
 
-@@ -948,9 +1061,16 @@ async fn trim_before_nth_user_message(
+@@ -963,9 +1047,16 @@ async fn trim_before_nth_user_message(
      segment.end_ordinal_exclusive = Some(boundary.rollout_ordinal);
      segment.end_byte_offset =
          byte_offset_for_ordinal(segment.rollout_path.as_path(), boundary.rollout_ordinal).await?;
@@ -6490,7 +6506,7 @@ index a965654e0db9473502d7d68de18cfa9282e36f7d..268be045ee775801ac3b1d8205db3006
      if filter_texts.is_empty() {
          return true;
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
-index db6b7191f8306e77a035416ba9a53c31678667ca..ecfb007156bba76ac3328c6ac83911cfa2038498 100644
+index f4af4a35b697834bc99901382d837f4d6fc260ad..7d69532f49a5b2011c74acbc667e1139f86159d7 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
 @@ -98,6 +98,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {

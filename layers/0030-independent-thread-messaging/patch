@@ -11,10 +11,10 @@ index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index c61f89673136f92f00f7088b6d47f0e58e4a9299..8e526c1716a06eef07de297ad8d46395bf2e5c9f 100644
+index 3fcb7f0b0de81a74dbb1e83f6aeb43a46b1204af..7db5b4a53f0c9559de9cb20addf0910a2dc837e4 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -11,6 +11,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
+@@ -14,6 +14,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
  use crate::hook_runtime::run_post_compact_hooks;
  use crate::hook_runtime::run_pre_compact_hooks;
@@ -23,7 +23,7 @@ index c61f89673136f92f00f7088b6d47f0e58e4a9299..8e526c1716a06eef07de297ad8d46395
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
-@@ -434,6 +436,7 @@ async fn run_compact_task_inner_impl(
+@@ -440,6 +442,7 @@ async fn run_compact_task_inner_impl(
      let user_messages = collect_annotated_user_messages(history_items);
 
      let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -82,7 +82,7 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index d52a669a9e53b30f311ca0ea4ac7110815006974..811fefc1c6fdefbf26dedc942c8058ef197d2d51 100644
+index b6f571317486a6c705359d2cbc2b32b7f5385b7b..f846ce5a8975ca95973ae99ff0e1d78699684d42 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -12,6 +12,7 @@ use crate::compact::InitialContextInjection;
@@ -93,7 +93,7 @@ index d52a669a9e53b30f311ca0ea4ac7110815006974..811fefc1c6fdefbf26dedc942c8058ef
  use crate::compact::retain_subagent_assignment_and_recent_messages;
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
-@@ -333,8 +334,9 @@ async fn run_remote_compact_task_inner_impl(
+@@ -334,8 +335,9 @@ async fn run_remote_compact_task_inner_impl(
              RetainedImageBudget::Disabled
          },
      );
@@ -105,10 +105,10 @@ index d52a669a9e53b30f311ca0ea4ac7110815006974..811fefc1c6fdefbf26dedc942c8058ef
              previous_history.annotated_items(),
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 1ada20281679106d99ef013e44f37b76837f8c8e..bee8598c0304f8fd72cd05d8ce29eebb61fb2713 100644
+index 217586577824e9beb978f8cff183c05343724c35..4d21107692e4383461dd2e0409e5700e330446a1 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -517,6 +517,11 @@ impl ContextManager {
+@@ -534,6 +534,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -1160,10 +1160,10 @@ index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd1
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index b070f0a4288262404e138f3165e7d60ca3a98e1c..c8794ac69a4822962bfe7c660e26acde8cbdb9fa 100644
+index cbabc9baede758ac69dcce810e3e75afb679578f..91d0bcce985bc947fab72c7d201880c9b90bddf7 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -79,6 +79,8 @@ pub use rollout_budget::RolloutBudgetReminder;
+@@ -82,6 +82,8 @@ pub use rollout_budget::RolloutBudgetReminder;
  mod agent_communication;
  mod agent_message_board;
  pub use agent_message_board::install_agent_message_board;
@@ -1173,7 +1173,7 @@ index b070f0a4288262404e138f3165e7d60ca3a98e1c..c8794ac69a4822962bfe7c660e26acde
  mod codex_delegate;
  mod command_canonicalization;
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 526e26d1ee19d040821384600fe0919c53763d10..121e1fe5455765e86b9181092834175fdd9756dd 100644
+index 00f470acfc42fa0d1a6f5f9712a2dbb4f6e691e4..713123630810052ec0d7b41003dc99e85806c9c5 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(

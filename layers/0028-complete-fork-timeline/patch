@@ -277,11 +277,48 @@ index c9e1a3ec57447a0df79bb4da531885de022d6597..b8973506bec28b72683638b5e8c3c5ef
 
      Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
  02:message/developer:
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index 0ae365477b2bd00314356f26075311079c09ac91..4955724230f3c44c300e34aee171f95d2373d914 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -1210,7 +1210,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
+     append_items(path.as_path(), [user_message("later message")]);
+     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+     let lineage = store
+-        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
++        .resolve_rollout_lineage(thread_id)
+         .await
+         .expect("resolve source lineage");
+     let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+@@ -1308,7 +1308,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
+         );
+         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+         let lineage = store
+-            .resolve_rollout_lineage(child_id, /*initial_path*/ None)
++            .resolve_rollout_lineage(child_id)
+             .await
+             .expect("resolve source lineage");
+         // Explicit metadata resolves the runtime, including None, without reading predecessors.
+diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
+index a10575b8c311dec8c5ff6132f943103f209db807..4b74b9ab82068984e80cc583ae258d509b0b526b 100644
+--- a/codex-rs/thread-store/src/local/revert_thread.rs
++++ b/codex-rs/thread-store/src/local/revert_thread.rs
+@@ -79,9 +79,7 @@ pub(super) async fn revert(
+
+     // Preserve old-reader compatibility when introducing the first reference to a standalone
+     // source. Already-shared ancestors stay read-only; their offsets address decoded JSONL bytes.
+-    let mut lineage = store
+-        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
+-        .await?;
++    let mut lineage = store.resolve_rollout_lineage(thread_id).await?;
+     for segment in &mut lineage.segments {
+         if segment.rollout_id() == current_rollout.rollout_id && source_meta.history_base.is_none()
+         {
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index 19d1749c64835bd3ed221ba9d2045b6a360d13db..f56966640995bc7c372097d69ac3cd5ebc2f77cc 100644
+index fd4e24af9dbdc6d520e18e6cf65d7dcea2c9f3df..f56966640995bc7c372097d69ac3cd5ebc2f77cc 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
-@@ -104,6 +104,24 @@ impl LocalThreadStore {
+@@ -104,13 +104,46 @@ impl LocalThreadStore {
      pub(super) async fn resolve_rollout_lineage(
          &self,
          requested_thread_id: ThreadId,
@@ -306,16 +343,31 @@ index 19d1749c64835bd3ed221ba9d2045b6a360d13db..f56966640995bc7c372097d69ac3cd5e
      ) -> ThreadStoreResult<RolloutLineage> {
          let resolved =
              thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
-@@ -119,7 +137,7 @@ impl LocalThreadStore {
-             /*inherited_filter_texts*/ None,
-             /*graph_depth*/ 0,
-             &mut active_paths,
--            LineageOffsetMode::Resolve,
+                 .await?
+                 .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
+-        self.resolve_rollout_lineage_from_path(requested_thread_id, &resolved.path)
+-            .await
++        let mut active_paths = HashSet::new();
++        let segments = resolve_path(
++            self,
++            requested_thread_id,
++            resolved.rollout_id,
++            resolved.path,
++            /*end*/ None,
++            /*inherited_filter_texts*/ None,
++            /*graph_depth*/ 0,
++            &mut active_paths,
 +            offset_mode,
-         )
-         .await?;
-         Ok(RolloutLineage {
-@@ -1639,7 +1657,10 @@ async fn trim_to_history_position(
++        )
++        .await?;
++        Ok(RolloutLineage {
++            root_rollout_id: resolved.rollout_id,
++            segments,
++        })
+     }
+
+     /// Resolves the lineage rooted at one explicit physical rollout rather than the thread's
+@@ -1624,7 +1657,10 @@ async fn trim_to_history_position(
  }
 
  /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
@@ -327,6 +379,46 @@ index 19d1749c64835bd3ed221ba9d2045b6a360d13db..f56966640995bc7c372097d69ac3cd5e
      let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
          malformed_lineage(
              end.thread_id,
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
+index 73cd5b88ccc23df4e4f3a2e41ac5ba8625633575..f7903dcd472f210c8b308292020e9ec0b9e65018 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage_tests.rs
+@@ -85,7 +85,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
+     );
+
+     let lineage = store
+-        .resolve_rollout_lineage(child, /*initial_path*/ None)
++        .resolve_rollout_lineage(child)
+         .await
+         .expect("resolve nested lineage");
+     let child_len = fs::metadata(&child_path).expect("child metadata").len();
+@@ -160,7 +160,7 @@ async fn resolves_archived_ancestors() {
+     );
+
+     let lineage = store
+-        .resolve_rollout_lineage(child, /*initial_path*/ None)
++        .resolve_rollout_lineage(child)
+         .await
+         .expect("resolve archived ancestor");
+
+@@ -303,7 +303,7 @@ async fn resolves_lineage_at_explicit_history_position() {
+     );
+
+     let lineage = store
+-        .resolve_rollout_lineage(child, /*initial_path*/ None)
++        .resolve_rollout_lineage(child)
+         .await
+         .expect("resolve child lineage")
+         .truncate_at(end)
+@@ -988,7 +988,7 @@ async fn resolves_512_same_thread_lineage_segments() {
+
+ async fn assert_invalid_lineage(store: &LocalThreadStore, thread_id: ThreadId, detail: &str) {
+     let err = store
+-        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
++        .resolve_rollout_lineage(thread_id)
+         .await
+         .expect_err("lineage should be invalid");
+     assert!(err.to_string().contains(detail), "{err}");
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
 index c5a9b31c9f02a4e3f19390ceb2f17c9fa37cb147..6f66da3f8f698ed4afc49257e43b36d77ee786ad 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
@@ -1478,7 +1570,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      path: &std::path::Path,
      thread_id: ThreadId,
 diff --git a/codex-rs/thread-store/src/local/thread_history/realtime.rs b/codex-rs/thread-store/src/local/thread_history/realtime.rs
-index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef3f0d3b10 100644
+index cfb897caf349553c7e1a184c7b662f373d3307a0..afd12008afe9c3656e659e2360e172ef3f0d3b10 100644
 --- a/codex-rs/thread-store/src/local/thread_history/realtime.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/realtime.rs
 @@ -1,4 +1,7 @@
@@ -1544,11 +1636,13 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
      validate_thread_for_paginated_reads(
          store,
          params.thread_id,
-@@ -52,7 +89,20 @@ pub(in crate::local) async fn list_timeline(
+@@ -52,9 +89,20 @@ pub(in crate::local) async fn list_timeline(
      .await?;
      validate_page_size(params.page_size)?;
 
--    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+-    let lineage = store
+-        .resolve_rollout_lineage(params.thread_id, /*initial_path*/ None)
+-        .await?;
 +    let mut canonical_segments = HashMap::new();
 +    // A rebuilt or resumed root stores the entire authenticated lineage under its own ID.
 +    // Applying the selected physical segment's lower bound would hide inherited rows.
@@ -1566,7 +1660,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
      let pool = store.thread_history_db().await?;
      let cursor = params
          .cursor
-@@ -82,7 +132,7 @@ pub(in crate::local) async fn list_timeline(
+@@ -84,7 +132,7 @@ pub(in crate::local) async fn list_timeline(
 
      let mut rows = Vec::new();
      let max_rows = params.page_size + 1;
@@ -1575,7 +1669,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
          let remaining = max_rows.saturating_sub(rows.len());
          if remaining == 0 {
              break;
-@@ -90,6 +140,27 @@ pub(in crate::local) async fn list_timeline(
+@@ -92,6 +140,27 @@ pub(in crate::local) async fn list_timeline(
          if cursor_position.is_some_and(|position| position < segment.start_ordinal()) {
              continue;
          }
@@ -1603,7 +1697,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
          let upper = segment
              .end_ordinal()
              .map(|value| sqlite_integer(value, "rollout ordinal"))
-@@ -153,7 +224,7 @@ LIMIT ?7
+@@ -155,7 +224,7 @@ LIMIT ?7
 
          for (position, kind, _id, turn_id, item_json) in segment_rows {
              let position = u64::try_from(position).map_err(thread_history_error)?;
@@ -1612,7 +1706,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
                  0 | 3 => serde_json::from_str::<ThreadTimelineEntry>(&item_json)
                      .map_err(thread_history_error)?,
                  1 => ThreadTimelineEntry::Item {
-@@ -171,7 +242,29 @@ LIMIT ?7
+@@ -173,7 +242,29 @@ LIMIT ?7
                          .into(),
                  },
                  _ => return Err(thread_history_error("invalid timeline entry kind")),
@@ -1643,7 +1737,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
          }
      }
 
-@@ -197,7 +290,7 @@ LIMIT ?7
+@@ -199,7 +290,7 @@ LIMIT ?7
      let (page_start, page_start_kind, page_start_id) =
          rows.last().map(entry_key).unwrap_or_default();
      let mut active_realtime_session_at_page_start = None;
@@ -1652,7 +1746,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
          let upper = page_start.min(
              segment
                  .end_ordinal()
-@@ -207,6 +300,37 @@ LIMIT ?7
+@@ -209,6 +300,37 @@ LIMIT ?7
          if upper < segment.start_ordinal() {
              continue;
          }
@@ -1690,7 +1784,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
          let boundary = sqlx::query_as::<_, (String, String)>(
              r#"
  SELECT item_type, json_extract(item_json, '$.realtime_session_id')
-@@ -216,7 +340,7 @@ WHERE thread_id = ?
+@@ -218,7 +340,7 @@ WHERE thread_id = ?
    AND rollout_ordinal <= ?
    AND (rollout_ordinal, 2, item_id) < (?, ?, ?)
    AND item_type IN ('realtime_session_started', 'realtime_session_closed')
@@ -1699,7 +1793,7 @@ index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef
  LIMIT 1
              "#,
          )
-@@ -238,9 +362,311 @@ LIMIT 1
+@@ -240,9 +362,311 @@ LIMIT 1
      }
 
      rows.reverse();

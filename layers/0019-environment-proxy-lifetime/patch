@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index bf08214e32b24f10b6f2948822d4d7d353cafdaa..6cabf4a2dca9cd3dd1ef0b32869ed2c0f171ae91 100644
+index 6d8900d0f8c6d9199f70c86aa491857f7de2955b..d09316775be367a4582c510f55499e11fbdd8367 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2367,6 +2367,7 @@ dependencies = [
+@@ -2373,6 +2373,7 @@ dependencies = [
   "codex-windows-sandbox",
   "dotenvy",
   "pathdiff",
@@ -250,18 +250,18 @@ index e802122c0f92480f60d487ca2df8f0c9b27be6a0..0dcf1a85a0e1391079c3d8dbbc91ae96
          capture_policy: ExecCapturePolicy::ShellTool,
          sandbox: SandboxType::None,
 diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
-index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33dbd912ffb 100644
+index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90f88fbaa0 100644
 --- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
 +++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
-@@ -45,6 +45,7 @@ use crate::unified_exec::UnifiedExecProcess;
- use crate::unified_exec::UnifiedExecProcessManager;
+@@ -47,6 +47,7 @@ use crate::unified_exec::UnifiedExecProcessManager;
  use codex_core_plugins::PluginMetricsSidecar;
+ use codex_features::Feature;
  use codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 +use codex_network_proxy::EnvironmentProxyLease;
  use codex_network_proxy::ManagedNetworkSandboxContext;
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::error::CodexErr;
-@@ -118,6 +119,8 @@ pub(crate) struct UnifiedExecAttempt {
+@@ -119,6 +120,8 @@ pub(crate) struct UnifiedExecAttempt {
      pub(crate) process: UnifiedExecProcess,
      pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
      pub(crate) permissions: TerminalPermissions,
@@ -270,7 +270,7 @@ index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33d
  }
 
  fn unified_exec_options(
-@@ -357,43 +360,46 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -351,43 +354,46 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
          } else {
              None
          };
@@ -354,7 +354,7 @@ index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33d
                              .environment
                              .info()
                              .await
-@@ -402,33 +408,38 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -396,33 +402,38 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                                      "failed to query exec-server capabilities: {err}"
                                  ))))
                              })?;
@@ -414,7 +414,7 @@ index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33d
          if let Some(snapshot) = shell_snapshot.as_ref() {
              snapshot.restore_fail_open_aliases(
                  &mut env,
-@@ -654,6 +665,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -672,6 +683,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                  )
                  .map_err(ToolError::Codex)?;
              exec_env.exec_server_env_config = req.exec_server_env_config.clone();
@@ -422,7 +422,7 @@ index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33d
              match zsh_fork::maybe_prepare_unified_exec(req, attempt, ctx, exec_env, zsh_fork_config)
                  .await?
              {
-@@ -692,6 +704,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -710,6 +722,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                          process,
                          metrics_sidecar,
                          permissions,
@@ -430,7 +430,7 @@ index 8e7c256b566ea18674b0e179884d17e57c42d582..41204f1fc6ceee8db7c93a200968f33d
                      });
                  }
                  None => {
-@@ -740,6 +753,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -758,6 +771,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
              process,
              metrics_sidecar,
              permissions,
@@ -547,7 +547,7 @@ index 3204d620326f2d1094bf48d64064ac4fa74b8a57..69c1ffc92125beea2d8e938e59ad10aa
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 3dc3e97d91245b3326637817570b06ead902db96..b685c2d21c95ad7e0e1a70ddc99d2d69329fb407 100644
+index 8c0cfcfd0406f80967cebb44d5cb66fdd2e590da..8aae23aa9241445d325c6a54170fadd9118a4e9a 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -74,6 +74,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
@@ -615,10 +615,10 @@ index 3dc3e97d91245b3326637817570b06ead902db96..b685c2d21c95ad7e0e1a70ddc99d2d69
 
      #[allow(clippy::too_many_arguments)]
 diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-index 7edc743ce422bc2d1ef527f814ec9757a03a757e..9840d0b0879cd9164f555904c4d9143c44922482 100644
+index ce56681e68b43214f3baebcf144234a394ef44e7..53f19f631dcf3dc6a3dd29dd5e2d635c50f3a78e 100644
 --- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-@@ -223,6 +223,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
+@@ -226,6 +226,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
          exec_server_shell_snapshot: None,
          network: None,
          network_environment_id: None,
@@ -747,10 +747,10 @@ index 09c4606b629f0cab7c3952c01b73468700d99d54..7ba1faacbd3e977c4c454e8ab986e010
  }
 
 diff --git a/codex-rs/network-proxy/src/lib.rs b/codex-rs/network-proxy/src/lib.rs
-index df310c58c2e0cdcc7277937a0ac74e7db2975f73..682064a940472b12fc21f96d6ff64efe4acbefd1 100644
+index 559ec0a9b1842d7fca2de32dc2b073811c2ccbec..9d709b40f9143a62eeb48c497e1a2cd4d21b2740 100644
 --- a/codex-rs/network-proxy/src/lib.rs
 +++ b/codex-rs/network-proxy/src/lib.rs
-@@ -87,6 +87,7 @@ pub use proxy::Args;
+@@ -88,6 +88,7 @@ pub use proxy::Args;
  #[cfg(target_os = "macos")]
  pub use proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
  pub use proxy::DEFAULT_NO_PROXY_VALUE;

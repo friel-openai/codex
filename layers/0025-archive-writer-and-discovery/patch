@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 1496a9573da0da2ec2a9d8dce5929069d34d7707..cb2dfb196e2097125fe2e799de8aeab241d5c802 100644
+index f7293972a074405139fdc9b17dcc14c6d191df10..58fbc251b61f1b6fd193c3761b75fa6ab2e81a5e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -2192,7 +2192,7 @@ impl ThreadRequestProcessor {
@@ -11,7 +11,7 @@ index 1496a9573da0da2ec2a9d8dce5929069d34d7707..cb2dfb196e2097125fe2e799de8aeab2
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6607,6 +6607,28 @@ impl ThreadRequestProcessor {
+@@ -6620,6 +6620,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,12 +41,12 @@ index 1496a9573da0da2ec2a9d8dce5929069d34d7707..cb2dfb196e2097125fe2e799de8aeab2
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index feaf433da99fe9aa9c1d7968f2378dcbe47af1b7..c04db8b349572d6455945234c56c8bb48d9d1576 100644
+index 46c85c5bebbba92bffda27e804d1cd7b1f0bc3ed..d69e788629abb1c5bb286b858f662348ee303c48 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -126,6 +126,7 @@ mod session_end;
- mod skills_list;
+@@ -131,6 +131,7 @@ mod skills_list;
  mod sleep;
+ mod sqlite_recovery;
  mod thread_archive;
 +mod thread_archive_discovery;
  mod thread_attachments;
@@ -259,7 +259,7 @@ index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/rollout_compression.rs b/codex-rs/core/tests/suite/rollout_compression.rs
-index 2ccc07497996c0bca01c55145e953c2d8166433e..29eff3d6de6016edfc680c69ccb3a3c0c79a57e3 100644
+index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763cae0479e 100644
 --- a/codex-rs/core/tests/suite/rollout_compression.rs
 +++ b/codex-rs/core/tests/suite/rollout_compression.rs
 @@ -35,6 +35,7 @@ use pretty_assertions::assert_eq;
@@ -321,7 +321,7 @@ index 2ccc07497996c0bca01c55145e953c2d8166433e..29eff3d6de6016edfc680c69ccb3a3c0
      for (path, original) in paths.into_iter().zip(original_bytes) {
          let compressed = std::fs::File::open(path.with_extension("jsonl.zst"))?;
          assert_eq!(zstd::stream::decode_all(compressed)?, original);
-@@ -211,6 +228,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -212,6 +229,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
          "reading the ancestor must not materialize it"
      );
      assert!(parent_path.with_extension("jsonl.zst").exists());
@@ -334,10 +334,10 @@ index 2ccc07497996c0bca01c55145e953c2d8166433e..29eff3d6de6016edfc680c69ccb3a3c0
      Ok(())
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index cb43b44d6c1f36fd09088627fa589f588bf82cc3..08a7a741dd53b16fd6290a9db5fa48b4504470a3 100644
+index 1166c967ee9ed223d080bff566874845bd685c59..9305357f29cf3d92ad102ee005fe62a82aff1872 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -613,6 +613,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+@@ -725,6 +725,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
      Ok(())
  }
 
@@ -372,10 +372,10 @@ index cb43b44d6c1f36fd09088627fa589f588bf82cc3..08a7a741dd53b16fd6290a9db5fa48b4
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index ee3737e6a23c473b3cdf4eef36e349823342be2a..36cd58a3c704c4e54c97b93fbd56b59f5d3dd6d7 100644
+index b50dfcb0e6dce3b34dd9fd73413cd7b50862aa7b..652f70453f1503943e894768e51fbee4e6c10f86 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1119,12 +1119,12 @@ async fn select_thread_candidates(
+@@ -1195,12 +1195,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }

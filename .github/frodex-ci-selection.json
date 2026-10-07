@@ -22,6 +22,10 @@
         "agent::control::tests::multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry::trait_send",
         "agent::control::tests::goal_supervisor_full_history_bootstrap_survives_cold_resume",
         "agent::control::tests::paginated_goal_supervisor_helper_preserves_parent_request_prefix",
+        "agent::control::tests::tree_shutdown_cancels_goal_supervisor_without_failure_retry",
+        "session::tests::refresh_runtime_config_preserves_alias_for_stale_owner_and_mcp_only",
+        "session::model_routing::tests::routed_retry_advice_blocks_same_candidate_but_not_another_candidate",
+        "session::tests::submit_with_trace_cancelled_when_queue_full_does_not_enqueue",
         "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_model_history_without_removed_authorization::matching_guardian_boundary",
         "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_model_history_without_removed_authorization::missing_guardian_boundary_clears_evidence",
         "session::rollout_reconstruction_tests::complete_history_rollback_does_not_restore_removed_checkpoint_authorization",
@@ -279,6 +283,15 @@
         "suite::multi_agent_mode::empty_configured_mode_hint_emits_no_mode_message::explicit_mode",
         "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_drops_inherited_multi_agent_mode_instructions",
         "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_replaces_parent_proactive_policy_after_effort_changes"
+      ]
+    },
+    {
+      "package": "codex-app-server",
+      "binary": "codex-app-server",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up"
       ]
     },
     {

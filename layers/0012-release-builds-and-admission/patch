@@ -730,10 +730,10 @@ index 0000000000000000000000000000000000000000..8dc623b1ec1df1279b1e2722bc5426aa
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 2efbac95da6bfdbf25ec0a1967db5a223dd4c8ef..1eb2c75de4d4c3cd96f5205efe50ac8311bdef62 100644
+index 11a3598cca70618efbb2a09017bf6e240c966e53..ce32db55b5339a0d53cf344805ffd1bf6520ec06 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -52,6 +52,7 @@ mod experimental_feature_list;
+@@ -56,6 +56,7 @@ mod experimental_feature_list;
  mod external_agent_config;
  mod external_agent_import_sync;
  mod feedback;
@@ -742,7 +742,7 @@ index 2efbac95da6bfdbf25ec0a1967db5a223dd4c8ef..1eb2c75de4d4c3cd96f5205efe50ac83
  #[path = "gateway_oauth_tests.rs"]
  mod gateway_oauth;
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index dc5a46921bf2d1c9dd22c6fbd7748b43ff495921..ac828a75160338ad370921382a66004b5d505354 100644
+index 99e6a8b02873a362ddbf2162b72db15443d9daf6..2300307d78de9218268d8dc75f74d225a16379d8 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -1,3 +1,6 @@

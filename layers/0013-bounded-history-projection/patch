@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 20b648463fae5d8f7f5dffda6af2f29b29e22626..6a1032cce23ce4f952850eac57217f847ce54074 100644
+index 802920a51473bafa3bae348cc4d5eabc8ed30dfc..855f8ac17d0ecacfe59912d092da3f3dec8448b4 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -45,7 +45,9 @@ use std::sync::LazyLock;
@@ -189,7 +189,7 @@ index 20b648463fae5d8f7f5dffda6af2f29b29e22626..6a1032cce23ce4f952850eac57217f84
          }
      }
 
-@@ -5425,6 +5511,15 @@ impl ThreadRequestProcessor {
+@@ -5437,6 +5523,15 @@ impl ThreadRequestProcessor {
                          restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
                      })
                      .filter(|turn_id| !turn_id.is_empty());
@@ -887,10 +887,10 @@ index 0000000000000000000000000000000000000000..1dc38feb7df0d92594259f676efbab64
 +        .expect("write rollout");
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 1eb2c75de4d4c3cd96f5205efe50ac8311bdef62..ee9b8bf14a5a13f41057c0867e6a3489891cd843 100644
+index ce32db55b5339a0d53cf344805ffd1bf6520ec06..675430e3d5b093d677a5d1f951dc0bbeb22a4fa1 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -151,6 +151,7 @@ mod thread_settings_update;
+@@ -157,6 +157,7 @@ mod thread_settings_update;
  mod thread_shell_command;
  mod thread_start;
  mod thread_status;
@@ -1899,10 +1899,10 @@ index 8643204924615577f58d6d3b383c0ffc6e8e49cb..d53e8588e127f1598f65b512d72ddfc2
          ],
      )?;
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 47d84e2a8e84a08b4971e7ce28b1cd102049c4d3..a1b8305c0a7659cd290b845d885c159ab8929e4d 100644
+index 5e4fa86eb33408faac97530651755f3f1b2f4496..dde6df6ed953fbf59e61372a6721190a14c9ed3b 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-@@ -1417,10 +1417,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
+@@ -1418,10 +1418,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
              selected_capability_roots: Vec::new(),
              multi_agent_version: None,
              history_mode: ThreadHistoryMode::Legacy,
@@ -1916,10 +1916,10 @@ index 47d84e2a8e84a08b4971e7ce28b1cd102049c4d3..a1b8305c0a7659cd290b845d885c159a
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index a7008deca4fb1ccee7fc9540f3e2fa197f209d30..ea8d87dd6fe45e703b8745c8016176ec91ea943c 100644
+index 7635d674c51cd95fb4aed0be8abd50f536bd4f84..e539492a6580e724a57723053f677a7281487497 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-@@ -653,6 +653,50 @@ fn create_history_rollout(
+@@ -824,6 +824,50 @@ fn create_history_rollout(
          /*git_info*/ None,
      )
      .map_err(|err| color_eyre::eyre::eyre!("failed to create history rollout: {err}"))?;
@@ -1970,7 +1970,7 @@ index a7008deca4fb1ccee7fc9540f3e2fa197f209d30..ea8d87dd6fe45e703b8745c8016176ec
      Ok(ThreadId::from_string(&thread_id)?)
  }
 
-@@ -2863,7 +2907,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
+@@ -3138,7 +3182,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
          .iter()
          .map(|params| params["includeTurns"].as_bool().unwrap_or(false))
          .collect::<Vec<_>>();
@@ -1979,7 +1979,7 @@ index a7008deca4fb1ccee7fc9540f3e2fa197f209d30..ea8d87dd6fe45e703b8745c8016176ec
 
      app_server.shutdown().await?;
      proxy.await??;
-@@ -2886,8 +2930,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
+@@ -3161,8 +3205,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()>
                  ThreadHistoryMode::Legacy,
                  "legacy background task",
              )?,

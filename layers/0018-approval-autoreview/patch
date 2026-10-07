@@ -146,10 +146,10 @@ index 0381e8486e45dc7c7bce048f5cc202dfd713b847..b2b74bc16d0f2b1cb974c2ef6510ba80
      responses_server.abort();
      Ok(())
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index aff9a762646e3051c867167dff2667b4388eda04..5d75891eaf00c17757e4775d51a44524dcbf0c9d 100644
+index 178ca0137bbe725aaaef2d2dd0ac214ee5492f48..05c8952f950403d15f0d5b98639f13321be39eb5 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -590,6 +590,10 @@ pub struct AutoReviewToml {
+@@ -592,6 +592,10 @@ pub struct AutoReviewToml {
      /// Maximum estimated tokens per Guardian history-tool response, before the standard
      /// serialization allowance. Defaults to 4,000; stricter parent tool limits still apply.
      pub conversation_history_max_output_tokens: Option<NonZeroUsize>,
@@ -161,10 +161,10 @@ index aff9a762646e3051c867167dff2667b4388eda04..5d75891eaf00c17757e4775d51a44524
 
  #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index f8ff144591ef9704551d3db203d1af6ce37b0d74..3ff33c6d38f063ead9e0ec4b7e9d6b086d1c4bf6 100644
+index bb128ff01d6acb55435de787692e72573a40e8ee..615f8e5610293fc50f20b45f9388ee0895a49553 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -419,6 +419,11 @@
+@@ -427,6 +427,11 @@
          "policy": {
            "description": "Additional policy instructions inserted into the guardian prompt.",
            "type": "string"
@@ -177,10 +177,10 @@ index f8ff144591ef9704551d3db203d1af6ce37b0d74..3ff33c6d38f063ead9e0ec4b7e9d6b08
        },
        "type": "object"
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce845d8ef32 100644
+index 4e5140c3b19de3662d93d2425c522e1cc5736d01..ea5d82a9592fcda4a08893619fbf62779b8c2205 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -8425,6 +8425,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
+@@ -8397,6 +8397,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
  policy = "Use the user-configured guardian policy."
  extra_policy = "Use the user-configured additional policy."
  experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
@@ -188,7 +188,7 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
  "#,
      )
      .expect("TOML deserialization should succeed");
-@@ -8442,6 +8443,50 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
+@@ -8414,6 +8415,50 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
              Some("Configured template: {{ tenant_policy_config }}"),
          )
      );
@@ -239,7 +239,7 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
  }
 
  #[tokio::test]
-@@ -8457,6 +8502,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
+@@ -8429,6 +8474,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
              ),
              experimental_conversation_history_prompt: None,
              conversation_history_max_output_tokens: None,
@@ -247,7 +247,7 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
          }),
          ..Default::default()
      };
-@@ -8516,6 +8562,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
+@@ -8488,6 +8534,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
                  experimental_policy_template: None,
                  experimental_conversation_history_prompt: None,
                  conversation_history_max_output_tokens: None,
@@ -255,7 +255,7 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
              }),
              ..Default::default()
          };
-@@ -8557,6 +8604,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
+@@ -8529,6 +8576,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
              experimental_policy_template: None,
              experimental_conversation_history_prompt: Some(String::new()),
              conversation_history_max_output_tokens: None,
@@ -263,7 +263,7 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
          }),
          ..Default::default()
      };
-@@ -9988,6 +10036,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
+@@ -9960,6 +10008,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
              }),
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -272,10 +272,10 @@ index 9c2115b3f20037837e0c300bbee97b3631aeb354..cc7d8f40aa5a1553a5c7c4218e355ce8
      );
      Ok(())
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 685649f32ef8a62dcb609bfd12b82fdd9d945c38..8de6adf297de4f64f1b5c24ecc8b5b0f321b59f9 100644
+index 2bb8a3c37c67f6b2b4355c28689f51d1718d0fa7..2a5940f13fc28bccb26a51febdb7406fcf94ff6c 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -719,6 +719,9 @@ pub struct Config {
+@@ -724,6 +724,9 @@ pub struct Config {
      /// Include a structured error when Guardian's circuit breaker interrupts a turn.
      pub guardian_circuit_break_action: CircuitBreakAction,
 
@@ -285,7 +285,7 @@ index 685649f32ef8a62dcb609bfd12b82fdd9d945c38..8de6adf297de4f64f1b5c24ecc8b5b0f
      /// Whether to inject the `<permissions instructions>` developer block.
      pub include_permissions_instructions: bool,
 
-@@ -3320,6 +3323,7 @@ pub(crate) fn resolve_custom_models(
+@@ -3329,6 +3332,7 @@ pub(crate) fn resolve_custom_models(
                  routing_profile,
                  model_context_window: custom_model.model_context_window,
                  model_auto_compact_token_limit: custom_model.model_auto_compact_token_limit,
@@ -293,7 +293,7 @@ index 685649f32ef8a62dcb609bfd12b82fdd9d945c38..8de6adf297de4f64f1b5c24ecc8b5b0f
              },
          );
      }
-@@ -4231,6 +4235,10 @@ impl Config {
+@@ -4241,6 +4245,10 @@ impl Config {
              .auto_review
              .as_ref()
              .and_then(|auto_review| auto_review.conversation_history_max_output_tokens);
@@ -304,7 +304,7 @@ index 685649f32ef8a62dcb609bfd12b82fdd9d945c38..8de6adf297de4f64f1b5c24ecc8b5b0f
          let personality = personality.or(cfg.personality);
 
          let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
-@@ -4590,6 +4598,7 @@ impl Config {
+@@ -4601,6 +4609,7 @@ impl Config {
                  .as_ref()
                  .and_then(|auto_review| auto_review.circuit_break_action)
                  .unwrap_or_default(),
@@ -312,6 +312,18 @@ index 685649f32ef8a62dcb609bfd12b82fdd9d945c38..8de6adf297de4f64f1b5c24ecc8b5b0f
              model_reasoning_effort: cfg.model_reasoning_effort,
              plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
              model_reasoning_summary: cfg.model_reasoning_summary,
+diff --git a/codex-rs/core/src/config/runtime_refresh.rs b/codex-rs/core/src/config/runtime_refresh.rs
+index d14f60be31c4bf680f29e581e46b7db8e75a3234..0082a985179b7ac5fe52bdd33fa79ab60e2132ef 100644
+--- a/codex-rs/core/src/config/runtime_refresh.rs
++++ b/codex-rs/core/src/config/runtime_refresh.rs
+@@ -164,6 +164,7 @@ impl Config {
+         if !matches!(scope, RuntimeConfigRefresh::Mcp) {
+             config.tool_suggest = resolve_tool_suggest_config_from_layer_stack(&layers);
+             config.custom_models = incoming.custom_models.clone();
++            config.auto_review_use_ultrafast = incoming.auto_review_use_ultrafast;
+         }
+         config.config_layer_stack = layers;
+         if enterprise_retired {
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
 index a3e28cea27ab404992bbf00af703ff8abf744b46..55229640bb6280c3d48552d446e2f59396ce866a 100644
 --- a/codex-rs/core/src/guardian/review.rs
@@ -395,10 +407,10 @@ index a61c0d20d1282419802fc065843e0b211466fc0f..21c8ce1f7394e6f67e201fd1d099c6d6
          parent_response_id: params.parent_context.parent_response_id.clone(),
          schema: params.schema.clone(),
 diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
-index fcf2dca5d112ca296dbc14360bff3a846188bc96..196bd5e1ab2c700e56cf83cdcb9f8a4165dc4dcf 100644
+index a4a42a093d727bee8320bbc6d57932b0967c989a..b2ecf2003323b76dff87165c062790fc8ebf67ea 100644
 --- a/codex-rs/core/src/guardian/review_session_tests.rs
 +++ b/codex-rs/core/src/guardian/review_session_tests.rs
-@@ -695,8 +695,10 @@ fn token_usage_delta_never_reports_negative_usage() {
+@@ -696,8 +696,10 @@ fn token_usage_delta_never_reports_negative_usage() {
      );
  }
 
@@ -410,7 +422,7 @@ index fcf2dca5d112ca296dbc14360bff3a846188bc96..196bd5e1ab2c700e56cf83cdcb9f8a41
      let (review_session, tx_event, rx_sub) = test_review_session().await;
      {
          let mut state = review_session.state.lock().await;
-@@ -707,7 +709,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -708,7 +710,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
                  transcript_entry_count: 0,
              });
      }
@@ -422,7 +434,7 @@ index fcf2dca5d112ca296dbc14360bff3a846188bc96..196bd5e1ab2c700e56cf83cdcb9f8a41
 
      let review = tokio::spawn(async move {
          run_review_on_session(
-@@ -720,9 +725,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -721,9 +726,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
      });
      let submission = rx_sub.recv().await.expect("guardian submission");
      let id = submission.id;
@@ -442,7 +454,7 @@ index fcf2dca5d112ca296dbc14360bff3a846188bc96..196bd5e1ab2c700e56cf83cdcb9f8a41
      reply
          .send(Ok(TurnInputSubmission::Started {
              turn_id: id.clone(),
-@@ -746,6 +760,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -747,6 +761,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
          panic!("expected submitted turn completion");
      };
      assert_eq!(last_agent_message.as_deref(), Some("fresh"));
@@ -475,7 +487,7 @@ index 7ace01414c01a4d2fa4f2ec4704842e8d034c77c..7d55c07a41c9bce520f4697b81001408
          default_review_model_id,
          &available_models,
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3ae47c7883 100644
+index f63e7200b20d27778ed7b7c7a3124ac1859de319..11f019291c237037a51ddb7b3a2ef6f48046fdad 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
 @@ -22,6 +22,7 @@ use codex_config::NetworkDomainPermissionToml;
@@ -716,7 +728,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata()
  -> anyhow::Result<()> {
-@@ -3502,7 +3719,7 @@ async fn guardian_review_routes_required_actions(
+@@ -3504,7 +3721,7 @@ async fn guardian_review_routes_required_actions(
  #[tokio::test]
  async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
  {
@@ -725,7 +737,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
 
      let handle = std::thread::Builder::new()
          .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-@@ -3912,6 +4129,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
+@@ -3914,6 +4131,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
      );
  }
 
@@ -815,7 +827,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
  #[tokio::test]
  async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
      let server = start_mock_server().await;
-@@ -4001,6 +4301,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
+@@ -4003,6 +4303,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
  async fn guardian_review_session_config_isolates_parent_customizations() {
      let defaults = ResolvedModelMessages::bundled().auto_review();
      let mut parent_config = test_config().await;
@@ -824,7 +836,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
      let server: McpServerConfig =
          toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
      parent_config
-@@ -4012,6 +4314,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4014,6 +4316,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
          Feature::Plugins,
          Feature::GuardianV2,
          Feature::CodexHooks,
@@ -834,7 +846,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
      ];
      for feature in disabled_features {
          parent_config
-@@ -4023,6 +4328,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4025,6 +4330,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      parent_config.include_skill_instructions = true;
      parent_config.memories.use_memories = true;
      parent_config.memories.dedicated_tools = true;
@@ -849,7 +861,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
      parent_config.developer_instructions =
          Some("parent or managed config should not replace guardian policy".to_string());
      parent_config.notify = Some(vec![
-@@ -4052,14 +4365,25 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -4054,14 +4367,25 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      assert!(!guardian_config.include_skill_instructions);
      assert!(!guardian_config.memories.use_memories);
      assert!(!guardian_config.memories.dedicated_tools);
@@ -876,7 +888,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
                  defaults.policy_template,
                  guardian_output_contract_prompt(),
              )
-@@ -4145,13 +4469,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+@@ -4147,13 +4471,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
              guardian_policy_config: Some(
                  "  Use the workspace-managed guardian policy.  ".to_string(),
              ),
@@ -900,7 +912,7 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
          ConfigOverrides {
              cwd: Some(workspace.path().to_path_buf()),
              ..Default::default()
-@@ -4174,12 +4507,16 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+@@ -4176,12 +4509,16 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
      .expect("guardian config");
 
      assert_eq!(guardian_config.developer_instructions, None);
@@ -918,18 +930,6 @@ index 4221dcc568db52fe1048eef0cf4c488f180f2892..0df1863dccddaacade54625b88aa4b3a
                  ResolvedModelMessages::bundled()
                      .auto_review()
                      .policy_template,
-diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a2bfa043800512819de8fdb47890638cf99d4128..eebcffae6d0bbdaaf89cdaed9063265c6f35b4dc 100644
---- a/codex-rs/core/src/session/mod.rs
-+++ b/codex-rs/core/src/session/mod.rs
-@@ -2834,6 +2834,7 @@ impl Session {
-                 .with_user_layer_from(&next_config.config_layer_stack);
-             config.tool_suggest =
-                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
-+            config.auto_review_use_ultrafast = next_config.auto_review_use_ultrafast;
-             config.custom_models = next_config.custom_models.clone();
-             config.mcp_servers = next_config.mcp_servers.clone();
-             config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
 diff --git a/codex-rs/core/src/session/model_alias_refresh_tests.rs b/codex-rs/core/src/session/model_alias_refresh_tests.rs
 index 685fbe962079e72337a520f5035c18e6d70874a1..9880fc5dc5db275c03a214344e1cc3dc1b2e3702 100644
 --- a/codex-rs/core/src/session/model_alias_refresh_tests.rs
@@ -951,10 +951,10 @@ index 685fbe962079e72337a520f5035c18e6d70874a1..9880fc5dc5db275c03a214344e1cc3dc
      )]);
 
 diff --git a/codex-rs/core/src/session/model_routing.rs b/codex-rs/core/src/session/model_routing.rs
-index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4772aae9d 100644
+index 8077a61c0e2683ed13bef3682a02c9970801326f..718b05cba324e5cf94b14e479cc1d5e7b111049b 100644
 --- a/codex-rs/core/src/session/model_routing.rs
 +++ b/codex-rs/core/src/session/model_routing.rs
-@@ -16,6 +16,7 @@ use tracing::info;
+@@ -18,6 +18,7 @@ use tracing::info;
  use tracing::warn;
 
  use super::session::Session;
@@ -962,7 +962,7 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
  use super::step_settings::ResolvedStepSettings;
  use super::turn_context::TurnContext;
 
-@@ -106,12 +107,9 @@ impl Session {
+@@ -110,12 +111,9 @@ impl Session {
          attempted: &HashSet<ModelRoutingCandidate>,
          settings: &ResolvedStepSettings,
      ) -> Option<ModelRoutingSelection> {
@@ -978,7 +978,7 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
          let now = self.model_routing_now().await;
          let mut attempted = attempted.clone();
          let mut last_rejected = None;
-@@ -153,15 +151,26 @@ impl Session {
+@@ -157,15 +155,26 @@ impl Session {
                      });
                  }
              };
@@ -1008,7 +1008,7 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
                  return Some(ModelRoutingSelection {
                      context,
                      last_success: previous_success,
-@@ -176,10 +185,10 @@ impl Session {
+@@ -180,23 +189,32 @@ impl Session {
 
      pub(super) async fn record_model_routing_failure(
          &self,
@@ -1020,8 +1020,22 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
 +        let Some(candidate) = executed_routing_candidate(step) else {
              return;
          };
++        // Sample the remaining advice before awaiting the provider clock so a suspended
++        // clock read cannot shorten the server deadline. Never restart its original delay.
++        let server_retry_delay = failure.retry_after.map(RetryAfter::remaining_delay);
          let now = self.model_routing_now().await;
-@@ -191,8 +200,8 @@ impl Session {
++        let server_retry_at = server_retry_delay.map(|delay| {
++            chrono::Duration::from_std(delay)
++                .ok()
++                .and_then(|delay| now.checked_add_signed(delay))
++                .unwrap_or(DateTime::<Utc>::MAX_UTC)
++        });
+         self.state.lock().await.model_routing.record_failure(
+             candidate,
+             failure.class,
+             now,
+-            failure.minimum_retry_at,
++            failure.minimum_retry_at.max(server_retry_at),
          );
      }
 
@@ -1032,10 +1046,14 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
              return;
          };
          self.state
-@@ -261,6 +270,17 @@ impl Session {
+@@ -265,19 +283,30 @@ impl Session {
      }
  }
 
+-pub(super) fn classify_model_routing_failure(
+-    details: &CodexErrorDetails,
+-) -> Option<ModelRoutingFailure> {
+-    match details {
 +// Sparse active settings updates can override a routed model without changing its TurnContext.
 +// Attribute health only when the request still executed the resolved routing tuple.
 +fn executed_routing_candidate(step: &StepContext) -> Option<&ModelRoutingCandidate> {
@@ -1047,11 +1065,26 @@ index 00f7d3a59021d229fae9e9f4612ef5596f9bb702..b09803d4ed10f8f67e99f64f6e96f1f4
 +        .flatten()
 +}
 +
- pub(super) fn classify_model_routing_failure(
-     details: &CodexErrorDetails,
- ) -> Option<ModelRoutingFailure> {
++pub(super) fn classify_model_routing_failure(error: &CodexErr) -> Option<ModelRoutingFailure> {
++    match error.details() {
+         CodexErrorDetails::ServerOverloaded => Some(ModelRoutingFailure {
+             reason: ModelRoutingReason::TemporaryAvailability,
+             minimum_retry_at: None,
+             class: RoutingFailureClass::TemporaryAvailability,
++            retry_after: error.retry_after(),
+         }),
+-        CodexErrorDetails::UsageLimitReached(error) => Some(ModelRoutingFailure {
++        CodexErrorDetails::UsageLimitReached(limit) => Some(ModelRoutingFailure {
+             reason: ModelRoutingReason::UsageLimit,
+-            minimum_retry_at: error.resets_at,
++            minimum_retry_at: limit.resets_at,
+             class: RoutingFailureClass::TemporaryAvailability,
++            retry_after: error.retry_after(),
+         }),
+         CodexErrorDetails::ModelUnavailable(_) => Some(ModelRoutingFailure {
+             reason: ModelRoutingReason::ModelUnavailable,
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 43c0b59bdcd56560e0359fee6461632967a8d92e..9dd3b50dadf78d14eaffe3a4e53a666c95fe5288 100644
+index 15f8f3fd012c14aabcea6a2586ae6e8b9b36ffeb..4644d156497e020eaf1d64d9ff0a70b571ab1295 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -501,6 +501,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
@@ -1286,10 +1319,10 @@ index 43c0b59bdcd56560e0359fee6461632967a8d92e..9dd3b50dadf78d14eaffe3a4e53a666c
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index bfffed6cdfd1a97db709e3429f5fabf5f01c83ea..9baee3a668f7225a2a60bdf2ae7f43960fb1830a 100644
+index 74dcb1a98e6db1c4bd1cf20b1e8922ab4a1f0740..85445bebb3dac68edc673a62d33ebd70b32ba7c0 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5938,6 +5938,7 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6235,6 +6235,7 @@ async fn turn_context_with_model_updates_model_fields() {
              Arc::clone(&settings.model_info),
              /*fast_mode_enabled*/ true,
          );
@@ -1297,7 +1330,7 @@ index bfffed6cdfd1a97db709e3429f5fabf5f01c83ea..9baee3a668f7225a2a60bdf2ae7f4396
      });
      Arc::make_mut(&mut turn_context.config).service_tier =
          turn_context.initial_settings.service_tier.clone();
-@@ -5949,11 +5950,13 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6246,11 +6247,13 @@ async fn turn_context_with_model_updates_model_fields() {
          .collaboration_mode
          .settings
          .reasoning_effort = Some(ReasoningEffortConfig::High);
@@ -1313,7 +1346,7 @@ index bfffed6cdfd1a97db709e3429f5fabf5f01c83ea..9baee3a668f7225a2a60bdf2ae7f4396
      turn_context.next_step_settings.store(Arc::clone(&current));
      let updated = turn_context
          .with_model("gpt-5.5".to_string(), &session.services.models_manager)
-@@ -5995,6 +5998,21 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6292,6 +6295,21 @@ async fn turn_context_with_model_updates_model_fields() {
          &turn_context.next_step_settings.load_full()
      ));
      assert!(!Arc::ptr_eq(&captured, &updated.initial_settings));
@@ -1336,7 +1369,7 @@ index bfffed6cdfd1a97db709e3429f5fabf5f01c83ea..9baee3a668f7225a2a60bdf2ae7f4396
          &updated.initial_settings,
          &updated.next_step_settings.load_full()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170fe381e698 100644
+index 88e8c5ecd128201b5d3824d61fa6835552bac78f..c4ceb6f5700bda36ba765dd95cf3fc8b106f08ca 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -160,6 +160,19 @@ pub(crate) struct McpStartupRequirements {
@@ -1411,7 +1444,7 @@ index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170f
                      turn_diff_tracker
 @@ -995,7 +1022,7 @@ pub(crate) async fn run_turn(
              Err(failure) => {
-                 let routing_failure = classify_model_routing_failure(failure.error.details());
+                 let routing_failure = classify_model_routing_failure(&failure.error);
                  if let Some(routing_failure) = routing_failure.as_ref() {
 -                    sess.record_model_routing_failure(turn_context.as_ref(), routing_failure)
 +                    sess.record_model_routing_failure(step_context.as_ref(), routing_failure)
@@ -1527,7 +1560,7 @@ index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170f
                              }
                              Err(err) => {
 @@ -1072,20 +1117,14 @@ pub(crate) async fn run_turn(
-                                     classify_model_routing_failure(err.details())
+                                     classify_model_routing_failure(&err)
                                  {
                                      sess.record_model_routing_failure(
 -                                        routed.as_ref(),
@@ -1595,7 +1628,7 @@ index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170f
                          info!("Turn error during model reroute compaction: {err:#}");
                          let error = err.to_codex_protocol_error();
                          sess.emit_turn_error_lifecycle(
-@@ -1876,14 +1902,18 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1881,14 +1907,18 @@ async fn maybe_run_previous_model_inline_compact(
  /// the task's previous-turn configuration.
  async fn maybe_run_model_reroute_inline_compact(
      sess: &Arc<Session>,
@@ -1616,7 +1649,7 @@ index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170f
          routed_turn_context.model_info().comp_hash.as_deref(),
      ) {
          Some(CompactionReason::CompHashChanged)
-@@ -1908,10 +1938,12 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -1913,10 +1943,12 @@ async fn maybe_run_model_reroute_inline_compact(
                  .model_context_window()
                  .is_some_and(|context_window| active_context_tokens >= context_window),
          };
@@ -1633,10 +1666,10 @@ index 0b8552ee984cbb94e13b4fc77fa0f3fecd584643..5476c493e78dc173978a3c4c316a170f
                  .is_some_and(|(previous, routed)| previous > routed);
          (routed_limit_reached && is_model_downshift).then_some(CompactionReason::ModelDownshift)
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c99b9cddf 100644
+index 521857dc9ad3db67612647ce97470baec27c17b1..21fe719a8d3efbfdf610107eebc4b526b46f772e 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -653,9 +653,20 @@ impl TurnContext {
+@@ -802,9 +802,20 @@ impl TurnContext {
          &self,
          model: String,
          models_manager: &SharedModelsManager,
@@ -1657,7 +1690,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
          let model_info = models_manager
              .get_model_info(model.as_str(), &config.to_models_manager_config())
              .await;
-@@ -664,7 +675,7 @@ impl TurnContext {
+@@ -813,7 +824,7 @@ impl TurnContext {
              .iter()
              .map(|preset| preset.effort.clone())
              .collect::<Vec<_>>();
@@ -1666,7 +1699,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
              if supported_reasoning_levels.contains(current_reasoning_effort) {
                  Some(current_reasoning_effort.clone())
              } else {
-@@ -688,17 +699,19 @@ impl TurnContext {
+@@ -837,17 +848,19 @@ impl TurnContext {
              )
              .await;
          let model_info = Arc::new(model_info);
@@ -1689,7 +1722,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
          let available_models = models_manager
-@@ -811,7 +824,7 @@ impl TurnContext {
+@@ -962,7 +975,7 @@ impl TurnContext {
          validation: RoutingCandidateValidation,
      ) -> Option<Self> {
          let mut routed = self
@@ -1698,7 +1731,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
              .await;
          let mut model_info = Arc::clone(&routed.initial_settings.model_info);
          if let Some(custom_model) = self.config.custom_models.get(model_profile) {
-@@ -853,7 +866,10 @@ impl TurnContext {
+@@ -1004,7 +1017,10 @@ impl TurnContext {
              {
                  return None;
              }
@@ -1710,7 +1743,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
                  Arc::make_mut(&mut model_info)
                      .service_tiers
                      .push(ModelServiceTier {
-@@ -881,11 +897,10 @@ impl TurnContext {
+@@ -1032,11 +1048,10 @@ impl TurnContext {
              /*developer_instructions*/ None,
          );
          selected.service_tier = service_tier;
@@ -1726,7 +1759,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
          config.service_tier = settings.service_tier.clone();
          routed.multi_agent_version =
              config.multi_agent_version_for_model(settings.model_info.multi_agent_version);
-@@ -1626,6 +1641,9 @@ impl Session {
+@@ -1794,6 +1809,9 @@ impl Session {
              .await;
          let mut refreshed = Arc::try_unwrap(refreshed)
              .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
@@ -1736,7 +1769,7 @@ index e2001e7b32c2a271335909b2db25b1bca38ae94e..08630498c37f8608b878a0001e16ea9c
 
          crate::skills::preserve_implicit_skill_invocations(
              current.extension_data.as_ref(),
-@@ -1642,7 +1660,17 @@ impl Session {
+@@ -1810,7 +1828,17 @@ impl Session {
          if let (Some(profile_name), Some(candidate)) = (
              current.model_profile.as_deref(),
              current.model_routing_candidate.as_ref(),
@@ -1768,7 +1801,7 @@ index 60aab9c45f0310445221b97ee2abbb51131714b3..eeb2a10a8af8db072e403264609ea484
      )]);
      let mut primary_model = model_info_from_slug(ROUTED_WEBSOCKET_PRIMARY);
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index f61585b604bafd4e2ffcc3240bc93adcfd6c0eef..b89212cb577eb7f0705211173515a39722a0d13c 100644
+index 3381f46e2bb3483130e4e7ad50039dfcb12f0eaf..df787777cb226c197d78e565eb53cad92cf98bfa 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -89,6 +89,10 @@ async fn guardian_history_survives_restart_and_user_fork(

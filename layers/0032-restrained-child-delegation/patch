@@ -337,10 +337,10 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 411600b405026e903b31b7abf37c3ffd955a98cd..8867f8a22d0e3e4aee2b9e085065aa29fcf74d45 100644
+index f88eb5795e26899710f29ee82400443b3ba5dc99..529b82ee6f9a58a70e17d71453098367ff9e7e78 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -91,6 +91,7 @@ mod guardian_cached_score;
+@@ -94,6 +94,7 @@ mod guardian_cached_score;
  mod guardian_checkpoint_migration;
  // Uses the same command-approval harness as guardian_review below.
  mod canonical_plugin_connectors;
@@ -363,10 +363,10 @@ index 6245636eb8705e5609aae655dceee25d477ea4ea..4b11b5f344b1adadffd417b0bfc4e7d1
  const CUSTOM_MODE_HINT_TEXT: &str = "Use the configured delegation policy.";
  const CATALOG_MODE_HINT_TEXT: &str = "Use the model catalog delegation policy.";
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 34636b850caf2668c9163eed76b5784526821858..090bd74aca62d58dbe8689eedcd9d09e4a0cc7f2 100644
+index a46e854b3e7d6d191a9c965c6a17098b3a512af2..4a81187571e4f0a56002bcf7085bafde48ec6fcc 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -114,7 +114,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
+@@ -117,7 +117,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
  const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
  const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
  const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
@@ -375,7 +375,7 @@ index 34636b850caf2668c9163eed76b5784526821858..090bd74aca62d58dbe8689eedcd9d09e
 
  fn body_contains(req: &wiremock::Request, text: &str) -> bool {
      decoded_body(req)
-@@ -1604,7 +1604,7 @@ enum FullHistoryV2ModelSelection {
+@@ -1607,7 +1607,7 @@ enum FullHistoryV2ModelSelection {
  #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
  #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
  #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
@@ -384,7 +384,7 @@ index 34636b850caf2668c9163eed76b5784526821858..090bd74aca62d58dbe8689eedcd9d09e
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
      selection: FullHistoryV2ModelSelection,
-@@ -1957,8 +1957,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1960,8 +1960,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              (
                  mode_instruction_count(&parent_request),
                  mode_instruction_count(&child_request),
@@ -397,7 +397,7 @@ index 34636b850caf2668c9163eed76b5784526821858..090bd74aca62d58dbe8689eedcd9d09e
          );
      }
      if matches!(
-@@ -1984,7 +1987,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1987,7 +1990,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                      .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                      .count(),
              ),

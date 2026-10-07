@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 8b9104e86e347809a5a6c782efb4857706bde790..1496a9573da0da2ec2a9d8dce5929069d34d7707 100644
+index 84b1ee6618e8f76258a1b3d4715c94f3e1c00961..f7293972a074405139fdc9b17dcc14c6d191df10 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -4943,13 +4943,21 @@ impl ThreadRequestProcessor {
@@ -395,7 +395,7 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 08fd481e533ac06abc91756584d6e8814d983b92..4e12c33b490f8da125a118e61f606cb476221bfe 100644
+index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd244706bd6fff 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -85,6 +85,7 @@ use codex_protocol::protocol::EventMsg;
@@ -430,17 +430,18 @@ index 08fd481e533ac06abc91756584d6e8814d983b92..4e12c33b490f8da125a118e61f606cb4
  use core_test_support::responses::ev_response_created;
  use core_test_support::responses::mount_response_sequence;
  use core_test_support::responses::mount_sse_once;
-@@ -128,6 +132,9 @@ use core_test_support::responses::sse_failed;
+@@ -128,6 +132,10 @@ use core_test_support::responses::sse_failed;
  use core_test_support::responses::sse_response;
  use core_test_support::responses::start_mock_server;
  use core_test_support::responses::strip_response_item_ids;
 +use core_test_support::streaming_sse::StreamingSseChunk;
 +use core_test_support::streaming_sse::start_streaming_sse_server;
++use futures::FutureExt;
 +use futures::StreamExt;
  use pretty_assertions::assert_eq;
  use serial_test::serial;
  use std::ffi::OsStr;
-@@ -9945,6 +9952,411 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+@@ -10072,6 +10080,411 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
      )
  }
 
@@ -1039,7 +1040,7 @@ index 0000000000000000000000000000000000000000..153d83230741db3961d236c14a3af7ed
 +    }
 +}
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index a3984205cb6cb12c71e29656ae34a95c915fc186..34df2e3b045945cc9f28b35d12299bc2e98c1c1d 100644
+index 06b36830773df4d79d14e570dcb7dd1592b3e2c8..cb6e947e3b0427dced659b85a18acd10f770fa59 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -8,6 +8,7 @@ use serde_json::Value;
@@ -1058,7 +1059,7 @@ index a3984205cb6cb12c71e29656ae34a95c915fc186..34df2e3b045945cc9f28b35d12299bc2
  pub(crate) mod recorder;
  mod reference;
  mod reverse_jsonl_scanner;
-@@ -143,6 +145,8 @@ pub async fn materialize_rollout_for_reference(
+@@ -148,6 +150,8 @@ pub async fn materialize_rollout_for_reference(
  pub use config::Config;
  pub use config::RolloutConfig;
  pub use config::RolloutConfigView;
@@ -1195,7 +1196,7 @@ index 0000000000000000000000000000000000000000..6e21dc33d97b6ef55362a85ef7d9bb2a
 +    }
 +}
 diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
-index 973ab56b8ada4b79a95d86984c64b147e91d3456..26addb2d56315130bed3a944107e436a89987266 100644
+index b967f397249bf023da41555f3c96aabe1290ad75..d73f2e726e00af759d2733159d53c9b740dbe78f 100644
 --- a/codex-rs/rollout/src/recorder.rs
 +++ b/codex-rs/rollout/src/recorder.rs
 @@ -53,6 +53,7 @@ use super::list::parse_timestamp_uuid_from_filename;
@@ -1438,10 +1439,10 @@ index 7d29eee713316af44a25dba4e757f365f962d3dc..523ca9f0674d0f54a28c8c0e1bf26081
  }
 
 diff --git a/codex-rs/thread-store/src/local/model_context.rs b/codex-rs/thread-store/src/local/model_context.rs
-index fd3d76ed2918108356b272777fa3545cd877d487..c7b12247da9e48e273c4a813b5832357694ecd18 100644
+index a0dedad42ad1f4f6c1970a06deab5250c6a1dc79..fa4e09b99a490356cf049e2fb604737f45cdc8dd 100644
 --- a/codex-rs/thread-store/src/local/model_context.rs
 +++ b/codex-rs/thread-store/src/local/model_context.rs
-@@ -416,6 +416,23 @@ fn active_model_context_scan_or_fallback(
+@@ -457,6 +457,23 @@ fn active_model_context_scan_or_fallback(
              );
              Ok(None)
          }
@@ -1466,7 +1467,7 @@ index fd3d76ed2918108356b272777fa3545cd877d487..c7b12247da9e48e273c4a813b5832357
          Err(error) => Err(thread_store_io_error(error)),
      }
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index 330802453e185458e9e7815aaea4ef7c509a5738..42578a7197519e103c6d2c57b81a078a9a690eda 100644
+index b64394362ab1310b8d11c255ed1a22e301aa714a..71e65cb452d6a1fc0d1036ca7ba014c22274c272 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -54,6 +54,46 @@ use crate::local::test_support::test_config;
@@ -1517,10 +1518,10 @@ index 330802453e185458e9e7815aaea4ef7c509a5738..42578a7197519e103c6d2c57b81a078a
  async fn active_model_context_scan_stops_at_the_interactive_byte_limit() {
      let home = TempDir::new().expect("temp dir");
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index ee09d167f3391d03ee31cf5e1bd5980b496b89a2..a1ef00cea6a551bb13ad83246c8479b4f7173157 100644
+index d5722d91abf4ad8dd252f11f48a5aa268ef08f17..9cdbcc5c94c4b141ecc95a3697617ba7060aae62 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
-@@ -474,7 +474,11 @@ impl LocalThreadStore {
+@@ -459,7 +459,11 @@ impl LocalThreadStore {
                      malformed_lineage(segment.thread_id, "rollout byte offset overflow")
                  })?);
              }
@@ -1533,7 +1534,7 @@ index ee09d167f3391d03ee31cf5e1bd5980b496b89a2..a1ef00cea6a551bb13ad83246c8479b4
              // Ordinal-only legacy cutoffs must name a real boundary, not an ordinal beyond EOF.
              if segment.end_ordinal_exclusive.is_some()
                  && parsed
-@@ -1529,40 +1533,14 @@ async fn next_rollout_line(
+@@ -1514,40 +1518,14 @@ async fn next_rollout_line(
  }
 
  fn parse_rollout_bytes(
@@ -1579,7 +1580,7 @@ index ee09d167f3391d03ee31cf5e1bd5980b496b89a2..a1ef00cea6a551bb13ad83246c8479b4
      Ok(parsed)
  }
 
-@@ -1937,3 +1915,7 @@ fn lineage_io_error(err: io::Error) -> ThreadStoreError {
+@@ -1922,3 +1900,7 @@ fn lineage_io_error(err: io::Error) -> ThreadStoreError {
  #[cfg(test)]
  #[path = "rollout_lineage_tests.rs"]
  mod tests;
@@ -3001,10 +3002,10 @@ index e2011b3ee30a805a36dc3eaef1e043ad793a4b0f..5c6654dd68ce27d3150c78a73c3879f0
  ///
  /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index cbacedc3a905626def2b40453cb66b09d3c52166..255c5db0e37257cdd50b74f0beeacb0546f573b0 100644
+index 16bc440db56732dbcbbee4226898ca35f7c4ae70..0e48abe10e89ac61706a4f465843d5d1f529df4c 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
-@@ -4004,6 +4004,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -4007,6 +4007,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
      assert_eq!(projection_state, (replacement_len, 3));
  }
 

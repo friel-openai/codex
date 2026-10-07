@@ -247,10 +247,10 @@ index b60ad3c35b3efe74f235b963e379d5e5a59a74ce..4ed23b12aa899b3f596bf29cd6799349
          self.inner.thread_id
      }
 diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-index 886dbf426f28b9114a911e10fe9164c1a7b66885..6be998de7376000cc8ad398af281b16695fa110c 100644
+index d3571262440593af8f554c70c9354a7c497e7339..16f456cc25e4334734faa291275230550317569e 100644
 --- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
 +++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-@@ -52,6 +52,9 @@ use pretty_assertions::assert_eq;
+@@ -53,6 +53,9 @@ use pretty_assertions::assert_eq;
  use serde_json::json;
  use tempfile::TempDir;
 
@@ -260,7 +260,7 @@ index 886dbf426f28b9114a911e10fe9164c1a7b66885..6be998de7376000cc8ad398af281b166
  #[tokio::test]
  async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Result<()> {
      let runtime = test_runtime().await?;
-@@ -319,6 +322,7 @@ async fn ephemeral_goal_tools_preserve_specs_but_reject_execution() -> anyhow::R
+@@ -320,6 +323,7 @@ async fn ephemeral_goal_tools_preserve_specs_but_reject_execution() -> anyhow::R
          tools.iter().map(|tool| tool.spec()).collect::<Vec<_>>(),
          parent_tools
              .iter()

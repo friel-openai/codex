@@ -1,9 +1,9 @@
 diff --git a/codex-rs/core/src/independent_thread/fork.rs b/codex-rs/core/src/independent_thread/fork.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6239497bc6f3f701d3a971e2fdf94c73ab484e85
+index 0000000000000000000000000000000000000000..9478ec06ba9984ad1411c851084bcfc1a9749373
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork.rs
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,351 @@
 +//! Independent persistent forks initiated by the model in a root thread.
 +//!
 +//! The process ThreadManager owns execution after creation; the caller owns only
@@ -241,6 +241,7 @@ index 0000000000000000000000000000000000000000..6239497bc6f3f701d3a971e2fdf94c73
 +                        options,
 +                        InitialHistory::Resumed(ResumedHistory {
 +                            conversation_id: session.thread_id(),
++                            history_revision: history.revision,
 +                            history: Arc::new(history.items),
 +                            rollout_path: stored.rollout_path,
 +                        }),
@@ -1831,10 +1832,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index d2a98e5c068f6c62fdb8fcf3376a276a074185ca..b676a9285f72fc72d49d1829e8a426b6954acb19 100644
+index f72d283207bec5e3e165b47957f3b570b2d3b17b..2530fe7388adfa94076ba53358a14643a4d1945b 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1124,6 +1124,11 @@ impl ThreadManager {
+@@ -1132,6 +1132,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1869,7 +1870,7 @@ index f2b7860d06385301ebefa9bdd70eb0a43a8639ad..70eeee2d6623d299c586272a80dbc48e
      };
      if prev_entry.is_some() {
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 42deb1350d77954d2c2cc2ed108c5af77149851e..6704a5ee119890afa616197b126a28f3ec810b26 100644
+index 8c91ab6c71302390138ad3ca110e619a32a7df7a..86878789d330e4e448372967f6a621ad2e700626 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@
