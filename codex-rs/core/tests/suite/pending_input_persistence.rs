@@ -573,6 +573,10 @@ async fn cancelled_spawn_discards_provisional_child() -> anyhow::Result<()> {
             config.agent_max_depth = 1;
             config
                 .features
+                .disable(Feature::MultiAgentV2)
+                .expect("use the scripted V1 spawn tool");
+            config
+                .features
                 .enable(Feature::Collab)
                 .expect("enable collaboration");
         })
