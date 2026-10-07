@@ -72,6 +72,7 @@ async fn interrupt_if_no_pending_input_handles_cancelled_submission() {
         }),
         /*rollout_path*/ None,
         SessionSource::Cli,
+        /*model_history_complete*/ true,
     );
     thread.submit(Op::Interrupt).await.expect("fill the queue");
 
