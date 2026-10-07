@@ -2621,9 +2621,10 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         1,
         "follow-up reminder should be persisted for guardian forks"
     );
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     session
         .replace_compacted_history(
+            &turn,
             vec![
                 ResponseItem::Compaction {
                     id: Some(codex_protocol::ResponseItemId::from_server(
@@ -2659,14 +2660,14 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
             crate::compact::CompactedHistoryMetadata {
                 input_goal_ids: Default::default(),
                 message: String::new(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
                 compaction_response_id: None,
                 compaction_model_hash: Some("test-checkpoint".to_owned()),
                 reviewer_compaction_hash: Some("test-checkpoint".to_owned()),
             },
         )
-        .await;
+        .await
+        .expect("persist Guardian parent compaction");
     let third_request = GuardianApprovalRequest::ExecCommand {
         id: "shell-3".to_string(),
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),

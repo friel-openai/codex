@@ -20,6 +20,7 @@ use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SegmentStateCheckpoint;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -274,6 +275,8 @@ pub(super) struct CompactedItemWire<'a> {
     latest_token_usage_record: Option<Cow<'a, TokenUsageRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resume_metadata: Option<Cow<'a, crate::CompactionResumeMetadata>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    segment_state_checkpoint: Option<Cow<'a, SegmentStateCheckpoint>>,
 }
 
 impl<'a> From<&'a CompactedItem> for CompactedItemWire<'a> {
@@ -314,6 +317,7 @@ impl<'a> From<&'a CompactedItem> for CompactedItemWire<'a> {
             compaction_response_id: item.compaction_response_id.as_deref().map(Cow::Borrowed),
             latest_token_usage_record: item.latest_token_usage_record.as_ref().map(Cow::Borrowed),
             resume_metadata: item.resume_metadata.as_ref().map(Cow::Borrowed),
+            segment_state_checkpoint: item.segment_state_checkpoint.as_ref().map(Cow::Borrowed),
         }
     }
 }
@@ -380,6 +384,7 @@ impl TryFrom<CompactedItemWire<'_>> for CompactedItem {
             compaction_response_id: item.compaction_response_id.map(Cow::into_owned),
             latest_token_usage_record: item.latest_token_usage_record.map(Cow::into_owned),
             resume_metadata: item.resume_metadata.map(Cow::into_owned),
+            segment_state_checkpoint: item.segment_state_checkpoint.map(Cow::into_owned),
         })
     }
 }

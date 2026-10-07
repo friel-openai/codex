@@ -11,6 +11,9 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 
+use crate::segment_checkpoint::SegmentStateCheckpointMatch;
+use crate::segment_checkpoint::match_segment_state_checkpoint;
+
 /// Whether a reverse model-context scan needs more rollout items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelContextScanProgress {
@@ -20,30 +23,76 @@ pub enum ModelContextScanProgress {
     Complete,
 }
 
-/// Finds a bounded suffix for reconstructing the most recent context window.
+impl ModelContextScanProgress {
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+/// Accumulates newest-to-oldest rollout items until they are sufficient to reconstruct the latest
+/// model context.
 ///
-/// Replacement history and a window number bound model history. Explicit resume metadata also
-/// bounds previous-turn settings; legacy compactions require a surviving turn-context baseline.
-/// A rollback or compaction missing replacement history or a window number requires full replay.
+/// Storage implementations own how they fetch older items. Local JSONL readers and future
+/// reverse-paged cloud readers can both feed their items through this scan to share the cutoff
+/// rules and chronological replay assembly.
+///
+/// A versioned segment-state checkpoint is an immediate cutoff. Its replacement history,
+/// previous-turn settings, reference-context disposition, and world-state disposition certify
+/// that older segments are not needed for current-state reconstruction.
+///
+/// A turn establishes a context baseline with a user-turn boundary (a paginated
+/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
+/// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
+/// with empty input supply resume metadata, matching rollout reconstruction. Without either,
+/// the scan continues to older turns. A raw `role=user` response item is not sufficient because
+/// contextual user fragments use that role but do not count as turn boundaries during reconstruction.
+/// The compaction restores model-visible items; the turn context restores previous settings
+/// (`model`, `comp_hash`, and `realtime_active`) and the reference baseline.
+///
+/// An unmarked compaction remains a compatibility boundary for model-visible history, but sticky
+/// settings and token state may still exist in an older segment. The scan therefore continues to
+/// the beginning while retaining only the newest required sticky-state records. Explicit resume
+/// metadata establishes that boundary without an older completed-turn context. A rollback,
+/// unusable compaction, or invalid checkpoint forces complete replay.
 #[derive(Debug, Default)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
-    saw_compaction: bool,
+    saw_segment_checkpoint: bool,
+    segment_checkpoint_blocked: bool,
+    must_scan_to_start: bool,
+    saw_unmarked_compaction: bool,
     saw_resume_metadata: bool,
     saw_completed_turn_context: bool,
-    must_scan_to_start: bool,
+    compatibility_boundary: bool,
     active_segment: ActiveTurnSegment,
+    saw_thread_settings: bool,
+    saw_token_count: bool,
+    token_info_resolved: bool,
+    rate_limits_resolved: bool,
 }
 
 impl ModelContextScan {
     /// Adds the next newest-to-oldest rollout item and reports whether the reader can stop.
     pub fn push(&mut self, item: RolloutItem) -> ModelContextScanProgress {
+        let retain = self.should_retain(&item);
         let progress = self.observe(&item);
-        self.items_newest_first.push(item);
+        if retain {
+            self.items_newest_first.push(item);
+        }
         progress
     }
 
-    /// Returns the collected items in chronological order.
+    /// Reports whether the completed cutoff is a certified active-segment checkpoint.
+    pub fn completed_at_segment_checkpoint(&self) -> bool {
+        self.saw_segment_checkpoint && !self.must_scan_to_start
+    }
+
+    /// Reports whether [`Self::finish`] will return a bounded replay.
+    pub fn has_bounded_context(&self) -> bool {
+        self.has_bounded_cutoff()
+    }
+
+    /// Returns the collected items in chronological order; the reader supplies canonical metadata.
     ///
     /// Call this after the reader reaches the beginning of its source or after [`Self::push`]
     /// returns [`ModelContextScanProgress::Complete`].
@@ -53,22 +102,38 @@ impl ModelContextScan {
     }
 
     fn observe(&mut self, item: &RolloutItem) -> ModelContextScanProgress {
-        if self.must_scan_to_start {
+        self.observe_sticky_state(item);
+
+        if self.must_scan_to_start || self.compatibility_boundary {
             return ModelContextScanProgress::Continue;
         }
 
         match item {
-            RolloutItem::Compacted(compacted)
-                if compacted.replacement_history.is_none() || compacted.window_number.is_none() =>
-            {
-                self.must_scan_to_start = true;
-            }
             RolloutItem::Compacted(compacted) => {
-                if !self.saw_compaction {
-                    self.saw_resume_metadata = compacted.resume_metadata.is_some();
-                }
-                self.saw_compaction = true;
                 self.active_segment.saw_compaction = true;
+                match match_segment_state_checkpoint(compacted, self.items_newest_first.as_slice())
+                {
+                    SegmentStateCheckpointMatch::NotPresent => {
+                        self.segment_checkpoint_blocked = true;
+                        if compacted.replacement_history.is_some()
+                            && compacted.window_number.is_some()
+                        {
+                            if !self.saw_unmarked_compaction {
+                                self.saw_resume_metadata = compacted.resume_metadata.is_some();
+                            }
+                            self.saw_unmarked_compaction = true;
+                        } else {
+                            self.must_scan_to_start = true;
+                        }
+                    }
+                    SegmentStateCheckpointMatch::Valid if !self.segment_checkpoint_blocked => {
+                        self.saw_segment_checkpoint = true;
+                    }
+                    SegmentStateCheckpointMatch::Valid => {}
+                    SegmentStateCheckpointMatch::Invalid => {
+                        self.must_scan_to_start = true;
+                    }
+                }
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
                 // Rollback markers only occur in legacy history. Keep old rollouts correct rather than
@@ -142,10 +207,44 @@ impl ModelContextScan {
             | RolloutItem::TokenUsageRecord(_) => {}
         }
 
-        if self.has_bounded_cutoff() {
+        self.compatibility_boundary = !self.must_scan_to_start
+            && self.saw_unmarked_compaction
+            && (self.saw_resume_metadata || self.saw_completed_turn_context);
+
+        if self.saw_segment_checkpoint && !self.must_scan_to_start {
             ModelContextScanProgress::Complete
         } else {
             ModelContextScanProgress::Continue
+        }
+    }
+
+    fn should_retain(&self, item: &RolloutItem) -> bool {
+        if self.must_scan_to_start || !self.compatibility_boundary {
+            return true;
+        }
+
+        match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)) => !self.saw_thread_settings,
+            RolloutItem::EventMsg(EventMsg::TokenCount(event)) => {
+                !self.saw_token_count
+                    || (!self.token_info_resolved && event.info.is_some())
+                    || (!self.rate_limits_resolved && event.rate_limits.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    fn observe_sticky_state(&mut self, item: &RolloutItem) {
+        match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)) => {
+                self.saw_thread_settings = true;
+            }
+            RolloutItem::EventMsg(EventMsg::TokenCount(event)) => {
+                self.saw_token_count = true;
+                self.token_info_resolved |= event.info.is_some();
+                self.rate_limits_resolved |= event.rate_limits.is_some();
+            }
+            _ => {}
         }
     }
 
@@ -159,9 +258,7 @@ impl ModelContextScan {
     }
 
     fn has_bounded_cutoff(&self) -> bool {
-        !self.must_scan_to_start
-            && self.saw_compaction
-            && (self.saw_resume_metadata || self.saw_completed_turn_context)
+        !self.must_scan_to_start && (self.saw_segment_checkpoint || self.compatibility_boundary)
     }
 }
 

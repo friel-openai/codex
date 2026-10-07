@@ -101,6 +101,13 @@ pub(crate) struct Session {
     pub(crate) realtime_history: Option<Mutex<crate::realtime_history::RealtimeHistoryState>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+    /// Orders mutations before checkpoint capture or after commit classification.
+    pub(super) checkpoint_admission_lock: Arc<Mutex<()>>,
+    /// Orders retained-history mutations and their appends with writer recovery.
+    /// Acquire after `state`; event producers may already hold `state` when persisting.
+    pub(super) persistence_repair_lock: Mutex<super::persistence_repair::PersistenceRepairState>,
+    /// Published only after surviving history is durable; the original Session stays alive.
+    pub(super) repaired_persistence: OnceLock<super::persistence_repair::RepairedPersistence>,
     pub(crate) input_queue: InputQueue,
     /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
     /// terminal action. The persisted snooze deadline is reconstructed from the goals database;
@@ -322,6 +329,7 @@ impl SessionConfiguration {
             ),
             workspace_roots,
             profile_workspace_roots: permission_profile.profile_workspace_roots().to_vec(),
+            windows_sandbox_level: self.windows_sandbox_level,
             ephemeral: self.original_config_do_not_use.ephemeral,
             reasoning_effort: self.step_settings.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.step_settings.reasoning_summary,
@@ -358,6 +366,24 @@ impl SessionConfiguration {
             personality: self.step_settings.personality,
             collaboration_mode: self.step_settings.collaboration_mode.clone(),
             disabled_plugin_ids: self.disabled_plugin_ids.clone(),
+            environments: Some(
+                TurnEnvironmentSelections::new(
+                    self.legacy_fallback_cwd.clone(),
+                    environment_selections.to_vec(),
+                )
+                .into(),
+            ),
+            workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(
+                environment_selections,
+            )),
+            profile_workspace_roots: Some(
+                self.permission_profile_state
+                    .profile_workspace_roots()
+                    .iter()
+                    .map(|root| root.as_uri().clone().into())
+                    .collect(),
+            ),
+            windows_sandbox_level: Some(self.windows_sandbox_level),
         }
     }
 
@@ -1938,6 +1964,9 @@ impl Session {
                 .then(|| Mutex::new(Default::default())),
                 active_turn: Mutex::new(None),
                 async_hook_results,
+                checkpoint_admission_lock: Arc::new(Mutex::new(())),
+                persistence_repair_lock: Mutex::default(),
+                repaired_persistence: OnceLock::new(),
                 input_queue: InputQueue::new(),
                 goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
