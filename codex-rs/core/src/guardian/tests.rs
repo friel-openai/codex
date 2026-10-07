@@ -22,6 +22,7 @@ use codex_config::NetworkDomainPermissionToml;
 use codex_config::NetworkDomainPermissionsToml;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::types::McpServerConfig;
 use codex_exec_server::LOCAL_FS;
@@ -78,6 +79,7 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::streaming_sse::StreamingSseChunk;
@@ -2148,6 +2150,221 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_ultrafast_usage_limit_falls_back_and_reuses_fast_during_cooldown()
+-> anyhow::Result<()> {
+    assert_guardian_ultrafast_routing(GuardianUltrafastFailure::UsageLimit).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_ultrafast_unsupported_tier_falls_back_and_reuses_fast_during_cooldown()
+-> anyhow::Result<()> {
+    assert_guardian_ultrafast_routing(GuardianUltrafastFailure::UnsupportedTier).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_ultrafast_unstructured_invalid_request_does_not_fall_through()
+-> anyhow::Result<()> {
+    assert_guardian_ultrafast_routing(GuardianUltrafastFailure::InvalidRequest).await
+}
+
+/// Distinguishes provider errors that advance Guardian's fixed routing profile from unrelated
+/// request errors that must remain failures.
+#[derive(Clone, Copy)]
+enum GuardianUltrafastFailure {
+    UsageLimit,
+    UnsupportedTier,
+    InvalidRequest,
+}
+
+async fn assert_guardian_ultrafast_routing(
+    failure: GuardianUltrafastFailure,
+) -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let assessment = serde_json::json!({
+        "outcome": "allow",
+    })
+    .to_string();
+    let successful_review = |response_id: &str, message_id: &str| {
+        sse_response(sse(vec![
+            ev_response_created(response_id),
+            ev_assistant_message(message_id, &assessment),
+            ev_completed(response_id),
+        ]))
+    };
+    let failed_response = match failure {
+        GuardianUltrafastFailure::UsageLimit => {
+            wiremock::ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": {
+                    "type": "usage_limit_reached",
+                    "plan_type": "pro",
+                    "resets_at": 4_102_444_800_i64
+                }
+            }))
+        }
+        GuardianUltrafastFailure::UnsupportedTier => wiremock::ResponseTemplate::new(400)
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "service_tier_not_supported",
+                    "message": "Request rejected."
+                }
+            })),
+        GuardianUltrafastFailure::InvalidRequest => wiremock::ResponseTemplate::new(400)
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request",
+                    "param": "tools",
+                    "message": "ultrafast service_tier_not_supported"
+                }
+            })),
+    };
+    let responses = match failure {
+        GuardianUltrafastFailure::UsageLimit | GuardianUltrafastFailure::UnsupportedTier => vec![
+            failed_response,
+            successful_review("resp-fast-first", "msg-fast-first"),
+            successful_review("resp-fast-second", "msg-fast-second"),
+        ],
+        GuardianUltrafastFailure::InvalidRequest => vec![failed_response],
+    };
+    let request_log = mount_response_sequence(&server, responses).await;
+
+    let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let mut config = (*turn.config).clone();
+    config.auto_review_use_ultrafast = true;
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+    let mut catalog = codex_models_manager::bundled_models_response()?;
+    let reviewer = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("bundled Sol reviewer metadata");
+    reviewer.service_tiers.retain(|tier| tier.id != "ultrafast");
+    assert!(reviewer.supports_service_tier("priority"));
+    assert!(!reviewer.supports_service_tier("ultrafast"));
+    let auth_manager = Arc::clone(&session.services.auth_manager);
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .models_manager = Arc::new(StaticModelsManager::new(Some(auth_manager), catalog));
+    crate::guardian::test_host::install(&session, &turn.config);
+    let parent_settings = (
+        turn.model_info().slug.clone(),
+        turn.reasoning_effort().cloned(),
+        turn.config.model.clone(),
+        turn.config.service_tier.clone(),
+    );
+    let parent_config = Arc::clone(&turn.config);
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let first_outcome = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_exec_command_request("shell-ultrafast-first"),
+        ApprovalRequestReasons::default(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 1,
+    )
+    .await;
+    let (completed_outcomes, expected_tiers) = match failure {
+        GuardianUltrafastFailure::UsageLimit | GuardianUltrafastFailure::UnsupportedTier => {
+            let second_outcome = run_guardian_review_session_for_test(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                guardian_exec_command_request("shell-ultrafast-second"),
+                ApprovalRequestReasons::default(),
+                /*external_cancel*/ None,
+                /*max_attempts*/ 1,
+            )
+            .await;
+            (
+                vec![first_outcome, second_outcome],
+                vec!["ultrafast", "priority", "priority"],
+            )
+        }
+        GuardianUltrafastFailure::InvalidRequest => {
+            assert!(matches!(first_outcome.0, GuardianReviewOutcome::Error(_)));
+            (Vec::new(), vec!["ultrafast"])
+        }
+    };
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), expected_tiers.len());
+    // The response sequence stops recording at its limit, so also count unmatched retries.
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded Guardian requests")
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path() == "/v1/responses")
+            .count(),
+        expected_tiers.len()
+    );
+    let request_efforts = requests
+        .iter()
+        .map(|request| {
+            request
+                .body_json()
+                .pointer("/reasoning/effort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        request_efforts,
+        vec![request_efforts[0].clone(); expected_tiers.len()]
+    );
+    for (outcome, analytics) in completed_outcomes {
+        let GuardianReviewOutcome::Completed(assessment) = outcome else {
+            panic!("expected Guardian assessment");
+        };
+        assert_eq!(assessment.outcome, GuardianAssessmentOutcome::Allow);
+        assert_eq!(analytics.guardian_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            analytics.guardian_reasoning_effort.as_deref(),
+            request_efforts[0].as_deref()
+        );
+        assert_eq!(analytics.guardian_review_model_overridden, Some(true));
+        assert_eq!(
+            analytics.guardian_review_model_override.as_deref(),
+            Some("gpt-5.6-sol")
+        );
+    }
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (
+                request.body_json()["model"].as_str().map(str::to_string),
+                request.body_json()["service_tier"]
+                    .as_str()
+                    .map(str::to_string),
+            ))
+            .collect::<Vec<_>>(),
+        expected_tiers
+            .into_iter()
+            .map(|tier| (Some("gpt-5.6-sol".to_string()), Some(tier.to_string())))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (
+            turn.model_info().slug.clone(),
+            turn.reasoning_effort().cloned(),
+            turn.config.model.clone(),
+            turn.config.service_tier.clone(),
+        ),
+        parent_settings
+    );
+    assert!(Arc::ptr_eq(&turn.config, &parent_config));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata()
 -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -3504,7 +3721,7 @@ async fn guardian_review_routes_required_actions(
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
@@ -3914,6 +4131,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
     );
 }
 
+#[test_case::test_case(false; "distinct_parent_model")]
+#[test_case::test_case(true; "same_parent_model")]
+#[tokio::test]
+async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enabled(
+    same_parent_model: bool,
+) {
+    let server = start_mock_server().await;
+    let (session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let parent_model = turn.model_info.slug.clone();
+    let parent_service_tier = turn.config.service_tier.clone();
+    let mut config = (*turn.config).clone();
+    config.auto_review_use_ultrafast = true;
+    config.model_context_window = Some(900_000);
+    config.model_auto_compact_token_limit = Some(600_000);
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let mut context = GuardianReviewContext::from(&turn);
+    if same_parent_model {
+        Arc::make_mut(&mut context.model_info).slug = "gpt-5.6-sol".to_string();
+    }
+    let captured_parent_model = context.model_info.slug.clone();
+    let guardian_config = guardian_review_session_config(session.as_ref(), &context)
+        .await
+        .expect("guardian config");
+    let (review_model, _) = resolve_review_model(session.as_ref(), &context).await;
+    let expected_effort = guardian_config.spawn_config.model_reasoning_effort.clone();
+
+    assert_eq!(
+        guardian_config.spawn_config.model.as_deref(),
+        Some("__frodex_auto_review_ultrafast")
+    );
+    assert_eq!(review_model.model, "gpt-5.6-sol");
+    assert!(review_model.model_overridden);
+    assert_eq!(review_model.model_override.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(review_model.reasoning_effort, expected_effort);
+    assert_eq!(
+        (
+            guardian_config.spawn_config.model_context_window,
+            guardian_config.spawn_config.model_auto_compact_token_limit,
+        ),
+        (None, None)
+    );
+    assert_eq!(
+        guardian_config
+            .spawn_config
+            .custom_models
+            .get("__frodex_auto_review_ultrafast"),
+        Some(&codex_models_manager::CustomModelConfig {
+            model: "gpt-5.6-sol".to_string(),
+            routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+                candidates: vec![
+                    codex_models_manager::ModelRoutingCandidate {
+                        model: "gpt-5.6-sol".to_string(),
+                        reasoning_effort: expected_effort.clone(),
+                        service_tier: Some("ultrafast".to_string()),
+                    },
+                    codex_models_manager::ModelRoutingCandidate {
+                        model: "gpt-5.6-sol".to_string(),
+                        reasoning_effort: expected_effort,
+                        service_tier: Some("priority".to_string()),
+                    },
+                ],
+            }),
+            model_context_window: None,
+            model_auto_compact_token_limit: None,
+            trust_candidate_constraints: true,
+        })
+    );
+    assert_eq!(turn.model_info.slug, parent_model);
+    assert_eq!(context.model_info.slug, captured_parent_model);
+    assert_eq!(turn.config.service_tier, parent_service_tier);
+    assert_eq!(turn.config.model_context_window, Some(900_000));
+    assert_eq!(turn.config.model_auto_compact_token_limit, Some(600_000));
+    assert!(
+        !turn
+            .config
+            .custom_models
+            .contains_key("__frodex_auto_review_ultrafast")
+    );
+}
+
 #[tokio::test]
 async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
     let server = start_mock_server().await;
@@ -4003,6 +4303,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
 async fn guardian_review_session_config_isolates_parent_customizations() {
     let defaults = ResolvedModelMessages::bundled().auto_review();
     let mut parent_config = test_config().await;
+    let extra_policy = "Require approval before publishing private workspace content.";
+    parent_config.guardian_extra_policy = Some(extra_policy.to_string());
     let server: McpServerConfig =
         toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
     parent_config
@@ -4014,6 +4316,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
         Feature::Plugins,
         Feature::GuardianV2,
         Feature::CodexHooks,
+        Feature::AgentPromptInjection,
+        Feature::TokenBudget,
+        Feature::ContextManagement,
     ];
     for feature in disabled_features {
         parent_config
@@ -4025,6 +4330,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
     parent_config.include_skill_instructions = true;
     parent_config.memories.use_memories = true;
     parent_config.memories.dedicated_tools = true;
+    parent_config.token_budget = Some(crate::config::TokenBudgetConfig {
+        guidance_message: Some("parent token-budget guidance".to_string()),
+        ..Default::default()
+    });
+    parent_config.token_budget_startup_config = None;
+    parent_config
+        .prepare_token_budget_for_startup()
+        .expect("capture parent token-budget preferences");
     parent_config.developer_instructions =
         Some("parent or managed config should not replace guardian policy".to_string());
     parent_config.notify = Some(vec![
@@ -4054,14 +4367,25 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
     assert!(!guardian_config.include_skill_instructions);
     assert!(!guardian_config.memories.use_memories);
     assert!(!guardian_config.memories.dedicated_tools);
+    assert_eq!(
+        guardian_config.token_budget,
+        Some(crate::config::TokenBudgetConfig::default())
+    );
+    assert_eq!(guardian_config.token_budget_startup_config, None);
+    assert!(parent_config.features.enabled(Feature::TokenBudget));
+    assert!(parent_config.token_budget_startup_config.is_some());
     assert_eq!(guardian_config.notify, None);
     assert_eq!(guardian_config.developer_instructions, None);
+    assert_eq!(
+        guardian_config.guardian_extra_policy.as_deref(),
+        Some(extra_policy)
+    );
     assert_eq!(
         guardian_config.base_instructions,
         Some(
             GuardianPolicyInstructions::new(
                 defaults.policy,
-                "",
+                extra_policy,
                 defaults.policy_template,
                 guardian_output_contract_prompt(),
             )
@@ -4147,13 +4471,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
             guardian_policy_config: Some(
                 "  Use the workspace-managed guardian policy.  ".to_string(),
             ),
+            guardian_extra_policy: Some(
+                "  Use the workspace-managed additional policy.  ".to_string(),
+            ),
             ..Default::default()
         },
     )
     .expect("config layer stack");
     let parent_config = Config::load_config_with_layer_stack(
         LOCAL_FS.as_ref(),
-        ConfigToml::default(),
+        ConfigToml {
+            auto_review: Some(AutoReviewToml {
+                extra_policy: Some("Use the user-configured additional policy.".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         ConfigOverrides {
             cwd: Some(workspace.path().to_path_buf()),
             ..Default::default()
@@ -4177,11 +4510,15 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
 
     assert_eq!(guardian_config.developer_instructions, None);
     assert_eq!(
+        guardian_config.guardian_extra_policy.as_deref(),
+        Some("Use the workspace-managed additional policy.")
+    );
+    assert_eq!(
         guardian_config.base_instructions,
         Some(
             GuardianPolicyInstructions::new(
                 "Use the workspace-managed guardian policy.",
-                "",
+                "Use the workspace-managed additional policy.",
                 ResolvedModelMessages::bundled()
                     .auto_review()
                     .policy_template,
