@@ -318,6 +318,9 @@ async fn start_or_steer(
         request,
         turn_extension_init,
     } = request;
+    if session.active_turn.lock().await.is_none() {
+        session.reload_user_config_layer().await;
+    }
     let TurnInputRequest {
         mut input,
         thread_settings,

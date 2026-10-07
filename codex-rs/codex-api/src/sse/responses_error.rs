@@ -2,8 +2,11 @@
 //! Only rate-limit codes derive retry delays from plaintext messages.
 
 use crate::error::ApiError;
+use crate::error::is_request_configuration_unavailable;
 use crate::error::parse_flex_unavailable;
 use codex_http_client::RetryAfter;
+use codex_protocol::auth::PlanType;
+use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,8 +18,9 @@ use std::time::Duration;
 struct Error {
     r#type: Option<String>,
     code: Option<String>,
+    param: Option<String>,
     message: Option<String>,
-    plan_type: Option<String>,
+    plan_type: Option<PlanType>,
     resets_at: Option<i64>,
     #[serde(default)]
     misalignment: Option<Value>,
@@ -47,6 +51,18 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
             | "project_spend_limit_exceeded",
         ) => ApiError::QuotaExceeded,
         Some("usage_not_included") => ApiError::UsageNotIncluded,
+        _ if error.r#type.as_deref() == Some("usage_limit_reached") => {
+            ApiError::UsageLimitReached(UsageLimitReachedError {
+                plan_type: error.plan_type,
+                resets_at: error
+                    .resets_at
+                    .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0)),
+                limit_window_minutes: None,
+                rate_limits: None,
+                promo_message: None,
+                rate_limit_reached_type: None,
+            })
+        }
         Some("cyber_policy") => ApiError::CyberPolicy {
             message: cyber_policy_message(error.message),
         },
@@ -80,10 +96,24 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
         },
         Some("server_is_overloaded") => ApiError::ServerOverloaded { retry_after: None },
         Some("rate_limit_exceeded" | "slow_down") => {
+            // A rate limit can name a model parameter without rejecting that model.
+            // Keep retry advice instead of applying the model-unavailable cooldown.
             let retry_after = try_parse_retry_delay(&error).and_then(RetryAfter::from_delay);
             ApiError::RateLimitExceeded {
                 message: error.message.unwrap_or_default(),
                 retry_after,
+            }
+        }
+        _ if is_request_configuration_unavailable(
+            error.code.as_deref(),
+            error.param.as_deref(),
+        ) =>
+        {
+            ApiError::ModelUnavailable {
+                message: error
+                    .message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| "The selected model is unavailable.".to_string()),
             }
         }
         _ => ApiError::Retryable {

@@ -1,6 +1,7 @@
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::session::Submission;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
@@ -48,6 +49,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::TurnAbortReason;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -344,6 +346,14 @@ impl GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.inner.custom_models_snapshot()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.inner.replace_custom_models(custom_models);
+    }
+
     fn raw_model_catalog(
         &self,
         strategy: RefreshStrategy,
@@ -362,10 +372,6 @@ impl ModelsManager for GatedModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.inner.auth_manager()
-    }
-
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        self.inner.custom_models()
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -472,6 +478,290 @@ fn step_values(
         step.settings.reasoning_summary,
         step.settings.service_tier.as_deref(),
     )
+}
+
+#[tokio::test]
+async fn routing_replacement_preserves_active_settings_and_accepts_later_updates() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let future = desired_step_settings(&session).await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Detailed),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    lookup.release();
+    let routed = Arc::new(
+        turn.with_unchecked_routing_candidate(
+            "test-profile",
+            &candidate,
+            &session.services.models_manager,
+            &prepared.settings,
+        )
+        .await,
+    );
+    assert_eq!(
+        routed.initial_settings.selected().reasoning_summary,
+        Some(ReasoningSummary::Detailed)
+    );
+    assert_eq!(
+        routed.initial_settings.selected().personality,
+        prepared.settings.selected().personality
+    );
+    assert_eq!(
+        routed.initial_settings.selected().approval_policy,
+        prepared.settings.selected().approval_policy
+    );
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("publish route")
+    );
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Concise),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    assert_eq!(
+        routed.next_step_settings.load_full().reasoning_summary,
+        ReasoningSummary::Concise
+    );
+    assert_eq!(
+        turn.next_step_settings.load_full().reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    let next_cwd = turn.config.cwd.join("routed-next-step-environment");
+    std::fs::create_dir_all(&next_cwd).expect("create next workspace");
+    let next_cwd = codex_utils_path_uri::PathUri::from_abs_path(&next_cwd);
+    let mut environments = session.services.turn_environments.selections();
+    environments[0].cwd = next_cwd.clone();
+    environments[0].workspace_roots = vec![next_cwd];
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    environments: Some(environments.clone()),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    let step = session
+        .capture_step_context(Arc::clone(&routed), &CancellationToken::new())
+        .await
+        .expect("capture routed step");
+    assert_eq!(step.settings.model_info.slug, MODEL_B);
+    assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
+    assert_eq!(step.environments.all_selections(), environments);
+    assert_eq!(desired_step_settings(&session).await, future);
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn routing_replacement_rejects_preparation_before_a_sparse_update() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    let source = Arc::clone(&turn);
+    let models = Arc::clone(&session.services.models_manager);
+    let settings = Arc::clone(&prepared.settings);
+    let routing = tokio::spawn(async move {
+        Arc::new(
+            source
+                .with_unchecked_routing_candidate("test-profile", &candidate, &models, &settings)
+                .await,
+        )
+    });
+    lookup.wait_until_blocked().await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Detailed),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    lookup.release();
+    let routed = routing.await.expect("prepared candidate");
+    assert!(
+        !session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("detect stale preparation")
+    );
+    assert_eq!(
+        turn.next_step_settings.load_full().reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    assert_eq!(
+        session
+            .prepare_turn_context_replacement(&turn)
+            .await
+            .expect("original owner retained")
+            .settings
+            .reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn routing_replacement_rejects_preparation_before_an_environment_update() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    let source = Arc::clone(&turn);
+    let models = Arc::clone(&session.services.models_manager);
+    let settings = Arc::clone(&prepared.settings);
+    let routing = tokio::spawn(async move {
+        Arc::new(
+            source
+                .with_unchecked_routing_candidate("test-profile", &candidate, &models, &settings)
+                .await,
+        )
+    });
+    lookup.wait_until_blocked().await;
+
+    let mut environments = session.services.turn_environments.selections();
+    let error = "executor disconnected during route selection".to_string();
+    environments[0].config = EnvironmentConfigState::Failed(error.clone());
+    // An environment-only change leaves the settings allocation unchanged. Routing must retry
+    // against the manager's current selections without restoring the earlier ready environment.
+    session
+        .services
+        .turn_environments
+        .update_selections(&environments);
+    lookup.release();
+    let routed = routing.await.expect("prepared candidate");
+    assert!(
+        !session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("detect stale environment snapshot")
+    );
+    assert!(Arc::ptr_eq(
+        &turn.next_step_settings.load_full(),
+        &prepared.settings
+    ));
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("original owner retained");
+    assert!(Arc::ptr_eq(
+        &prepared.settings,
+        &turn.next_step_settings.load_full(),
+    ));
+    assert_eq!(prepared.environments, environments);
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("publish with current environment selections")
+    );
+    let snapshot = session.services.turn_environments.snapshot().await;
+    assert_eq!(snapshot.all_selections(), environments);
+    assert!(matches!(
+        &snapshot.environments[0],
+        TurnEnvironmentState::Failed { error: actual, .. } if actual == &error
+    ));
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn workspace_refresh_keeps_active_settings_separate_from_future_settings() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        ..
+    } = activation_fixture(activation_models()).await;
+    {
+        let mut state = session.state.lock().await;
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode =
+            settings
+                .collaboration_mode
+                .with_updates(Some(MODEL_B.to_string()), None, None);
+    }
+    let future = desired_step_settings(&session).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture owner");
+    let refreshed = session
+        .refresh_active_turn_context(&turn, &prepared.settings)
+        .await;
+    assert_eq!(
+        refreshed.initial_settings.selected(),
+        prepared.settings.selected()
+    );
+    assert_eq!(refreshed.model_info().slug, MODEL_A);
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &refreshed)
+            .await
+            .expect("publish workspace context")
+    );
+    assert_eq!(desired_step_settings(&session).await, future);
+    finish.notify_one();
 }
 
 async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {

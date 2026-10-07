@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -248,6 +249,8 @@ mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
+mod model_alias_refresh;
+mod model_routing;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_history;
@@ -423,7 +426,6 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -2290,6 +2292,23 @@ impl Session {
                 };
                 next_config.config_layer_stack = config_layer_stack;
             }
+            let layer_models = crate::config::resolve_custom_models_from_config_layer_stack;
+            let (previous_layer_models, mut next_layer_models) = match (
+                layer_models(&expected_config.config_layer_stack),
+                layer_models(&next_config.config_layer_stack),
+            ) {
+                (Ok(previous), Ok(next)) => (previous, next),
+                (Err(err), _) | (_, Err(err)) => {
+                    warn!("failed to resolve custom models while reloading user config: {err}");
+                    return;
+                }
+            };
+            model_alias_refresh::preserve_materialized_custom_model_overrides(
+                &previous_layer_models,
+                &expected_config.custom_models,
+                &mut next_layer_models,
+            );
+            next_config.custom_models = next_layer_models;
             match self
                 .refresh_config(
                     expected_config,
@@ -3929,6 +3948,7 @@ impl Session {
             selected_capability_roots,
             executor_capability_discovery,
             mcp,
+            required_mcp_servers: required_servers.to_vec(),
             tool_router,
             loaded_agents_md,
         }))

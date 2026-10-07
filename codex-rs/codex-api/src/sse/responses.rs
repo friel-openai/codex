@@ -363,7 +363,7 @@ pub fn process_responses_event(
                 return Ok(Some(ResponseEvent::OutputTextDelta(delta)));
             }
         }
-        "response.custom_tool_call_input.delta" => {
+        "response.custom_tool_call_input.delta" | "response.function_call_arguments.delta" => {
             if let (Some(delta), Some(item_id)) =
                 (event.delta, event.item_id.clone().or(event.call_id.clone()))
             {
@@ -481,7 +481,6 @@ pub fn process_responses_event(
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.custom_tool_call_input.done"
-        | "response.function_call_arguments.delta"
         | "response.function_call_arguments.done"
         | "response.in_progress"
         | "response.metadata"
@@ -946,7 +945,15 @@ mod tests {
                 delta,
             } if item_id == "ctc_1" && call_id == "call_1" && delta == "*** Begin"
         );
-        assert_matches!(&events[1], ResponseEvent::Completed { .. });
+        assert_matches!(
+            &events[1],
+            ResponseEvent::ToolCallInputDelta {
+                item_id,
+                call_id: None,
+                delta,
+            } if item_id == "fc_1" && delta == "{\"input\":\""
+        );
+        assert_matches!(&events[2], ResponseEvent::Completed { .. });
     }
 
     #[tokio::test]
@@ -1021,6 +1028,44 @@ mod tests {
                 );
             }
             other => panic!("unexpected rate-limit event: {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limit_codes_take_precedence_over_request_configuration_params() {
+        for code in ["rate_limit_exceeded", "slow_down"] {
+            for param in ["model", "service_tier", "reasoning.effort"] {
+                let message = "Please try again in 1s.";
+                let event = json!({
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": code,
+                            "param": param,
+                            "message": message,
+                        },
+                    },
+                });
+                let sse = format!("event: response.failed\ndata: {event}\n\n");
+                let events = collect_events(&[sse.as_bytes()]).await;
+                match events.as_slice() {
+                    [
+                        Err(ApiError::RateLimitExceeded {
+                            message: actual,
+                            retry_after,
+                        }),
+                    ] => {
+                        assert_eq!(
+                            (
+                                actual.as_str(),
+                                retry_after.map(RetryAfter::remaining_delay)
+                            ),
+                            (message, Some(Duration::from_secs(/*secs*/ 1))),
+                        );
+                    }
+                    _ => panic!("unexpected events for {code}, {param}: {events:?}"),
+                }
+            }
         }
     }
 
@@ -1329,6 +1374,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_prompt_takes_precedence_over_request_configuration_param() {
+        for param in ["model", "service_tier", "reasoning.effort"] {
+            let event = json!({
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "param": param,
+                        "message": "The prompt was rejected.",
+                    },
+                },
+            });
+            let sse = format!("event: response.failed\ndata: {event}\n\n");
+            let events = collect_events(&[sse.as_bytes()]).await;
+            assert_matches!(
+                events.as_slice(),
+                [Err(ApiError::InvalidPrompt { message })]
+                    if message == "The prompt was rejected."
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn typed_errors_handle_missing_or_blank_message() {
         for (code, fallback) in [
             (
@@ -1360,6 +1429,211 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn structured_request_configuration_errors_are_unavailable_independent_of_message() {
+        for (code, message) in [
+            ("model_not_found", "unrelated first diagnostic"),
+            ("model_not_supported", "unrelated second diagnostic"),
+            ("unsupported_model", "unrelated third diagnostic"),
+            ("service_tier_not_supported", "unrelated fourth diagnostic"),
+            ("unsupported_service_tier", "unrelated fifth diagnostic"),
+            (
+                "reasoning_effort_not_supported",
+                "unrelated sixth diagnostic",
+            ),
+            (
+                "unsupported_reasoning_effort",
+                "unrelated seventh diagnostic",
+            ),
+        ] {
+            let raw_error = json!({
+                "type": "response.failed",
+                "sequence_number": 3,
+                "response": {
+                    "id": "resp_model_unavailable",
+                    "status": "failed",
+                    "error": { "code": code, "message": message },
+                },
+            })
+            .to_string();
+            let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+            let events = collect_events(&[sse.as_bytes()]).await;
+
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                Err(ApiError::ModelUnavailable { message: actual }) => {
+                    assert_eq!(actual, message);
+                }
+                other => panic!("unexpected event for {code}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_request_configuration_params_are_model_unavailable() {
+        for param in ["service_tier", "reasoning.effort"] {
+            let raw_error = json!({
+                "type": "response.failed",
+                "sequence_number": 3,
+                "response": {
+                    "id": "resp_request_configuration_param",
+                    "status": "failed",
+                    "error": {
+                        "code": "invalid_value",
+                        "param": param,
+                        "message": "unrelated diagnostic",
+                    },
+                },
+            })
+            .to_string();
+            let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+            let events = collect_events(&[sse.as_bytes()]).await;
+
+            assert_eq!(events.len(), 1);
+            assert_matches!(
+                &events[0],
+                Err(ApiError::ModelUnavailable { message })
+                    if message == "unrelated diagnostic"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn model_unavailable_uses_fallback_for_empty_message() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_model_unavailable_empty_message",
+                "status": "failed",
+                "error": { "code": "model_not_found", "message": " " },
+            },
+        })
+        .to_string();
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::ModelUnavailable { message })
+                if message == "The selected model is unavailable."
+        );
+    }
+
+    #[tokio::test]
+    async fn server_overloaded_takes_precedence_over_model_param() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_server_overloaded",
+                "status": "failed",
+                "error": {
+                    "code": "server_is_overloaded",
+                    "param": "model",
+                    "message": "The requested model test-model does not support reasoning effort high or service tier priority.",
+                },
+            },
+        })
+        .to_string();
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::ServerOverloaded { retry_after: None })
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_usage_limit_is_semantic() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_usage_limit",
+                "status": "failed",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "resets_at": 4_102_444_800_i64,
+                    "message": "display text is not classification input",
+                },
+            },
+        })
+        .to_string();
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::UsageLimitReached(error))
+                if error.resets_at
+                    == chrono::DateTime::from_timestamp(4_102_444_800_i64, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn model_param_is_model_unavailable_without_a_known_code() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_model_param",
+                "status": "failed",
+                "error": {
+                    "code": "future_model_error",
+                    "param": "model",
+                    "message": "candidate rejected",
+                },
+            },
+        })
+        .to_string();
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::ModelUnavailable { message }) if message == "candidate rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_prose_without_structured_fields_is_not_model_unavailable() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_unstructured_model_prose",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request",
+                    "message": "The requested model test-model does not support reasoning effort high or service tier priority.",
+                },
+            },
+        })
+        .to_string();
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::Retryable { message, retry_after: None })
+                if message == "The requested model test-model does not support reasoning effort high or service tier priority."
+        );
     }
 
     #[tokio::test]
