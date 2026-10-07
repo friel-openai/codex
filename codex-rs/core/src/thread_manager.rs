@@ -449,6 +449,7 @@ pub fn build_models_manager(
     let manager = provider.models_manager(
         config.codex_home.to_path_buf(),
         config.model_catalog.clone(),
+        config.custom_models.clone(),
     );
     manager.set_api_key_model_discovery_enabled(
         config.features.enabled(Feature::ApiKeyModelDiscovery),
@@ -754,7 +755,11 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 agent_control_factory: None,
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-                    .models_manager(codex_home, /*config_model_catalog*/ None),
+                    .models_manager(
+                        codex_home,
+                        /*config_model_catalog*/ None,
+                        Default::default(),
+                    ),
                 git_root_discovery: Arc::default(),
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
