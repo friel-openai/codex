@@ -171,7 +171,7 @@ impl CoreToolRuntime for DynamicToolHandler {}
     clippy::await_holding_invalid_type,
     reason = "active turn checks and dynamic tool response registration must remain atomic"
 )]
-async fn request_dynamic_tool(
+pub(crate) async fn request_dynamic_tool(
     session: &Session,
     turn_context: &TurnContext,
     call_id: String,
@@ -189,7 +189,7 @@ async fn request_dynamic_tool(
                 let mut ts = at.turn_state.lock().await;
                 ts.insert_pending_dynamic_tool(call_id.clone(), tx_response)
             }
-            None => None,
+            None => return None,
         }
     };
     if prev_entry.is_some() {
