@@ -1328,54 +1328,88 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
 
 #[tokio::test]
 async fn fork_version_respects_inherited_segment_cutoffs() {
-    let home = TempDir::new().expect("temp dir");
-    let root_uuid = Uuid::from_u128(/*v*/ 3003);
-    let root_id = ThreadId::from_string(&root_uuid.to_string()).expect("root id");
-    let RolloutItem::TurnContext(mut inherited) = turn_context(home.path(), "inherited") else {
-        unreachable!();
-    };
-    inherited.multi_agent_version = Some(MultiAgentVersion::V2);
-    let mut excluded = inherited.clone();
-    excluded.multi_agent_version = Some(MultiAgentVersion::V1);
-    let root_path = write_ordinaled_paginated_rollout(
-        home.path(),
-        "2025-01-03T13-02-02",
-        root_uuid,
-        [
-            RolloutItem::TurnContext(inherited),
-            RolloutItem::TurnContext(excluded),
-        ],
-    );
-    let child_uuid = Uuid::from_u128(/*v*/ 3004);
-    let child_id = ThreadId::from_string(&child_uuid.to_string()).expect("child id");
-    let child_path = write_ordinaled_paginated_rollout(
-        home.path(),
-        "2025-01-03T13-02-03",
-        child_uuid,
-        [turn_context(home.path(), "unset-child")],
-    );
-    set_history_base(
-        &child_path,
-        history_position(&root_path, root_id, /*end_ordinal_exclusive*/ 2),
-    );
-    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
-    let lineage = store
-        .resolve_rollout_lineage(child_id, /*initial_path*/ None)
-        .await
-        .expect("resolve source lineage");
-    let mut source_meta = codex_rollout::read_session_meta_line(&child_path)
-        .await
-        .expect("read child metadata");
+    for (compressed, explicit_empty_metadata) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let home = TempDir::new().expect("temp dir");
+        let root_uuid = Uuid::from_u128(/*v*/ 3003);
+        let root_id = ThreadId::from_string(&root_uuid.to_string()).expect("root id");
+        let RolloutItem::TurnContext(mut inherited) = turn_context(home.path(), "inherited") else {
+            unreachable!();
+        };
+        inherited.multi_agent_version = Some(MultiAgentVersion::V2);
+        let selected = if explicit_empty_metadata {
+            let RolloutItem::Compacted(mut compacted) = modern_compacted("explicit empty runtime")
+            else {
+                unreachable!();
+            };
+            compacted.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+                multi_agent_version: None,
+                last_started_turn_id: None,
+                previous_turn_settings: None,
+            });
+            RolloutItem::Compacted(compacted)
+        } else {
+            RolloutItem::TurnContext(inherited.clone())
+        };
+        let mut excluded = inherited.clone();
+        excluded.multi_agent_version = Some(MultiAgentVersion::V1);
+        let root_path = write_ordinaled_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-02-02",
+            root_uuid,
+            [
+                RolloutItem::TurnContext(inherited),
+                selected,
+                RolloutItem::TurnContext(excluded),
+            ],
+        );
+        let child_uuid = Uuid::from_u128(/*v*/ 3004);
+        let child_id = ThreadId::from_string(&child_uuid.to_string()).expect("child id");
+        let child_path = write_ordinaled_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-02-03",
+            child_uuid,
+            [turn_context(home.path(), "unset-child")],
+        );
+        let cutoff = history_position(&root_path, root_id, /*end_ordinal_exclusive*/ 3);
+        set_history_base(&child_path, cutoff);
+        if compressed {
+            let input = std::fs::File::open(&root_path).expect("open parent rollout");
+            let output = std::fs::File::create(root_path.with_extension("jsonl.zst"))
+                .expect("create compressed parent rollout");
+            zstd::stream::copy_encode(input, output, /*level*/ 3).expect("compress parent rollout");
+            std::fs::remove_file(&root_path).expect("remove plain parent rollout");
+        }
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let lineage = store
+            .resolve_rollout_lineage(child_id)
+            .await
+            .expect("resolve source lineage");
+        let inherited_segment = lineage.segments().first().expect("inherited segment");
+        assert_eq!(
+            inherited_segment.jsonl_end_byte_offset,
+            Some(cutoff.end_byte_offset)
+        );
+        if compressed {
+            assert_eq!(inherited_segment.end_byte_offset, None);
+        }
+        let mut source_meta = codex_rollout::read_session_meta_line(&child_path)
+            .await
+            .expect("read child metadata");
 
-    let context = load_for_fork(lineage, /*history_base*/ None)
-        .await
-        .expect("recover version from inherited prefix");
-    source_meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
-    assert_eq!(
-        serde_json::to_value(context).expect("serialize fork context"),
-        serde_json::to_value(vec![RolloutItem::SessionMeta(source_meta)])
-            .expect("serialize expected context")
-    );
+        let context = load_for_fork(lineage, /*history_base*/ None)
+            .await
+            .expect("recover version from inherited prefix");
+        source_meta.meta.multi_agent_version =
+            (!explicit_empty_metadata).then_some(MultiAgentVersion::V2);
+        assert_eq!(
+            serde_json::to_value(context).expect("serialize fork context"),
+            serde_json::to_value(vec![RolloutItem::SessionMeta(source_meta)])
+                .expect("serialize expected context"),
+            "compressed={compressed}, explicit_empty_metadata={explicit_empty_metadata}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1706,6 +1740,30 @@ async fn replays_nested_archived_lineage_from_frozen_prefix() {
     );
     // The same frozen lineage must replay from compressed files, without materializing or
     // accidentally including the archived root's records after the inherited cutoff.
+    // Unordinaled and invalid records after the cutoff must not enter model context or
+    // make a bounded ancestor unreadable merely because it was compressed.
+    let mut root_suffix = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&archived_root)
+        .expect("open excluded root suffix");
+    use std::io::Write as _;
+    writeln!(
+        root_suffix,
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: "2025-01-03T13:01:02Z".to_string(),
+            ordinal: None,
+            item: user_message("excluded unordinaled suffix"),
+        })
+        .expect("encode excluded record")
+    )
+    .expect("append excluded record");
+    writeln!(
+        root_suffix,
+        "{{\"type\":\"event_msg\",\"payload\":\"unterminated"
+    )
+    .expect("append excluded malformed record");
+    drop(root_suffix);
     for path in [&archived_root, &middle_path, &child_path] {
         let input = std::fs::File::open(path).expect("open rollout");
         let output = std::fs::File::create(path.with_extension("jsonl.zst"))
