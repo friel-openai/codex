@@ -1,6 +1,10 @@
 mod archive_thread;
 mod create_thread;
 mod delete_thread;
+mod goal_supervisor_history_repair;
+mod goal_supervisor_runtime_repair;
+#[cfg(test)]
+mod goal_supervisor_runtime_repair_tests;
 mod helpers;
 mod history_revision;
 mod list_threads;
@@ -214,14 +218,23 @@ struct LiveRecorderRecovery {
 /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
 /// entry supplies that half of the reservation until the in-process mutex is released.
 struct RolloutWriterReservation {
+    store_identity: usize,
     thread_ids: Vec<ThreadId>,
-    _in_process_guards: Vec<OwnedMutexGuard<()>>,
-    _cross_process_guards: Vec<WriterLockGuard>,
+    _in_process_guards: Vec<(ThreadId, OwnedMutexGuard<()>)>,
+    cross_process_guards: Vec<(ThreadId, WriterLockGuard)>,
 }
 
 impl RolloutWriterReservation {
     fn contains(&self, thread_id: ThreadId) -> bool {
         self.thread_ids.contains(&thread_id)
+    }
+
+    fn take_cross_process_guard(&mut self, thread_id: ThreadId) -> Option<WriterLockGuard> {
+        let index = self
+            .cross_process_guards
+            .iter()
+            .position(|(candidate, _)| *candidate == thread_id)?;
+        Some(self.cross_process_guards.swap_remove(index).1)
     }
 }
 
@@ -466,13 +479,59 @@ impl LocalThreadStore {
         live_writer::rollout_path(self, thread_id).await
     }
 
+    /// Avoids history preflight when another process already owns the source. This check is
+    /// advisory: repair and freezing still acquire their own authoritative writer reservation.
+    async fn check_snapshot_writer_available(&self, thread_id: ThreadId) -> ThreadStoreResult<()> {
+        let _writer = self.live_writer_locks.lock(thread_id).await;
+        if !self.live_recorders.lock().await.contains_key(&thread_id) {
+            drop(self.acquire_writer_lock(thread_id)?);
+        }
+        Ok(())
+    }
+
     /// Freezes the thread's current prefix and installs a reference-backed continuation.
     pub async fn freeze_thread_segment(
         &self,
         thread_id: ThreadId,
         params: FreezeRolloutSegmentParams,
     ) -> ThreadStoreResult<FrozenRolloutSegment> {
-        segment::freeze_thread_segment(self, thread_id, params).await
+        if params.is_snapshot() {
+            self.check_snapshot_writer_available(thread_id).await?;
+        }
+        let source = if params.is_snapshot() {
+            thread_rollout_resolver::resolve_current_including_archived_read_only(self, thread_id)
+                .await?
+        } else {
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        };
+        let Some(source) = source else {
+            // A deferred live recorder is intentionally pathless until the freeze operation makes
+            // it durable. The segment implementation already owns that transition; there is no
+            // persisted history to inspect for the compatibility repair beforehand.
+            return segment::freeze_thread_segment(self, thread_id, params).await;
+        };
+        // Rotation stabilizes the active rollout's bounded reference window. History-base
+        // ancestors are repaired by operations that replay them; traversing the complete lineage
+        // here makes repeated rotations rescan every older immutable segment.
+        let history_access = goal_supervisor_runtime_repair::repair_recent_history_before_access(
+            self,
+            thread_id,
+            source.path.as_path(),
+        )
+        .await?;
+        match history_access.writer_reservation() {
+            Some(reservation) => {
+                segment::freeze_thread_segment_reserved(
+                    self,
+                    thread_id,
+                    params,
+                    /*expected_rollout_id*/ None,
+                    reservation,
+                )
+                .await
+            }
+            None => segment::freeze_thread_segment(self, thread_id, params).await,
+        }
     }
 
     /// Freezes a thread only while the expected physical rollout remains selected.
@@ -482,13 +541,50 @@ impl LocalThreadStore {
         expected_rollout_id: codex_protocol::RolloutId,
         params: FreezeRolloutSegmentParams,
     ) -> ThreadStoreResult<FrozenRolloutSegment> {
-        segment::freeze_thread_segment_for_rollout(
+        if params.is_snapshot() {
+            self.check_snapshot_writer_available(thread_id).await?;
+        }
+        let source = if params.is_snapshot() {
+            thread_rollout_resolver::resolve_current_including_archived_read_only(self, thread_id)
+                .await?
+        } else {
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        }
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        if source.rollout_id != expected_rollout_id {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "rollout path does not select the current rollout for thread {thread_id}"
+                ),
+            });
+        }
+        let history_access = goal_supervisor_runtime_repair::repair_recent_history_before_access(
             self,
             thread_id,
-            params,
-            Some(expected_rollout_id),
+            source.path.as_path(),
         )
-        .await
+        .await?;
+        match history_access.writer_reservation() {
+            Some(reservation) => {
+                segment::freeze_thread_segment_reserved(
+                    self,
+                    thread_id,
+                    params,
+                    Some(expected_rollout_id),
+                    reservation,
+                )
+                .await
+            }
+            None => {
+                segment::freeze_thread_segment_for_rollout(
+                    self,
+                    thread_id,
+                    params,
+                    Some(expected_rollout_id),
+                )
+                .await
+            }
+        }
     }
 
     /// Freezes a paginated fork without reading history excluded from its response.
@@ -709,13 +805,20 @@ impl LocalThreadStore {
         thread_ids.dedup();
         let mut in_process_guards = Vec::with_capacity(thread_ids.len());
         for &thread_id in &thread_ids {
-            in_process_guards.push(self.live_writer_locks.lock(thread_id).await);
+            in_process_guards.push((thread_id, self.live_writer_locks.lock(thread_id).await));
         }
-        let cross_process_guards = self.acquire_writer_locks(thread_ids.as_slice()).await?;
+        let mut cross_process_guards = Vec::with_capacity(thread_ids.len());
+        for &thread_id in &thread_ids {
+            if self.live_recorders.lock().await.contains_key(&thread_id) {
+                continue;
+            }
+            cross_process_guards.push((thread_id, self.acquire_writer_lock(thread_id)?));
+        }
         Ok(RolloutWriterReservation {
+            store_identity: Arc::as_ptr(&self.live_writer_locks) as usize,
             thread_ids,
             _in_process_guards: in_process_guards,
-            _cross_process_guards: cross_process_guards,
+            cross_process_guards,
         })
     }
 
@@ -1358,7 +1461,7 @@ mod tests {
             .expect("recover recorder");
         drop(store);
 
-        let locks = WriterLockCoordinator::new(home.path());
+        let locks = Arc::new(WriterLockCoordinator::new(home.path()));
         assert!(
             matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
@@ -2331,7 +2434,7 @@ mod tests {
             drop(recorder);
 
             // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
-            let locks = WriterLockCoordinator::new(home.path());
+            let locks = Arc::new(WriterLockCoordinator::new(home.path()));
             let _guard = locks
                 .acquire(thread_id)
                 .expect("writer lock must be released");
