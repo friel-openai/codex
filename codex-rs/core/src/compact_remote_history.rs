@@ -126,6 +126,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
 fn rewritten_output_for_context_window(
     envelope: &ResponseItemEnvelope,
 ) -> Option<ResponseItemEnvelope> {
+    if crate::compact::is_independent_thread_message(&envelope.item) {
+        return None;
+    }
     let item = match &envelope.item {
         ResponseItem::FunctionCallOutput {
             id,
