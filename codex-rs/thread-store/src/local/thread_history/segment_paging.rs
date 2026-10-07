@@ -838,7 +838,9 @@ mod tests {
         let oldest = segment(thread_id, "oldest", /*start_ordinal*/ 1, Some(10));
         let newer = [
             segment(thread_id, "middle", /*start_ordinal*/ 10, Some(20)),
-            segment(thread_id, "newest", /*start_ordinal*/ 20, None),
+            segment(
+                thread_id, "newest", /*start_ordinal*/ 20, /*end_ordinal_exclusive*/ None,
+            ),
         ];
         let mut query = QueryBuilder::<Sqlite>::new("SELECT * FROM thread_turns WHERE 1 = 1");
 
@@ -868,7 +870,12 @@ mod tests {
                 /*start_ordinal*/ 10,
                 Some(20),
             ),
-            segment(child_thread_id, "child", /*start_ordinal*/ 20, None),
+            segment(
+                child_thread_id,
+                "child",
+                /*start_ordinal*/ 20,
+                /*end_ordinal_exclusive*/ None,
+            ),
         ];
         let mut query = QueryBuilder::<Sqlite>::new("SELECT * FROM thread_turns WHERE 1 = 1");
 
@@ -951,6 +958,9 @@ mod tests {
             jsonl_end_byte_offset: None,
             end_byte_offset: None,
             filter_texts: Vec::new(),
+            goal_supervisor_provenance: Default::default(),
+            uses_history_base: false,
+            uses_fork_boundary: false,
         }
     }
 }
