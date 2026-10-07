@@ -605,6 +605,7 @@ impl LocalAgentControl {
                 inherited_instructions,
                 inherited_exec_policy,
                 client_mcp_extensions,
+                inherited_thread_state: Default::default(),
             })
             .await
         {
@@ -766,6 +767,7 @@ impl LocalAgentControl {
                     /*metrics_service_name*/ None,
                     inheritance.environments,
                     inheritance.exec_policy,
+                    Default::default(),
                     environments,
                 ))
                 .await?;
@@ -1236,6 +1238,18 @@ impl LocalAgentControl {
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);
 
+        let inherited_thread_state = InheritedThreadState::builder()
+            .prompt_cache_key(
+                parent_prompt_cache_key_for_source(state, Some(&session_source)).await,
+            )
+            .response_continuation(
+                parent_response_continuation_for_source(state, Some(&session_source)).await,
+            )
+            .mcp_tool_snapshot(
+                parent_mcp_tool_snapshot_for_source(state, Some(&session_source)).await,
+            )
+            .build();
+
         let fork_context = fork_context_started_at.elapsed();
         let child_create_started_at = Instant::now();
         let new_thread = state
@@ -1251,6 +1265,7 @@ impl LocalAgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 /*environments*/ None,
+                inherited_thread_state,
                 thread_extension_init,
             )
             .await?;
@@ -1423,6 +1438,7 @@ impl LocalAgentControl {
                 inherited_instructions: None,
                 inherited_exec_policy,
                 client_mcp_extensions: None,
+                inherited_thread_state: Default::default(),
             })
             .await?;
         let mut agent_metadata = agent_metadata;
