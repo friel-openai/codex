@@ -4417,7 +4417,12 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     requests.lock().expect("request recorder lock").clear();
     app.change_working_directory(&mut tui, &mut server, untrusted.clone().abs())
         .await;
-    assert_eq!(app.config.active_project.trust_level, Some(T::Untrusted));
+    assert_eq!(
+        app.config.active_project.trust_level,
+        Some(T::Untrusted),
+        "{}",
+        history().join("")
+    );
     let approval = app.config.permissions.approval_policy.value();
     assert_eq!(approval, AskForApproval::UnlessTrusted.to_core());
     assert_eq!(rec(req, "thread/fork")[0]["approvalPolicy"], "untrusted");
@@ -4592,6 +4597,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     &mut app_server,
                     AppEvent::ForkCurrentSession {
                         name: Some("Add User Fork".to_string()),
+                        placement: None,
                     },
                 ))
                 .await?;
@@ -4620,6 +4626,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     &mut app_server,
                     AppEvent::ForkCurrentSession {
                         name: Some("Failed Fork".to_string()),
+                        placement: None,
                     },
                 ))
                 .await?;

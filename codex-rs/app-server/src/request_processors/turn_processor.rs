@@ -15,7 +15,9 @@ use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_skills::system_cache_root_dir;
+use futures::FutureExt;
 
+use crate::error_code::OVERLOADED_ERROR_CODE;
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
 
@@ -923,7 +925,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
-        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
@@ -957,16 +959,34 @@ impl TurnRequestProcessor {
             .await?;
 
         if thread_settings != codex_protocol::protocol::ThreadSettingsOverrides::default() {
-            self.submit_core_op(
-                request_id,
-                thread.as_ref(),
-                Op::ThreadSettings {
-                    thread_settings,
-                    reply: None,
-                },
-            )
-            .await
-            .map_err(|err| internal_error(format!("failed to update thread settings: {err}")))?;
+            let trace = self.request_trace_context(request_id).await;
+            let state = self.thread_state_manager.thread_state(thread_id).await;
+            let mut state = state.lock().await;
+            // Register before the listener can consume the result, but never wait for
+            // queue capacity while holding its lock. A pending send has not enqueued the op.
+            let submission_id = thread
+                .submit_with_trace(
+                    Op::ThreadSettings {
+                        thread_settings,
+                        reply: None,
+                    },
+                    trace,
+                )
+                .now_or_never()
+                .ok_or_else(|| JSONRPCErrorError {
+                    code: OVERLOADED_ERROR_CODE,
+                    message: "Thread settings queue is full; retry after pending requests complete"
+                        .into(),
+                    data: None,
+                })?
+                .map_err(|err| {
+                    internal_error(format!("failed to update thread settings: {err}"))
+                })?;
+            if state.listener_matches(&thread) && state.listener_command_tx().is_some() {
+                state
+                    .pending_thread_settings_confirmations
+                    .insert(submission_id);
+            }
         }
 
         Ok(ThreadSettingsUpdateResponse {})

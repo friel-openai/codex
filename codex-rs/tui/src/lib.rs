@@ -85,6 +85,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 pub use token_usage::TokenUsage;
@@ -149,6 +150,7 @@ mod external_agent_config_migration;
 mod external_editor;
 mod file_search;
 mod get_git_diff;
+mod ghostty_fork;
 mod git_action_directives;
 mod goal_display;
 mod goal_files;
@@ -217,6 +219,7 @@ mod system_motion;
 mod task_mentions;
 mod temporary_structured_request;
 mod terminal_hyperlinks;
+mod terminal_multiplexer;
 mod terminal_palette;
 mod terminal_probe;
 mod terminal_title;
@@ -331,14 +334,8 @@ impl AppServerTarget {
     }
 
     fn uses_embedded_network_policy(&self) -> bool {
-        matches!(
-            self,
-            Self::Embedded
-                | Self::LocalDaemon {
-                    allow_embedded_fallback: true,
-                    ..
-                }
-        )
+        // Even a required automatic daemon can fail the final release-identity check.
+        matches!(self, Self::Embedded | Self::LocalDaemon { .. })
     }
 
     fn environment_http_client_factory(
@@ -348,16 +345,8 @@ impl AppServerTarget {
     ) -> codex_http_client::HttpClientFactory {
         let factory = config.http_client_factory();
         match self {
-            Self::Embedded
-            | Self::LocalDaemon {
-                allow_embedded_fallback: true,
-                ..
-            } => policy.bind(factory),
-            Self::LocalDaemon {
-                allow_embedded_fallback: false,
-                ..
-            }
-            | Self::Remote { .. } => factory,
+            Self::Embedded | Self::LocalDaemon { .. } => policy.bind(factory),
+            Self::Remote { .. } => factory,
         }
     }
 
@@ -549,7 +538,7 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
 async fn start_app_server(
     target: &mut AppServerTarget,
     arg0_paths: Arg0DispatchPaths,
-    config: Config,
+    mut config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
@@ -575,10 +564,14 @@ async fn start_app_server(
                         allow_embedded_fallback: true,
                         ..
                     }
-                ) =>
+                ) || matches!(target, AppServerTarget::LocalDaemon { .. })
+                    && err
+                        .downcast_ref::<app_server_connection::LocalDaemonVersionMismatch>()
+                        .is_some() =>
             {
                 tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
                 *target = AppServerTarget::Embedded;
+                embedded_network_policy.activate(&mut config);
                 *state_db = init_state_db_for_app_server_target(&config, target).await?;
             }
             Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
@@ -942,12 +935,24 @@ async fn resolve_startup_resume_or_fork_cwd(
         resume_picker::SessionSelection::Fork(target_session) => {
             Some((CwdPromptAction::Fork, target_session))
         }
+        resume_picker::SessionSelection::Side(target_session) => {
+            Some((CwdPromptAction::Fork, target_session))
+        }
         _ => None,
     }) else {
         return Ok(ResolveCwdOutcome::Continue(None));
     };
     let local_settings = crate::local_settings::LocalSettings::from(config);
-    let resume_cwd_mode = effective_resume_cwd_mode(local_settings.tui.resume_cwd, cwd_override);
+    let allow_prompt = allow_interactive_session_cwd_prompt(
+        uses_remote_workspace,
+        cwd_override.is_some(),
+        session_selection,
+    );
+    let mut resume_cwd_mode =
+        effective_resume_cwd_mode(local_settings.tui.resume_cwd, cwd_override);
+    if !allow_prompt && resume_cwd_mode.is_none() {
+        resume_cwd_mode = Some(ResumeCwdMode::Session);
+    }
     if uses_remote_workspace_or_environment
         && cwd_override.is_none()
         && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
@@ -1014,6 +1019,7 @@ fn app_server_target_for_launch(
     can_reuse_implicit_local_daemon: bool,
     workload_identity_selected: bool,
     exec_server_url: Option<&std::ffi::OsStr>,
+    force_embedded: bool,
 ) -> std::io::Result<AppServerTarget> {
     if workload_identity_selected {
         if explicit_remote_endpoint.is_some() {
@@ -1022,6 +1028,9 @@ fn app_server_target_for_launch(
                 "workload identity must be configured on the remote app-server host",
             ));
         }
+        return Ok(AppServerTarget::Embedded);
+    }
+    if force_embedded {
         return Ok(AppServerTarget::Embedded);
     }
     Ok(match explicit_remote_endpoint {
@@ -1037,6 +1046,16 @@ fn app_server_target_for_launch(
         }
         None => AppServerTarget::Embedded,
     })
+}
+
+fn allow_interactive_session_cwd_prompt(
+    uses_remote_workspace: bool,
+    cli_cwd_is_set: bool,
+    session_selection: &resume_picker::SessionSelection,
+) -> bool {
+    !uses_remote_workspace
+        && !cli_cwd_is_set
+        && !matches!(session_selection, resume_picker::SessionSelection::Side(_))
 }
 
 async fn cloud_config_bundle_for_app_server_target(
@@ -1087,6 +1106,14 @@ pub async fn run_main(
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    // Daemon compatibility checks can handle an eyre Report before run_ratatui_app.
+    // Install before startup creates any reports, and retain the result for database recovery retries.
+    static COLOR_EYRE: OnceLock<Result<(), String>> = OnceLock::new();
+    COLOR_EYRE
+        .get_or_init(|| color_eyre::install().map_err(|err| err.to_string()))
+        .as_ref()
+        .map_err(|err| std::io::Error::other(err.clone()))?;
+
     system_motion::initialize().await;
     startup_recovery::scope(async move {
         // Startup retains a large future for the whole session. Keep it off callers' stacks,
@@ -1121,6 +1148,25 @@ pub async fn run_main(
     .await
 }
 
+fn missing_session_message(id_str: &str, picker_action: Option<&str>) -> String {
+    match picker_action {
+        Some(action) => format!(
+            "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+        ),
+        None => format!(
+            "No saved session found with ID {id_str}. Return to the original conversation and retry `/side`."
+        ),
+    }
+}
+
+fn format_error_chain(error: &color_eyre::Report) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ratatui_app(
     mut cli: Cli,
@@ -1146,7 +1192,6 @@ async fn run_ratatui_app(
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     let workload_identity_selected = is_workload_identity_selected();
-    color_eyre::install()?;
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
 
@@ -1409,7 +1454,7 @@ async fn run_ratatui_app(
 
     let missing_session_exit =
         |id_str: &str,
-         action: &str,
+         picker_action: Option<&str>,
          tui: &mut Tui,
          terminal_restore_guard: &mut TerminalRestoreGuard| {
             error!("Error finding conversation path: {id_str}");
@@ -1422,9 +1467,7 @@ async fn run_ratatui_app(
                 resume_hint: None,
                 disconnect_info: None,
                 update_action: None,
-                exit_reason: ExitReason::Fatal(format!(
-                    "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
-                )),
+                exit_reason: ExitReason::Fatal(missing_session_message(id_str, picker_action)),
             })
         };
 
@@ -1442,6 +1485,22 @@ async fn run_ratatui_app(
     let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
     let mut session_selection = if cli.agents_overview {
         resume_picker::SessionSelection::AgentsOverview
+    } else if let Some(id_str) = cli.side_session_id.as_deref() {
+        let Some(startup_app_server) = app_server.as_mut() else {
+            unreachable!("app server should be initialized for an internal side session");
+        };
+        match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await? {
+            Some(target_session) => resume_picker::SessionSelection::Side(target_session),
+            None => {
+                shutdown_app_server_if_present(app_server.take()).await;
+                return missing_session_exit(
+                    id_str,
+                    /*picker_action*/ None,
+                    &mut tui,
+                    &mut terminal_restore_guard,
+                );
+            }
+        }
     } else if use_fork {
         if let Some(id_str) = cli.fork_session_id.as_deref() {
             let Some(startup_app_server) = app_server.as_mut() else {
@@ -1466,7 +1525,7 @@ async fn run_ratatui_app(
                     shutdown_app_server_if_present(app_server.take()).await;
                     return missing_session_exit(
                         id_str,
-                        "fork",
+                        Some("fork"),
                         &mut tui,
                         &mut terminal_restore_guard,
                     );
@@ -1568,7 +1627,7 @@ async fn run_ratatui_app(
                 shutdown_app_server_if_present(app_server.take()).await;
                 return missing_session_exit(
                     id_str,
-                    "resume",
+                    Some("resume"),
                     &mut tui,
                     &mut terminal_restore_guard,
                 );
@@ -1652,7 +1711,9 @@ async fn run_ratatui_app(
 
     if matches!(
         &session_selection,
-        resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_)
+        resume_picker::SessionSelection::Resume(_)
+            | resume_picker::SessionSelection::Fork(_)
+            | resume_picker::SessionSelection::Side(_)
     ) && let Err(err) = startup_draft.flush_pending_events(&mut tui).await
     {
         shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
@@ -1709,7 +1770,9 @@ async fn run_ratatui_app(
     ) && (cli.resume_picker || cli.fork_picker);
 
     let reloaded_config = match &session_selection {
-        resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
+        resume_picker::SessionSelection::Resume(_)
+        | resume_picker::SessionSelection::Fork(_)
+        | resume_picker::SessionSelection::Side(_) => {
             startup_draft
                 .run_until(
                     &mut tui,
@@ -2338,6 +2401,14 @@ mod daemon_telemetry;
 mod daemon_startup_tests;
 
 #[cfg(test)]
+#[path = "daemon_identity_tests.rs"]
+mod daemon_identity_tests;
+
+#[cfg(test)]
+#[path = "startup_error_hook_tests.rs"]
+mod startup_error_hook_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
@@ -2365,6 +2436,19 @@ pub(crate) mod tests {
         assert!(size < 64 * 1024, "TUI startup future is {size} bytes");
     }
 
+    #[test]
+    fn format_error_chain_preserves_nested_side_fork_failure() {
+        let error = color_eyre::eyre::eyre!(
+            "missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021"
+        )
+        .wrap_err("thread/fork failed during TUI bootstrap")
+        .wrap_err("Failed to start standalone side conversation from parent");
+
+        assert_eq!(
+            format_error_chain(&error),
+            "Failed to start standalone side conversation from parent: thread/fork failed during TUI bootstrap: missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021"
+        );
+    }
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
             .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
@@ -3083,6 +3167,7 @@ requires_openai_auth = {requires_openai_auth}
             /*can_reuse_implicit_local_daemon*/ true,
             /*workload_identity_selected*/ false,
             /*exec_server_url*/ None,
+            /*force_embedded*/ false,
         )?;
 
         assert_eq!(
@@ -3108,6 +3193,7 @@ requires_openai_auth = {requires_openai_auth}
                     /*can_reuse_implicit_local_daemon*/ true,
                     /*workload_identity_selected*/ false,
                     Some(std::ffi::OsStr::new(executor)),
+                    /*force_embedded*/ false,
                 )?,
                 AppServerTarget::Embedded,
             );
@@ -3126,6 +3212,7 @@ requires_openai_auth = {requires_openai_auth}
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
             Some(std::ffi::OsStr::new("none")),
+            /*force_embedded*/ false,
         )?;
 
         assert_eq!(
@@ -3149,6 +3236,7 @@ requires_openai_auth = {requires_openai_auth}
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
             /*exec_server_url*/ None,
+            /*force_embedded*/ false,
         )?;
 
         assert_eq!(target, AppServerTarget::Embedded);
@@ -3165,6 +3253,7 @@ requires_openai_auth = {requires_openai_auth}
                 /*can_reuse_implicit_local_daemon*/ true,
                 /*workload_identity_selected*/ true,
                 /*exec_server_url*/ None,
+                /*force_embedded*/ false,
             )?,
             AppServerTarget::Embedded
         );
@@ -3178,6 +3267,7 @@ requires_openai_auth = {requires_openai_auth}
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ true,
             /*exec_server_url*/ None,
+            /*force_embedded*/ false,
         )
         .expect_err("remote hosts must own workload identity");
         assert_eq!(
@@ -3185,6 +3275,47 @@ requires_openai_auth = {requires_openai_auth}
             "workload identity must be configured on the remote app-server host"
         );
         Ok(())
+    }
+
+    #[test]
+    fn internal_side_launch_forces_embedded_app_server() -> color_eyre::Result<()> {
+        let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
+            socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
+        };
+        let target = app_server_target_for_launch(
+            Some(explicit_endpoint),
+            Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
+            /*can_reuse_implicit_local_daemon*/ true,
+            /*workload_identity_selected*/ false,
+            /*exec_server_url*/ None,
+            /*force_embedded*/ true,
+        )?;
+
+        assert_eq!(target, AppServerTarget::Embedded);
+        Ok(())
+    }
+
+    #[test]
+    fn internal_side_uses_persisted_cwd_without_interactive_prompt() {
+        let side = resume_picker::SessionSelection::Side(resume_picker::SessionTarget {
+            path: None,
+            thread_id: ThreadId::new(),
+            cwd: Some(PathBuf::from("/persisted/project")),
+            history_mode: None,
+        });
+        let fork = resume_picker::SessionSelection::Fork(resume_picker::SessionTarget {
+            path: None,
+            thread_id: ThreadId::new(),
+            cwd: Some(PathBuf::from("/persisted/project")),
+            history_mode: None,
+        });
+
+        assert!(!allow_interactive_session_cwd_prompt(
+            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &side,
+        ));
+        assert!(allow_interactive_session_cwd_prompt(
+            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &fork,
+        ));
     }
 
     #[test]

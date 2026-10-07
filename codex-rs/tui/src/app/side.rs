@@ -19,7 +19,7 @@ use codex_protocol::models::ResponseItem;
 const SIDE_RENAME_BLOCK_MESSAGE: &str = "Side conversations are ephemeral and cannot be renamed.";
 const SIDE_MAIN_THREAD_UNAVAILABLE_MESSAGE: &str =
     "'/side' is unavailable until the main thread is ready.";
-const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
+pub(super) const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
     "'/side' is unavailable until the current conversation has started. ",
     "Send a message first, then try /side again."
 );
@@ -224,6 +224,10 @@ impl SideThreadState {
 
 impl App {
     pub(super) fn sync_side_thread_ui(&mut self) {
+        if self.standalone_side_active {
+            self.activate_standalone_side_ui();
+            return;
+        }
         let clear_side_ui = |chat_widget: &mut crate::chatwidget::ChatWidget| {
             chat_widget.set_side_conversation_context_label(/*label*/ None);
             chat_widget.set_side_conversation_active(/*active*/ false);
@@ -530,6 +534,9 @@ impl App {
         self.abort_thread_event_listener(thread_id);
         self.thread_event_channels.remove(&thread_id);
         self.pending_server_profiles.remove(&thread_id);
+        self.agents_overview
+            .requested_permission_profiles
+            .remove(&thread_id);
         self.agents_overview.activity.remove(&thread_id);
         self.side_threads.remove(&thread_id);
         self.agent_navigation.remove(thread_id);

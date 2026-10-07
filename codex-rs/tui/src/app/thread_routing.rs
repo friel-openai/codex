@@ -1207,11 +1207,12 @@ impl App {
                         })
                 })
             {
-                confirmed_profile = self.pending_server_profiles.remove(&thread_id).or_else(|| {
-                    self.agents_overview
-                        .requested_permission_profiles
-                        .remove(&thread_id)
-                });
+                let pending = self.pending_server_profiles.remove(&thread_id);
+                let requested = self
+                    .agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
+                confirmed_profile = pending.or(requested);
             }
         }
         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification
