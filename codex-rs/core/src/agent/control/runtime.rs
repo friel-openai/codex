@@ -3,7 +3,7 @@
 
 use super::LocalAgentControl;
 use super::execution::AgentExecutionLimiter;
-use super::residency::V2Residency;
+use super::residency::AgentResidency;
 use crate::agent::api::AgentControl;
 use crate::agent::registry::AgentRegistry;
 use crate::config::RolloutBudgetConfig;
@@ -108,7 +108,8 @@ pub(crate) struct LocalAgentRuntime {
     pub(super) shared_thread_instructions_provider:
         Arc<OnceLock<Arc<dyn ThreadInstructionsProvider>>>,
     pub(super) registry: Arc<AgentRegistry>,
-    pub(super) residency: Arc<V2Residency>,
+    /// Shared loaded-worker accounting for both multi-agent protocol versions.
+    pub(super) agent_residency: Arc<AgentResidency>,
     /// Shared by every session in this tree, including private delegates.
     pub(crate) shutdown: CancellationToken,
     shutdown_state: Arc<AgentTreeShutdownState>,
@@ -124,7 +125,7 @@ impl LocalAgentRuntime {
             manager,
             thread_id_generator,
             registry: Arc::default(),
-            residency: Arc::default(),
+            agent_residency: Arc::default(),
             shutdown: CancellationToken::new(),
             shutdown_state: Arc::default(),
             agent_execution_limiter: Arc::default(),
