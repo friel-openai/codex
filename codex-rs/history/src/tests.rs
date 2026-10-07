@@ -533,6 +533,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
+        retained_context_replay: None,
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
@@ -591,6 +592,7 @@ fn compacted_resume_metadata_presence_round_trips_empty_values() -> Result<()> {
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
+        retained_context_replay: None,
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
@@ -683,6 +685,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         replacement_history: Some(vec![envelope]),
         retained_context: None,
         guardian_history: Some(checkpoint.clone()),
+        retained_context_replay: None,
         mcp_resource_origins: Some(McpResourceOriginCheckpoint::default()),
         window_number: None,
         first_window_id: None,
@@ -907,6 +910,22 @@ fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<(
     let required = compacted["required"].as_array().expect("required fields");
     assert!(!required.contains(&json!("replacement_history")));
     assert!(!required.contains(&json!("replacement_history_metadata")));
+    assert!(!required.contains(&json!("retained_context_replay")));
+    assert_eq!(
+        schema["definitions"]["RetainedContextReplay"]["properties"]["legacy"],
+        schema["definitions"]["RetainedContextReplay"]["properties"]["thread_owned_root"]
+    );
+    assert!(
+        !schema["definitions"]["RetainedContextReplay"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("review_input"))
+    );
+    assert!(
+        schema["definitions"]["RetainedContextReplay"]["properties"]
+            .get("resolved_review_input")
+            .is_none()
+    );
     Ok(())
 }
 
@@ -932,6 +951,7 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(3),
+        retained_context_replay: None,
         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
         previous_window_id: Some("019b3f6e-0000-7000-8000-000000000002".to_string()),
         window_id: Some("019b3f6e-7a10-7cc3-8b6e-1d09e2f7a001".to_string()),
@@ -952,6 +972,89 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
             "compaction_response_id": null,
             "latest_token_usage_record": null,
         })
+    );
+    Ok(())
+}
+
+#[test]
+fn migration_retained_context_override_round_trips_without_changing_older_checkpoints() -> Result<()>
+{
+    let mut item = serde_json::from_value::<CompactedItem>(json!({"message": ""}))?;
+    assert_eq!(item.retained_context_replay, None);
+    assert!(
+        serde_json::to_value(&item)?
+            .get("retained_context_replay")
+            .is_none()
+    );
+
+    let mut thread_owned = crate::RetainedContext::default();
+    thread_owned.record_user_message(
+        crate::RetainedUserMessage {
+            turn_id: String::new(),
+            message_id: None,
+            text: "anonymous instruction".to_string(),
+            complete: false,
+            origin: crate::UserInputOrigin::User,
+            phase: None,
+        },
+        crate::RetainedInputSource::Local(None),
+    );
+    let mut legacy = crate::RetainedContext::default();
+    legacy.mark_user_messages_incomplete();
+    item.retained_context = Some(thread_owned.clone());
+    item.retained_context_replay = Some(crate::RetainedContextReplay {
+        legacy,
+        thread_owned_worker: crate::RetainedContext::default(),
+        thread_owned_root: thread_owned.clone(),
+        review_input: None,
+        resolved_review_input: None,
+    });
+    let serialized = serde_json::to_value(&item)?;
+    assert!(
+        serialized["retained_context_replay"]
+            .get("review_input")
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::from_value::<CompactedItem>(serialized.clone())?,
+        item
+    );
+
+    #[derive(serde::Deserialize)]
+    struct OlderCheckpoint {
+        retained_context: Option<crate::RetainedContext>,
+    }
+    let older: OlderCheckpoint = serde_json::from_value(serialized)?;
+    assert_eq!(older.retained_context, Some(thread_owned));
+    let replay = item.retained_context_replay.as_mut().unwrap();
+    replay.review_input = Some(serde_json::from_value(json!({
+        "thread_id": "00000000-0000-7000-8000-000000000123",
+        "end_ordinal_exclusive": 2,
+        "end_byte_offset": 123,
+    }))?);
+    replay.resolved_review_input = Some(std::sync::Arc::new(vec![
+        crate::ReviewInputRecord::Baseline {
+            applicability: crate::ReviewTranscriptApplicability::ThreadOwned,
+            history: crate::GuardianHistoryCheckpoint(vec![ResponseItemEnvelope::new(
+                response_message("user"),
+            )]),
+            root_retains_legacy_transcript: None,
+        },
+    ]));
+    let serialized = serde_json::to_value(&item)?;
+    assert!(
+        serialized["retained_context_replay"]
+            .get("resolved_review_input")
+            .is_none()
+    );
+    let restored = serde_json::from_value::<CompactedItem>(serialized)?;
+    assert_eq!(restored, item);
+    assert!(
+        restored
+            .retained_context_replay
+            .unwrap()
+            .resolved_review_input
+            .is_none()
     );
     Ok(())
 }
@@ -1035,6 +1138,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
             replacement_history: None,
             retained_context: None,
             guardian_history: None,
+            retained_context_replay: None,
             mcp_resource_origins: None,
             window_number: Some(3),
             first_window_id: None,

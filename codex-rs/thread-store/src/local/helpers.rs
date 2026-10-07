@@ -304,15 +304,9 @@ pub(super) async fn resolve_thread_names(
     store: &LocalThreadStore,
     thread_history_modes: &HashMap<ThreadId, ThreadHistoryMode>,
 ) -> HashMap<ThreadId, String> {
-    let legacy_thread_ids = thread_history_modes
-        .iter()
-        .filter_map(|(&thread_id, &history_mode)| {
-            (history_mode == ThreadHistoryMode::Legacy).then_some(thread_id)
-        })
-        .collect::<HashSet<_>>();
-    let mut names = find_thread_names_by_ids(store.config.codex_home.as_path(), &legacy_thread_ids)
-        .await
-        .unwrap_or_default();
+    let mut names = HashMap::<ThreadId, String>::with_capacity(thread_history_modes.len());
+    let mut index_thread_ids = thread_history_modes.keys().copied().collect::<HashSet<_>>();
+    let mut guardian_default_titles = HashSet::new();
     if let Some(state_db_ctx) = store.state_db().await {
         let thread_ids = thread_history_modes.keys().copied().collect::<Vec<_>>();
         let metadata_by_id = state_db_ctx
@@ -327,13 +321,28 @@ pub(super) async fn resolve_thread_names(
                 ThreadHistoryMode::Legacy => distinct_thread_metadata_title(metadata),
                 ThreadHistoryMode::Paginated => sqlite_thread_name(metadata),
             };
+            if history_mode == ThreadHistoryMode::Paginated && metadata.name.is_some() {
+                index_thread_ids.remove(&thread_id);
+            }
             if let Some(name) = name {
                 if history_mode == ThreadHistoryMode::Legacy && has_guardian_default_title(metadata)
                 {
-                    names.entry(thread_id).or_insert(name);
-                } else {
-                    names.insert(thread_id, name);
+                    guardian_default_titles.insert(thread_id);
                 }
+                names.insert(thread_id, name);
+            }
+        }
+    }
+    if let Ok(index_names) =
+        find_thread_names_by_ids(store.config.codex_home.as_path(), &index_thread_ids).await
+    {
+        // Migration in older releases did not copy Legacy names into SQLite. Existing SQLite
+        // names remain authoritative; the index recovers only names missing from that column.
+        for (thread_id, name) in index_names {
+            if guardian_default_titles.contains(&thread_id) {
+                names.insert(thread_id, name);
+            } else {
+                names.entry(thread_id).or_insert(name);
             }
         }
     }

@@ -29,6 +29,10 @@ use crate::types::canonical_history_mode_from_rollout_items;
 
 const ROLLOUT_SIZE_BYTES_METRIC: &str = "codex.rollout.size_bytes";
 
+#[cfg(test)]
+#[path = "live_writer_selection_tests.rs"]
+mod selection_tests;
+
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
     params: CreateThreadParams,
@@ -124,6 +128,8 @@ pub(super) async fn resume_thread(
     }
     let supplied_empty_placeholder = has_supplied_history
         && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
+    #[cfg(test)]
+    selection_tests::pause_before_history_access(params.thread_id).await;
     let (rollout_path, mut history_access) = if !supplied_empty_placeholder {
         super::model_context::prepare_history_access(store, params.thread_id, rollout_path).await?
     } else {
@@ -151,24 +157,7 @@ pub(super) async fn resume_thread(
         store.acquire_writer_lock(params.thread_id)?
     };
     // Repair may have waited for a concurrent rotation. Validate selection again while owned.
-    if let Some(selected_path) = selected_rollout_path(store, params.thread_id).await? {
-        let selected_path = codex_rollout::existing_rollout_path(&selected_path)
-            .await
-            .unwrap_or(selected_path);
-        let selected_path = tokio::fs::canonicalize(&selected_path)
-            .await
-            .unwrap_or(selected_path);
-        if codex_rollout::plain_rollout_path(&rollout_path)
-            != codex_rollout::plain_rollout_path(&selected_path)
-        {
-            return Err(ThreadStoreError::InvalidRequest {
-                message: format!(
-                    "rollout path does not select the current rollout for thread {}",
-                    params.thread_id
-                ),
-            });
-        }
-    }
+    require_selected_rollout_path(store, params.thread_id, rollout_path.as_path()).await?;
     let history = match params.history {
         Some(history)
             if !matches!(
@@ -286,6 +275,34 @@ pub(super) async fn resume_thread(
 }
 
 /// Returns the authoritative selected path without requiring a paginated rollout to parse first.
+/// The caller must retain writer ownership while consuming the checked selection.
+pub(super) async fn require_selected_rollout_path(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected: &std::path::Path,
+) -> ThreadStoreResult<()> {
+    if let Some(selected) = selected_rollout_path(store, thread_id).await? {
+        let selected = codex_rollout::existing_rollout_path(&selected)
+            .await
+            .unwrap_or(selected);
+        let selected = tokio::fs::canonicalize(&selected).await.unwrap_or(selected);
+        let expected = codex_rollout::existing_rollout_path(expected)
+            .await
+            .unwrap_or_else(|| expected.to_path_buf());
+        let expected = tokio::fs::canonicalize(&expected).await.unwrap_or(expected);
+        if codex_rollout::plain_rollout_path(&expected)
+            != codex_rollout::plain_rollout_path(&selected)
+        {
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn selected_rollout_path(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -520,8 +537,9 @@ async fn segmented_legacy_rollout_paths(
             if line.trim().is_empty() {
                 continue;
             }
-            let line = match codex_rollout::parse_rollout_line(line.as_str()) {
-                Ok(line) => line,
+            let line = match RolloutRecorder::parse_rollout_line_bytes(line.as_bytes()) {
+                Ok(Some(line)) => line,
+                Ok(None) => continue,
                 Err(_error)
                     if is_active_rollout && seen_session_meta && seen_non_metadata_record =>
                 {
@@ -611,14 +629,18 @@ async fn stream_segmented_legacy_history_builder(
             if line_bytes.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let line = codex_rollout::parse_rollout_line_bytes(&line_bytes).map_err(|error| {
-                ThreadStoreError::Internal {
-                    message: format!(
-                        "failed to decode segmented legacy rollout {}: {error}",
-                        rollout_path.display()
-                    ),
-                }
-            })?;
+            let Some(line) =
+                RolloutRecorder::parse_rollout_line_bytes(&line_bytes).map_err(|error| {
+                    ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to decode segmented legacy rollout {}: {error}",
+                            rollout_path.display()
+                        ),
+                    }
+                })?
+            else {
+                continue;
+            };
             if !matches!(
                 line.item,
                 RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
