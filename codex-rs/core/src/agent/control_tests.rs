@@ -1448,15 +1448,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
             .collect::<Vec<_>>(),
         vec![root_thread_id],
     );
+    let mut canonical_ids = dynamic_control
+        .list_canonical(
+            root_thread_id,
+            /*parent*/ None,
+            &SessionSource::Cli,
+            /*path_prefix*/ None,
+        )
+        .await
+        .expect("canonical list should include loaded and cold agents")
+        .into_iter()
+        .map(|agent| agent.agent_id)
+        .collect::<Vec<_>>();
+    let mut expected_canonical_ids = expected_ids.clone();
+    expected_canonical_ids.push(root_thread_id);
+    canonical_ids.sort_by_key(ToString::to_string);
+    expected_canonical_ids.sort_by_key(ToString::to_string);
+    assert_eq!(canonical_ids, expected_canonical_ids);
 
     let mut cursor = None;
     let mut actual_ids = Vec::new();
     let mut first_page = None;
     loop {
-        let page = dynamic_control
-            .list_page(
-                root_thread_id,
-                /*parent*/ None,
+        let page = harness
+            .control
+            .list_agents_page(
                 &SessionSource::Cli,
                 /*path_prefix*/ None,
                 cursor.as_deref(),
