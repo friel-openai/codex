@@ -82,7 +82,7 @@ impl LocalAgentControl {
         }
     }
 
-    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+    pub(crate) fn forget_agent_residency(&self, thread_id: ThreadId) {
         self.runtime.agent_residency.remove(thread_id);
     }
 }
@@ -232,6 +232,8 @@ impl AgentResidency {
                     return false;
                 }
                 let environments = candidate_thread.environment_selections().await;
+                let ephemeral = candidate_thread.config_snapshot().await.ephemeral;
+                let status = candidate_thread.agent_status().await;
                 if let Err(err) = candidate_thread.shutdown_and_wait().await {
                     warn!(
                         "failed to shut down resident thread before unloading {candidate_thread_id}: {err}"
@@ -246,12 +248,24 @@ impl AgentResidency {
                     teardown.complete();
                     return false;
                 }
+                if matches!(
+                    status,
+                    AgentStatus::Completed(_)
+                        | AgentStatus::Errored(_)
+                        | AgentStatus::Interrupted
+                        | AgentStatus::Shutdown
+                ) {
+                    lifecycle.remember_cold_terminal_status(
+                        status,
+                        candidate_thread.multi_agent_version() == Some(MultiAgentVersion::V2),
+                    );
+                }
                 candidate_thread
                     .session
                     .services
                     .local_agent_runtime
                     .registry
-                    .save_evicted_environments(candidate_thread_id, environments);
+                    .save_evicted_runtime_settings(candidate_thread_id, environments, ephemeral);
                 // Keep publication excluded until both entries have been removed.
                 threads.remove(&candidate_thread_id);
                 residency.remove(candidate_thread_id);
@@ -351,13 +365,14 @@ impl LocalAgentControl {
         thread.ensure_rollout_materialized().await;
         thread.flush_rollout().await?;
         let environments = thread.environment_selections().await;
+        let ephemeral = thread.config_snapshot().await.ephemeral;
         thread.shutdown_and_wait().await?;
         thread
             .session
             .services
             .local_agent_runtime
             .registry
-            .save_evicted_environments(thread_id, environments);
+            .save_evicted_runtime_settings(thread_id, environments, ephemeral);
         Ok(manager.remove_thread(&thread_id).await.is_some())
     }
 }
