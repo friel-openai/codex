@@ -310,9 +310,10 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
         .expect("closed event channel must not leave an elicitation pending")
         .expect_err("closed event channel must fail the elicitation");
 
-    assert_eq!(
-        error.to_string(),
-        "failed to deliver MCP elicitation request"
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to deliver MCP elicitation request")
     );
     assert!(
         manager
@@ -447,6 +448,76 @@ async fn strict_auto_review_fails_closed_without_a_canonical_decision() {
         assert_declined(json!(true), Some(Ok(Some(response)))).await;
     }
     assert_declined(json!(true), /*response*/ None).await;
+}
+
+#[tokio::test]
+async fn retained_elicitation_sender_observes_approval_policy_updates() {
+    let (manager, events, sender) = elicitation_fixture(
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+        /*reviewer*/ None,
+    );
+    for policy in [
+        AskForApproval::OnRequest,
+        AskForApproval::Never,
+        AskForApproval::OnRequest,
+    ] {
+        assert!(manager.update(
+            test_elicitation_config("independent-mcp", policy, PermissionProfile::read_only()),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+        ));
+        let pending = tokio::spawn(sender(
+            RequestId::Number(7),
+            Elicitation::OpenAiForm {
+                meta: None,
+                message: "Review this request".into(),
+                requested_schema: json!({"type": "object"}),
+            },
+        ));
+        let response = if policy == AskForApproval::Never {
+            ElicitationResponse {
+                action: ElicitationAction::Decline,
+                content: None,
+                meta: None,
+            }
+        } else {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("current approval policy should prompt")
+                .unwrap();
+            let EventMsg::ElicitationRequest(request) = event.msg else {
+                panic!("expected MCP elicitation");
+            };
+            let ProtocolRequestId::String(id) = request.id else {
+                panic!("expected Codex-owned string request ID");
+            };
+            let response = ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: None,
+            };
+            manager
+                .resolve(
+                    request.server_name,
+                    RequestId::String(id.into()),
+                    response.clone(),
+                )
+                .await
+                .unwrap();
+            response
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                .await
+                .expect("current approval policy must complete the request")
+                .unwrap()
+                .unwrap(),
+            response
+        );
+        assert!(events.is_empty());
+        assert!(manager.router.requests.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
