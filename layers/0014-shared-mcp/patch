@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index dc8940e8971ad7b8b639c3ac4f3e480bd1308316..6d8900d0f8c6d9199f70c86aa491857f7de2955b 100644
+index 752befd8d660a37ee92ee8acc18fcc54677809fc..736ca4eb3edb0bfde3467921f3f53e0ce6f03dd3 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -3867,6 +3867,7 @@ dependencies = [
+@@ -3906,6 +3906,7 @@ dependencies = [
   "codex-utils-path-uri",
   "codex-utils-plugins",
   "futures",
@@ -337,10 +337,19 @@ index 2cdd0c83c2fac6865c4eef0f78ba9dabafa79937..29300cbec45662597d3cacfc26d50af9
          tool_catalog.read(Arc::new).await,
          tool.clone(),
 diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
-index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454d9cadde4 100644
+index 7aaba94fbc79d2c63e9b838cd4ad8dcb538950ea..7c5929d9b3a081be7384ba9abbc9ef127f55fadd 100644
 --- a/codex-rs/codex-mcp/src/connection_manager.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager.rs
-@@ -21,17 +21,21 @@ use startup::emit_update;
+@@ -6,7 +6,7 @@
+ //! running RMCP clients.
+
+ #[path = "connection_manager/catalog_telemetry.rs"]
+-mod catalog_telemetry;
++pub(crate) mod catalog_telemetry;
+ #[path = "connection_manager/required.rs"]
+ mod required;
+ #[path = "connection_manager/resources.rs"]
+@@ -23,17 +23,21 @@ use startup::emit_update;
  use startup::mcp_init_error_display;
  use startup::mcp_startup_failure_reason;
  use startup::should_share_codex_apps_tools_cache;
@@ -364,7 +373,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  use crate::elicitation::ElicitationRequestManager;
  use crate::elicitation::ElicitationRequestRouter;
  use crate::event_stream::EventStreamConnectionSettings;
-@@ -39,13 +43,11 @@ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+@@ -41,13 +45,11 @@ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
  use crate::mcp::ToolPluginContext;
  use crate::pagination::MAX_CODEX_APPS_TOOL_CATALOG_ITEMS;
  use crate::pagination::MAX_MCP_CATALOG_ITEMS;
@@ -379,7 +388,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  use crate::runtime::McpPublicationGate;
  use crate::runtime::McpRuntimeInput;
  use crate::runtime::McpStartupPolicy;
-@@ -54,7 +56,6 @@ use crate::server::McpServerMetadata;
+@@ -56,7 +58,6 @@ use crate::server::McpServerMetadata;
  use crate::tool_catalog_cache::McpToolCatalogCacheContext;
  use crate::tools::ToolFilter;
  use crate::tools::ToolInfo;
@@ -387,7 +396,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  use crate::trusted_access::ENTITLEMENT_CONTEXT_KEY;
  use crate::trusted_access::TrustedAccessContext;
  use anyhow::Context;
-@@ -63,8 +64,6 @@ use anyhow::anyhow;
+@@ -65,8 +66,6 @@ use anyhow::anyhow;
  use anyhow::bail;
  use codex_config::McpServerTransportConfig;
  use codex_config::McpStartupReadiness;
@@ -396,7 +405,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  use codex_otel::auth_storage::AuthStorageOriginator;
  use codex_protocol::mcp::CallToolResult;
  use codex_protocol::mcp::McpServerInfo;
-@@ -78,71 +77,35 @@ use codex_protocol::protocol::McpStartupUpdateEvent;
+@@ -80,71 +79,35 @@ use codex_protocol::protocol::McpStartupUpdateEvent;
  use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
  use tokio::sync::watch;
  use tokio::task::JoinSet;
@@ -488,7 +497,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          }
      }
 
-@@ -151,40 +114,23 @@ impl McpServerConnection {
+@@ -153,40 +116,23 @@ impl McpServerConnection {
              .as_ref()
              .is_some_and(|startup_trigger| !*startup_trigger.borrow())
      }
@@ -538,7 +547,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              || match self.startup_readiness {
                  McpStartupReadiness::Connection => !tools.is_empty(),
                  McpStartupReadiness::Catalog => tools.iter().any(|tool| {
-@@ -192,19 +138,6 @@ impl McpServerView {
+@@ -194,19 +140,6 @@ impl McpServerView {
                  }),
              }
      }
@@ -558,7 +567,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  }
 
  /// A published view over a set of running MCP server connections.
-@@ -219,6 +152,21 @@ pub(crate) struct McpConnectionSet {
+@@ -221,6 +154,21 @@ pub(crate) struct McpConnectionSet {
      non_prefixed_mcp_tool_servers: Vec<String>,
      elicitation_requests: ElicitationRequestManager,
      pub(crate) trusted_access: Option<TrustedAccessContext>,
@@ -580,7 +589,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
  }
 
  impl McpConnectionSet {
-@@ -240,6 +188,8 @@ impl McpConnectionSet {
+@@ -242,6 +190,8 @@ impl McpConnectionSet {
              submit_id,
              tx_event,
              startup_cancellation_token,
@@ -589,7 +598,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              runtime_context,
              codex_apps_tools_cache,
              tool_catalog_cache,
-@@ -274,7 +224,7 @@ impl McpConnectionSet {
+@@ -276,7 +226,7 @@ impl McpConnectionSet {
              .map(|(server_name, _)| server_name.clone())
              .collect::<Vec<_>>();
          required_servers.sort();
@@ -598,7 +607,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          let mut join_set = JoinSet::new();
          // Explicit reconnects have no previous set and must replace their clients eagerly.
          let allow_deferred_startup =
-@@ -287,6 +237,9 @@ impl McpConnectionSet {
+@@ -289,6 +239,9 @@ impl McpConnectionSet {
                      elicitation_lifecycle.clone(),
                  )
          });
@@ -608,7 +617,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          let elicitation_requests = if let Some(previous) = reusable_previous {
              previous.elicitation_requests.clone()
          } else {
-@@ -298,6 +251,11 @@ impl McpConnectionSet {
+@@ -300,6 +253,11 @@ impl McpConnectionSet {
              )
          };
          let tool_plugin_context = Arc::new(tool_plugin_context);
@@ -620,7 +629,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          let startup_submit_id = submit_id;
          let static_chatgpt_auth_provider = auth
              .filter(|auth| auth.uses_codex_backend())
-@@ -436,25 +394,6 @@ impl McpConnectionSet {
+@@ -438,25 +396,6 @@ impl McpConnectionSet {
                      client_mcp_extensions: client_mcp_extensions.clone(),
                  }));
              }
@@ -646,7 +655,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              let expected_protocol_mode = match &configured_config.transport {
                  McpServerTransportConfig::StreamableHttp { .. } => Some(protocol_mode),
                  McpServerTransportConfig::Stdio { .. }
-@@ -475,110 +414,28 @@ impl McpConnectionSet {
+@@ -477,110 +416,28 @@ impl McpConnectionSet {
                      Some(_) => None,
                  },
              };
@@ -779,7 +788,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              let cancel_token = startup_cancellation_token.child_token();
              let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
                  || server.requires_read_only_mcp_tools()
-@@ -601,39 +458,143 @@ impl McpConnectionSet {
+@@ -603,39 +460,143 @@ impl McpConnectionSet {
                  None
              };
              let has_runtime_auth = runtime_auth_provider.is_some();
@@ -954,7 +963,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                      .as_ref()
                      .and_then(McpToolCatalogCacheContext::current_tools)
                      .is_some_and(|tools| {
-@@ -642,24 +603,59 @@ impl McpConnectionSet {
+@@ -644,24 +605,59 @@ impl McpConnectionSet {
                                  && tool_is_model_visible(&tool)
                          })
                      });
@@ -1024,7 +1033,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                      metadata,
                      tool_filter: configured_tool_filter,
                      tool_timeout: configured_tool_timeout,
-@@ -669,11 +665,14 @@ impl McpConnectionSet {
+@@ -671,11 +667,14 @@ impl McpConnectionSet {
              let tx_event = tx_event.clone();
              let submit_id = startup_submit_id.clone();
              let publication_gate = publication_gate.clone();
@@ -1041,7 +1050,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                      }
                  {
                      return (server_name, Err(StartupOutcomeError::Cancelled));
-@@ -692,13 +691,37 @@ impl McpConnectionSet {
+@@ -694,13 +693,37 @@ impl McpConnectionSet {
                      )
                      .await;
                  }
@@ -1082,7 +1091,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                              match &configured_config.transport {
                                  McpServerTransportConfig::StreamableHttp {
                                      url,
-@@ -732,14 +755,15 @@ impl McpConnectionSet {
+@@ -734,14 +757,15 @@ impl McpConnectionSet {
                          }
                          Ok(_) | Err(_) => None,
                      };
@@ -1100,7 +1109,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                              let error_str = mcp_init_error_display(
                                  server_name.as_str(),
                                  Some(&configured_config),
-@@ -763,12 +787,17 @@ impl McpConnectionSet {
+@@ -765,12 +789,17 @@ impl McpConnectionSet {
                      )
                      .await;
                  }
@@ -1120,7 +1129,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                  }
 
                  (server_name, outcome)
-@@ -792,6 +821,9 @@ impl McpConnectionSet {
+@@ -794,6 +823,9 @@ impl McpConnectionSet {
              non_prefixed_mcp_tool_servers,
              elicitation_requests: elicitation_requests.clone(),
              trusted_access,
@@ -1130,7 +1139,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          };
          let summary_publication_gate = publication_gate;
          tokio::spawn(async move {
-@@ -839,6 +871,12 @@ impl McpConnectionSet {
+@@ -841,6 +873,12 @@ impl McpConnectionSet {
      }
 
      pub fn empty(prefix_mcp_tool_names: bool) -> Self {
@@ -1143,7 +1152,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          Self {
              servers: HashMap::new(),
              event_stream_connection: None,
-@@ -848,8 +886,11 @@ impl McpConnectionSet {
+@@ -850,8 +888,11 @@ impl McpConnectionSet {
              tool_plugin_context: Arc::new(ToolPluginContext::default()),
              prefix_mcp_tool_names,
              non_prefixed_mcp_tool_servers: Vec::new(),
@@ -1156,7 +1165,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
          }
      }
 
-@@ -857,21 +898,41 @@ impl McpConnectionSet {
+@@ -859,21 +900,41 @@ impl McpConnectionSet {
          !self.servers.is_empty()
      }
 
@@ -1206,7 +1215,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                  failed_servers.push(server_name.clone());
              }
          }
-@@ -885,10 +946,10 @@ impl McpConnectionSet {
+@@ -887,10 +948,10 @@ impl McpConnectionSet {
          let mut candidates = Vec::new();
          for server_name in self.authentication_failed_servers().await {
              if let Some(view) = self.servers.get(&server_name)
@@ -1219,7 +1228,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              }
          }
          if candidates.is_empty() {
-@@ -922,7 +983,11 @@ impl McpConnectionSet {
+@@ -924,7 +985,11 @@ impl McpConnectionSet {
          let Some(view) = self.servers.get(server_name) else {
              return false;
          };
@@ -1232,7 +1241,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
      }
 
      /// Stop all MCP clients owned by this manager and terminate stdio server processes.
-@@ -930,12 +995,35 @@ impl McpConnectionSet {
+@@ -932,12 +997,35 @@ impl McpConnectionSet {
          let connections = self
              .servers
              .values()
@@ -1270,7 +1279,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
              }
          });
          if let Err(error) = shutdown_task.await {
-@@ -944,9 +1032,7 @@ impl McpConnectionSet {
+@@ -946,9 +1034,7 @@ impl McpConnectionSet {
      }
 
      pub(crate) fn cancel_startup(&self) {
@@ -1281,7 +1290,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
      }
 
      pub fn plugin_id_for_mcp_server_name(&self, server_name: &str) -> Option<&str> {
-@@ -963,11 +1049,15 @@ impl McpConnectionSet {
+@@ -965,11 +1051,15 @@ impl McpConnectionSet {
          let Some(view) = self.servers.get(server_name) else {
              return false;
          };
@@ -1302,7 +1311,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
      }
 
      /// Invoke the tool indicated by the (server, tool) pair.
-@@ -999,38 +1089,42 @@ impl McpConnectionSet {
+@@ -1001,38 +1091,42 @@ impl McpConnectionSet {
                  "tool '{tool}' is disabled for MCP server '{server}'"
              ));
          }
@@ -1367,7 +1376,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
 
          Ok(call_tool_result_from_rmcp(result))
      }
-@@ -1041,11 +1135,7 @@ impl McpConnectionSet {
+@@ -1043,11 +1137,7 @@ impl McpConnectionSet {
              .iter()
              .filter_map(|(name, view)| {
                  view.connection
@@ -1380,7 +1389,7 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                      .map(|capabilities| (name.clone(), capabilities))
              })
              .collect()
-@@ -1060,19 +1150,23 @@ impl McpConnectionSet {
+@@ -1062,19 +1152,23 @@ impl McpConnectionSet {
      ) -> HashMap<String, McpServerInfo> {
          let mut server_infos = HashMap::new();
          for (server_name, view) in self.servers.iter().filter(|(name, _)| include_server(name)) {
@@ -1409,6 +1418,63 @@ index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..08f7edf5bad787b5d2bb192bcac5a454
                          server_infos.insert(server_name.clone(), server_info);
                      }
                  }
+diff --git a/codex-rs/codex-mcp/src/connection_manager/catalog_telemetry.rs b/codex-rs/codex-mcp/src/connection_manager/catalog_telemetry.rs
+index 8ea65bb6919a9bbf9eda9950ac3b254ed572cf20..99d452dd03cb8cd9edd772046c8f7e4bb8b36459 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/catalog_telemetry.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/catalog_telemetry.rs
+@@ -35,8 +35,15 @@ const RAW_DEFINITION_JSON_BYTES_BUCKETS: &[f64] = &[
+     512.0 * MIB,
+ ];
+
+-pub(super) fn tool_definition_json_bytes<'a>(tools: impl Iterator<Item = &'a Tool>) -> usize {
+-    tools.map(serialized_json_bytes).sum()
++pub(crate) fn tool_definition_json_bytes<'a>(
++    tools: impl Iterator<Item = &'a Tool>,
++    measurement_enabled: bool,
++) -> usize {
++    if measurement_enabled {
++        tools.map(serialized_json_bytes).sum()
++    } else {
++        0
++    }
+ }
+
+ pub(super) fn record_binding_catalog_size(
+@@ -96,3 +103,34 @@ fn serialized_json_bytes<T: Serialize + ?Sized>(value: &T) -> usize {
+         0
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::tool_definition_json_bytes;
++    use rmcp::model::JsonObject;
++    use rmcp::model::Tool;
++    use std::cell::Cell;
++    use std::sync::Arc;
++
++    #[test]
++    fn tool_definition_json_bytes_skips_disabled_measurement_and_counts_enabled_tools() {
++        let tools = ["first", "second"]
++            .map(|name| Tool::new(name, "tool description", Arc::new(JsonObject::default())));
++        let visited = Cell::new(0);
++        let observed_tools = || tools.iter().inspect(|_| visited.set(visited.get() + 1));
++
++        assert_eq!(tool_definition_json_bytes(observed_tools(), false), 0);
++        assert_eq!(visited.get(), 0);
++
++        let expected_bytes = tools
++            .iter()
++            .map(|tool| serde_json::to_vec(tool).expect("serialized tool").len())
++            .sum::<usize>();
++        assert_eq!(
++            tool_definition_json_bytes(observed_tools(), true),
++            expected_bytes
++        );
++        assert_eq!(visited.get(), tools.len());
++        assert!(expected_bytes > 0);
++    }
++}
 diff --git a/codex-rs/codex-mcp/src/connection_manager/required.rs b/codex-rs/codex-mcp/src/connection_manager/required.rs
 index 6a2f267f62eed533ee1953ea3985397ae2b6bd8a..e421b8359f89c71b0fda8e0a9ec48e88b6935868 100644
 --- a/codex-rs/codex-mcp/src/connection_manager/required.rs
@@ -1683,7 +1749,7 @@ index 6e8852b0ea32c63b89841f440d9cab49caee1b25..d9e50411c067b79306f18e6dcc05c206
              statuses.insert(name.clone(), status);
          }
 diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
-index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594cc1defff 100644
+index 54c6de2e8c43cf90a4b6ec11ebe24d9657af682b..d562eecd362c23ed159d4e97faf2b039bbe4fc3a 100644
 --- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
 @@ -1,7 +1,6 @@
@@ -1694,7 +1760,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
  use std::time::Instant;
 
  use anyhow::Context;
-@@ -23,10 +22,11 @@ use crate::binding_clients::McpBindingClients;
+@@ -26,10 +25,11 @@ use crate::binding_clients::McpBindingClients;
  use crate::client_tool_catalog::ClientToolCatalogRevision;
  use crate::client_tool_catalog::CodexAppsToolSnapshot;
  use crate::client_tool_catalog::ToolCatalogSnapshot;
@@ -1707,7 +1773,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
  use crate::rmcp_client::list_tools_for_client_uncached;
  use crate::rmcp_client::prepare_codex_apps_tools_for_model;
  use crate::runtime::emit_duration;
-@@ -37,6 +37,27 @@ use crate::tools::normalize_tools_for_model_with_prefix;
+@@ -40,6 +40,27 @@ use crate::tools::normalize_tools_for_model_with_prefix;
  const MCP_UI_META_KEY: &str = "ui";
  const MCP_UI_VISIBILITY_META_KEY: &str = "visibility";
  const MCP_UI_MODEL_VISIBILITY: &str = "model";
@@ -1735,7 +1801,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
  /// Returns whether a tool may be included in model-facing tool declarations.
  ///
  /// Tools without visibility metadata remain visible. Tools with visibility
-@@ -61,7 +82,7 @@ pub fn tool_is_model_visible(tool: &ToolInfo) -> bool {
+@@ -64,7 +85,7 @@ pub fn tool_is_model_visible(tool: &ToolInfo) -> bool {
  }
 
  /// Catalog identity within one published connection set, including cached declarations.
@@ -1744,7 +1810,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
  pub(crate) enum BindingCatalogRevision {
      Ready(ClientToolCatalogRevision),
      Cached(u64),
-@@ -82,17 +103,14 @@ impl McpConnectionSet {
+@@ -85,17 +106,14 @@ impl McpConnectionSet {
              if view.startup_readiness != McpStartupReadiness::Catalog {
                  continue;
              }
@@ -1769,7 +1835,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
              let explicitly_required = required_servers.contains(server_name)
                  || (self.is_selected_plugin_mcp_server(server_name)
                      && self
-@@ -112,69 +130,79 @@ impl McpConnectionSet {
+@@ -115,69 +133,79 @@ impl McpConnectionSet {
          }
      }
 
@@ -1898,7 +1964,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
      }
 
      /// Returns all tools with model-visible names normalized.
-@@ -196,15 +224,28 @@ impl McpConnectionSet {
+@@ -199,15 +227,28 @@ impl McpConnectionSet {
                  .iter()
                  .filter(|(name, _)| include_server(name))
                  .map(|(server_name, view)| async move {
@@ -1935,8 +2001,8 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
                          .instrument(trace_span!(
                              "list_tools_for_server",
                              server_name = %server_name,
-@@ -269,15 +310,10 @@ impl McpConnectionSet {
-         let mut clients = HashMap::new();
+@@ -285,15 +326,10 @@ impl McpConnectionSet {
+         .unwrap_or("unknown");
          let optional_mcp_startup_grace = config.optional_mcp_startup_grace;
          let server_snapshots = join_all(self.servers.iter().map(|(server_name, view)| async move {
 -            if !view
@@ -1953,7 +2019,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
                  let has_cached_tools = cached_tools.is_some();
                  let must_wait_for_startup = (required
                      && (!view.allows_cached_startup() || !has_cached_tools))
-@@ -294,16 +330,12 @@ impl McpConnectionSet {
+@@ -310,16 +346,12 @@ impl McpConnectionSet {
                      return (server_name, view, cached_tools);
                  }
                  if !must_wait_for_startup && optional_mcp_startup_grace.is_zero() {
@@ -1975,7 +2041,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
                          tokio::time::Instant::now() + optional_mcp_startup_grace
                      } else {
                          *self.optional_startup_deadline.get_or_init(|| {
-@@ -312,87 +344,99 @@ impl McpConnectionSet {
+@@ -328,118 +360,130 @@ impl McpConnectionSet {
                      };
                      let startup_deadline = view
                          .connection
@@ -2033,8 +2099,8 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
 -            } else {
 -                None
 -            };
--            let (client, server_tools) = if let Some(cached_tools) = cached_tools {
--                (None, cached_tools)
+-            let (client, server_tools, catalog_source) = if let Some(cached_tools) = cached_tools {
+-                (None, cached_tools, "cached")
 -            } else {
 -                // A server may opt out of caching after the first pass. Required catalog
 -                // readiness must then wait for discovery rather than silently omit its tools.
@@ -2043,9 +2109,33 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
 -                        && self.required_servers.binary_search(server_name).is_ok())
 +        let server_results = join_all(server_snapshots.into_iter().map(
 +            |(server_name, view, cached_tools)| async move {
++                let measure_catalog = |tools: &[ToolInfo], catalog_source| {
++                    let raw_definition_json_bytes = tool_definition_json_bytes(
++                        tools.iter().map(|tool| &tool.tool),
++                        catalog_measurement_enabled,
++                    );
++                    if catalog_log_enabled {
++                        let plugin_id = self.plugin_id_for_mcp_server_name(server_name);
++                        emit_binding_catalog(
++                            product_sku,
++                            if server_name == CODEX_APPS_MCP_SERVER_NAME {
++                                "codex_apps"
++                            } else if plugin_id.is_some() {
++                                "plugin"
++                            } else {
++                                "configured"
++                            },
++                            plugin_id,
++                            catalog_source,
++                            tools.len(),
++                            raw_definition_json_bytes,
++                        );
++                    }
++                    raw_definition_json_bytes
++                };
 +                let startup_pending = !view.connection.startup_complete();
 +                let accepts_cached_catalog = view.startup_readiness == McpStartupReadiness::Catalog;
-+                let server_tools = if startup_pending
++                let cached_tools = if startup_pending
 +                    || (accepts_cached_catalog && !view.connection.has_ready_client())
                  {
 -                    return None;
@@ -2058,6 +2148,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
 +                        cached_tools,
 +                        self.tool_plugin_context.as_ref(),
 +                        |tools| view.accepts_cached_tools(server_name, tools),
++                        |tools| measure_catalog(tools, "cached"),
 +                    )
 +                } else {
 +                    None
@@ -2065,14 +2156,92 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
 -                client.tool_timeout = view.tool_timeout;
 -                let snapshot = client.tool_catalog.read(Arc::new).await;
 -                let server_tools = snapshot.tools.to_vec();
--                (Some((Arc::new(client), snapshot)), server_tools)
+-                (
+-                    Some((Arc::new(client), snapshot)),
+-                    server_tools,
+-                    "live",
+-                )
 -            };
+-            let raw_definition_json_bytes = if catalog_measurement_enabled {
+-                tool_definition_json_bytes(server_tools.iter().map(|tool| &tool.tool))
+-            } else {
+-                0
+-            };
+-            if catalog_log_enabled {
+-                let plugin_id = self.plugin_id_for_mcp_server_name(server_name);
+-                emit_binding_catalog(
+-                    product_sku,
+-                    if server_name == CODEX_APPS_MCP_SERVER_NAME {
+-                        "codex_apps"
+-                    } else if plugin_id.is_some() {
+-                        "plugin"
++                let (client, server_tools, raw_definition_json_bytes) =
++                    if let Some((tools, bytes)) = cached_tools {
++                        (None, tools, bytes)
+                     } else {
+-                        "configured"
+-                    },
+-                    plugin_id,
+-                    catalog_source,
+-                    server_tools.len(),
+-                    raw_definition_json_bytes,
+-                );
+-            }
 -            let server_tools = filter_tools(server_tools, &view.tool_filter);
 -            let server_tools = if server_name == CODEX_APPS_MCP_SERVER_NAME {
 -                prepare_codex_apps_tools_for_model(server_tools, &self.tool_plugin_context)
 -            } else {
 -                crate::rmcp_client::prepare_regular_mcp_tools_for_model(
--                    server_tools,
++                        // Required catalog readiness must still wait if caching was disabled
++                        // after the first pass, rather than silently omitting the server.
++                        if startup_pending {
++                            if !(accepts_cached_catalog
++                                && self.required_servers.binary_search(server_name).is_ok())
++                            {
++                                return None;
++                            }
++                            view.trigger_startup().await;
++                            let _ = view
++                                .connection
++                                .await_current_startup_preserving_connection(Arc::clone(
++                                    &self.session_route,
++                                ))
++                                .await;
++                        }
++                        let Some((client, snapshot, tools)) = view
++                            .connection
++                            .capture_ready_client_and_tools(
++                                Arc::clone(&self.session_route),
++                                Arc::clone(&self.tool_plugin_context),
++                                view.tool_timeout,
++                            )
++                            .await
++                        else {
++                            trace!(
++                                server_name = %server_name,
++                                "omitting MCP server without an exact ready client"
++                            );
++                            return None;
++                        };
++                        let bytes = measure_catalog(snapshot.tools.as_ref(), "live");
++                        (Some((client, snapshot)), tools, bytes)
++                    };
++                let server_tools = filter_tools(server_tools, &view.tool_filter);
++                let server_tools = server_tools
++                    .into_iter()
++                    .map(|mut tool| {
++                        if client.is_none()
++                            && let Some(annotations) = tool.tool.annotations.as_mut()
++                        {
++                            annotations.read_only_hint = None;
++                        }
++                        Self::with_server_metadata(tool, &view.metadata)
++                    })
++                    .collect::<Vec<_>>();
++                Some((
++                    server_name.clone(),
++                    client,
+                     server_tools,
 -                    &self.tool_plugin_context,
 -                )
 -            };
@@ -2081,68 +2250,27 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
 -                .map(|mut tool| {
 -                    if client.is_none()
 -                        && let Some(annotations) = tool.tool.annotations.as_mut()
-+                if let Some(server_tools) = server_tools {
-+                    let server_tools = filter_tools(server_tools, &view.tool_filter);
-+                    let server_tools = server_tools
-+                        .into_iter()
-+                        .map(|mut tool| {
-+                            if let Some(annotations) = tool.tool.annotations.as_mut() {
-+                                annotations.read_only_hint = None;
-+                            }
-+                            Self::with_server_metadata(tool, &view.metadata)
-+                        })
-+                        .collect::<Vec<_>>();
-+                    return Some((server_name.clone(), None, server_tools));
-+                }
-+                // Required catalog readiness must still wait if caching was disabled
-+                // after the first pass, rather than silently omitting the server.
-+                if startup_pending {
-+                    if !(accepts_cached_catalog
-+                        && self.required_servers.binary_search(server_name).is_ok())
-                     {
+-                    {
 -                        annotations.read_only_hint = None;
-+                        return None;
-                     }
+-                    }
 -                    Self::with_server_metadata(tool, &view.metadata)
 -                })
 -                .collect::<Vec<_>>();
--            Some((server_name.clone(), client, server_tools))
+-            Some((
+-                server_name.clone(),
+-                client,
+-                server_tools,
+-                raw_definition_json_bytes,
+-            ))
 -        }))
-+                    view.trigger_startup().await;
-+                    let _ = view
-+                        .connection
-+                        .await_current_startup_preserving_connection(Arc::clone(
-+                            &self.session_route,
-+                        ))
-+                        .await;
-+                }
-+                let Some((client, snapshot, server_tools)) = view
-+                    .connection
-+                    .capture_ready_client_and_tools(
-+                        Arc::clone(&self.session_route),
-+                        Arc::clone(&self.tool_plugin_context),
-+                        view.tool_timeout,
-+                    )
-+                    .await
-+                else {
-+                    trace!(
-+                        server_name = %server_name,
-+                        "omitting MCP server without an exact ready client"
-+                    );
-+                    return None;
-+                };
-+                let server_tools = filter_tools(server_tools, &view.tool_filter);
-+                let server_tools = server_tools
-+                    .into_iter()
-+                    .map(|tool| Self::with_server_metadata(tool, &view.metadata))
-+                    .collect::<Vec<_>>();
-+                Some((server_name.clone(), Some((client, snapshot)), server_tools))
++                    raw_definition_json_bytes,
++                ))
 +            },
 +        ))
          .await;
-         for (server_name, client, server_tools) in server_results.into_iter().flatten() {
-             if let Some((client, snapshot)) = client {
-@@ -417,7 +461,7 @@ impl McpConnectionSet {
+         let mut raw_definition_json_bytes = 0usize;
+         for (server_name, client, server_tools, server_definition_json_bytes) in
+@@ -472,7 +516,7 @@ impl McpConnectionSet {
              };
              let Some(call) = self.prepare_call(
                  &tool_info,
@@ -2151,7 +2279,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
                  Arc::clone(&config),
                  Arc::clone(snapshot),
              ) else {
-@@ -466,26 +510,20 @@ impl McpConnectionSet {
+@@ -521,26 +565,20 @@ impl McpConnectionSet {
          if !view.tool_filter.allows(&advertised_tool.tool.name) {
              return None;
          }
@@ -2188,7 +2316,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
          if !tool_is_model_visible(&tool_info) {
              return None;
          }
-@@ -498,13 +536,13 @@ impl McpConnectionSet {
+@@ -553,13 +591,13 @@ impl McpConnectionSet {
          tool_info
              .callable_name
              .clone_from(&advertised_tool.callable_name);
@@ -2204,7 +2332,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
          config: Arc<crate::McpConfig>,
          tool_catalog_snapshot: Arc<ToolCatalogSnapshot>,
      ) -> Option<PreparedMcpCall> {
-@@ -593,62 +631,72 @@ impl McpConnectionSet {
+@@ -648,62 +686,72 @@ impl McpConnectionSet {
              .servers
              .get(CODEX_APPS_MCP_SERVER_NAME)
              .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?;
@@ -2330,7 +2458,7 @@ index d6040dcdf5e49aa54cf765e83d170d1f6c97c5d0..9b1ddeb7dc4ff6de9433529ded720594
              MCP_TOOLS_LIST_DURATION_METRIC,
              list_start.elapsed(),
 diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
-index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59717671fe 100644
+index 52be4fe1017c959b33932e7f233406333b8f545a..7b76b97e08537608ec37d90bb77ce5bcc35ff30c 100644
 --- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
 @@ -102,6 +102,20 @@ impl McpConnectionSet {
@@ -2447,7 +2575,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      }
  }
 
-@@ -523,7 +558,7 @@ async fn prepared_call_timeout_includes_trusted_access_lookup() {
+@@ -526,7 +561,7 @@ async fn prepared_call_timeout_includes_trusted_access_lookup() {
      let catalog_snapshot = client.tool_catalog.read(Arc::new).await;
      let prepared = crate::PreparedMcpCall::new(
          manager,
@@ -2456,7 +2584,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          Arc::new(config),
          catalog_snapshot,
          tool,
-@@ -561,6 +596,7 @@ pub(crate) async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> A
+@@ -564,6 +599,7 @@ pub(crate) async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> A
          tool_catalog_cache_context: None,
          startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
          startup_reconnect: None,
@@ -2464,7 +2592,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          cancel_token: CancellationToken::new(),
      }
  }
-@@ -606,9 +642,7 @@ async fn connection_statuses_observe_clients_without_starting_them() {
+@@ -609,9 +645,7 @@ async fn connection_statuses_observe_clients_without_starting_them() {
      manager.insert_test_client("starting", pending.clone());
      manager.insert_test_client("deferred", pending);
      let (trigger, _receiver) = watch::channel(/*init*/ false);
@@ -2475,7 +2603,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
 
      let statuses = tokio::time::timeout(
          Duration::from_millis(/*millis*/ 100),
-@@ -628,7 +662,10 @@ async fn connection_statuses_observe_clients_without_starting_them() {
+@@ -631,7 +665,10 @@ async fn connection_statuses_observe_clients_without_starting_them() {
      ]);
      assert_eq!(statuses, expected);
      assert!(!*trigger.borrow());
@@ -2487,7 +2615,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      expected.insert("connected".to_string(), Status::Cancelled);
      assert_eq!(manager.connection_statuses().await, expected);
  }
-@@ -670,8 +707,12 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
+@@ -673,8 +710,12 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
          })
      };
      let manager = create_test_manager_with_failed_apps_startup(Vec::new(), factory);
@@ -2502,7 +2630,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      let expected = |status| HashMap::from([(CODEX_APPS_MCP_SERVER_NAME.to_string(), status)]);
      assert_eq!(
          manager.connection_statuses().await,
-@@ -683,7 +724,9 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
+@@ -686,7 +727,9 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
          Status::Failed,
          Status::Connected,
      ] {
@@ -2513,7 +2641,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          started.notified().await;
          assert_eq!(
              manager.connection_statuses().await,
-@@ -727,6 +770,7 @@ fn create_gated_async_managed_client(
+@@ -730,6 +773,7 @@ fn create_gated_async_managed_client(
              tool_catalog_cache_context: None,
              startup_complete,
              startup_reconnect: None,
@@ -2521,7 +2649,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
          started_rx,
-@@ -796,6 +840,7 @@ pub(crate) async fn create_test_manager_with_ready_apps_client(
+@@ -799,6 +843,7 @@ pub(crate) async fn create_test_manager_with_ready_apps_client(
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
              startup_reconnect: None,
              cancel_token: CancellationToken::new(),
@@ -2529,7 +2657,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          },
      );
      manager.set_test_server_metadata(
-@@ -836,6 +881,7 @@ fn create_test_manager_with_failed_apps_startup(
+@@ -839,6 +884,7 @@ fn create_test_manager_with_failed_apps_startup(
          &permission_profile,
          /*prefix_mcp_tool_names*/ true,
      );
@@ -2537,7 +2665,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      manager.insert_test_client(
          CODEX_APPS_MCP_SERVER_NAME.to_string(),
          AsyncManagedClient {
-@@ -846,7 +892,12 @@ fn create_test_manager_with_failed_apps_startup(
+@@ -849,7 +895,12 @@ fn create_test_manager_with_failed_apps_startup(
              codex_apps_tools_cache_context: Some(cache_context),
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -2551,7 +2679,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -2048,6 +2099,8 @@ async fn read_only_apps_discovery_never_uses_a_shared_writable_catalog() -> anyh
+@@ -2051,6 +2102,8 @@ async fn read_only_apps_discovery_never_uses_a_shared_writable_catalog() -> anyh
                  auth_manager: None,
                  elicitation_reviewer: None,
                  elicitation_lifecycle: None,
@@ -2560,7 +2688,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              },
              ElicitationRequestRouter::default(),
          )
-@@ -2118,6 +2171,8 @@ async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::R
+@@ -2121,6 +2174,8 @@ async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::R
                  submit_id: "protocol-mode-scope".to_string(),
                  tx_event: None,
                  startup_cancellation_token,
@@ -2569,7 +2697,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
                  runtime_context: McpRuntimeContext::new(
                      Arc::new(environment_manager_without_environments()),
                      codex_home.path().to_path_buf(),
-@@ -2218,6 +2273,8 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
+@@ -2221,6 +2276,8 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
                  submit_id: "cache-ownership-test".to_string(),
                  tx_event: None,
                  startup_cancellation_token,
@@ -2578,7 +2706,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
                  runtime_context: McpRuntimeContext::new(
                      Arc::new(environment_manager_without_environments()),
                      codex_home.path().to_path_buf(),
-@@ -2289,6 +2346,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
+@@ -2292,6 +2349,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -2586,7 +2714,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -2349,6 +2407,7 @@ async fn capture_binding_uses_the_ready_clients_own_tools() {
+@@ -2352,6 +2410,7 @@ async fn capture_binding_uses_the_ready_clients_own_tools() {
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
              startup_reconnect: None,
              cancel_token: CancellationToken::new(),
@@ -2594,7 +2722,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          },
      );
      manager
-@@ -2656,7 +2715,7 @@ fn tool_catalog_cache_bypasses_http_headers_helpers() {
+@@ -2659,7 +2718,7 @@ fn tool_catalog_cache_bypasses_http_headers_helpers() {
      let cache = McpToolCatalogCache::default();
      let runtime_context = reusable_server_runtime_context();
      let mut config = reusable_server_config("https://example.com/mcp");
@@ -2603,7 +2731,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      let context = |config: &McpServerConfig, identity: &McpServerConnectionIdentity| {
          cache.context(
              "docs",
-@@ -2684,10 +2743,63 @@ fn tool_catalog_cache_bypasses_http_headers_helpers() {
+@@ -2687,10 +2746,63 @@ fn tool_catalog_cache_bypasses_http_headers_helpers() {
          unreachable!("expected HTTP transport");
      };
      *http_headers_helper = Some("auth-cli headers".to_string());
@@ -2668,7 +2796,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  #[tokio::test]
  async fn list_available_server_infos_uses_cache_while_client_is_pending() {
      let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-@@ -2712,6 +2824,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
+@@ -2715,6 +2827,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -2676,7 +2804,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -2810,6 +2923,7 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
+@@ -2813,6 +2926,7 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
              startup_complete,
              startup_reconnect: None,
              cancel_token: CancellationToken::new(),
@@ -2684,7 +2812,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          },
      );
      manager.set_test_server_metadata(
-@@ -2897,6 +3011,11 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+@@ -2900,6 +3014,11 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
      plugin_config.mcp_server_catalog = catalog.build();
      plugin_config.optional_mcp_startup_grace = Duration::from_millis(250);
      manager.tool_plugin_context = Arc::new(crate::tool_plugin_context(&plugin_config));
@@ -2696,7 +2824,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      for server_name in ["pending-one", "pending-two", "pending-selected"] {
          manager.insert_test_client(
              server_name.to_string(),
-@@ -2911,6 +3030,7 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+@@ -2914,6 +3033,7 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
                  tool_catalog_cache_context: None,
                  startup_complete: Arc::new(AtomicBool::new(false)),
                  startup_reconnect: None,
@@ -2704,7 +2832,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
                  cancel_token: CancellationToken::new(),
              },
          );
-@@ -2922,10 +3042,10 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+@@ -2925,10 +3045,10 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
          /*prefix_mcp_tool_names*/ true,
      );
      required_manager.tool_plugin_context = Arc::clone(&manager.tool_plugin_context);
@@ -2719,7 +2847,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      required_manager.required_servers = vec!["pending-selected".to_string()];
 
      let manager = Arc::new(manager);
-@@ -2958,6 +3078,22 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+@@ -2961,6 +3081,22 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
          .expect("later bindings must not restart the optional startup grace");
      assert!(binding.tools().is_empty());
 
@@ -2742,7 +2870,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      assert!(
          tokio::time::timeout(
              Duration::from_millis(1),
-@@ -2976,22 +3112,23 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+@@ -2979,22 +3115,23 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
          .is_ok(),
          "resource discovery must not wait for an omitted optional server"
      );
@@ -2781,7 +2909,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      for (plugin_id, must_wait) in [
          ("selected-plugin", true),
          ("optional-plugin", false),
-@@ -3118,21 +3255,56 @@ async fn stable_catalog_revisions_ignore_terminal_optional_server_failures() {
+@@ -3121,21 +3258,56 @@ async fn stable_catalog_revisions_ignore_terminal_optional_server_failures() {
      assert!(binding.prepare_call("ready", "echo").is_some());
  }
 
@@ -2848,7 +2976,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              &server_config,
              &runtime_context,
              /*resolved_environment*/ None,
-@@ -3142,126 +3314,407 @@ async fn capture_binding_shares_optional_startup_grace_across_connection_sets()
+@@ -3145,126 +3317,407 @@ async fn capture_binding_shares_optional_startup_grace_across_connection_sets()
              ),
              /*connection_identity*/ None,
          )
@@ -3368,7 +3496,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      );
 
      cache_context.disable();
-@@ -3325,13 +3778,7 @@ async fn capture_binding_uses_cache_published_during_optional_startup() {
+@@ -3328,13 +3781,7 @@ async fn capture_binding_uses_cache_published_during_optional_startup() {
      tokio::time::advance(Duration::from_secs(/*secs*/ 2)).await;
 
      let binding = binding.await;
@@ -3383,7 +3511,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      assert_eq!(
          model_tool_names(binding.tools()),
          HashSet::from([ToolName::namespaced("mcp__pending", "peer_tool")]),
-@@ -3380,9 +3827,8 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
+@@ -3383,9 +3830,8 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
      );
      manager.insert_test_client("server_a", client_a);
      manager.insert_test_client("server_b", client_b);
@@ -3395,7 +3523,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      manager.required_servers = vec!["server_a".to_string(), "server_b".to_string()];
      let manager = Arc::new(manager);
 
-@@ -3390,7 +3836,7 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
+@@ -3393,7 +3839,7 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
      tokio::pin!(binding);
      assert!(futures::poll!(&mut binding).is_pending());
      started_b.await.expect("server B startup should begin");
@@ -3404,7 +3532,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
 
      // Expire A's catalog while capture is waiting for B's required startup.
      tokio::time::advance(Duration::from_secs(/*secs*/ 2)).await;
-@@ -3407,7 +3853,7 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
+@@ -3410,7 +3856,7 @@ async fn capture_binding_retains_cached_tools_that_expire_while_waiting_for_anot
              ToolName::namespaced("mcp__server_b", "tool_b"),
          ])
      );
@@ -3413,7 +3541,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  }
 
  #[tokio::test]
-@@ -3594,7 +4040,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
+@@ -3597,7 +4043,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
  async fn call_tool_requires_connection_without_waiting_for_startup() {
      let client = create_test_managed_client(vec![create_test_tool("docs", "search")]).await;
      let (client, startup_started, release_startup) = create_gated_async_managed_client(client);
@@ -3422,7 +3550,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
      let permission_profile = Constrained::allow_any(PermissionProfile::default());
      let mut manager = McpConnectionSet::new_uninitialized(
-@@ -3621,7 +4067,7 @@ async fn call_tool_requires_connection_without_waiting_for_startup() {
+@@ -3624,7 +4070,7 @@ async fn call_tool_requires_connection_without_waiting_for_startup() {
      .expect_err("pending server must not accept ready-only calls");
      assert!(pending_call.to_string().contains("not connected"));
 
@@ -3431,7 +3559,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      startup_started.await.expect("server startup should begin");
      release_startup.send(()).expect("release server startup");
      startup
-@@ -3797,6 +4243,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
+@@ -3800,6 +4246,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -3439,7 +3567,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -3855,6 +4302,7 @@ async fn shutdown_cancels_pending_tool_listing() {
+@@ -3858,6 +4305,7 @@ async fn shutdown_cancels_pending_tool_listing() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -3447,7 +3575,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token,
          },
      );
-@@ -3902,6 +4350,7 @@ async fn shutdown_continues_after_caller_is_aborted() {
+@@ -3905,6 +4353,7 @@ async fn shutdown_continues_after_caller_is_aborted() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -3455,7 +3583,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -3925,6 +4374,60 @@ async fn shutdown_continues_after_caller_is_aborted() {
+@@ -3928,6 +4377,60 @@ async fn shutdown_continues_after_caller_is_aborted() {
          .expect("client shutdown completion sender should stay alive");
  }
 
@@ -3516,7 +3644,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  #[tokio::test]
  async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
      let codex_home = tempdir().expect("tempdir");
-@@ -3955,6 +4458,7 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
+@@ -3958,6 +4461,7 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
              tool_catalog_cache_context: None,
              startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              startup_reconnect: None,
@@ -3524,7 +3652,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -4008,6 +4512,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
+@@ -4011,6 +4515,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
              tool_catalog_cache_context: None,
              startup_complete,
              startup_reconnect: None,
@@ -3532,7 +3660,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              cancel_token: CancellationToken::new(),
          },
      );
-@@ -4210,12 +4715,13 @@ async fn later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools()
+@@ -4213,12 +4718,13 @@ async fn later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools()
      tokio::time::advance(CODEX_APPS_RECONNECT_INITIAL_BACKOFF).await;
      let third_reconnect_finished = reconnect_finished.notified();
      let tools = manager.list_all_tools().await;
@@ -3552,7 +3680,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      );
      third_reconnect_finished.await;
      assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
-@@ -4361,7 +4867,6 @@ async fn list_all_tools_adds_server_metadata_to_tools() {
+@@ -4364,7 +4870,6 @@ async fn list_all_tools_adds_server_metadata_to_tools() {
              tool_approval_modes: HashMap::new(),
          },
      );
@@ -3560,7 +3688,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      let tools = manager.list_all_tools().await;
      assert_eq!(tools.len(), 1);
      let tool = &tools[0];
-@@ -4575,6 +5080,8 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
+@@ -4578,6 +5083,8 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                  ElicitationCapability::default(),
                  ClientMcpExtensions::default(),
                  /*previous_identity*/ None,
@@ -3569,7 +3697,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              )
          };
          let direct_keyring_identity = connection_identity(AuthKeyringBackendKind::Direct);
-@@ -4631,11 +5138,23 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
+@@ -4634,11 +5141,23 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                  auth_manager: None,
                  elicitation_reviewer: None,
                  elicitation_lifecycle: None,
@@ -3594,7 +3722,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              Ok(_) => panic!("{case}: the unreachable fake executor must not connect"),
              Err(error) => error,
          };
-@@ -4740,6 +5259,8 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+@@ -4743,6 +5262,8 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
              submit_id: String::new(),
              tx_event: None,
              startup_cancellation_token: cancel_token.clone(),
@@ -3603,7 +3731,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              runtime_context: McpRuntimeContext::new(
                  Arc::new(environment_manager_without_environments()),
                  PathBuf::from("/tmp"),
-@@ -4761,12 +5282,30 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+@@ -4764,12 +5285,30 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
 
      assert!(manager.contains_server("stdio"));
      assert!(manager.contains_server("http"));
@@ -3635,7 +3763,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          Ok(_) => panic!("local stdio MCP startup should fail"),
          Err(error) => error,
      };
-@@ -5087,7 +5626,7 @@ fn reusable_server_runtime_context() -> McpRuntimeContext {
+@@ -5090,7 +5629,7 @@ fn reusable_server_runtime_context() -> McpRuntimeContext {
      )
  }
 
@@ -3644,7 +3772,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      server_name: &str,
      config: &McpServerConfig,
      runtime_context: &McpRuntimeContext,
-@@ -5109,13 +5648,35 @@ fn reusable_server_identity(
+@@ -5112,13 +5651,35 @@ fn reusable_server_identity(
          ElicitationCapability::default(),
          ClientMcpExtensions::default(),
          /*previous_identity*/ None,
@@ -3680,7 +3808,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  ) -> McpConnectionSet {
      let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
      let permission_profile = Constrained::allow_any(PermissionProfile::default());
-@@ -5124,21 +5685,38 @@ async fn manager_with_reusable_ready_server(
+@@ -5127,21 +5688,38 @@ async fn manager_with_reusable_ready_server(
          &permission_profile,
          /*prefix_mcp_tool_names*/ true,
      );
@@ -3729,7 +3857,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              metadata: McpServerMetadata::from(&server),
              tool_filter: ToolFilter::from_config(config),
              tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
-@@ -5148,15 +5726,82 @@ async fn manager_with_reusable_ready_server(
+@@ -5151,15 +5729,82 @@ async fn manager_with_reusable_ready_server(
      manager
  }
 
@@ -3814,7 +3942,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          config,
          runtime_context,
          crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf()),
-@@ -5170,6 +5815,23 @@ async fn reconcile_reusable_server_with_mcp_config(
+@@ -5173,6 +5818,23 @@ async fn reconcile_reusable_server_with_mcp_config(
      config: McpServerConfig,
      runtime_context: McpRuntimeContext,
      mcp_config: crate::McpConfig,
@@ -3838,7 +3966,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  ) -> McpConnectionSet {
      let (tx_event, _rx_event) = async_channel::unbounded();
      McpConnectionSet::new(
-@@ -5187,6 +5849,8 @@ async fn reconcile_reusable_server_with_mcp_config(
+@@ -5190,6 +5852,8 @@ async fn reconcile_reusable_server_with_mcp_config(
              submit_id: "refresh".to_string(),
              tx_event: Some(tx_event),
              startup_cancellation_token: CancellationToken::new(),
@@ -3847,7 +3975,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              runtime_context,
              codex_apps_tools_cache: ConnectorRuntimeManager::default(),
              tool_catalog_cache: McpToolCatalogCache::default(),
-@@ -5393,6 +6057,114 @@ async fn apps_catalog_broadcast_survives_an_older_local_refresh() -> anyhow::Res
+@@ -5396,6 +6060,114 @@ async fn apps_catalog_broadcast_survives_an_older_local_refresh() -> anyhow::Res
      Ok(())
  }
 
@@ -3962,7 +4090,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  #[tokio::test]
  async fn refreshed_catalog_follows_reused_client_without_mutating_old_bindings()
  -> anyhow::Result<()> {
-@@ -5416,20 +6188,17 @@ async fn refreshed_catalog_follows_reused_client_without_mutating_old_bindings()
+@@ -5419,20 +6191,17 @@ async fn refreshed_catalog_follows_reused_client_without_mutating_old_bindings()
          "docs",
          create_ready_async_managed_client(vec![create_test_tool("docs", "unrelated")]).await,
      );
@@ -3993,7 +4121,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      // Seed an earlier catalog before capturing the binding under test.
      let startup_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "startup")];
      client
-@@ -5551,30 +6320,44 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
+@@ -5554,30 +6323,44 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
          /*prefix_mcp_tool_names*/ true,
      );
      let server = EffectiveMcpServer::from_host_config(config.clone());
@@ -4058,7 +4186,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              metadata: McpServerMetadata::from(&server),
              tool_filter: ToolFilter::from_config(&config),
              tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
-@@ -5648,25 +6431,21 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() ->
+@@ -5651,25 +6434,21 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() ->
          create_test_tool("docs", "search"),
          create_test_tool("docs", "write"),
      ];
@@ -4096,7 +4224,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      config.enabled_tools = Some(vec!["search".to_string()]);
      config.startup_timeout_sec = Some(DEFAULT_STARTUP_TIMEOUT);
 
-@@ -5694,7 +6473,7 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+@@ -5697,7 +6476,7 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
      let runtime_context = reusable_server_runtime_context();
      let mut config = reusable_server_config("http://127.0.0.1:1");
      let tools = vec![create_test_tool("docs", "search")];
@@ -4105,7 +4233,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          manager_with_reusable_ready_server(&config, &runtime_context, tools.clone()).await;
      let managed_client = create_test_managed_client(tools).await;
      let (pending_client, startup_started, release_startup) =
-@@ -5705,15 +6484,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+@@ -5708,15 +6487,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
          async move { pending_client.client().await }
      });
      startup_started.await?;
@@ -4127,7 +4255,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
 
      let reused =
          reconcile_reusable_server(&previous, config.clone(), runtime_context.clone()).await;
-@@ -5722,13 +6498,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+@@ -5725,13 +6501,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
      config.enabled = false;
      let removed = reconcile_reusable_server(&reused, config, runtime_context).await;
      assert!(!removed.servers.contains_key("docs"));
@@ -4146,7 +4274,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      release_startup
          .send(())
          .map_err(|()| anyhow!("pending startup should remain available for test cleanup"))?;
-@@ -5740,21 +6515,40 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+@@ -5743,21 +6518,40 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
  async fn reconciliation_retries_non_oauth_authentication_failures() {
      let runtime_context = reusable_server_runtime_context();
      let config = reusable_server_config("http://127.0.0.1:1");
@@ -4194,7 +4322,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  }
 
  #[test]
-@@ -5788,6 +6582,8 @@ fn connection_identity_tracks_only_oauth_credentials_when_oauth_is_active() {
+@@ -5791,6 +6585,8 @@ fn connection_identity_tracks_only_oauth_credentials_when_oauth_is_active() {
                  ElicitationCapability::default(),
                  ClientMcpExtensions::default(),
                  /*previous_identity*/ None,
@@ -4203,7 +4331,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              )
          };
          let original_config = serde_json::json!({
-@@ -5870,6 +6666,8 @@ fn connection_identity_uses_effective_authorization_headers() {
+@@ -5873,6 +6669,8 @@ fn connection_identity_uses_effective_authorization_headers() {
                  ElicitationCapability::default(),
                  ClientMcpExtensions::default(),
                  /*previous_identity*/ None,
@@ -4212,7 +4340,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              )
          };
 
-@@ -5966,8 +6764,11 @@ async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::
+@@ -5969,8 +6767,11 @@ async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::
          .get("docs")
          .expect("refreshed server should exist")
          .connection
@@ -4226,7 +4354,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      assert_matches!(
          outcome.err().expect("changed auth mode must be validated"),
          StartupOutcomeError::Failed {
-@@ -6000,6 +6801,12 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
+@@ -6003,6 +6804,12 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
          vec![create_test_tool("docs", "search")],
      )
      .await;
@@ -4239,7 +4367,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      let codex_home = tempdir().expect("tempdir");
      let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
      mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
-@@ -6019,6 +6826,8 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
+@@ -6022,6 +6829,8 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
              submit_id: "refresh".to_string(),
              tx_event: None,
              startup_cancellation_token: CancellationToken::new(),
@@ -4248,7 +4376,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              runtime_context,
              codex_apps_tools_cache: ConnectorRuntimeManager::default(),
              tool_catalog_cache: McpToolCatalogCache::default(),
-@@ -6035,7 +6844,220 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
+@@ -6038,7 +6847,220 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
      )
      .await;
 
@@ -4470,7 +4598,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  }
 
  #[tokio::test]
-@@ -6077,6 +7099,8 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
+@@ -6080,6 +7102,8 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
              submit_id: "refresh".to_string(),
              tx_event: None,
              startup_cancellation_token: CancellationToken::new(),
@@ -4479,7 +4607,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
              runtime_context,
              codex_apps_tools_cache: ConnectorRuntimeManager::default(),
              tool_catalog_cache: McpToolCatalogCache::default(),
-@@ -6253,33 +7277,54 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
+@@ -6256,33 +7280,54 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
              Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
          )
          .await?;
@@ -4558,7 +4686,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
 
      assert!(!client.is_closed().await);
      disconnect.cancel();
-@@ -6293,7 +7338,16 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
+@@ -6296,7 +7341,16 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
 
      let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
 
@@ -4576,7 +4704,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      Ok(())
  }
 
-@@ -6348,16 +7402,10 @@ async fn reconciliation_reconnects_when_host_plugin_root_changes() {
+@@ -6351,16 +7405,10 @@ async fn reconciliation_reconnects_when_host_plugin_root_changes() {
          ElicitationCapability::default(),
          ClientMcpExtensions::default(),
          /*previous_identity*/ None,
@@ -4596,7 +4724,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
 
      let codex_home = tempdir().expect("tempdir");
      let config_for_root = |root| {
-@@ -6429,6 +7477,8 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
+@@ -6432,6 +7480,8 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
              ElicitationCapability::default(),
              ClientMcpExtensions::default(),
              /*previous_identity*/ None,
@@ -4605,7 +4733,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          )
      };
 
-@@ -6483,6 +7533,8 @@ async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> a
+@@ -6486,6 +7536,8 @@ async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> a
              ElicitationCapability::default(),
              ClientMcpExtensions::default(),
              /*previous_identity*/ None,
@@ -4614,7 +4742,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
          )
      };
      let previous_identity = connection_identity(&previous_auth);
-@@ -6548,8 +7600,14 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
+@@ -6551,8 +7603,14 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
      let mut new_config = old_config;
      new_config.enabled_tools = Some(vec!["search".to_string()]);
      new_config.default_tools_approval_mode = Some(AppToolApproval::Approve);
@@ -4631,7 +4759,7 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
      assert!(previous.shares_test_connection_with(&reconciled, "docs"));
 
      let new_step = capture_binding(&reconciled).await;
-@@ -6576,4 +7634,56 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
+@@ -6579,4 +7637,56 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
          vec!["search".to_string()]
      );
      assert_eq!(new_call.tool_approval_mode(), AppToolApproval::Approve);
@@ -4690,10 +4818,10 @@ index 015240507bac3a622bbd18bd2588287c17dd559f..407bd151f76aa0db1b32b5bc24d6df59
  }
 diff --git a/codex-rs/codex-mcp/src/connection_pool.rs b/codex-rs/codex-mcp/src/connection_pool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..934d12059f227b72f69c32f419a3b6deb84a9820
+index 0000000000000000000000000000000000000000..6ae3df243cf9b5a0019acebc2ef6a459a789c479
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/connection_pool.rs
-@@ -0,0 +1,1406 @@
+@@ -0,0 +1,1412 @@
 +//! Agent-tree-scoped ownership for reusable MCP connections.
 +
 +use std::future::Future;
@@ -5739,7 +5867,8 @@ index 0000000000000000000000000000000000000000..934d12059f227b72f69c32f419a3b6de
 +        fallback: Option<(u64, Vec<ToolInfo>)>,
 +        context: &crate::mcp::ToolPluginContext,
 +        accepts_cached_tools: impl FnOnce(&[ToolInfo]) -> bool,
-+    ) -> Option<Vec<ToolInfo>> {
++        measure_raw_tools: impl FnOnce(&[ToolInfo]) -> usize,
++    ) -> Option<(Vec<ToolInfo>, usize)> {
 +        let connection = self.current().ok()?;
 +        // A cache snapshot must not carry tools across a physical connection replacement.
 +        let fallback = fallback.and_then(|(id, tools)| (id == connection.id).then_some(tools));
@@ -5747,7 +5876,12 @@ index 0000000000000000000000000000000000000000..934d12059f227b72f69c32f419a3b6de
 +            .client
 +            .cached_tools_or(fallback)
 +            .filter(|tools| accepts_cached_tools(tools))?;
-+        Some(connection.client.prepare_tools(tools, context))
++        // Measure the same physical catalog before model preparation changes its definitions.
++        let raw_definition_json_bytes = measure_raw_tools(&tools);
++        Some((
++            connection.client.prepare_tools(tools, context),
++            raw_definition_json_bytes,
++        ))
 +    }
 +
 +    pub(crate) fn cached_catalog_revision_if(
@@ -6102,10 +6236,10 @@ index 0000000000000000000000000000000000000000..934d12059f227b72f69c32f419a3b6de
 +mod tests;
 diff --git a/codex-rs/codex-mcp/src/connection_pool_tests.rs b/codex-rs/codex-mcp/src/connection_pool_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a81fa92f522e31110c8336ef968c4ce140dd025
+index 0000000000000000000000000000000000000000..51c2d2eae02e07b19617b1ef15ecf80c5852e783
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/connection_pool_tests.rs
-@@ -0,0 +1,2304 @@
+@@ -0,0 +1,2346 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::io;
@@ -7388,7 +7522,17 @@ index 0000000000000000000000000000000000000000..8a81fa92f522e31110c8336ef968c4ce
 +    ));
 +    let mut managed = test_managed_client("filtered Apps").await?;
 +    managed.tool_catalog = Arc::clone(&catalog);
-+    let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
++    let codex_home = tempfile::tempdir()?;
++    let cache_context = codex_connectors::ConnectorRuntimeManager::default().context(
++        codex_home.path().to_path_buf(),
++        ConnectorRuntimeContextKey::personal(None, None),
++    );
++    let _ = cache_context.publish_if_newest_accepted(
++        cache_context.begin_fetch(codex_connectors::ConnectorRuntimeFetchSource::HardRefresh),
++        &managed.server_info,
++        raw_tools.clone(),
++    );
++    let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
 +    config.connector_snapshot = codex_connectors::ConnectorSnapshot::from_plugin_sources(
 +        [],
 +        &[],
@@ -7403,9 +7547,14 @@ index 0000000000000000000000000000000000000000..8a81fa92f522e31110c8336ef968c4ce
 +        move |request_router| {
 +            let mut client = ready_client(request_router, managed.clone());
 +            client.is_codex_apps_mcp_server = true;
++            client.codex_apps_tools_cache_context = Some(cache_context.clone());
 +            client
 +        },
 +    );
++    // Cached Apps tools do not establish a ready physical client for binding capture.
++    lease
++        .await_current_startup(Arc::clone(&session_route))
++        .await?;
 +    let (_binding, snapshot, visible_tools) = lease
 +        .capture_ready_client_and_tools(
 +            session_route,
@@ -7417,6 +7566,33 @@ index 0000000000000000000000000000000000000000..8a81fa92f522e31110c8336ef968c4ce
 +
 +    assert_eq!(snapshot.tools.as_ref(), raw_tools.as_slice());
 +    assert_eq!(visible_tools, vec![raw_tools[0].clone()]);
++    let (cached_visible_tools, measured_bytes) = lease
++        .prepared_cached_tools(
++            None,
++            &crate::mcp::tool_plugin_context(&config),
++            |_| true,
++            |tools| {
++                assert_eq!(tools, raw_tools.as_slice());
++                crate::connection_manager::catalog_telemetry::tool_definition_json_bytes(
++                    tools.iter().map(|tool| &tool.tool),
++                    true,
++                )
++            },
++        )
++        .expect("raw cached Apps catalog should be measured before filtering");
++    let serialized_bytes = |tools: &[crate::tools::ToolInfo]| {
++        tools
++            .iter()
++            .map(|tool| {
++                serde_json::to_vec(&tool.tool)
++                    .expect("serialized tool")
++                    .len()
++            })
++            .sum::<usize>()
++    };
++    assert_eq!(cached_visible_tools, visible_tools);
++    assert_eq!(measured_bytes, serialized_bytes(&raw_tools));
++    assert!(measured_bytes > serialized_bytes(&cached_visible_tools));
 +    assert_eq!(
 +        catalog
 +            .run_with_snapshot(&snapshot, || async { "captured raw catalog" })
@@ -8677,7 +8853,7 @@ index d1b3a4b041f92a60806b16f6bc4eae12a5a732ac..7ab2106c68e8ff62a5fa5e47e1052902
  mod resource_origin;
  pub(crate) mod rmcp_client;
 diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
-index 7f6be9376d19a92c6e9f13b6b80ca3f1a2231cc7..8c339a10e2db93ece67de8b0ba3776bbd50b55d2 100644
+index c690f088384dc51c5d018d69d128c07bfd072789..2e7baa4a12cf03763d669605ed473da52947fe5e 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod.rs
 @@ -465,6 +465,8 @@ pub async fn read_mcp_resource(
@@ -10057,7 +10233,7 @@ index 0fa40abeb428a584a278e87b842b8feef1d98024..ed1a67676c939ba0dee777f3e53b76a3
 
      /// Creates an event stream opener using the task's event server settings.
 diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
-index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb25077eeae 100644
+index 8e3a8d26b1123fb1c592136f541d4ae16465e6e1..a1e6d0e5043c269a66dbb4d7ade483e098fdbe9a 100644
 --- a/codex-rs/codex-mcp/src/rmcp_client.rs
 +++ b/codex-rs/codex-mcp/src/rmcp_client.rs
 @@ -24,16 +24,18 @@ use std::time::Duration;
@@ -10262,7 +10438,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
                          codex_apps_tools_cache_context,
                          tool_catalog_cache_context,
                          tool_catalog_fetch_ticket,
-@@ -440,6 +451,7 @@ pub(crate) struct AsyncManagedClient {
+@@ -444,6 +455,7 @@ pub(crate) struct AsyncManagedClient {
      pub(crate) startup_complete: Arc<AtomicBool>,
      pub(crate) startup_reconnect: Option<Arc<CodexAppsStartupReconnect>>,
      pub(crate) cancel_token: CancellationToken,
@@ -10270,7 +10446,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
  }
 
  impl AsyncManagedClient {
-@@ -449,14 +461,12 @@ impl AsyncManagedClient {
+@@ -453,14 +465,12 @@ impl AsyncManagedClient {
      #[allow(clippy::too_many_arguments)]
      pub(crate) fn new(
          server_name: String,
@@ -10286,7 +10462,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
          codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
          tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
          runtime_context: McpRuntimeContext,
-@@ -469,8 +479,6 @@ impl AsyncManagedClient {
+@@ -473,8 +483,6 @@ impl AsyncManagedClient {
          catalog_item_limit: usize,
      ) -> Self {
          let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
@@ -10295,7 +10471,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
          let cached_server_info = if is_codex_apps_mcp_server {
              codex_apps_tools_cache_context
                  .as_ref()
-@@ -482,13 +490,12 @@ impl AsyncManagedClient {
+@@ -486,13 +494,12 @@ impl AsyncManagedClient {
          let server_capabilities = Arc::new(StdMutex::new(None));
          let startup = Arc::new(ManagedClientStartup {
              originator: AuthStorageOriginator::current(),
@@ -10311,7 +10487,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
              codex_apps_tools_cache_context: codex_apps_tools_cache_context.clone(),
              tool_catalog_cache_context: tool_catalog_cache_context.clone(),
              runtime_context,
-@@ -506,14 +513,11 @@ impl AsyncManagedClient {
+@@ -510,14 +517,11 @@ impl AsyncManagedClient {
          let client = startup.start();
          let startup_reconnect = is_codex_apps_mcp_server.then(|| {
              let startup = Arc::clone(&startup);
@@ -10331,7 +10507,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
          });
          Self {
              client,
-@@ -525,9 +529,18 @@ impl AsyncManagedClient {
+@@ -529,9 +533,18 @@ impl AsyncManagedClient {
              startup_complete,
              startup_reconnect,
              cancel_token,
@@ -10350,7 +10526,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
      pub(crate) async fn client(&self) -> Result<ManagedClient, StartupOutcomeError> {
          if let Some(client) = self
              .startup_reconnect
-@@ -553,11 +566,77 @@ impl AsyncManagedClient {
+@@ -557,11 +570,77 @@ impl AsyncManagedClient {
              })
      }
 
@@ -10431,7 +10607,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
          let Some(startup_reconnect) = self.startup_reconnect.as_ref() else {
              return;
          };
-@@ -565,13 +644,21 @@ impl AsyncManagedClient {
+@@ -569,13 +648,21 @@ impl AsyncManagedClient {
              return;
          }
          if matches!(self.client().await, Err(StartupOutcomeError::Failed { .. })) {
@@ -10456,7 +10632,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
              Ok(client) => client.client.shutdown().await,
              Err(StartupOutcomeError::Cancelled) => {}
              Err(error) => {
-@@ -605,9 +692,24 @@ impl AsyncManagedClient {
+@@ -609,9 +696,24 @@ impl AsyncManagedClient {
              })
      }
 
@@ -10483,7 +10659,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
              && let Some(startup_tools) = self.cached_tools()
          {
              Ok(startup_tools)
-@@ -617,7 +719,14 @@ impl AsyncManagedClient {
+@@ -621,7 +723,14 @@ impl AsyncManagedClient {
                  Err(error) if self.is_codex_apps_mcp_server => self.cached_tools().ok_or(error),
                  Err(error) => Err(error),
              }
@@ -10499,7 +10675,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
      }
  }
 
-@@ -766,7 +875,7 @@ fn add_plugin_provenance_to_tool(tool: &mut ToolInfo, plugin_names: &[String]) {
+@@ -765,7 +874,7 @@ fn add_plugin_provenance_to_tool(tool: &mut ToolInfo, plugin_names: &[String]) {
  }
 
  /// Adds server-scoped plugin names to regular MCP tools without changing their input schemas.
@@ -10508,7 +10684,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
      mut tools: Vec<ToolInfo>,
      tool_plugin_context: &ToolPluginContext,
  ) -> Vec<ToolInfo> {
-@@ -925,8 +1034,7 @@ async fn start_server_task(
+@@ -924,8 +1033,7 @@ async fn start_server_task(
      let StartServerTaskParams {
          is_codex_apps_mcp_server,
          startup_timeout,
@@ -10518,7 +10694,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
          codex_apps_tools_cache_context,
          tool_catalog_cache_context,
          tool_catalog_fetch_ticket,
-@@ -936,8 +1044,12 @@ async fn start_server_task(
+@@ -935,8 +1043,12 @@ async fn start_server_task(
          catalog_item_limit,
          server_capabilities,
      } = params;
@@ -10532,7 +10708,7 @@ index 6d1d90b74ca8ff05e93a4883288e1cec58345209..c180d189af1be0fe8b0369eef7201fb2
      let mut params =
          mcp_initialize_request_params(client_elicitation_capability, client_mcp_extensions);
      if auth_changes.is_some() {
-@@ -1153,8 +1265,7 @@ struct StartServerTaskParams {
+@@ -1152,8 +1264,7 @@ struct StartServerTaskParams {
      server_capabilities: Arc<StdMutex<Option<serde_json::Value>>>,
      is_codex_apps_mcp_server: bool,
      startup_timeout: Option<Duration>, // TODO: cancel_token should handle this.
@@ -11168,18 +11344,18 @@ index 9c9334aa70662eb3d07f10601e5a1381e9d1944e..6ed3f8376462eee6922c18e04fe4fdb1
          .await
  }
 diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
-index 2f1aa43f7ff6df2c416a540b756947622c27c8fa..5ea72cde01b029a02ef1f60579c5e370f7bbbadc 100644
+index e8fcc95f63c4d2791875d3178216a8628923f0a5..cdffc9e69fff940c4f698413ef7ba73feb34b2ee 100644
 --- a/codex-rs/core/src/agent/control/runtime.rs
 +++ b/codex-rs/core/src/agent/control/runtime.rs
-@@ -12,6 +12,7 @@ use crate::thread_manager::ThreadIdGenerator;
+@@ -15,6 +15,7 @@ use crate::thread_manager::ThreadIdGenerator;
  use crate::thread_manager::ThreadManagerState;
  use arc_swap::ArcSwapOption;
  use codex_extension_api::ThreadInstructionsProvider;
 +use codex_mcp::McpConnectionPool;
  use codex_protocol::SessionId;
  use codex_protocol::ThreadId;
- use codex_protocol::error::CodexErr;
-@@ -100,6 +101,8 @@ pub(crate) struct LocalAgentRuntime {
+ use codex_protocol::error::AgentErrorContext;
+@@ -189,6 +190,8 @@ pub(crate) struct LocalAgentRuntime {
      /// Captured at construction so delegates retain their manager's allocation policy.
      pub(super) thread_id_generator: ThreadIdGenerator,
      pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
@@ -11188,7 +11364,7 @@ index 2f1aa43f7ff6df2c416a540b756947622c27c8fa..5ea72cde01b029a02ef1f60579c5e370
      /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
      pub(super) rollout_budget: Arc<RolloutBudget>,
      /// The user-selected root routing tier, shared by the entire agent tree.
-@@ -129,6 +132,7 @@ impl LocalAgentRuntime {
+@@ -220,6 +223,7 @@ impl LocalAgentRuntime {
              shutdown: CancellationToken::new(),
              shutdown_state: Arc::default(),
              agent_execution_limiter: Arc::default(),
@@ -11196,8 +11372,8 @@ index 2f1aa43f7ff6df2c416a540b756947622c27c8fa..5ea72cde01b029a02ef1f60579c5e370
              rollout_budget: Arc::default(),
              root_service_tier: Arc::new(ArcSwapOption::from(None)),
              shared_thread_instructions_provider: Arc::default(),
-@@ -212,6 +216,10 @@ impl LocalAgentRuntime {
-         self.shutdown_state.record_failure();
+@@ -308,6 +312,10 @@ impl LocalAgentRuntime {
+         self.shutdown_state.record_failure(failure);
      }
 
 +    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
@@ -11221,10 +11397,10 @@ index 00640bcb7594b141fb43b5d45f74ccb6b7dd14b0..e89d4fdcf909605c82f7e82e11891bf1
          // one exists, but do not reintroduce the old hidden-local fallback.
          runtime_context,
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index 3f51d6596b2bcc0cb8bc807bb79e2dfd4d65e4a0..b426b98ca9cfd26a843cdfa858297b45b7b8df33 100644
+index 2fa5a93e95c19bb2a6dc5d021af49d840b0a6d09..5eab0ea2a4e93d46ea36c50015d69bba8f13d9f0 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
-@@ -258,9 +258,9 @@ impl Session {
+@@ -259,9 +259,9 @@ impl Session {
                  mcp_projection,
                  &ready_selected_capability_roots,
                  Some(self.mcp_elicitation_reviewer()),
@@ -11235,7 +11411,7 @@ index 3f51d6596b2bcc0cb8bc807bb79e2dfd4d65e4a0..b426b98ca9cfd26a843cdfa858297b45
              refresh_invalidation.published = true;
          }
      }
-@@ -340,6 +340,7 @@ impl Session {
+@@ -341,6 +341,7 @@ impl Session {
              mcp_projection,
              &ready_selected_capability_roots,
              Some(self.mcp_elicitation_reviewer()),
@@ -11243,7 +11419,7 @@ index 3f51d6596b2bcc0cb8bc807bb79e2dfd4d65e4a0..b426b98ca9cfd26a843cdfa858297b45
          );
          anyhow::ensure!(
              input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
-@@ -349,13 +350,19 @@ impl Session {
+@@ -350,13 +351,19 @@ impl Session {
              .scope(self.services.mcp_runtime.replace_fresh(input))
              .await;
          self.services.thread_extension_data.insert(selected_plugins);
@@ -11264,7 +11440,7 @@ index 3f51d6596b2bcc0cb8bc807bb79e2dfd4d65e4a0..b426b98ca9cfd26a843cdfa858297b45
      #[tracing::instrument(
          name = "mcp.runtime.resolve_for_step",
          skip_all,
-@@ -414,6 +421,9 @@ impl Session {
+@@ -415,6 +422,9 @@ impl Session {
              let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
              Arc::new(codex_mcp::McpBinding::empty(config))
          };
@@ -11274,7 +11450,7 @@ index 3f51d6596b2bcc0cb8bc807bb79e2dfd4d65e4a0..b426b98ca9cfd26a843cdfa858297b45
          let inherited_tools = self
              .services
              .mcp_tool_snapshot
-@@ -754,9 +764,10 @@ impl Session {
+@@ -756,9 +766,10 @@ impl Session {
              mcp_projection,
              &ready_selected_capability_roots,
              elicitation_reviewer,
@@ -11336,10 +11512,10 @@ index b813458ffa4c9ea98051c99c48dc24ab6605d14e..6e8756e8ce325ef823382f508f2b02f1
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 33a34fe12392230157756ed8b6c11aac63e5367f..f2c1e29dae9fbef83d27d63f71053a0759ebd0fa 100644
+index 9cd66ef5f55efe4cab03602ee0e0472433fc05e2..554492beab342e77e6b3e70006df1dd8381b38e5 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -7604,6 +7604,7 @@ async fn mcp_runtime_keeps_local_backend_without_a_selected_local_environment()
+@@ -7706,6 +7706,7 @@ async fn mcp_runtime_keeps_local_backend_without_a_selected_local_environment()
          },
          &[],
          /*elicitation_reviewer*/ None,
@@ -11347,7 +11523,7 @@ index 33a34fe12392230157756ed8b6c11aac63e5367f..f2c1e29dae9fbef83d27d63f71053a07
      );
      assert_eq!(
          runtime.config.environment_use_mxc,
-@@ -10888,6 +10889,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
+@@ -10986,6 +10987,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
      );
  }
 
@@ -11366,10 +11542,10 @@ index 33a34fe12392230157756ed8b6c11aac63e5367f..f2c1e29dae9fbef83d27d63f71053a07
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 9593508612c0374fadd548e1d32b23d113f8b286..16dc9b6f590b775a1b9de7ea753d7821e7858267 100644
+index 4bfda7e8e5271540132e147d0c986c877820bf5e..4e5798589e31520ef086434ff56549c774b36f2b 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1203,6 +1203,7 @@ impl ThreadManager {
+@@ -1208,6 +1208,7 @@ impl ThreadManager {
          Box::pin(self.start_thread_inner(
              options,
              /*forked_from_thread_id*/ None,
@@ -11377,7 +11553,7 @@ index 9593508612c0374fadd548e1d32b23d113f8b286..16dc9b6f590b775a1b9de7ea753d7821
              /*startup*/ None,
              ForkStartupItems::default(),
          ))
-@@ -1279,12 +1280,21 @@ impl ThreadManager {
+@@ -1284,12 +1285,21 @@ impl ThreadManager {
          &self,
          mut options: StartThreadOptions,
          forked_from_thread_id: Option<ThreadId>,
@@ -11402,7 +11578,7 @@ index 9593508612c0374fadd548e1d32b23d113f8b286..16dc9b6f590b775a1b9de7ea753d7821
          let (resumed_session_source, resumed_thread_source) = options
              .initial_history
              .get_resumed_session_sources()
-@@ -1338,6 +1348,10 @@ impl ThreadManager {
+@@ -1343,6 +1353,10 @@ impl ThreadManager {
          mut options: StartThreadOptions,
      ) -> CodexResult<NewThread> {
          let fork_source = self.get_thread(forked_from_thread_id).await?;
@@ -11413,7 +11589,7 @@ index 9593508612c0374fadd548e1d32b23d113f8b286..16dc9b6f590b775a1b9de7ea753d7821
          let inherited_multi_agent_version = fork_source
              .multi_agent_version()
              .unwrap_or(MultiAgentVersion::V1);
-@@ -1368,6 +1382,7 @@ impl ThreadManager {
+@@ -1373,6 +1387,7 @@ impl ThreadManager {
                  .start_thread_inner(
                      options,
                      Some(forked_from_thread_id),
@@ -11421,7 +11597,7 @@ index 9593508612c0374fadd548e1d32b23d113f8b286..16dc9b6f590b775a1b9de7ea753d7821
                      /*startup*/ None,
                      ForkStartupItems::default(),
                  )
-@@ -1394,6 +1409,7 @@ impl ThreadManager {
+@@ -1399,6 +1414,7 @@ impl ThreadManager {
              .start_thread_inner(
                  options,
                  Some(forked_from_thread_id),
@@ -11442,10 +11618,10 @@ index bc42d6c44f28fd1fa3b98b53208552c3898fb70a..268e5e26fdd4a6eb795dd19a80703af6
                      crate::session::ForkStartupItems::default(),
                  );
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 92b37a2a29d87d87b91732178b2000132d0efbc7..b11c2da306437872f70908e22ed0e250a3ca028c 100644
+index e3e0f9d7ee0032f8dfce74315edd26e9354ef451..880627c0336961e5dc8431855cff2a075c2b4e7d 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
-@@ -1987,22 +1987,19 @@ async fn selected_capability_roots_round_trip_through_fork() {
+@@ -2006,22 +2006,19 @@ async fn selected_capability_roots_round_trip_through_fork() {
              path: PathUri::parse("file:///plugins/demo").expect("plugin root URI"),
          },
      }];
@@ -11483,7 +11659,7 @@ index 92b37a2a29d87d87b91732178b2000132d0efbc7..b11c2da306437872f70908e22ed0e250
          .thread
 diff --git a/codex-rs/core/tests/suite/mcp_agent_tree.rs b/codex-rs/core/tests/suite/mcp_agent_tree.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc73d0476fc5aac41dce54ab3b77756b91ced7f2
+index 0000000000000000000000000000000000000000..c6cfc8c031e52e67582b95a742850ea0116b823b
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/mcp_agent_tree.rs
 @@ -0,0 +1,1834 @@
@@ -11816,7 +11992,7 @@ index 0000000000000000000000000000000000000000..bc73d0476fc5aac41dce54ab3b77756b
 +        .await?;
 +    let environments = test
 +        .thread_manager
-+        .default_environment_selections(&test.config.cwd, &test.config.workspace_roots);
++        .default_environment_requests(&test.config.cwd, &test.config.workspace_roots);
 +    let child = test
 +        .thread_manager
 +        .spawn_legacy_subagent(
@@ -13355,10 +13531,10 @@ index 846049c627daaf9a5c600dd3e35b5905150b310a..24354fcd2a501f74e2cd24f6fb933064
          &barrier_file,
          b"ready".to_vec(),
 diff --git a/codex-rs/core/tests/suite/mcp_turn_metadata.rs b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
-index 4fdc08065b982a0a82f0120a5f6801f33d65924d..7640b668749a62c2a7212ce3a2cb2e9431b8401e 100644
+index f139626324c7116193c3854e47f147133e1cbd7f..634fcc5e45e203320cdf1f70664475049d911f6e 100644
 --- a/codex-rs/core/tests/suite/mcp_turn_metadata.rs
 +++ b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
-@@ -399,6 +399,11 @@ default_tools_approval_mode = "{approval_mode}"
+@@ -407,6 +407,11 @@ default_tools_approval_mode = "{approval_mode}"
  "#
      ))
      .expect("apps config should parse");
@@ -13370,7 +13546,7 @@ index 4fdc08065b982a0a82f0120a5f6801f33d65924d..7640b668749a62c2a7212ce3a2cb2e94
      config.config_layer_stack = config
          .config_layer_stack
          .with_user_config(&user_config_path, user_config)
-@@ -425,6 +430,11 @@ default_tools_approval_mode = "{approval_mode}"
+@@ -433,6 +438,11 @@ default_tools_approval_mode = "{approval_mode}"
  "#
      ))
      .expect("apps config should parse");
@@ -13382,7 +13558,7 @@ index 4fdc08065b982a0a82f0120a5f6801f33d65924d..7640b668749a62c2a7212ce3a2cb2e94
      config.config_layer_stack = config
          .config_layer_stack
          .with_user_config(&user_config_path, user_config)
-@@ -879,6 +889,11 @@ approvals_reviewer = "auto_review"
+@@ -913,6 +923,11 @@ approvals_reviewer = "auto_review"
  "#
                  ))
                  .expect("apps config should parse");
@@ -13394,23 +13570,11 @@ index 4fdc08065b982a0a82f0120a5f6801f33d65924d..7640b668749a62c2a7212ce3a2cb2e94
                  config.config_layer_stack = config
                      .config_layer_stack
                      .with_user_config(&config.codex_home.join("config.toml").abs(), user_config)
-@@ -929,10 +944,7 @@ approvals_reviewer = "auto_review"
-         .requests()
-         .into_iter()
-         .find(|request| {
--            request
--                .message_input_texts("developer")
--                .iter()
--                .any(|text| text.starts_with("You are judging one planned coding-agent action."))
-+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
-         })
-         .expect("expected a Guardian request for the app MCP approval");
-     assert!(guardian_request.body_contains_text("calendar_create_event"));
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 915e99cb6ec1c8d2e34f5b7a282d879c62149137..f88eb5795e26899710f29ee82400443b3ba5dc99 100644
+index 4850b44da77f8a97ee6d3c9c83f9741ecce364de..b9256c330371cedf7dc888101d9378bad420a7a5 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -125,6 +125,7 @@ mod json_result;
+@@ -127,6 +127,7 @@ mod json_result;
  mod live_cli;
  #[path = "managed_threads_tests.rs"]
  mod managed_threads;
@@ -13419,7 +13583,7 @@ index 915e99cb6ec1c8d2e34f5b7a282d879c62149137..f88eb5795e26899710f29ee82400443b
  mod mcp_auth_refresh;
  mod mcp_ema_config;
 diff --git a/codex-rs/rmcp-client/Cargo.toml b/codex-rs/rmcp-client/Cargo.toml
-index 81758721ca0c17ff2b79a5f61a5e8c97a7153249..b61783ff827685d8135d4266bc46b631a487aa08 100644
+index 4702b0f53f1b9aeec01e57839b4460dcf2ea81d8..de01334b0a2f24dfc3e909f786744dfa7602b5c5 100644
 --- a/codex-rs/rmcp-client/Cargo.toml
 +++ b/codex-rs/rmcp-client/Cargo.toml
 @@ -37,6 +37,7 @@ rmcp = { workspace = true, default-features = false, features = [

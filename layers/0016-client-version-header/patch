@@ -1,8 +1,8 @@
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index 5d5b1f92e58efc63ef24459db87c549285fc3119..1fe6dd1bb8f2f9aec2e7f421d440248997c53ded 100644
+index f020d34c25413a7ac581dc5ed0a5187be17caa99..fd4c19231abc9db294d714c32f7c646c291dd9a9 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
-@@ -98,6 +98,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
+@@ -101,6 +101,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
  pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
  pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -21,7 +21,7 @@ index 5d5b1f92e58efc63ef24459db87c549285fc3119..1fe6dd1bb8f2f9aec2e7f421d4402489
  /// Wire protocol that the provider speaks.
  #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
  #[serde(rename_all = "lowercase")]
-@@ -531,9 +543,14 @@ other non-default provider fields are not supported"
+@@ -537,9 +549,14 @@ other non-default provider fields are not supported"
              wire_api: WireApi::Responses,
              query_params: None,
              http_headers: Some(
@@ -40,10 +40,10 @@ index 5d5b1f92e58efc63ef24459db87c549285fc3119..1fe6dd1bb8f2f9aec2e7f421d4402489
              env_http_headers: Some(
                  [
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index 3cbd8b2bac7a0b1482832f4634843e6e7387ebe6..e4f0a665f52d60a18d397faca5d028551df51b0f 100644
+index 9c15c54b70d1c500f07e2432aa1e7d9fada91740..fe02eef86036c64bc841c7f5fdac98346431bda1 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-@@ -240,6 +240,37 @@ fn codex_backend_routes_require_codex_base_url() {
+@@ -243,6 +243,37 @@ fn codex_backend_routes_require_codex_base_url() {
      }
  }
 

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index f7293972a074405139fdc9b17dcc14c6d191df10..58fbc251b61f1b6fd193c3761b75fa6ab2e81a5e 100644
+index a7f9e06f924c8c8e0aabfa5a7ac14c17c8feab27..bc9faf48b611728df1e23970897cc52f167f1ae5 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -2192,7 +2192,7 @@ impl ThreadRequestProcessor {
@@ -41,10 +41,10 @@ index f7293972a074405139fdc9b17dcc14c6d191df10..58fbc251b61f1b6fd193c3761b75fa6a
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 46c85c5bebbba92bffda27e804d1cd7b1f0bc3ed..d69e788629abb1c5bb286b858f662348ee303c48 100644
+index a7156aac5e62dd3904ff82f5f2e2fd35b2b9a100..d147c2e0fc67e1b543bb79128dde176dd19add05 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -131,6 +131,7 @@ mod skills_list;
+@@ -133,6 +133,7 @@ mod skills_list;
  mod sleep;
  mod sqlite_recovery;
  mod thread_archive;
@@ -334,10 +334,10 @@ index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763
      Ok(())
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 1166c967ee9ed223d080bff566874845bd685c59..9305357f29cf3d92ad102ee005fe62a82aff1872 100644
+index b82f6f6e5e624304ca1562e4f3747efd2b527923..ccf94ae0138cafa358532179feb0d77490745c01 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -725,6 +725,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+@@ -768,6 +768,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
      Ok(())
  }
 

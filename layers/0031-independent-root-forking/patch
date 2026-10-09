@@ -1,6 +1,6 @@
 diff --git a/codex-rs/core/src/independent_thread/fork.rs b/codex-rs/core/src/independent_thread/fork.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9478ec06ba9984ad1411c851084bcfc1a9749373
+index 0000000000000000000000000000000000000000..5b2dfa991aa276fa100e94746f3f4d2ee11b17d7
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork.rs
 @@ -0,0 +1,351 @@
@@ -287,8 +287,8 @@ index 0000000000000000000000000000000000000000..9478ec06ba9984ad1411c851084bcfc1
 +                .await
 +                .map_err(|error| error.to_string())?;
 +            match submitted {
-+                TurnInputSubmission::Started { turn_id } => Ok(Execution::Started { turn_id }),
-+                TurnInputSubmission::Steered { turn_id } => Ok(Execution::Steered { turn_id }),
++                TurnInputSubmission::Started { turn_id, .. } => Ok(Execution::Started { turn_id }),
++                TurnInputSubmission::Steered { turn_id, .. } => Ok(Execution::Steered { turn_id }),
 +                TurnInputSubmission::NotSubmitted { reason } => {
 +                    Err(format!("initial assignment was not submitted: {reason:?}"))
 +                }
@@ -1275,10 +1275,10 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +}
 diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..99c26a973443bdc07daaaad502943fa904183f55
+index 0000000000000000000000000000000000000000..3be7b514988ff51928c8a1c242c4b8b4efdb2da6
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/tests.rs
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,522 @@
 +//! Deterministic tests of the tool's persisted history and independent lifecycle.
 +
 +use super::*;
@@ -1776,6 +1776,7 @@ index 0000000000000000000000000000000000000000..99c26a973443bdc07daaaad502943fa9
 +/// Supplies a persisted turn boundary without asking a model to run the source.
 +fn turn_started(turn_id: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++        turn_attribution: None,
 +        turn_id: turn_id.to_string(),
 +        root_turn_id: None,
 +        trace_id: None,
@@ -1832,10 +1833,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index f72d283207bec5e3e165b47957f3b570b2d3b17b..2530fe7388adfa94076ba53358a14643a4d1945b 100644
+index 1cba0c82a463624809c62e4b6b571fbf934173b4..ece7f6531da6afdc88e2dc59b61ba25709376470 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1132,6 +1132,11 @@ impl ThreadManager {
+@@ -1137,6 +1137,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1848,10 +1849,10 @@ index f72d283207bec5e3e165b47957f3b570b2d3b17b..2530fe7388adfa94076ba53358a14643
          let thread = self.state.get_thread(thread_id).await?;
          if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
 diff --git a/codex-rs/core/src/tools/handlers/dynamic.rs b/codex-rs/core/src/tools/handlers/dynamic.rs
-index f2b7860d06385301ebefa9bdd70eb0a43a8639ad..70eeee2d6623d299c586272a80dbc48ed9d0e126 100644
+index f658d6742b158fbc5abbf6a8e1a78dba890466e1..74a5697ee526d7587f9e798e43703e0a871bfccf 100644
 --- a/codex-rs/core/src/tools/handlers/dynamic.rs
 +++ b/codex-rs/core/src/tools/handlers/dynamic.rs
-@@ -171,7 +171,7 @@ impl CoreToolRuntime for DynamicToolHandler {}
+@@ -175,7 +175,7 @@ impl CoreToolRuntime for DynamicToolHandler {
      clippy::await_holding_invalid_type,
      reason = "active turn checks and dynamic tool response registration must remain atomic"
  )]
@@ -1860,7 +1861,7 @@ index f2b7860d06385301ebefa9bdd70eb0a43a8639ad..70eeee2d6623d299c586272a80dbc48e
      session: &Session,
      turn_context: &TurnContext,
      call_id: String,
-@@ -189,7 +189,7 @@ async fn request_dynamic_tool(
+@@ -193,7 +193,7 @@ async fn request_dynamic_tool(
                  let mut ts = at.turn_state.lock().await;
                  ts.insert_pending_dynamic_tool(call_id.clone(), tx_response)
              }
@@ -1870,7 +1871,7 @@ index f2b7860d06385301ebefa9bdd70eb0a43a8639ad..70eeee2d6623d299c586272a80dbc48e
      };
      if prev_entry.is_some() {
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 8c91ab6c71302390138ad3ca110e619a32a7df7a..86878789d330e4e448372967f6a621ad2e700626 100644
+index 2df4586f7affd2afe8275a9fa52e6bc6d8f2f6fc..dce0710272114791e0fa772081f1b447292bc692 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@
@@ -1950,7 +1951,7 @@ index 4cadd93adc5c6cb21ab2162678a8ad430e527e14..0dd9f21339dfaf97b13b1af53c0b593a
      }
  }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 523ca9f0674d0f54a28c8c0e1bf26081ef8ca80d..3575fde14d3429150f8654d5b737d9f25754a19e 100644
+index bc879c11019a22d58e42146c7e3bfe8c29f76a3f..474b2e0c32677a00ce564012cd737f4b50af4bde 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
 @@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -1962,7 +1963,7 @@ index 523ca9f0674d0f54a28c8c0e1bf26081ef8ca80d..3575fde14d3429150f8654d5b737d9f2
  use codex_protocol::protocol::TurnCompleteEvent;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentSelections;
-@@ -1671,6 +1673,181 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
+@@ -1667,6 +1669,182 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
      assert_nth_user_message_ignores_contextual_user_items(/*use_completed_user_items*/ false).await
  }
 
@@ -1991,6 +1992,7 @@ index 523ca9f0674d0f54a28c8c0e1bf26081ef8ca80d..3575fde14d3429150f8654d5b737d9f2
 +                    ordinal: Some(6),
 +                    item: RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
 +                        turn_id: turn_id.map(str::to_string),
++                        root_turn_id: None,
 +                        reason: TurnAbortReason::Interrupted,
 +                        error: None,
 +                        started_at: None,

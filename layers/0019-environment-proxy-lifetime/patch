@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 6d8900d0f8c6d9199f70c86aa491857f7de2955b..d09316775be367a4582c510f55499e11fbdd8367 100644
+index 736ca4eb3edb0bfde3467921f3f53e0ce6f03dd3..b2f37de69c037f50ae33a4a80000636f394f4893 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2373,6 +2373,7 @@ dependencies = [
+@@ -2379,6 +2379,7 @@ dependencies = [
   "codex-windows-sandbox",
   "dotenvy",
   "pathdiff",
@@ -11,7 +11,7 @@ index 6d8900d0f8c6d9199f70c86aa491857f7de2955b..d09316775be367a4582c510f55499e11
   "tempfile",
   "tokio",
 diff --git a/codex-rs/arg0/Cargo.toml b/codex-rs/arg0/Cargo.toml
-index b6d4c2d404ece5b3030ead85f888fa8a29538c48..63d9cf9ad8a2603a74815680a830e4c1c477755c 100644
+index 1f1bc3866efd8962ae9f4e0dd776037370d035a1..5f3d7662b481fa7bc343ec07fbe206a0446fec2b 100644
 --- a/codex-rs/arg0/Cargo.toml
 +++ b/codex-rs/arg0/Cargo.toml
 @@ -28,6 +28,9 @@ dotenvy = { workspace = true }
@@ -25,10 +25,10 @@ index b6d4c2d404ece5b3030ead85f888fa8a29538c48..63d9cf9ad8a2603a74815680a830e4c1
  codex-windows-sandbox = { workspace = true }
  pathdiff = { workspace = true }
 diff --git a/codex-rs/arg0/src/lib.rs b/codex-rs/arg0/src/lib.rs
-index 5bed3b93efda109906a0d12806265688f8d441ed..8b1bfd9f41950ed37044a86acfe9c750296b666e 100644
+index c3467367190389297406c1aefd40d42ca503b6b5..d275303599b45b9d4e67e8e48a09f00394a62547 100644
 --- a/codex-rs/arg0/src/lib.rs
 +++ b/codex-rs/arg0/src/lib.rs
-@@ -159,6 +159,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+@@ -154,6 +154,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
          std::process::exit(exit_code);
      }
 
@@ -38,7 +38,7 @@ index 5bed3b93efda109906a0d12806265688f8d441ed..8b1bfd9f41950ed37044a86acfe9c750
      // This modifies the environment, which is not thread-safe, so do this
      // before creating any threads/the Tokio runtime.
      load_dotenv();
-@@ -178,6 +181,38 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+@@ -173,6 +176,38 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
      path_entry_guard
  }
 
@@ -151,7 +151,7 @@ index fa458ed1b71b74805a096df0862e4e3412be21fc..342f11be1f1fd1e4d0c0345df51dfd68
      let (program, args) = command.split_first().ok_or_else(|| {
          CodexErr::Io(io::Error::new(
 diff --git a/codex-rs/core/src/sandboxing/mod.rs b/codex-rs/core/src/sandboxing/mod.rs
-index 43003e8ad09666b4ebdd3630375b304591c9a64e..9369060ff0d20c3ef04dc2ff72c494d93195e80f 100644
+index 69f6ff90447ffd6389bc0d0972c3cf4d6f4bfcea..2e65a6d312451d4bc85fa2050341ff84bc3f54b3 100644
 --- a/codex-rs/core/src/sandboxing/mod.rs
 +++ b/codex-rs/core/src/sandboxing/mod.rs
 @@ -15,6 +15,7 @@ use crate::exec::execute_exec_request;
@@ -179,7 +179,7 @@ index 43003e8ad09666b4ebdd3630375b304591c9a64e..9369060ff0d20c3ef04dc2ff72c494d9
              expiration,
              capture_policy,
              sandbox,
-@@ -185,6 +189,7 @@ impl ExecRequest {
+@@ -186,6 +190,7 @@ impl ExecRequest {
              exec_server_shell_snapshot: None,
              network,
              network_environment_id,
@@ -238,10 +238,10 @@ index 1da6854995147d6ef526175aaf6625f8715dcf58..085f5e023898911f0fb3ff516c969413
          let output = tokio::spawn(execute_env(request, /*stdout_stream*/ None))
              .await
 diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
-index e802122c0f92480f60d487ca2df8f0c9b27be6a0..0dcf1a85a0e1391079c3d8dbbc91ae96d0b05816 100644
+index f3915ed5c77c73f4c23ec69be434eea24f7a126c..813686d53bad23ddca9367036f91bdded45607af 100644
 --- a/codex-rs/core/src/tasks/user_shell.rs
 +++ b/codex-rs/core/src/tasks/user_shell.rs
-@@ -221,6 +221,7 @@ pub(crate) async fn execute_user_shell_command(
+@@ -219,6 +219,7 @@ pub(crate) async fn execute_user_shell_command(
          // inherit a managed proxy from the surrounding session or turn.
          network: None,
          network_environment_id: None,
@@ -250,7 +250,7 @@ index e802122c0f92480f60d487ca2df8f0c9b27be6a0..0dcf1a85a0e1391079c3d8dbbc91ae96
          capture_policy: ExecCapturePolicy::ShellTool,
          sandbox: SandboxType::None,
 diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
-index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90f88fbaa0 100644
+index 2642a9c1c00b7b6ec217b79dd066d917e6c231d8..9c9703827d5ffc933d994c7f60ad58c1fb9067d7 100644
 --- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
 +++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
 @@ -47,6 +47,7 @@ use crate::unified_exec::UnifiedExecProcessManager;
@@ -261,7 +261,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
  use codex_network_proxy::ManagedNetworkSandboxContext;
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::error::CodexErr;
-@@ -119,6 +120,8 @@ pub(crate) struct UnifiedExecAttempt {
+@@ -120,6 +121,8 @@ pub(crate) struct UnifiedExecAttempt {
      pub(crate) process: UnifiedExecProcess,
      pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
      pub(crate) permissions: TerminalPermissions,
@@ -270,7 +270,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
  }
 
  fn unified_exec_options(
-@@ -351,43 +354,46 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -360,43 +363,46 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
          } else {
              None
          };
@@ -354,7 +354,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
                              .environment
                              .info()
                              .await
-@@ -396,33 +402,38 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -405,33 +411,38 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                                      "failed to query exec-server capabilities: {err}"
                                  ))))
                              })?;
@@ -414,7 +414,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
          if let Some(snapshot) = shell_snapshot.as_ref() {
              snapshot.restore_fail_open_aliases(
                  &mut env,
-@@ -672,6 +683,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -690,6 +701,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                  )
                  .map_err(ToolError::Codex)?;
              exec_env.exec_server_env_config = req.exec_server_env_config.clone();
@@ -422,7 +422,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
              match zsh_fork::maybe_prepare_unified_exec(req, attempt, ctx, exec_env, zsh_fork_config)
                  .await?
              {
-@@ -710,6 +722,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -728,6 +740,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                          process,
                          metrics_sidecar,
                          permissions,
@@ -430,7 +430,7 @@ index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..8cd702a52f76e9f603fce7bf7e5d9e90
                      });
                  }
                  None => {
-@@ -758,6 +771,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -776,6 +789,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
              process,
              metrics_sidecar,
              permissions,
@@ -486,7 +486,7 @@ index f0aaf9d5f4e5e5c247ae1cfe9be706c4c9c81b91..0b7795ad1857f05748706269f1db8e26
                      &mut exec_request.env,
                      self.network_environment_id.as_deref(),
 diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
-index 9d3c5e8ade2d4a8cf065457e1ac03f327bddd374..2eee21c7eeedda637a8ec91a674f5a213b9da401 100644
+index ca282cd696f49aaded9457f6c7b77880192e2400..ceb3ff449e76cbc7036a4488407b3151cd9df872 100644
 --- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
 +++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
 @@ -366,6 +366,7 @@ async fn unsandboxed_intercepted_exec_strips_managed_network_env() -> anyhow::Re
@@ -527,7 +527,7 @@ index f30c750cbb38afef5a7117c41e5e9c26aca0add9..c9422ec4c44a7959abf0d623cf796b49
          output_drained.notified().await;
          // Deferred network denial deliberately remains observable for a short
 diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-index 3204d620326f2d1094bf48d64064ac4fa74b8a57..69c1ffc92125beea2d8e938e59ad10aa8469e91c 100644
+index 9cde1c60116b39227e6b6190d070b34da05612cf..2e7780e012700614cfb8f3e1ec12216ca783d357 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 @@ -114,6 +114,7 @@ async fn completed_output_preserves_bytes_before_subscription(
@@ -547,7 +547,7 @@ index 3204d620326f2d1094bf48d64064ac4fa74b8a57..69c1ffc92125beea2d8e938e59ad10aa
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 8c0cfcfd0406f80967cebb44d5cb66fdd2e590da..8aae23aa9241445d325c6a54170fadd9118a4e9a 100644
+index 2940235c6a3b254a867fbac57d7b4accd15c2053..ba4ddba1efd7a610436786ee1968aaf29f2bf52b 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -74,6 +74,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;

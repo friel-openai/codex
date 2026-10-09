@@ -371,7 +371,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
      Ok(())
  }
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index 515de67972a0a21dcda9cf57a5385ff20bec9812..eeeea6b1c4dd1d7da68cfe48cab8922b71aaad37 100644
+index 5967dcbf29c3dac3597cb8133a771b2e77c6b070..64198d21ce1dc2104b39e7d2c7999161561a5d0b 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
 @@ -2,7 +2,10 @@ use codex_utils_absolute_path::test_support::PathExt;
@@ -1771,7 +1771,7 @@ index 515de67972a0a21dcda9cf57a5385ff20bec9812..eeeea6b1c4dd1d7da68cfe48cab8922b
  }
 
  #[tokio::test]
-@@ -1315,34 +2406,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
+@@ -1336,34 +2427,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
          .open_read_write_pool(&state_path)
          .await
          .expect("sqlite database should open");

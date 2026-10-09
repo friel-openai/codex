@@ -1,10 +1,9 @@
 {
-  "schema_version": 1,
   "groups": [
     {
-      "package": "codex-core",
       "binary": "codex-core",
       "kind": "lib",
+      "package": "codex-core",
       "target": null,
       "tests": [
         "agent::api::tests::host_list_canonical_preserves_metadata_and_order",
@@ -114,29 +113,67 @@
         "context::world_state::multi_agent_mode::tests::snapshots",
         "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
         "agent::control::tests::pending_environment_failure_reaches_child_and_grandchild",
-        "agent::control::tests::spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated",
+        "agent::control::tests::spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated::v1_gate_enabled",
+        "agent::control::tests::spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated::v2_gate_disabled",
+        "agent::control::tests::spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated::v2_gate_enabled",
         "guardian::input_budget::tests::compacted_review_restores_originals_once_and_persists_the_request_prefix",
         "guardian::review_session::tests::run_review_preserves_evidence_during_parent_compaction",
         "guardian::review_session::tests::encrypted_parent_compaction_requires_original_item_id::thread_owned",
-        "guardian::review_session::tests::encrypted_parent_compaction_requires_original_item_id::legacy_checkpoint"
+        "guardian::review_session::tests::encrypted_parent_compaction_requires_original_item_id::legacy_checkpoint",
+        "agent::control::tests::forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot",
+        "client::tests::response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest",
+        "client::tests::fork_preconnect_preserves_only_eligible_response_continuation::same_identity",
+        "client::tests::fork_preconnect_preserves_only_eligible_response_continuation::changed_auth_owner",
+        "client::tests::fork_preconnect_preserves_only_eligible_response_continuation::changed_provider_route",
+        "agent::control::tests::spawn_agent_fork_strips_parent_usage_hints_from_compacted_history::marked_catalog_hints",
+        "agent::control::tests::spawn_agent_fork_strips_parent_usage_hints_from_compacted_history::unmarked_bundled_hints",
+        "session::tests::remote_compaction_v2_retains_only_the_selected_step::primary_succeeds",
+        "session::tests::remote_compaction_v2_retains_only_the_selected_step::fallback_executes",
+        "session::tests::interrupting_compaction_fallback_retains_last_known_step_context",
+        "session::rollout_reconstruction_tests::reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_completed_turns",
+        "agent::control::tests::spawn_agent_fork_from_paginated_parent_uses_model_context_prefix",
+        "agent::control::tests::full_history_agent_fork_uses_nonlocal_thread_store",
+        "agent::control::tests::full_history_fork_copies_paginated_history_base_lineage_across_resume",
+        "agent::control::runtime::tests::cloned_guard_reports_its_own_context_before_releasing_membership",
+        "agent::control::tests::spawn_agent_can_fork_parent_thread_history_with_sanitized_items",
+        "tools::handlers::multi_agents::tests::multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override",
+        "tools::handlers::multi_agents::tests::multi_agent_v2_spawn_without_history_allows_agent_type_override",
+        "tools::handlers::multi_agents::tests::multi_agent_v2_spawn_rejects_invalid_fork_turns_string::invalid_string",
+        "tools::handlers::multi_agents::tests::multi_agent_v2_spawn_rejects_invalid_fork_turns_string::zero_turns",
+        "agent::control::residency::tests::residency_slot_reservation_unloads_oldest_idle_v1_agent",
+        "agent::control::residency::tests::residency_slot_reservation_unloads_oldest_idle_v2_agent",
+        "agent::control::tests::status_and_subscription_retain_a_cold_terminal_agent",
+        "context::world_state::environment::tests::subagent_diffs_add_change_remove_and_escape_xml",
+        "session::tests::failed_compaction_restores_state_and_allows_persisted_continuation",
+        "session::tests::compaction_checkpoint_waits_for_accepted_settings_persistence",
+        "session::rollout_reconstruction_tests::reconstruct_attribution_ignores_previous_turn_terminal::late_completion",
+        "session::rollout_reconstruction_tests::reconstruct_attribution_ignores_previous_turn_terminal::late_abort_before_current_context",
+        "session::rollout_reconstruction_tests::reconstruct_attribution_ignores_previous_terminal_after_checkpoint::continuation_marker_cleared",
+        "session::rollout_reconstruction_tests::completed_suffix_keeps_certified_world_state_before_applying_patch",
+        "agent::control::tests::ownership_transfer_cold_reload_preserves_applied_instructions",
+        "agent::control::tests::spawn_agent_full_history_fork_from_compacted_paginated_parent_preserves_summary",
+        "client::tests::ephemeral_root_fork_cache_key_survives_transitive_subagent_forks",
+        "client::tests::guardian_scoped_cache_key_is_not_inherited_by_forks",
+        "thread_manager::tests::thread_id_generator_applies_to_roots_children_and_forks"
       ]
     },
     {
-      "package": "codex-models-manager",
       "binary": "codex-models-manager",
       "kind": "lib",
+      "package": "codex-models-manager",
       "target": null,
       "tests": [
         "manager::tests::authoritative_catalog_preserves_configured_alias_metadata_and_replacement",
         "manager::tests::authoritative_catalog_preserves_hidden_models_and_matches_exact_ids",
         "manager::tests::authoritative_catalog_failure_invalidates_cache_until_refresh_succeeds",
-        "manager::tests::replacing_custom_models_preserves_authenticated_remote_catalog"
+        "manager::tests::replacing_custom_models_preserves_authenticated_remote_catalog",
+        "manager::tests::custom_model_alias_uses_backing_model_metadata_and_request_model"
       ]
     },
     {
-      "package": "codex-mcp",
       "binary": "codex-mcp",
       "kind": "lib",
+      "package": "codex-mcp",
       "target": null,
       "tests": [
         "connection_manager::tests::catalog_readiness_accepts_pending_required_server_but_explicit_capture_waits",
@@ -150,13 +187,16 @@
         "server::tests::connection_identity_does_not_reuse_connections_across_credential_policies",
         "server::tests::executor_connection_identity_does_not_capture_host_environment_values",
         "server::tests::tool_catalog_cache_does_not_reuse_catalogs_across_credential_policies",
-        "rmcp_client::credential_policy_tests::executor_credentials_reject_host_fallback_for_arbitrary_environment_names"
+        "rmcp_client::credential_policy_tests::executor_credentials_reject_host_fallback_for_arbitrary_environment_names",
+        "connection_pool::tests::pooled_capture_retains_raw_catalog_snapshot_when_connector_tools_are_filtered",
+        "connection_manager::tests::capture_binding_uses_the_ready_clients_own_tools",
+        "connection_manager::catalog_telemetry::tests::tool_definition_json_bytes_skips_disabled_measurement_and_counts_enabled_tools"
       ]
     },
     {
-      "package": "codex-history",
       "binary": "codex-history",
       "kind": "lib",
+      "package": "codex-history",
       "target": null,
       "tests": [
         "user_authorization::tests::retained_messages_preserve_phase_origin_and_source",
@@ -169,9 +209,9 @@
       ]
     },
     {
-      "package": "codex-thread-store",
       "binary": "codex-thread-store",
       "kind": "lib",
+      "package": "codex-thread-store",
       "target": null,
       "tests": [
         "local::rollout_migration::modern_rollback::retained_tests::assistant_delivery_keeps_call_order_and_saved_revisions_after_rollback",
@@ -188,13 +228,16 @@
         "local::thread_history::read::tests::indexed_paginated_cursor_pages_never_open_projected_predecessors",
         "local::thread_history::read::tests::item_anchors_reject_developer_messages_hidden_by_fork_filters",
         "local::update_thread_metadata::tests::update_thread_metadata_uses_live_rollout_path_for_external_resume",
-        "local::update_thread_metadata::tests::update_thread_metadata_recreates_missing_archived_sqlite_row_as_archived"
+        "local::update_thread_metadata::tests::update_thread_metadata_recreates_missing_archived_sqlite_row_as_archived",
+        "local::thread_history_materialization::tests::legacy_projection_materializes_visible_messages_without_rollout_ordinals",
+        "local::thread_history_materialization::tests::paginated_command_history_caps_aggregated_output",
+        "local::thread_history_materialization::tests::paginated_mcp_history_caps_large_results"
       ]
     },
     {
-      "package": "codex-tui",
       "binary": "codex-tui",
       "kind": "lib",
+      "package": "codex-tui",
       "target": null,
       "tests": [
         "startup_error_hook_tests::handled_startup_error_does_not_prevent_startup_retry",
@@ -205,13 +248,23 @@
         "app_server_session::provider_selection_tests::starts_and_forks_use_server_provider_unless_explicitly_selected",
         "app_server_session::rollout_history::tests::remote_resume_restores_saved_server_profile_without_permission_overrides",
         "app::tests::fork_workspace_roots_tests::remote_fork_dispatch_preserves_server_workspace_roots",
-        "app::tests::session_lifecycle_requests::agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable"
+        "app::tests::session_lifecycle_requests::agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable",
+        "app::tests::session_lifecycle_requests::startup_defaults_tests::fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence",
+        "named_session_lookup::tests::resolves_name_and_preview_from_server_list",
+        "named_session_lookup::tests::recovers_legacy_index_name_without_requiring_sidecar_rewrite",
+        "chatwidget::tests::status_and_layout::answer_phase_controls_working_status_snapshot",
+        "app::tests::server_only_profile_selection_keeps_turns_on_the_selected_profile",
+        "chatwidget::tests::side::slash_side_without_args_places_blank_side_to_the_right",
+        "chatwidget::tests::side::slash_btw_without_args_places_blank_side_to_the_right",
+        "chatwidget::tests::side::side_alias_placement_flags_emit_placed_side_events",
+        "chatwidget::tests::side::side_aliases_are_rejected_during_review_mode",
+        "app::tests::goal_supervisor_spawn_notification_is_hidden_without_thread_started"
       ]
     },
     {
-      "package": "codex-state",
       "binary": "codex-state",
       "kind": "lib",
+      "package": "codex-state",
       "target": null,
       "tests": [
         "runtime::threads::tests::archived_thread_pages_use_ordered_indexes_without_sorting",
@@ -227,19 +280,21 @@
       ]
     },
     {
-      "package": "codex-api",
       "binary": "codex-api",
       "kind": "lib",
+      "package": "codex-api",
       "target": null,
       "tests": [
         "sse::responses_error::tests::usage_limit_type_preserves_plan_and_reset_details",
-        "sse::responses_error::tests::context_and_quota_codes_take_precedence_over_usage_limit_type"
+        "sse::responses_error::tests::context_and_quota_codes_take_precedence_over_usage_limit_type",
+        "sse::responses::error_tests::rate_limit_plaintext_loses_to_valid_error_header",
+        "sse::responses::error_tests::retry_header_does_not_override_terminal_errors"
       ]
     },
     {
-      "package": "codex-rollout",
       "binary": "codex-rollout",
       "kind": "lib",
+      "package": "codex-rollout",
       "target": null,
       "tests": [
         "segment_checkpoint::tests::checkpoint_without_previous_cyber_access_program_roundtrips",
@@ -247,13 +302,17 @@
         "reference::tests::nth_user_message_uses_real_turn_events_instead_of_contextual_user_items",
         "reference::tests::nth_user_message_preserves_exact_tool_output_only_turn_boundary",
         "reference::tests::nth_user_message_preserves_rollback_after_unfinished_turn",
-        "reference::tests::nth_user_message_uses_completed_user_items_instead_of_contextual_user_items"
+        "reference::tests::nth_user_message_uses_completed_user_items_instead_of_contextual_user_items",
+        "compression::tests::full_history_load_preserves_records_and_errors_across_representations",
+        "compression::tests::exact_reader_preserves_physical_sibling_and_read_metrics",
+        "reference::tests::materialization_rejects_malformed_references_in_active_legacy_root",
+        "segment_checkpoint::tests::cleared_checkpoint_has_canonical_order_and_descriptor"
       ]
     },
     {
-      "package": "codex-core",
       "binary": "codex-core::all",
       "kind": "test",
+      "package": "codex-core",
       "target": "all",
       "tests": [
         "suite::agent_control::default_list_canonical_uses_provided_host_controller",
@@ -282,22 +341,38 @@
         "suite::multi_agent_mode::catalog_proactive_mode_applies_across_reasoning_efforts::high_uses_proactive_override",
         "suite::multi_agent_mode::empty_configured_mode_hint_emits_no_mode_message::explicit_mode",
         "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_drops_inherited_multi_agent_mode_instructions",
-        "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_replaces_parent_proactive_policy_after_effort_changes"
+        "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::full_fork_replaces_parent_proactive_policy_after_effort_changes",
+        "suite::model_switching::custom_model_alias_uses_backing_model_in_responses_request",
+        "suite::compact::manual_compact_twice_preserves_latest_user_messages",
+        "suite::model_visible_layout::snapshot_model_visible_layout_resume_override_matches_rollout_model",
+        "suite::model_routing_profiles::smaller_fallback_compacts_before_its_first_sampling_request",
+        "suite::model_routing_profiles::typed_compaction_failure_falls_through_without_terminating_the_turn",
+        "suite::model_routing_profiles::token_budget_reroute_runs_post_compact_hook_once_after_route_commit",
+        "suite::agent_execution::agent_mailbox::idle_mail_survives_eviction_and_preserves_followup_order",
+        "suite::agent_control::host_mailbox_notifies_waiting_agent_and_delivers_once",
+        "suite::mcp_turn_metadata::mcp_app_ui_survives_tool_events_and_resume::fullscreen",
+        "suite::subagent_notifications::spawned_full_history_v2_child_uses_model_precedence_without_dropping_context::legacy_one_turn_forks_full_history_with_explicit_override",
+        "suite::compact::paginated_compaction_cold_resume_from_bounded_suffix",
+        "suite::pending_input::queued_inter_agent_mail_triggers_follow_up_after_commentary_message_item",
+        "suite::pending_input::queued_inter_agent_mail_triggers_follow_up_after_reasoning_item",
+        "suite::pending_input::user_input_does_not_preempt_after_reasoning_item",
+        "suite::token_budget::new_context_tool_skips_auto_compact_fallback",
+        "suite::agent_control::host_factory_follows_thread_lifecycle"
       ]
     },
     {
-      "package": "codex-app-server",
       "binary": "codex-app-server",
       "kind": "lib",
+      "package": "codex-app-server",
       "target": null,
       "tests": [
         "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up"
       ]
     },
     {
-      "package": "codex-app-server",
       "binary": "codex-app-server::all",
       "kind": "test",
+      "package": "codex-app-server",
       "target": "all",
       "tests": [
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::different_sync_hash_preserves_retained_evidence",
@@ -309,9 +384,9 @@
       ]
     },
     {
-      "package": "codex-goal-extension",
       "binary": "codex-goal-extension::goal_extension_backend",
       "kind": "test",
+      "package": "codex-goal-extension",
       "target": "goal_extension_backend",
       "tests": [
         "goal_resume_tests::resume_goal_tool_preserves_goal_and_emits_update",
@@ -330,14 +405,37 @@
       ]
     },
     {
-      "package": "codex-code-mode-host",
       "binary": "codex-code-mode-host::stdio",
       "kind": "test",
+      "package": "codex-code-mode-host",
       "target": "stdio",
       "tests": [
         "remote_session_persists_values_forwards_delegates_and_controls_cells",
         "interrupt_yields_observations_without_stopping_the_cell"
       ]
+    },
+    {
+      "binary": "codex-model-provider",
+      "kind": "lib",
+      "package": "codex-model-provider",
+      "target": null,
+      "tests": [
+        "provider::tests::configured_bedrock_catalog_preserves_service_tiers"
+      ]
+    },
+    {
+      "binary": "codex-protocol",
+      "kind": "lib",
+      "package": "codex-protocol",
+      "target": null,
+      "tests": [
+        "protocol::tests::turn_context_item_deserializes_without_summary",
+        "protocol::tests::turn_context_item_serializes_split_policy_and_summary",
+        "protocol::tests::turn_started_roundtrips_nonempty_turn_attribution",
+        "protocol::tests::thread_settings_environments_persist_locations_without_owner_config",
+        "protocol::tests::thread_settings_environments_read_legacy_selections_and_absence"
+      ]
     }
-  ]
+  ],
+  "schema_version": 1
 }

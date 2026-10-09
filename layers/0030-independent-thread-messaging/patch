@@ -11,10 +11,10 @@ index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 3fcb7f0b0de81a74dbb1e83f6aeb43a46b1204af..7db5b4a53f0c9559de9cb20addf0910a2dc837e4 100644
+index 0579293247736f2fb0cdecad16626d095aa61e7e..1b4b43c74285497a06cddd9a0be2916457c6f1da 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -14,6 +14,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
+@@ -17,6 +17,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
  use crate::hook_runtime::run_post_compact_hooks;
  use crate::hook_runtime::run_pre_compact_hooks;
@@ -23,7 +23,7 @@ index 3fcb7f0b0de81a74dbb1e83f6aeb43a46b1204af..7db5b4a53f0c9559de9cb20addf0910a
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
-@@ -440,6 +442,7 @@ async fn run_compact_task_inner_impl(
+@@ -461,6 +463,7 @@ async fn run_compact_task_inner_impl(
      let user_messages = collect_annotated_user_messages(history_items);
 
      let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -82,18 +82,18 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index b6f571317486a6c705359d2cbc2b32b7f5385b7b..f846ce5a8975ca95973ae99ff0e1d78699684d42 100644
+index 07caf0e75e7e3ad165f2b9e060f94590af10972f..145595c6dd25704533ab7541ec703430a078d86e 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -12,6 +12,7 @@ use crate::compact::InitialContextInjection;
- use crate::compact::build_compaction_initial_context;
+@@ -10,6 +10,7 @@ use crate::compact::CompactionAnalyticsDetails;
+ use crate::compact::CompactionReporting;
+ use crate::compact::build_compaction_replacement_history;
  use crate::compact::compaction_status_from_result;
- use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 +use crate::compact::retain_independent_thread_messages;
  use crate::compact::retain_subagent_assignment_and_recent_messages;
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
-@@ -334,8 +335,9 @@ async fn run_remote_compact_task_inner_impl(
+@@ -324,8 +325,9 @@ async fn run_remote_compact_task_inner_impl(
              RetainedImageBudget::Disabled
          },
      );
@@ -105,10 +105,10 @@ index b6f571317486a6c705359d2cbc2b32b7f5385b7b..f846ce5a8975ca95973ae99ff0e1d786
              previous_history.annotated_items(),
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 217586577824e9beb978f8cff183c05343724c35..4d21107692e4383461dd2e0409e5700e330446a1 100644
+index 27b31bfedec54dc7c82ce9b2daf844578b8ee31e..f9259a41f985caa69994cd9b4f126e5357305217 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -534,6 +534,11 @@ impl ContextManager {
+@@ -536,6 +536,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -122,7 +122,7 @@ index 217586577824e9beb978f8cff183c05343724c35..4d21107692e4383461dd2e0409e5700e
          | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed
 diff --git a/codex-rs/core/src/independent_thread/message.rs b/codex-rs/core/src/independent_thread/message.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f314bce9f4d40c4e1b60017949e380b02391c4f8
+index 0000000000000000000000000000000000000000..9074db181b876312df8e7fc24821298aec7132aa
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/message.rs
 @@ -0,0 +1,209 @@
@@ -281,8 +281,8 @@ index 0000000000000000000000000000000000000000..f314bce9f4d40c4e1b60017949e380b0
 +            .await
 +            .map_err(invalid)?;
 +        let (status, turn_id) = match submitted {
-+            TurnInputSubmission::Started { turn_id } => (Delivery::Started, turn_id),
-+            TurnInputSubmission::Steered { turn_id } => (Delivery::Steered, turn_id),
++            TurnInputSubmission::Started { turn_id, .. } => (Delivery::Started, turn_id),
++            TurnInputSubmission::Steered { turn_id, .. } => (Delivery::Steered, turn_id),
 +            TurnInputSubmission::NotSubmitted { reason } => {
 +                return Err(invalid(format!("message was not submitted: {reason:?}")));
 +            }
@@ -1160,7 +1160,7 @@ index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd1
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index cbabc9baede758ac69dcce810e3e75afb679578f..91d0bcce985bc947fab72c7d201880c9b90bddf7 100644
+index 59809e6351dd7f27eb0aa892c5213de9579966a5..86c95b8007280138b5932c1b00574df49de5caed 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -82,6 +82,8 @@ pub use rollout_budget::RolloutBudgetReminder;
@@ -1173,7 +1173,7 @@ index cbabc9baede758ac69dcce810e3e75afb679578f..91d0bcce985bc947fab72c7d201880c9
  mod codex_delegate;
  mod command_canonicalization;
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 00f470acfc42fa0d1a6f5f9712a2dbb4f6e691e4..713123630810052ec0d7b41003dc99e85806c9c5 100644
+index 752ca93df112288d1a73eb597117cbab99d0e665..cef97bde8445f9fe92d26db7971419e2dd60a968 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(

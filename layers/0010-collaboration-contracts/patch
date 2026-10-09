@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 26c5507210dc00f07260bebf7b9dd57486cd6eba..d7c4230932a1587fd250334cfc4171ec59b1c4ca 100644
+index b654753a6cd661038766d4aa9b189a2092a4e05d..66ca75bd716454a647aa2f2df31b6bd2662b222b 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -2591,6 +2591,70 @@
@@ -73,7 +73,7 @@ index 26c5507210dc00f07260bebf7b9dd57486cd6eba..d7c4230932a1587fd250334cfc4171ec
      "ItemCompletedNotification": {
        "properties": {
          "completedAtMs": {
-@@ -4769,6 +4833,30 @@
+@@ -4783,6 +4847,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -105,10 +105,10 @@ index 26c5507210dc00f07260bebf7b9dd57486cd6eba..d7c4230932a1587fd250334cfc4171ec
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 2d7b1e63a8772e4c05100131fcf54bacb8c3d81d..786a4a8cb552a3486c2c2d50780d1897090ae345 100644
+index 4da4953bd7f40283fcfc1aa24da64bad7f644816..bf311f5deebfe5bf7195744e285347c74b49d897 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-@@ -13768,6 +13768,58 @@
+@@ -13839,6 +13839,58 @@
          ],
          "type": "object"
        },
@@ -167,7 +167,7 @@ index 2d7b1e63a8772e4c05100131fcf54bacb8c3d81d..786a4a8cb552a3486c2c2d50780d1897
        "InternalChatMessageMetadataPassthrough": {
          "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
          "properties": {
-@@ -21942,6 +21994,30 @@
+@@ -22148,6 +22200,30 @@
              "title": "FunctionCallOutputThreadItem",
              "type": "object"
            },
@@ -199,10 +199,10 @@ index 2d7b1e63a8772e4c05100131fcf54bacb8c3d81d..786a4a8cb552a3486c2c2d50780d1897
              "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
              "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 8b47ce6cf98e363625dcdb4b9e547bc7c69e3c96..2782f82ddff97654a4344dc059aec18c1a0e1943 100644
+index 042d84a6eca78a37efaa46e0e01b66c3a24d7075..5f01010fd460bb821263446026d20cda61efcd15 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-@@ -9780,6 +9780,58 @@
+@@ -9851,6 +9851,58 @@
        ],
        "type": "object"
      },
@@ -261,7 +261,7 @@ index 8b47ce6cf98e363625dcdb4b9e547bc7c69e3c96..2782f82ddff97654a4344dc059aec18c
      "InternalChatMessageMetadataPassthrough": {
        "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
        "properties": {
-@@ -19656,6 +19708,30 @@
+@@ -19862,6 +19914,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -293,7 +293,7 @@ index 8b47ce6cf98e363625dcdb4b9e547bc7c69e3c96..2782f82ddff97654a4344dc059aec18c
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
-index f04acebc1322d2c73f19b0bfc1a0730ab5f62c8f..9d8433c5d595064542417f5bc72e2c193e6df608 100644
+index bee9a755a56371f62970838ff0589646761e48b3..515356e60494a62e445b56ae48dcc615ff72286b 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
 @@ -11,6 +11,9 @@
@@ -377,7 +377,7 @@ index f04acebc1322d2c73f19b0bfc1a0730ab5f62c8f..9d8433c5d595064542417f5bc72e2c19
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -935,6 +1002,30 @@
+@@ -942,6 +1009,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -409,7 +409,7 @@ index f04acebc1322d2c73f19b0bfc1a0730ab5f62c8f..9d8433c5d595064542417f5bc72e2c19
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
-index 6fc8e54e39b64eeaf2631c06ca7a302cbf4d7ca1..412c3733f05ad9ced349143d2b70df8a114898c7 100644
+index a5354a39647ea38ffc0ab05f91fdb971b286b08e..f8558d1c67fc18a30b8c117d6a0aa8ecee075cd7 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
 @@ -11,6 +11,9 @@
@@ -493,7 +493,7 @@ index 6fc8e54e39b64eeaf2631c06ca7a302cbf4d7ca1..412c3733f05ad9ced349143d2b70df8a
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -935,6 +1002,30 @@
+@@ -942,6 +1009,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -525,7 +525,7 @@ index 6fc8e54e39b64eeaf2631c06ca7a302cbf4d7ca1..412c3733f05ad9ced349143d2b70df8a
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
-index 7168b6d2c72c2ffa08416a8011dbc1e4e089431c..cbeaa7a98f5bcc784b8e460e92bab53ecbefbb1f 100644
+index 65dcc4200d3d31bd73d1d066fc9ff4ecf0adf1ee..b705e5722aa639c8a8cf5a57da3aa2c856b8ce9f 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
 @@ -11,6 +11,9 @@
@@ -609,7 +609,7 @@ index 7168b6d2c72c2ffa08416a8011dbc1e4e089431c..cbeaa7a98f5bcc784b8e460e92bab53e
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1131,6 +1198,30 @@
+@@ -1145,6 +1212,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -641,7 +641,7 @@ index 7168b6d2c72c2ffa08416a8011dbc1e4e089431c..cbeaa7a98f5bcc784b8e460e92bab53e
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
-index e6d1481a87bb82d0f7ae9a6c1e9855a284535ea5..422d9b7a81c0ccbb4e4a5d618dbfa00bdede1c27 100644
+index 02b6fb0a6102448889a0609a0de6ba6cd51bdb24..930f6cccca96f08a6e1bf010f3cc9f9bab793672 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
 @@ -759,6 +759,70 @@
@@ -715,7 +715,7 @@ index e6d1481a87bb82d0f7ae9a6c1e9855a284535ea5..422d9b7a81c0ccbb4e4a5d618dbfa00b
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1745,6 +1809,30 @@
+@@ -1759,6 +1823,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -747,7 +747,7 @@ index e6d1481a87bb82d0f7ae9a6c1e9855a284535ea5..422d9b7a81c0ccbb4e4a5d618dbfa00b
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
-index 69549fe455f3253c43b65aa2284cfe3bbad56516..3b4fe5ea1114f5b1734538285a2019c4f616232b 100644
+index 5bb7c64b9781b18d90babcec5bb64d70652e074f..88390beeecc17d33c2bfbae35ff6da73e222e3de 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
 @@ -11,6 +11,9 @@
@@ -831,7 +831,7 @@ index 69549fe455f3253c43b65aa2284cfe3bbad56516..3b4fe5ea1114f5b1734538285a2019c4
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -935,6 +1002,30 @@
+@@ -942,6 +1009,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -862,7 +862,7 @@ index 69549fe455f3253c43b65aa2284cfe3bbad56516..3b4fe5ea1114f5b1734538285a2019c4
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-@@ -1324,6 +1415,20 @@
+@@ -1331,6 +1422,20 @@
                ],
                "description": "Reasoning effort requested for the spawned agent, when applicable."
              },
@@ -884,7 +884,7 @@ index 69549fe455f3253c43b65aa2284cfe3bbad56516..3b4fe5ea1114f5b1734538285a2019c4
                "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
                "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
-index d4a6e3a6d1a5c2dfcb1ac0f1c6ca74205e44b451..cea554c6790412132fe870e2f505c28ee1c01ae8 100644
+index dda155f4e3db763569476016cd097ca76ed726d2..ab0291c0096e3ce700457c9f730909662f6931ab 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
 @@ -681,6 +681,70 @@
@@ -958,7 +958,7 @@ index d4a6e3a6d1a5c2dfcb1ac0f1c6ca74205e44b451..cea554c6790412132fe870e2f505c28e
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -990,7 +990,7 @@ index d4a6e3a6d1a5c2dfcb1ac0f1c6ca74205e44b451..cea554c6790412132fe870e2f505c28e
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
-index afe57831fbff17c188be5e9010cf1c970481824a..d6005f7c300b39d51d1f074eafdbf7bc35f910a7 100644
+index 28cd4dfa40c6272467679f175b023cb55495f54e..2f43a6f12f698d0e0812f23198a0ac15b3088308 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
 @@ -681,6 +681,70 @@
@@ -1064,7 +1064,7 @@ index afe57831fbff17c188be5e9010cf1c970481824a..d6005f7c300b39d51d1f074eafdbf7bc
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1096,7 +1096,7 @@ index afe57831fbff17c188be5e9010cf1c970481824a..d6005f7c300b39d51d1f074eafdbf7bc
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
-index 1d1a4887ca0eb4200541979de35c63ec678502d9..8342385d9c8a5f3eff67b7182780ae36eb7ccf7d 100644
+index 558b0fb1ed4d38448673b3c9bede65e5460fcda3..d7ca0279d23d8d2824d34bb38608495253794f03 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
 @@ -681,6 +681,70 @@
@@ -1170,7 +1170,7 @@ index 1d1a4887ca0eb4200541979de35c63ec678502d9..8342385d9c8a5f3eff67b7182780ae36
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1202,7 +1202,7 @@ index 1d1a4887ca0eb4200541979de35c63ec678502d9..8342385d9c8a5f3eff67b7182780ae36
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
-index 937906a4f3143d35474b2acba16f01d4dac40971..4c3fefc5af96486947cc4c6819b0d0d406cb5ca3 100644
+index 419d29a1d15c8216c2a982ce830395028f8ae8d2..922685d4fde87aca21ae6258f78e34a16eb56b6f 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
 @@ -775,6 +775,70 @@
@@ -1276,7 +1276,7 @@ index 937906a4f3143d35474b2acba16f01d4dac40971..4c3fefc5af96486947cc4c6819b0d0d4
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1797,6 +1861,30 @@
+@@ -1811,6 +1875,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1308,7 +1308,7 @@ index 937906a4f3143d35474b2acba16f01d4dac40971..4c3fefc5af96486947cc4c6819b0d0d4
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
-index cbf3223c56ba406b0a84690dc9e1e3ef7c38999a..fc221a7c20f7cdceea9acba4c4095f7e4a5d2f9c 100644
+index 7a8a97b9d9bbc5ccc1e29fd5a34ff7d9c7646b6f..af6e9c81a397786288682a36e7ffa77c0df63370 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
 @@ -681,6 +681,70 @@
@@ -1382,7 +1382,7 @@ index cbf3223c56ba406b0a84690dc9e1e3ef7c38999a..fc221a7c20f7cdceea9acba4c4095f7e
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1204,7 +1268,7 @@
+@@ -1218,7 +1282,7 @@
            ]
          },
          "parentThreadId": {
@@ -1391,7 +1391,7 @@ index cbf3223c56ba406b0a84690dc9e1e3ef7c38999a..fc221a7c20f7cdceea9acba4c4095f7e
            "type": [
              "string",
              "null"
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1422,7 +1422,7 @@ index cbf3223c56ba406b0a84690dc9e1e3ef7c38999a..fc221a7c20f7cdceea9acba4c4095f7e
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-@@ -1925,6 +2013,20 @@
+@@ -1939,6 +2027,20 @@
                ],
                "description": "Reasoning effort requested for the spawned agent, when applicable."
              },
@@ -1444,7 +1444,7 @@ index cbf3223c56ba406b0a84690dc9e1e3ef7c38999a..fc221a7c20f7cdceea9acba4c4095f7e
                "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
                "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
-index d2dfeb3e60b4d1071a35fe720714701e988ebe08..91328fb6d07a675a89eeb5c4e08c10d426460719 100644
+index 76d8956afe3df680a5484d90759cd34b436311bb..918db6049937bb3bfe21e014ed95f4521b8d1353 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
 @@ -759,6 +759,70 @@
@@ -1518,7 +1518,7 @@ index d2dfeb3e60b4d1071a35fe720714701e988ebe08..91328fb6d07a675a89eeb5c4e08c10d4
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1745,6 +1809,30 @@
+@@ -1759,6 +1823,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1550,7 +1550,7 @@ index d2dfeb3e60b4d1071a35fe720714701e988ebe08..91328fb6d07a675a89eeb5c4e08c10d4
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
-index 88e585a3adf5bc73e1f91adff1a45f0d677a2465..0c10a8cf63673c7b18afaf64b80efdcbce9fad0e 100644
+index 73fdff503c943e30b39a7d157fb0bf9a956c4142..3f26a01182ebdf31bc2c8c21616ea0628e4b197f 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
 @@ -681,6 +681,70 @@
@@ -1624,7 +1624,7 @@ index 88e585a3adf5bc73e1f91adff1a45f0d677a2465..0c10a8cf63673c7b18afaf64b80efdcb
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1656,7 +1656,7 @@ index 88e585a3adf5bc73e1f91adff1a45f0d677a2465..0c10a8cf63673c7b18afaf64b80efdcb
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
-index 4db744c11a620d96c1c330b63a6518f694ca8ab0..1189f89b75b280e03524c08af69032de8a0dae05 100644
+index ea56799c418d6748a126352db8da07bb74880f10..8221ba29797b530d234a5c5b01a2a4e66037be84 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
 @@ -11,6 +11,9 @@
@@ -1740,7 +1740,7 @@ index 4db744c11a620d96c1c330b63a6518f694ca8ab0..1189f89b75b280e03524c08af69032de
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1131,6 +1198,30 @@
+@@ -1145,6 +1212,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1771,7 +1771,7 @@ index 4db744c11a620d96c1c330b63a6518f694ca8ab0..1189f89b75b280e03524c08af69032de
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-@@ -1520,6 +1611,20 @@
+@@ -1534,6 +1625,20 @@
                ],
                "description": "Reasoning effort requested for the spawned agent, when applicable."
              },
@@ -1793,7 +1793,7 @@ index 4db744c11a620d96c1c330b63a6518f694ca8ab0..1189f89b75b280e03524c08af69032de
                "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
                "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
-index ff77b0c58d5b0ff97a396bd947f1192917616f67..a6739f73544f3e8487438221db3a411da8280f83 100644
+index 2a9641fbe607e8b4eb4b7a60e3bf11019b562443..d6779612843b1b9b9d131f6114fa063858c58655 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
 @@ -681,6 +681,70 @@
@@ -1867,7 +1867,7 @@ index ff77b0c58d5b0ff97a396bd947f1192917616f67..a6739f73544f3e8487438221db3a411d
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1536,6 +1600,30 @@
+@@ -1550,6 +1614,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1899,7 +1899,7 @@ index ff77b0c58d5b0ff97a396bd947f1192917616f67..a6739f73544f3e8487438221db3a411d
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
-index 03d7d734b653944a01af8c909d5d067a94b40275..91126d297c9e7ea0e1acdb6c966d58f63272ce1d 100644
+index 55f96b3c6c48b08ffb4c09747933b4d913f901fe..845acc94eaf1e977e76146492ccebbd880be90cd 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
 @@ -11,6 +11,9 @@
@@ -1983,7 +1983,7 @@ index 03d7d734b653944a01af8c909d5d067a94b40275..91126d297c9e7ea0e1acdb6c966d58f6
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1131,6 +1198,30 @@
+@@ -1145,6 +1212,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -2015,7 +2015,7 @@ index 03d7d734b653944a01af8c909d5d067a94b40275..91126d297c9e7ea0e1acdb6c966d58f6
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
-index 47ad323fbbf13f4289ff60d22fa75dad2f15fc5e..230176a01777cab9ef22d443904116cf28570405 100644
+index 1aef9d89cfb29368b5fecbfd9c8b6dc956d22a6a..206d40a1f2be3fdda1d433296df7008d4cab5fcd 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
 @@ -11,6 +11,9 @@
@@ -2099,7 +2099,7 @@ index 47ad323fbbf13f4289ff60d22fa75dad2f15fc5e..230176a01777cab9ef22d443904116cf
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1131,6 +1198,30 @@
+@@ -1145,6 +1212,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -2131,7 +2131,7 @@ index 47ad323fbbf13f4289ff60d22fa75dad2f15fc5e..230176a01777cab9ef22d443904116cf
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
-index 83d1295f3ab43e36c0e040e88f975813e8af5e03..ce80c32e8fe4033054f7fb50a8090d90d450b917 100644
+index 7c170fcd02cb84e4ebebd058dd9d172167d0c35f..551cf93cdf9e605f35bc99e9bf9915ae196e8efe 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
 @@ -11,6 +11,9 @@
@@ -2215,7 +2215,7 @@ index 83d1295f3ab43e36c0e040e88f975813e8af5e03..ce80c32e8fe4033054f7fb50a8090d90
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1131,6 +1198,30 @@
+@@ -1145,6 +1212,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -2273,7 +2273,7 @@ index 79f9f52ffc8b74d6de4e71d98d086c3f6ca82b28..614d989f113d2bae32f5242487eabdb7
  export type { InternalSessionSource } from "./InternalSessionSource";
  export type { LegacyAppPathString } from "./LegacyAppPathString";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
-index f55b871dfe11fb53c56dacd04f15b377aee63346..296af93c88f040f109e2a891b7a2f207590ba261 100644
+index 518d5318ca85507899ac0158a2f192f076168b0b..6e4e6a1496c87fea99eaac7e0df87e0c19138af0 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
 @@ -3,6 +3,7 @@
@@ -2294,10 +2294,10 @@ index f55b871dfe11fb53c56dacd04f15b377aee63346..296af93c88f040f109e2a891b7a2f207
   * Trusted first-party plugin id when this command resolves to one plugin script.
   */
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index 3e6911a682cf11cdf2abd2f77a8a42256f00abf1..c221a67d4be6871d8a2ef4e139fccdac2ed7e645 100644
+index f7e4a00fdc19941f336899c08b41d18ac26b00b5..2637f732248d9f538c72839c8b9b8fb24c50f1cd 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
-@@ -1165,14 +1165,15 @@ pub(crate) async fn apply_bespoke_event_handling(
+@@ -1166,14 +1166,15 @@ pub(crate) async fn apply_bespoke_event_handling(
          EventMsg::RawResponseItem(mut raw_response_item_event) => {
              // Keep warehouse metadata out of app-server notifications.
              raw_response_item_event.item.clear_executed_tool_calls();
@@ -2318,7 +2318,7 @@ index 3e6911a682cf11cdf2abd2f77a8a42256f00abf1..c221a67d4be6871d8a2ef4e139fccdac
          }
          EventMsg::RawResponseCompleted(raw_response_completed_event) => {
              let notification = RawResponseCompletedNotification {
-@@ -1491,31 +1492,27 @@ async fn complete_command_execution_item(
+@@ -1494,31 +1495,27 @@ async fn complete_command_execution_item(
          .await;
  }
 
@@ -2363,7 +2363,7 @@ index 3e6911a682cf11cdf2abd2f77a8a42256f00abf1..c221a67d4be6871d8a2ef4e139fccdac
  }
 
  pub(crate) fn is_inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> bool {
-@@ -4000,14 +3997,12 @@ mod tests {
+@@ -4018,14 +4015,12 @@ mod tests {
          );
          let item = communication.to_model_input_item();
 
@@ -2384,7 +2384,7 @@ index 3e6911a682cf11cdf2abd2f77a8a42256f00abf1..c221a67d4be6871d8a2ef4e139fccdac
 
          let msg = recv_broadcast_notification(&mut rx).await?;
          match msg {
-@@ -4067,14 +4062,12 @@ mod tests {
+@@ -4085,14 +4080,12 @@ mod tests {
          );
          let item = communication.to_model_input_item();
 
@@ -2406,10 +2406,10 @@ index 3e6911a682cf11cdf2abd2f77a8a42256f00abf1..c221a67d4be6871d8a2ef4e139fccdac
          let msg = recv_broadcast_notification(&mut rx).await?;
          match msg {
 diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
-index 71a31fc9cec1a0b62150a709559923ae93d6190b..bacff82e0765e967e1e198fb4f3e8f2da92927f4 100644
+index 24c5fdd9bd84babdd5384289db69e321701ed9f6..8e02729776458c3e7786f78cb2e08bf6e712324c 100644
 --- a/codex-rs/app-server/tests/common/test_app_server.rs
 +++ b/codex-rs/app-server/tests/common/test_app_server.rs
-@@ -1985,43 +1985,39 @@ impl TestAppServerBuilder {
+@@ -1986,43 +1986,39 @@ impl TestAppServerBuilder {
                  )
              }
          };
@@ -2503,7 +2503,7 @@ index 387511610f5ccb15482dd19bf76321eafb2fd99e..bb6b3e430f441f240ebd3c908f57efe5
      test_shard_counts = {
          "core-all-test": 16,
 diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
-index ac691a4eb45864143ba2280d81d96fbdd3eb1574..a9cd926a0ad54bc9e307d386a694b6196e1579c7 100644
+index 2cb2b7b668ef998f8eb0c5e473910ee7170bb7cc..35557f3cef71b3b5fb2a263b62c51741fa6f48b1 100644
 --- a/codex-rs/core/src/agent/api.rs
 +++ b/codex-rs/core/src/agent/api.rs
 @@ -5,9 +5,7 @@
@@ -2516,7 +2516,7 @@ index ac691a4eb45864143ba2280d81d96fbdd3eb1574..a9cd926a0ad54bc9e307d386a694b619
  use crate::agent::types::AgentExecutionGuard;
  use crate::agent::types::AgentMessage;
  use crate::agent::types::AgentMetadata;
-@@ -91,21 +89,19 @@ pub trait AgentControl: Send + Sync {
+@@ -104,21 +102,19 @@ pub trait AgentControl: Send + Sync {
          path_prefix: Option<&'a str>,
      ) -> BoxFuture<'a, Result<Vec<LiveAgent>>>;
 
@@ -2543,7 +2543,7 @@ index ac691a4eb45864143ba2280d81d96fbdd3eb1574..a9cd926a0ad54bc9e307d386a694b619
          })
      }
 
-@@ -169,11 +165,7 @@ pub trait AgentControl: Send + Sync {
+@@ -182,11 +178,7 @@ pub trait AgentControl: Send + Sync {
      ) -> BoxFuture<'a, ()>;
  }
 
@@ -2556,7 +2556,7 @@ index ac691a4eb45864143ba2280d81d96fbdd3eb1574..a9cd926a0ad54bc9e307d386a694b619
      let mut agents = agents
          .into_iter()
          .map(|agent| ListedAgent {
-@@ -198,7 +190,7 @@ fn paginate_live_agents(
+@@ -211,7 +203,7 @@ fn paginate_live_agents(
              .cmp(&right.agent_name)
              .then_with(|| left.agent_id.to_string().cmp(&right.agent_id.to_string()))
      });
@@ -2652,7 +2652,7 @@ index af3e0fcfdc5370d62b19caf577067aacef1ed427..ff51d90a2189dd2bb600cb750cc2f289
 -    assert!(paginate_live_agents(vec![agent], None, None).is_err());
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index cd77c5721cc611ac9b26d88e739ef95b466dba14..abe3f88c2d4b27170867790d2b6de024a1ef94e0 100644
+index 0a582d3d39bcf82ec5bb3cba71df966657ff756d..de924665f2c676bffb22370247b307af9a143702 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
 @@ -121,10 +121,10 @@ pub struct ListedAgent {
@@ -2670,7 +2670,7 @@ index cd77c5721cc611ac9b26d88e739ef95b466dba14..abe3f88c2d4b27170867790d2b6de024
  }
 
  /// Result of a supervisor request to compact its authenticated direct parent.
-@@ -679,6 +679,83 @@ impl LocalAgentControl {
+@@ -710,6 +710,83 @@ impl LocalAgentControl {
          Ok(agents)
      }
 
@@ -2755,7 +2755,7 @@ index cd77c5721cc611ac9b26d88e739ef95b466dba14..abe3f88c2d4b27170867790d2b6de024
          &self,
          current_session_source: &SessionSource,
 diff --git a/codex-rs/core/src/agent/control/api.rs b/codex-rs/core/src/agent/control/api.rs
-index f9c9f4e195061e8c2a194077daa8f2f2856b945a..b6ef320571f045486d13ff9fd69bc0255a50e04a 100644
+index 62c6d115eb6c8ce4430e52bbb74b144fe1e05dc7..7775ee6d86f5bfc6ece0a19cb4b4d5021c0b693c 100644
 --- a/codex-rs/core/src/agent/control/api.rs
 +++ b/codex-rs/core/src/agent/control/api.rs
 @@ -1,7 +1,7 @@
@@ -2767,7 +2767,7 @@ index f9c9f4e195061e8c2a194077daa8f2f2856b945a..b6ef320571f045486d13ff9fd69bc025
  use super::LocalAgentControl;
  use super::agent_matches_prefix;
  use super::spawn::SpawnInitialInput;
-@@ -185,7 +185,7 @@ impl AgentControl for LocalAgentControl {
+@@ -196,7 +196,7 @@ impl AgentControl for LocalAgentControl {
                  }) {
                      continue;
                  }
@@ -2776,7 +2776,7 @@ index f9c9f4e195061e8c2a194077daa8f2f2856b945a..b6ef320571f045486d13ff9fd69bc025
                  let thread = match state.get_thread(thread_id).await {
                      Ok(thread) => thread,
                      Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
-@@ -203,19 +203,16 @@ impl AgentControl for LocalAgentControl {
+@@ -214,19 +214,16 @@ impl AgentControl for LocalAgentControl {
          })
      }
 
@@ -2823,10 +2823,10 @@ index 95b22e7335f7242adf95fa290e02d2a660393d8a..750fa265209fbbf23071d6ecbc86a913
                  (receiver, submission_id)
              }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ae4441c76fd14abe448bb5254e17f792a93efe2a..12abfa834f7b0c146a70286575b65fe6659faa96 100644
+index b9eaf9ab1ffca4a584c5abb9d67d09c8e4fae5bd..61616573c35f97b7e18840c29c8c1b6d59636fd8 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1448,15 +1448,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
+@@ -1458,15 +1458,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
              .collect::<Vec<_>>(),
          vec![root_thread_id],
      );
@@ -2876,7 +2876,7 @@ index 485f9a526b44fe1416852a6c5b6456b741594065..24de6af2687feaae201e22cac64a71ec
 
      fn role(&self) -> &'static str {
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 4c33d7bfb7120307c781543c86641b53bec96580..cbabc9baede758ac69dcce810e3e75afb679578f 100644
+index a4ea950cee812a30e79946a56cfb1578eb7d76f7..59809e6351dd7f27eb0aa892c5213de9579966a5 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -70,7 +70,6 @@ pub use agent::api::DeliveryReceipt;
@@ -3177,10 +3177,10 @@ index 0000000000000000000000000000000000000000..f2b914c028cc901790390483f7a7eae8
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index ed20a46abfdb906d2ec202fb5df347a702a379bc..26a2d12a7afe8f6797816f966c9f2719860480ef 100644
+index 48e66c282b148a991811d95e10afb767aa8c5da5..8fefc7a8f735cb882963bfb0078c005cd8aebe85 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1036,13 +1036,20 @@ impl Session {
+@@ -1063,13 +1063,20 @@ impl Session {
          }
          let configured_config = Arc::clone(&config);
          let configured_multi_agent_version = config.multi_agent_version_override();
@@ -3209,7 +3209,7 @@ index ed20a46abfdb906d2ec202fb5df347a702a379bc..26a2d12a7afe8f6797816f966c9f2719
              requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
          );
 diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
-index e7f90646e29a33d56d208a5d78bf6973cbb642ec..7b308a81c6e684887453103fdcb1750bd558cac1 100644
+index 44ec95ff60bbb73e82ce62905721f8b1d6d94438..7d37f4d1530da7351342b9d8a6bb78dd566080ae 100644
 --- a/codex-rs/core/src/session/review.rs
 +++ b/codex-rs/core/src/session/review.rs
 @@ -13,7 +13,7 @@ pub(super) async fn spawn_review_thread(
@@ -3234,10 +3234,10 @@ index e7f90646e29a33d56d208a5d78bf6973cbb642ec..7b308a81c6e684887453103fdcb1750b
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 2647e8921caeb44db4150c4519b9ce7bf4a19250..33a34fe12392230157756ed8b6c11aac63e5367f 100644
+index 645718c1d65505c3f16f588005abb1fdd6921078..9cd66ef5f55efe4cab03602ee0e0472433fc05e2 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13758,6 +13758,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
+@@ -13898,6 +13898,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
      assert!(rx.try_recv().is_err());
  }
 
@@ -3247,7 +3247,7 @@ index 2647e8921caeb44db4150c4519b9ce7bf4a19250..33a34fe12392230157756ed8b6c11aac
  async fn submit_steer_only(
      sess: &Arc<Session>,
      input: Vec<UserInput>,
-@@ -14401,9 +14404,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -14541,9 +14544,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
      );
  }
 
@@ -3268,7 +3268,7 @@ index 2647e8921caeb44db4150c4519b9ce7bf4a19250..33a34fe12392230157756ed8b6c11aac
      let input = vec![TurnInput::UserInput {
          metadata: Default::default(),
          content: vec![UserInput::Text {
-@@ -14465,14 +14477,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
+@@ -14605,14 +14617,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
              let ResponseItem::Message { role, content, .. } = item else {
                  return false;
              };
@@ -3286,7 +3286,7 @@ index 2647e8921caeb44db4150c4519b9ce7bf4a19250..33a34fe12392230157756ed8b6c11aac
          }),
          "expected a model-visible turn aborted marker in history after interrupt"
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index d3531307185c54a243972494b2efce0d0cc084f1..521857dc9ad3db67612647ce97470baec27c17b1 100644
+index 6e77b48a7074e50b536330b8b3e580888cea571e..58ffe1a2f3cf85210aaf407b338f32b9be60bd0f 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -385,6 +385,7 @@ pub struct TurnContext {
@@ -3297,7 +3297,7 @@ index d3531307185c54a243972494b2efce0d0cc084f1..521857dc9ad3db67612647ce97470bae
      pub(crate) available_models: Vec<ModelPreset>,
      pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
      pub(crate) final_output_json_schema: Option<Value>,
-@@ -829,7 +830,7 @@ impl TurnContext {
+@@ -826,7 +827,7 @@ impl TurnContext {
          };
          config.model_reasoning_effort = reasoning_effort.clone();
 
@@ -3306,7 +3306,7 @@ index d3531307185c54a243972494b2efce0d0cc084f1..521857dc9ad3db67612647ce97470bae
              .list_models(
                  RefreshStrategy::OnlineIfUncached,
                  config.http_client_factory(),
-@@ -849,6 +850,9 @@ impl TurnContext {
+@@ -846,6 +847,9 @@ impl TurnContext {
          ));
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
@@ -3316,7 +3316,7 @@ index d3531307185c54a243972494b2efce0d0cc084f1..521857dc9ad3db67612647ce97470bae
 
          Self {
              sub_id: self.sub_id.clone(),
-@@ -1265,7 +1269,9 @@ impl Session {
+@@ -1210,7 +1214,9 @@ impl Session {
          let model_info = &step_settings.model_info;
          let session_telemetry_for_context = step_settings.telemetry(session_telemetry);
          let session_source = session_configuration.session_source.clone();
@@ -3328,7 +3328,7 @@ index d3531307185c54a243972494b2efce0d0cc084f1..521857dc9ad3db67612647ce97470bae
              per_turn_config.features.get(),
              crate::tools::tool_user_shell_type(user_shell),
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158eca4995666 100644
+index c295c6932972377c2ad999f6d84b161f148910d4..157a518b0da4b2652483e339a9e1233de9d1b145 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -74,6 +74,13 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
@@ -3411,7 +3411,7 @@ index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158ec
  }
 
  impl Session {
-@@ -364,40 +416,54 @@ impl Session {
+@@ -368,40 +420,54 @@ impl Session {
          );
          let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
          let task_future = async move {
@@ -3499,7 +3499,7 @@ index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158ec
              done_clone.notify_waiters();
          }
          .instrument(task_span);
-@@ -641,11 +707,17 @@ impl Session {
+@@ -656,11 +722,17 @@ impl Session {
          }
      }
 
@@ -3518,7 +3518,7 @@ index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158ec
          let (last_agent_message, abort_reason) = match task_result {
              Ok(last_agent_message) => (last_agent_message, None),
              Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-@@ -668,21 +740,37 @@ impl Session {
+@@ -683,21 +755,37 @@ impl Session {
                  (None, None)
              }
          };
@@ -3568,7 +3568,7 @@ index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158ec
          let pending_input = self
              .input_queue
              .take_pending_input_for_turn_state(turn_state.as_ref())
-@@ -899,6 +987,7 @@ impl Session {
+@@ -916,6 +1004,7 @@ impl Session {
          if cleared_active_turn {
              self.maybe_start_turn_for_pending_work().await;
          }
@@ -3577,7 +3577,7 @@ index 73674e298816f2953fbecb8aa00a02e610feafa5..17f64f9acbd6f18b566c07f0a3a158ec
 
      async fn take_active_turn(&self, reason: &TurnAbortReason) -> Option<ActiveTurn> {
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
-index a13335515a127dc1ccba7dcd5a9eb37e6fc73309..a44d1c59105299f4af0da78b48d44c8d0c316417 100644
+index ef96396f7920ef604f6e4b487f56f3e56546cee4..cd3ed22e5fed45e4f18e8743f9d6d8fddf1f036b 100644
 --- a/codex-rs/core/src/tasks/regular.rs
 +++ b/codex-rs/core/src/tasks/regular.rs
 @@ -2,6 +2,7 @@ use std::sync::Arc;
@@ -19050,7 +19050,7 @@ index 0000000000000000000000000000000000000000..3556a38ede5a86a9ae065e5a63925001
 +    );
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-index 10d383542c09a8c6d79a82384041943119e5336e..79c556563a766bdc05a5006ccd90167bd470adb5 100644
+index 86b8c8fe0025751e85f4f28302fe60c253892b57..632f1cfdfa547b2be3e6f15e2368f8848b8eb50f 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
 @@ -376,32 +376,19 @@ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
@@ -19291,7 +19291,7 @@ index 4f88811cbe95c4464c3cf0bd32027bd596e3ea39..d4cfce55b8265483cb8d0b52ef33ebf9
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a54ea18abf 100644
+index ef72b9814a8e11cf743c1e98f0b4bdab8d948d22..a966855133295ff7287dcdffddea0959170164bf 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -20,6 +20,7 @@ use crate::session::turn_context::TurnContext;
@@ -19328,7 +19328,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
  }
 
  #[derive(Debug, Deserialize)]
-@@ -1074,6 +1069,44 @@ async fn multi_agent_v2_spawn_requires_task_name() {
+@@ -1076,6 +1071,44 @@ async fn multi_agent_v2_spawn_requires_task_name() {
      assert!(message.contains("missing field `task_name`"));
  }
 
@@ -19373,7 +19373,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
  #[tokio::test]
  async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
      let (mut session, mut turn) = make_session_and_context().await;
-@@ -1093,7 +1126,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+@@ -1095,7 +1128,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
      let session = Arc::new(session);
      let turn = Arc::new(turn);
 
@@ -19382,7 +19382,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
          .handle(invocation(
              session.clone(),
              turn.clone(),
-@@ -1167,7 +1200,7 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+@@ -1169,7 +1202,7 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
                      .clone(),
              );
 
@@ -19391,7 +19391,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
              .handle(invocation(
                  session.clone(),
                  turn.clone(),
-@@ -1178,12 +1211,10 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+@@ -1180,12 +1213,10 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
          else {
              panic!("adoption must reject fork and configuration overrides");
          };
@@ -19408,7 +19408,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      }
  }
 
-@@ -1700,8 +1731,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
+@@ -1701,8 +1732,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
      assert_eq!(
          err,
          FunctionCallError::RespondToModel(
@@ -19418,7 +19418,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
          )
      );
      let root_ops = manager
-@@ -1717,9 +1747,110 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
+@@ -1718,9 +1748,110 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
      );
  }
 
@@ -19531,7 +19531,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      std::thread::Builder::new()
          .name("goal-supervisor-followup-handler".to_string())
          .stack_size(32 * 1024 * 1024)
-@@ -1728,18 +1859,30 @@ fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper() -
+@@ -1729,18 +1860,30 @@ fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper() -
                  .enable_all()
                  .build()
                  .expect("build goal supervisor test runtime")
@@ -19568,7 +19568,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let server = start_mock_server().await;
      let request_log = mount_response_sequence(
          &server,
-@@ -1844,28 +1987,67 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1845,28 +1988,67 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
      helper_control.unregister_goal_supervisor_parent_for_test(root.thread_id);
      assert!(helper_control.get_agent_metadata(root.thread_id).is_none());
      assert!(manager.get_thread(root.thread_id).await.is_ok());
@@ -19641,7 +19641,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
              )
      }));
      timeout(Duration::from_secs(5), async {
-@@ -1874,7 +2056,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1875,7 +2057,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
          }
      })
      .await
@@ -19650,7 +19650,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
 
      let continuity = crate::goal_supervisor::supervisor_continuity_context_item(
          &root.thread.session,
-@@ -1896,6 +2078,18 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1897,6 +2079,18 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
              ))
      ));
 
@@ -19669,7 +19669,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let _ = manager
          .shutdown_all_threads_bounded(Duration::from_secs(5))
          .await;
-@@ -1914,32 +2108,31 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1915,32 +2109,31 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
      set_agent_control(&mut session, manager.agent_control());
      session.thread_id = root.thread_id;
      let _ = config.features.enable(Feature::MultiAgentV2);
@@ -19721,7 +19721,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let child_thread = manager
          .get_thread(agent_id)
          .await
-@@ -1961,6 +2154,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1963,6 +2156,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          )
          .await;
 
@@ -19730,7 +19730,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let output = ListAgentsHandlerV2
          .handle(invocation(
              session,
-@@ -1971,6 +2166,20 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1973,6 +2168,20 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          .await
          .expect("list_agents should succeed");
      let (content, success) = expect_text_output(output);
@@ -19751,7 +19751,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
-@@ -1979,18 +2188,13 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1981,18 +2190,13 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          .iter()
          .map(|agent| agent.agent_name.as_str())
          .collect::<Vec<_>>();
@@ -19771,7 +19771,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      assert_eq!(success, Some(true));
  }
 
-@@ -2139,9 +2343,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
+@@ -2141,9 +2345,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -19783,7 +19783,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
  }
 
  #[tokio::test]
-@@ -2213,8 +2416,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
+@@ -2215,8 +2418,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -19805,7 +19805,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
  }
 
  #[tokio::test]
-@@ -3326,33 +3540,32 @@ async fn resume_agent_noops_for_active_agent() {
+@@ -3331,33 +3545,32 @@ async fn resume_agent_noops_for_active_agent() {
  }
 
  #[tokio::test]
@@ -19863,7 +19863,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let _ = manager
          .agent_control()
          .shutdown_live_agent(agent_id)
-@@ -3362,9 +3575,6 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
+@@ -3367,9 +3580,6 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
          manager.agent_control().get_status(agent_id).await,
          AgentStatus::NotFound
      );
@@ -19873,7 +19873,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let resume_invocation = invocation(
          session.clone(),
          turn.clone(),
-@@ -5164,6 +5374,10 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
+@@ -5169,6 +5379,10 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
  async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
      let (_session, turn) = make_session_and_context().await;
      let mut config = turn.config.as_ref().clone();
@@ -19884,7 +19884,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      config.agent_max_depth = 3;
      config
          .permissions
-@@ -5174,6 +5388,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5179,6 +5393,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
          .enable(Feature::Sqlite)
          .expect("test config should allow sqlite");
      let state_db = init_state_db(&config).await;
@@ -19892,7 +19892,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
      let manager = ThreadManager::new(
          &config,
-@@ -5186,7 +5401,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5191,7 +5406,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
          Arc::new(crate::test_support::EmptyUserInstructionsProvider),
          /*analytics_events_client*/ None,
          crate::thread_manager::passthrough_image_store(),
@@ -19901,7 +19901,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
          local_agent_graph_store_from_state_db(state_db.as_ref()),
          "11111111-1111-4111-8111-111111111111".to_string(),
          /*attestation_provider*/ None,
-@@ -5262,20 +5477,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5267,20 +5482,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
      );
      assert_eq!(grandchild_success, Some(true));
 
@@ -19927,7 +19927,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      assert_eq!(
          manager.agent_control().get_status(child_thread_id).await,
          AgentStatus::NotFound
-@@ -5316,6 +5523,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5321,6 +5528,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              .permission_profile,
          owner_permission_profile
      );
@@ -19957,7 +19957,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      assert_ne!(
          manager
              .agent_control()
-@@ -5351,6 +5581,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5356,6 +5586,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
          AgentStatus::NotFound
      );
 
@@ -19977,7 +19977,7 @@ index d1101c621fccadd7f6209c218d6cae5f2acc15d3..5aaaffab694291167514ec461e07f5a5
      let operator = manager
          .start_thread(StartThreadOptions::new(config.clone()))
          .await
-@@ -5373,13 +5616,35 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5378,13 +5621,35 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              "resume_agent",
              function_payload(json!({"id": parent_thread_id.to_string()})),
          ))
@@ -20131,7 +20131,7 @@ index 668b5fc75dcabc881263912fe0156a67bc3ef8b9..903447d4ef3fdfc3f119ca1e56500289
 
  impl ToolOutput for ListAgentsResult {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
-index b784c6abf3d4daa76299a64208f8492ec8acc955..da49f8cc6c16d9fe9e7c4d64a2544fedd01bf137 100644
+index 9e03a7e2396d45568af8fc657d957d55fa061d99..d349a95f1dbc871c001ba4cb14727694fb008edc 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs
 @@ -57,48 +57,25 @@ pub(super) async fn handle_message_string_tool(
@@ -20214,7 +20214,7 @@ index b784c6abf3d4daa76299a64208f8492ec8acc955..da49f8cc6c16d9fe9e7c4d64a2544fed
      let receiver_agent_path = receipt.metadata.agent_path.ok_or_else(|| {
          FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
      })?;
-@@ -129,18 +104,7 @@ pub(super) async fn handle_message_string_tool(
+@@ -131,18 +106,7 @@ pub(super) async fn handle_message_string_tool(
          },
      )
      .await;
@@ -20235,10 +20235,10 @@ index b784c6abf3d4daa76299a64208f8492ec8acc955..da49f8cc6c16d9fe9e7c4d64a2544fed
 
  fn direct_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac8ebd14f5 100644
+index 3cd01c51b286fb8f525b07242266e135445462aa..ab431eaa68637839197c4848831a6abbbe83b4bc 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-@@ -167,7 +167,17 @@ async fn handle_agent_start(
+@@ -168,7 +168,17 @@ async fn handle_agent_start(
      } = invocation;
      let turn = &step_context.turn;
      let arguments = function_arguments(payload)?;
@@ -20257,7 +20257,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      if matches!(operation, AgentStartOperation::Adopt)
          && !turn.config.multi_agent_v2.enable_thread_adoption
      {
-@@ -176,11 +186,6 @@ async fn handle_agent_start(
+@@ -177,11 +187,6 @@ async fn handle_agent_start(
                  .to_string(),
          ));
      }
@@ -20269,7 +20269,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      let is_adoption = matches!(operation, AgentStartOperation::Adopt);
      let adopted_thread_id = if is_adoption {
          Some(args.existing_thread_id.ok_or_else(|| {
-@@ -191,12 +196,6 @@ async fn handle_agent_start(
+@@ -192,12 +197,6 @@ async fn handle_agent_start(
      } else {
          None
      };
@@ -20282,7 +20282,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      let message = message_content(args.message)?;
      let role_name = args
          .agent_type
-@@ -240,6 +239,7 @@ async fn handle_agent_start(
+@@ -241,6 +240,7 @@ async fn handle_agent_start(
              "spawned agent is missing a canonical task name".to_string(),
          )
      })?;
@@ -20290,7 +20290,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      let multi_agent_v2_usage_hints =
          if is_full_history_fork && turn.multi_agent_version == MultiAgentVersion::V2 {
              let child_model_info = match config.model.as_deref() {
-@@ -269,7 +269,7 @@ async fn handle_agent_start(
+@@ -270,7 +270,7 @@ async fn handle_agent_start(
              .session_source
              .get_agent_path()
              .unwrap_or_else(AgentPath::root);
@@ -20299,7 +20299,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
              author,
              new_agent_path.clone(),
              MessageDeliveryMode::TriggerTurn,
-@@ -318,7 +318,7 @@ async fn handle_agent_start(
+@@ -330,7 +330,7 @@ async fn handle_agent_start(
                  caller: session.thread_id,
                  config,
                  input: AgentInput::Message {
@@ -20308,7 +20308,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
                      mode: MessageDeliveryMode::TriggerTurn,
                  },
                  source: spawn_source,
-@@ -402,7 +402,6 @@ impl CoreToolRuntime for AdoptHandler {
+@@ -422,7 +422,6 @@ impl CoreToolRuntime for AdoptHandler {
  struct SpawnAgentArgs {
      message: String,
      task_name: String,
@@ -20316,7 +20316,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      agent_type: Option<String>,
      model: Option<String>,
      reasoning_effort: Option<ReasoningEffort>,
-@@ -411,22 +410,6 @@ struct SpawnAgentArgs {
+@@ -431,22 +430,6 @@ struct SpawnAgentArgs {
  }
 
  impl SpawnAgentArgs {
@@ -20339,7 +20339,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
      fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
          if self.fork_context.is_some() {
              return Err(FunctionCallError::RespondToModel(
-@@ -463,6 +446,50 @@ impl SpawnAgentArgs {
+@@ -475,6 +458,50 @@ impl SpawnAgentArgs {
      }
  }
 
@@ -20390,7 +20390,7 @@ index 5e52b113cf17d24ee77275bc18b0a65b05d02d00..1ea7accd28223e73c068e2a14e45eeac
  #[derive(Debug, Serialize)]
  #[serde(untagged)]
  pub(crate) enum SpawnAgentResult {
-@@ -492,3 +519,40 @@ impl ToolOutput for SpawnAgentResult {
+@@ -504,3 +531,40 @@ impl ToolOutput for SpawnAgentResult {
          tool_output_code_mode_result(self, "spawn_agent")
      }
  }
@@ -20541,7 +20541,7 @@ index 0000000000000000000000000000000000000000..8967ee2aafce57c5ae5eeacb3f23497a
 +    );
 +}
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 995f87359fe15517041ee043167ffea879c12e43..00f470acfc42fa0d1a6f5f9712a2dbb4f6e691e4 100644
+index b7db3a9b354f2165fa6a82ec61cdbe6a42788a0f..752ca93df112288d1a73eb597117cbab99d0e665 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -38,6 +38,7 @@ use crate::tools::handlers::multi_agents::ResumeAgentHandler;
@@ -20552,7 +20552,7 @@ index 995f87359fe15517041ee043167ffea879c12e43..00f470acfc42fa0d1a6f5f9712a2dbb4
  use crate::tools::handlers::multi_agents::SupervisorSelfCloseHandler;
  use crate::tools::handlers::multi_agents::SupervisorSnoozeHandler;
  use crate::tools::handlers::multi_agents::WaitAgentHandler;
-@@ -687,9 +688,6 @@ fn collab_tools_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> b
+@@ -734,9 +735,6 @@ fn collab_tools_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> b
          MultiAgentVersion::V2 => {
              turn_context.session_source.get_agent_path().is_none()
                  || model_info.multi_agent_version == Some(MultiAgentVersion::V2)
@@ -20562,7 +20562,7 @@ index 995f87359fe15517041ee043167ffea879c12e43..00f470acfc42fa0d1a6f5f9712a2dbb4
          }
      }
  }
-@@ -1476,6 +1474,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+@@ -1549,6 +1547,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
      }
      if crate::goal_supervisor::is_goal_supervisor_helper_source(&turn_context.session_source) {
          registry.add(SupervisorSelfCloseHandler);
@@ -20570,7 +20570,7 @@ index 995f87359fe15517041ee043167ffea879c12e43..00f470acfc42fa0d1a6f5f9712a2dbb4
          registry.add(SupervisorSnoozeHandler);
          registry.add(SupervisorCompactParentContextHandler);
      }
-@@ -1591,3 +1590,7 @@ fn code_mode_namespace_name<'a>(
+@@ -1674,3 +1673,7 @@ fn code_mode_namespace_name<'a>(
  #[cfg(test)]
  #[path = "spec_plan_tests.rs"]
  mod tests;
@@ -20579,10 +20579,10 @@ index 995f87359fe15517041ee043167ffea879c12e43..00f470acfc42fa0d1a6f5f9712a2dbb4
 +#[path = "collaboration_contract_tests.rs"]
 +mod collaboration_contract_tests;
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620a263e635 100644
+index 74c3f9bd9d9bdaf499e459b85a860f3898829ee1..9417005f18f5f29e7ee127bf23fe7b5a5cd82fe3 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -277,8 +277,30 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -275,8 +275,30 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      .await;
      assert_eq!(
          supervisor.namespace_function_names("supervisor"),
@@ -20614,7 +20614,7 @@ index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620
 
      let supervisor_path_without_role = probe(|turn| {
          turn.session_source = source("/root/goal_supervisor", "worker");
-@@ -291,6 +313,7 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -289,6 +311,7 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      );
      supervisor_path_without_role.assert_registered_lacks(&[
          "supervisor.close_self",
@@ -20622,7 +20622,7 @@ index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620
          "supervisor.snooze",
          "supervisor.compact_parent_context",
      ]);
-@@ -304,11 +327,22 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -302,11 +325,22 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      .await;
      assert_eq!(
          supervisor_role_on_custom_path.namespace_function_names("supervisor"),
@@ -20646,7 +20646,7 @@ index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620
  }
 
  fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
-@@ -3272,10 +3306,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
+@@ -3285,10 +3319,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
  }
 
  #[tokio::test]
@@ -20662,7 +20662,7 @@ index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620
          turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
              parent_thread_id: ThreadId::new(),
              depth: 1,
-@@ -3288,11 +3325,20 @@ async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise
+@@ -3301,11 +3338,20 @@ async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise
      })
      .await;
 
@@ -20685,7 +20685,7 @@ index 2dc581a7637825fd97a851999575053a0be34ceb..6c55444247ef5b9803da87929f840620
  }
 
  #[tokio::test]
-@@ -3349,6 +3395,46 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
+@@ -3362,6 +3408,46 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
      }
  }
 
@@ -20789,7 +20789,7 @@ index 5644a06e0a1e7f5962c7e9e1bb7e8a5225630777..94d19de5289d8ca94a2a6037fc1ec8a3
  tracing-opentelemetry = { workspace = true }
  tracing-subscriber = { workspace = true }
 diff --git a/codex-rs/core/tests/common/responses.rs b/codex-rs/core/tests/common/responses.rs
-index 842bd19dc3a3984bb5c583af3876d143e90047d5..7d43abbcf45b25caf6a3ea1e14f19d343539aadb 100644
+index de8507feb227845ad85b9f85006b59835a2a432d..8ab8f973f7d51fff22a01169c4c597908f65ec1a 100644
 --- a/codex-rs/core/tests/common/responses.rs
 +++ b/codex-rs/core/tests/common/responses.rs
 @@ -1209,9 +1209,26 @@ pub async fn start_mock_server() -> MockServer {
@@ -21050,10 +21050,10 @@ index 0000000000000000000000000000000000000000..a8973f3fd2c22dfc49eb21b09ece497f
 +  }
 +]
 diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
-index 1fa5dec164e9e050cf25a7109e0990841e5c3d65..b259c87c775ae62769e619b7722910fc3051a1d0 100644
+index d6a0fe19d0cf4e44d5df70a0e058796dd90d5a06..d0acd6621619b528b5cb2c9349a9766250656b8a 100644
 --- a/codex-rs/core/tests/suite/agent_control_tests.rs
 +++ b/codex-rs/core/tests/suite/agent_control_tests.rs
-@@ -196,20 +196,13 @@ impl AgentControl for TestAgentControl {
+@@ -213,20 +213,13 @@ impl AgentControl for TestAgentControl {
  }
 
  #[tokio::test]
@@ -21283,10 +21283,10 @@ index 0000000000000000000000000000000000000000..70947b9789c34acd2bf7718f79b657f9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 8cc410213755c75f4a10f88d06470405287efd87..915e99cb6ec1c8d2e34f5b7a282d879c62149137 100644
+index 46792735dd619f66ff704f077c21d655153bc713..4850b44da77f8a97ee6d3c9c83f9741ecce364de 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -67,6 +67,7 @@ mod code_mode_elicitation;
+@@ -69,6 +69,7 @@ mod code_mode_elicitation;
  mod code_mode_model_messages;
  mod codex_apps_protocol;
  mod codex_delegate;
@@ -21295,7 +21295,7 @@ index 8cc410213755c75f4a10f88d06470405287efd87..915e99cb6ec1c8d2e34f5b7a282d879c
  mod compact;
  mod compact_remote;
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b3a512af2 100644
+index 22d5b737e11011f2a0f95e7847281b95050053d7..557c36dde15dc4a9c12c284ae6dcbb907eb553b4 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
 @@ -1,3 +1,4 @@
@@ -21326,7 +21326,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
              config
                  .features
                  .enable(Feature::Collab)
-@@ -1440,15 +1450,27 @@ async fn grandchild_full_fork_preserves_context_baseline(
+@@ -1436,15 +1446,27 @@ async fn grandchild_full_fork_preserves_context_baseline(
          ]),
      )
      .await;
@@ -21356,7 +21356,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
          .mount(&server)
          .await;
      let test = test_codex()
-@@ -1499,19 +1521,32 @@ async fn grandchild_full_fork_preserves_context_baseline(
+@@ -1495,19 +1517,32 @@ async fn grandchild_full_fork_preserves_context_baseline(
                  sleep(Duration::from_millis(/*millis*/ 10)).await;
              }
          })
@@ -21393,7 +21393,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
          if agent_name == "/root/child/grandchild" {
              assert_eq!(
                  thread.agent_status().await,
-@@ -1572,7 +1607,7 @@ enum FullHistoryV2ModelSelection {
+@@ -1570,7 +1605,7 @@ enum FullHistoryV2ModelSelection {
  #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
  #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
  #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
@@ -21402,7 +21402,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
      selection: FullHistoryV2ModelSelection,
-@@ -1845,20 +1880,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1843,20 +1878,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
          let proactive_developer_messages = proactive_request.message_input_text_groups("developer");
          assert!(
              proactive_developer_messages.iter().any(|message| {
@@ -21429,7 +21429,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
          );
      }
      test.submit_turn(TURN_1_PROMPT).await?;
-@@ -1953,7 +1987,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1951,7 +1985,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                      .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                      .count(),
              ),
@@ -21438,7 +21438,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
          );
      }
      if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
-@@ -3510,6 +3544,10 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
+@@ -3615,6 +3649,10 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
                  .features
                  .enable(Feature::Collab)
                  .expect("test config should allow feature update");
@@ -21449,7 +21449,7 @@ index 1f7823bec0abe26608ef293daa54b674efe1c245..a46e854b3e7d6d191a9c965c6a17098b
              let role_path = config.codex_home.join("model-only-role.toml");
              std::fs::write(&role_path, format!("model = \"{ROLE_MODEL}\"\n"))
                  .expect("write role config");
-@@ -3577,6 +3615,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
+@@ -3682,6 +3720,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
              .enable(Feature::Collab)
              .expect("test config should allow feature update");
          config.multi_agent_v2.hide_spawn_agent_metadata = false;
@@ -21497,10 +21497,10 @@ index 2ec905a2f8ca2c9c5e35e0066fbb65bd1e87e480..f8392fd51093602dff6728f0d5d05b44
      /// Get the model identifier to use, refreshing according to the specified strategy.
      ///
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d0728f6f5 100644
+index cc725030fc37ff9b98bc49e4e1996ee9a54b8e93..6182f3ec96287b9bde9c514875891beca4b0551f 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -862,6 +862,72 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -861,6 +861,72 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
      );
  }
 
@@ -21573,7 +21573,7 @@ index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d
  #[tokio::test]
  async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
      let remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-@@ -975,6 +1041,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -974,6 +1040,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
      );
      assert_eq!(*manager.remote_models.read().await, cached);
 
@@ -21586,7 +21586,7 @@ index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d
      manager.replace_custom_models(HashMap::new());
      assert_eq!(
          manager.try_list_models().expect("unlocked catalog"),
-@@ -1941,6 +2013,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -1940,6 +2012,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["chatgpt-only", "api-model"]
      );
@@ -21599,7 +21599,7 @@ index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d
 
      auth_manager
          .set_external_auth(Arc::new(TestExternalApiKeyAuth))
-@@ -1957,6 +2035,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -1956,6 +2034,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["api-model"]
      );
@@ -21613,7 +21613,7 @@ index 7e4dfeaf19b0c37fc469d19775a982a6b53edff3..d92ab9993a13c82a7212d6df09ea5c2d
 
  #[test]
 diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
-index 7deb8c810a76ca8e69efb01b1d0d8362501aace5..9aa14ff0df006f58983efde41daf99cda7933513 100644
+index 819438792171b7680f2ee6cef5f806d6731a46cb..cad91d945ddc7584de30aa53324405de5fa80c71 100644
 --- a/codex-rs/tools/src/code_mode.rs
 +++ b/codex-rs/tools/src/code_mode.rs
 @@ -161,6 +161,16 @@ fn effective_input_schema_max_bytes(
@@ -21633,7 +21633,7 @@ index 7deb8c810a76ca8e69efb01b1d0d8362501aace5..9aa14ff0df006f58983efde41daf99cd
  ) -> Vec<CodeModeToolDefinition> {
      match spec {
          ToolSpec::Function(tool) => {
-@@ -227,6 +237,27 @@ fn code_mode_tool_definitions_for_spec(
+@@ -258,6 +268,27 @@ fn code_mode_tool_definitions_for_spec(
      }
  }
 
@@ -21662,7 +21662,7 @@ index 7deb8c810a76ca8e69efb01b1d0d8362501aace5..9aa14ff0df006f58983efde41daf99cd
      if tool_name.is_default_namespace() {
          return tool_name.name.clone();
 diff --git a/codex-rs/tools/src/code_mode_tests.rs b/codex-rs/tools/src/code_mode_tests.rs
-index 135694bc95b1295c7b994fe536ed3935d9fef5c3..bd5319fb43e9723b0fd78d7c34f4b7ad46790f14 100644
+index 0486372a5c740036b3fa6520c7b72e71f23fa7a9..3fe6175ad481143e09fe6a73371a7490804d929a 100644
 --- a/codex-rs/tools/src/code_mode_tests.rs
 +++ b/codex-rs/tools/src/code_mode_tests.rs
 @@ -1,5 +1,6 @@
@@ -21672,9 +21672,9 @@ index 135694bc95b1295c7b994fe536ed3935d9fef5c3..bd5319fb43e9723b0fd78d7c34f4b7ad
  use super::tool_spec_to_code_mode_tool_definition;
  use crate::AdditionalProperties;
  use crate::FreeformTool;
-@@ -252,3 +253,71 @@ fn tool_spec_to_code_mode_tool_definition_skips_unsupported_variants() {
-         None
+@@ -285,3 +286,71 @@ fn tool_search_spec_converts_to_a_callable_code_mode_definition() {
      );
+     assert!(!definition.description.contains("Native tool discovery"));
  }
 +
 +#[test]
@@ -21745,7 +21745,7 @@ index 135694bc95b1295c7b994fe536ed3935d9fef5c3..bd5319fb43e9723b0fd78d7c34f4b7ad
 +    assert_eq!(augment_tool_spec_for_code_mode(spec.clone()), spec);
 +}
 diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
-index 29521b066f1806d2163f9739a9d5bee33a84b710..1568b7113af9b86e2a2fd7b727c5339ff4b01b99 100644
+index b41ec8dbc249d11e1ce6ac39a66ca51455cd17dc..de442143e8c3ec1cdeacad8d2ae4e75dd2472384 100644
 --- a/codex-rs/tui/src/dynamic_tools.rs
 +++ b/codex-rs/tui/src/dynamic_tools.rs
 @@ -1388,10 +1388,14 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 84b1ee6618e8f76258a1b3d4715c94f3e1c00961..f7293972a074405139fdc9b17dcc14c6d191df10 100644
+index 7f3d0c94b32b5d567abf11846ef030a2d798648d..a7f9e06f924c8c8e0aabfa5a7ac14c17c8feab27 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -4943,13 +4943,21 @@ impl ThreadRequestProcessor {
@@ -395,10 +395,10 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd244706bd6fff 100644
+index 6fc80f13462faf57262225ed84fccfd68dc4d33b..de7315c9d10bdb11a36d81650b4e99cab6a31231 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -85,6 +85,7 @@ use codex_protocol::protocol::EventMsg;
+@@ -87,6 +87,7 @@ use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::HistoryPosition;
  use codex_protocol::protocol::InterAgentCommunication;
  use codex_protocol::protocol::ItemCompletedEvent;
@@ -406,7 +406,7 @@ index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd2447
  use codex_protocol::protocol::SessionSource;
  use codex_protocol::protocol::SubAgentSource;
  use codex_protocol::protocol::ThreadGoal;
-@@ -94,6 +95,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
+@@ -96,6 +97,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
  use codex_protocol::protocol::ThreadSettingsAppliedEvent;
  use codex_protocol::protocol::ThreadSettingsOverrides;
  use codex_protocol::protocol::ThreadSettingsSnapshot;
@@ -414,15 +414,15 @@ index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd2447
  use codex_protocol::protocol::TokenUsage;
  use codex_protocol::protocol::TokenUsageRecord;
  use codex_protocol::protocol::TurnAbortReason;
-@@ -102,6 +104,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
- use codex_protocol::protocol::TurnEnvironmentSelection;
+@@ -105,6 +107,7 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
  use codex_protocol::protocol::TurnEnvironmentSelections;
  use codex_protocol::protocol::TurnStartedEvent;
+ use codex_protocol::protocol::WorldStateItem;
 +use codex_rollout::CertifiedSegmentStateCheckpoint;
  use codex_rollout::RolloutRecorder;
  use codex_state::DirectionalThreadSpawnEdgeStatus;
  use codex_thread_store::AppendThreadItemsParams;
-@@ -119,6 +122,7 @@ use codex_utils_path_uri::PathUri;
+@@ -122,6 +125,7 @@ use codex_utils_path_uri::PathUri;
  use core_test_support::responses::assert_parent_turn;
  use core_test_support::responses::assert_root_turn;
  use core_test_support::responses::ev_completed;
@@ -430,7 +430,7 @@ index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd2447
  use core_test_support::responses::ev_response_created;
  use core_test_support::responses::mount_response_sequence;
  use core_test_support::responses::mount_sse_once;
-@@ -128,6 +132,10 @@ use core_test_support::responses::sse_failed;
+@@ -131,6 +135,10 @@ use core_test_support::responses::sse_failed;
  use core_test_support::responses::sse_response;
  use core_test_support::responses::start_mock_server;
  use core_test_support::responses::strip_response_item_ids;
@@ -441,7 +441,7 @@ index b7b106ba8f80fd1bc930170bde6ab6776e8615ce..bcb5b23a24efef329e937a4cb2fd2447
  use pretty_assertions::assert_eq;
  use serial_test::serial;
  use std::ffi::OsStr;
-@@ -10072,6 +10080,411 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+@@ -10100,6 +10108,411 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
      )
  }
 
@@ -1040,7 +1040,7 @@ index 0000000000000000000000000000000000000000..153d83230741db3961d236c14a3af7ed
 +    }
 +}
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 06b36830773df4d79d14e570dcb7dd1592b3e2c8..cb6e947e3b0427dced659b85a18acd10f770fa59 100644
+index f024cece0a30a5d1739857241c647f25dd10bbca..6bcada2e5fae4176aa3e37d9faf90d23914d6a4e 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -8,6 +8,7 @@ use serde_json::Value;
@@ -1196,7 +1196,7 @@ index 0000000000000000000000000000000000000000..6e21dc33d97b6ef55362a85ef7d9bb2a
 +    }
 +}
 diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
-index b967f397249bf023da41555f3c96aabe1290ad75..d73f2e726e00af759d2733159d53c9b740dbe78f 100644
+index 34f603e7b119aa351daa07bf5d6f9a9dfe8ba4c6..5a415047adedc8d63368d9d409c2e13fa32b03d3 100644
 --- a/codex-rs/rollout/src/recorder.rs
 +++ b/codex-rs/rollout/src/recorder.rs
 @@ -53,6 +53,7 @@ use super::list::parse_timestamp_uuid_from_filename;
@@ -1207,77 +1207,81 @@ index b967f397249bf023da41555f3c96aabe1290ad75..d73f2e726e00af759d2733159d53c9b7
  use super::rollout_file_name::RolloutFileName;
  use super::session_index::find_thread_names_by_ids;
  use crate::InitialHistory;
-@@ -1214,65 +1215,15 @@ impl RolloutRecorder {
+@@ -1227,67 +1228,18 @@ impl RolloutRecorder {
+         path: &Path,
      ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
          trace!("Resuming rollout from {path:?}");
-         let mut lines: Vec<RolloutLine> = Vec::new();
--        let mut thread_id: Option<ThreadId> = None;
--        let mut parse_errors = 0usize;
-+        let mut loader = RolloutLineLoader::new(path);
-         let mut reader = compression::open_rollout_line_reader(path).await?;
--        let mut saw_non_empty_line = false;
-         while let Some(line) = reader.next_line().await? {
-             if line.trim().is_empty() {
-                 continue;
-             }
--            saw_non_empty_line = true;
--            let value: Value = match serde_json::from_str(&line) {
--                Ok(value) => value,
--                Err(e) => {
--                    warn!("failed to parse line as JSON: {line:?}, error: {e}");
--                    parse_errors = parse_errors.saturating_add(1);
--                    continue;
--                }
--            };
--            if thread_id.is_none() {
--                // The first SessionMeta belongs to this rollout. Later SessionMeta lines
--                // can be copied from fork history, so only validate unknown history modes
--                // before we have parsed the rollout's own SessionMeta.
--                reject_unknown_thread_history_mode(&value)?;
--            }
--
--            let is_rollout_reference = matches!(
--                value.get("type").and_then(Value::as_str),
--                Some("rollout_reference" | "fork_reference")
--            );
--            let rollout_line = match Self::parse_rollout_line_value(value) {
--                Ok(Some(rollout_line)) => rollout_line,
--                Ok(None) => {
--                    trace!("skipping legacy ghost_snapshot rollout line");
--                    continue;
--                }
--                Err(e) => {
--                    if is_rollout_reference {
--                        return Err(IoError::new(
--                            std::io::ErrorKind::InvalidData,
--                            "invalid rollout reference record",
--                        ));
+-        compression::read_rollout_lines(path, |reader| {
++        let diagnostic_path = path.to_path_buf();
++        compression::read_rollout_lines(path, move |reader| {
+             let mut lines: Vec<RolloutLine> = Vec::new();
+-            let mut thread_id: Option<ThreadId> = None;
+-            let mut parse_errors = 0usize;
+-            let mut saw_non_empty_line = false;
++            let mut loader = RolloutLineLoader::new(&diagnostic_path);
+             for line in reader {
+                 let line = line?;
+                 if line.trim().is_empty() {
+                     continue;
+                 }
+-                saw_non_empty_line = true;
+-                let value: Value = match serde_json::from_str(&line) {
+-                    Ok(value) => value,
+-                    Err(e) => {
+-                        warn!("failed to parse line as JSON: {line:?}, error: {e}");
+-                        parse_errors = parse_errors.saturating_add(1);
+-                        continue;
 -                    }
--                    trace!("failed to parse rollout line: {e}");
--                    parse_errors = parse_errors.saturating_add(1);
--                    continue;
+-                };
+-                if thread_id.is_none() {
+-                    // The first SessionMeta belongs to this rollout. Later SessionMeta lines
+-                    // can be copied from fork history, so only validate unknown history modes
+-                    // before we have parsed the rollout's own SessionMeta.
+-                    reject_unknown_thread_history_mode(&value)?;
 -                }
--            };
 -
--            // Use the FIRST SessionMeta encountered in the file as the canonical
--            // thread id and main session information. Keep all items intact.
--            if thread_id.is_none()
--                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
--            {
--                thread_id = Some(session_meta_line.meta.id);
+-                let is_rollout_reference = matches!(
+-                    value.get("type").and_then(Value::as_str),
+-                    Some("rollout_reference" | "fork_reference")
+-                );
+-                let rollout_line = match Self::parse_rollout_line_value(value) {
+-                    Ok(Some(rollout_line)) => rollout_line,
+-                    Ok(None) => {
+-                        trace!("skipping legacy ghost_snapshot rollout line");
+-                        continue;
+-                    }
+-                    Err(e) => {
+-                        if is_rollout_reference {
+-                            return Err(IoError::new(
+-                                std::io::ErrorKind::InvalidData,
+-                                "invalid rollout reference record",
+-                            ));
+-                        }
+-                        trace!("failed to parse rollout line: {e}");
+-                        parse_errors = parse_errors.saturating_add(1);
+-                        continue;
+-                    }
+-                };
+-
+-                // Use the FIRST SessionMeta encountered in the file as the canonical
+-                // thread id and main session information. Keep all items intact.
+-                if thread_id.is_none()
+-                    && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
+-                {
+-                    thread_id = Some(session_meta_line.meta.id);
+-                }
+-                lines.push(rollout_line);
 -            }
--            lines.push(rollout_line);
--        }
--        if !saw_non_empty_line {
--            return Err(IoError::other("empty session file"));
-+            loader.push(line.as_bytes(), |line| lines.push(line))?;
-         }
-+        let (thread_id, parse_errors) = loader.finish()?;
+-            if !saw_non_empty_line {
+-                return Err(IoError::other("empty session file"));
++                loader.push(line.as_bytes(), |line| lines.push(line))?;
+             }
++            let (thread_id, parse_errors) = loader.finish()?;
 
-         tracing::debug!(
-             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-@@ -1283,6 +1234,28 @@ impl RolloutRecorder {
-         Ok((lines, thread_id, parse_errors))
+             tracing::debug!(
+                 "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
+@@ -1300,6 +1252,28 @@ impl RolloutRecorder {
+         .await
      }
 
 +    /// Loads a decoded JSONL snapshot with the same damaged-record policy as file loading.
@@ -1306,7 +1310,7 @@ index b967f397249bf023da41555f3c96aabe1290ad75..d73f2e726e00af759d2733159d53c9b7
          let (items, thread_id, _parse_errors) = Self::load_rollout_items(path).await?;
          let conversation_id = thread_id
 diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
-index 206e5f2345daeaed49239f57bc96f7ef8574b1d5..5f9eb9efa055db2f90a67a25ace60e32f6c6a52e 100644
+index 4ed94bd2b425094d48910089fc15accdcaf2693a..0e57a30502175c7df9f6074777d9fafbec19de7b 100644
 --- a/codex-rs/rollout/src/recorder_tests.rs
 +++ b/codex-rs/rollout/src/recorder_tests.rs
 @@ -486,6 +486,64 @@ async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -
@@ -1398,10 +1402,10 @@ index b69ce52bbdc866c6e0c6389d6d34806774385dde..4cadd93adc5c6cb21ab2162678a8ad43
          let lines = materialize_rollout_lines_from_with_cache(
              self.codex_home,
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 7d29eee713316af44a25dba4e757f365f962d3dc..523ca9f0674d0f54a28c8c0e1bf26081ef8ca80d 100644
+index f763e85067bf0ebddcc58ffdafc46a3ad1083d50..bc879c11019a22d58e42146c7e3bfe8c29f76a3f 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -1440,7 +1440,12 @@ async fn bounded_materializer_rejects_modified_cached_immutable_segment() -> io:
+@@ -1436,7 +1436,12 @@ async fn bounded_materializer_rejects_modified_cached_immutable_segment() -> io:
      fs::write(referenced_path, format!("{referenced_meta}\n{{malformed\n"))?;
 
      let error = materializer
@@ -1415,7 +1419,7 @@ index 7d29eee713316af44a25dba4e757f365f962d3dc..523ca9f0674d0f54a28c8c0e1bf26081
          .await
          .err()
          .expect("modified immutable rollout must not use cached records");
-@@ -1993,6 +1998,22 @@ async fn materialization_rejects_torn_ordinary_records_in_paginated_root() -> io
+@@ -1989,6 +1994,22 @@ async fn materialization_rejects_torn_ordinary_records_in_paginated_root() -> io
      .err()
      .expect("paginated bounded rollout reads must remain strict");
      assert!(bounded_error.to_string().contains("invalid record"));
@@ -1467,7 +1471,7 @@ index a0dedad42ad1f4f6c1970a06deab5250c6a1dc79..fa4e09b99a490356cf049e2fb604737f
          Err(error) => Err(thread_store_io_error(error)),
      }
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index b64394362ab1310b8d11c255ed1a22e301aa714a..71e65cb452d6a1fc0d1036ca7ba014c22274c272 100644
+index c7e6eb452fcec0d3323a4e2752660e3163eb223a..b8b060ce36c75fd5b177586075996491341e8679 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -54,6 +54,46 @@ use crate::local::test_support::test_config;
@@ -2393,7 +2397,7 @@ index 79138c056e445bfc444f614a4b97754ac8118a48..2371f1bfb5df2630adabe173406bcd4b
  fn parses_legacy_numeric_event_payloads_through_value() {
      let bytes = line(
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
-index efd1559d03fbae98c366bf0c4f4bc77155aff8d3..c33c55f1351f5c2e6e885414a53a8b21a44910d6 100644
+index efd1559d03fbae98c366bf0c4f4bc77155aff8d3..3339e98270f990bb404d138330d379386abd6687 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
 @@ -1282,8 +1282,8 @@ async fn inspect_source(
@@ -2407,7 +2411,7 @@ index efd1559d03fbae98c366bf0c4f4bc77155aff8d3..c33c55f1351f5c2e6e885414a53a8b21
              Err(error) => {
                  canonical_paginated_suffix = false;
                  let value = serde_json::from_str::<serde_json::Value>(raw.as_str()).ok();
-@@ -1304,60 +1304,96 @@ async fn inspect_source(
+@@ -1304,60 +1304,95 @@ async fn inspect_source(
                          path.display()
                      )));
                  }
@@ -2496,11 +2500,10 @@ index efd1559d03fbae98c366bf0c4f4bc77155aff8d3..c33c55f1351f5c2e6e885414a53a8b21
 +                    .meta
 +                    .subagent_history_start_ordinal
 +                    .is_none_or(|start| line.ordinal.is_none_or(|ordinal| ordinal >= start))
-+                && codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
-+                && !codex_rollout::is_persisted_rollout_item(
-+                    &line.item,
-+                    ThreadHistoryMode::Paginated,
-+                )
++                && codex_rollout::persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
++                    .is_some()
++                && codex_rollout::persisted_rollout_item(&line.item, ThreadHistoryMode::Paginated)
++                    .is_none()
 +            {
                  return Err(migration_error(format!(
 -                    "rollout migration source {} contains a non-leading reference",
@@ -2672,10 +2675,10 @@ index 39fa80b9c248284053b0e0545f476ae4b9ca39ff..c7f92746052026099dfa3311bbc5850e
      Ok(planner.finish())
  }
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index 53fc5df1732910738af13fe0aa5de31ba42e4b50..2fde2204ff7ce1e2f5da18ce44fd66632821d6a6 100644
+index c79923b3d93a1aa6a500c1b3779121d1b7e23919..691b93a398f7457b515fc51707af6ffdda8dd55d 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -4897,6 +4897,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
+@@ -4896,6 +4896,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
      assert_context_dependent_migration_projection(&store, &fixture).await;
  }
 
@@ -2828,7 +2831,7 @@ index 53fc5df1732910738af13fe0aa5de31ba42e4b50..2fde2204ff7ce1e2f5da18ce44fd6663
  #[tokio::test]
  async fn segmented_migration_preserves_low_suffix_legacy_item_ids() {
      let fixture = context_dependent_legacy_fixture_with_counts(
-@@ -10853,7 +10999,7 @@ async fn migration_reports_invalid_session_metadata() {
+@@ -10895,7 +11041,7 @@ async fn migration_reports_invalid_session_metadata() {
  }
 
  #[tokio::test]
@@ -2837,7 +2840,7 @@ index 53fc5df1732910738af13fe0aa5de31ba42e4b50..2fde2204ff7ce1e2f5da18ce44fd6663
      let home = TempDir::new().expect("create Codex home");
      let thread_id = ThreadId::new();
      let path = write_rollout(
-@@ -10872,6 +11018,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
+@@ -10914,6 +11060,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
          ordinal: None,
          item: agent_message("kept answer"),
      };
@@ -3002,7 +3005,7 @@ index e2011b3ee30a805a36dc3eaef1e043ad793a4b0f..5c6654dd68ce27d3150c78a73c3879f0
  ///
  /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 16bc440db56732dbcbbee4226898ca35f7c4ae70..0e48abe10e89ac61706a4f465843d5d1f529df4c 100644
+index 09137a748bdeb6a5f99b815b16bc6bc592eed14b..cba2fc1d787e715873c8b401622dc19e240d973a 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -4007,6 +4007,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()

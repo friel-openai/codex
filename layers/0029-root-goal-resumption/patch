@@ -207,7 +207,7 @@ index 0000000000000000000000000000000000000000..b8bcc3480cb7460e4200456cc98e0a2c
 +    }
 +}
 diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
-index b60ad3c35b3efe74f235b963e379d5e5a59a74ce..4ed23b12aa899b3f596bf29cd6799349c9ab6ded 100644
+index a110c6cd24df2f215fc14858c1d1b368f8432646..f6a625ce4ab0ffae3a14132dc343f29bfebcf6ef 100644
 --- a/codex-rs/ext/goal/src/runtime.rs
 +++ b/codex-rs/ext/goal/src/runtime.rs
 @@ -34,6 +34,8 @@ pub(crate) struct GoalRuntimeConfig {

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
-index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad4469831b44fb11 100644
+index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..16dfdd1277af4b5f2929bd8f09f67c4a722c85b4 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 @@ -4,17 +4,24 @@ use app_test_support::TestAppServer;
@@ -27,7 +27,7 @@ index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad446983
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::ItemCompletedEvent;
  use codex_protocol::protocol::SessionSource;
-@@ -228,3 +235,229 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
+@@ -230,3 +237,229 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
 
      Ok(())
  }
@@ -258,10 +258,10 @@ index c2c31a831dc662fed1382ccd9b23a554217b41ac..f3bd1518c5ba07c217a9b82bad446983
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
-index c9e1a3ec57447a0df79bb4da531885de022d6597..b8973506bec28b72683638b5e8c3c5ef83f8b82c 100644
+index 2477eb29741b25b0ab3e1aec9553e39be5ecd941..783b34d93c0b771c4515dd81b80ec770b530571a 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
-@@ -36,13 +36,13 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
+@@ -20,13 +20,13 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
 
      You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
      Child agents can also spawn their own sub-agents.
@@ -275,13 +275,13 @@ index c9e1a3ec57447a0df79bb4da531885de022d6597..b8973506bec28b72683638b5e8c3c5ef
 -    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
 +    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
 
-     Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
- 02:message/developer:
+     Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
+ 03:message/developer:
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index 0ae365477b2bd00314356f26075311079c09ac91..4955724230f3c44c300e34aee171f95d2373d914 100644
+index 3586a986c6701d46c3d9c648bb932df5e7af60bf..8c4dbac7878a309823b1ee96062d1b1abc2844ce 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
-@@ -1210,7 +1210,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
+@@ -1212,7 +1212,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
      append_items(path.as_path(), [user_message("later message")]);
      let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
      let lineage = store
@@ -290,7 +290,7 @@ index 0ae365477b2bd00314356f26075311079c09ac91..4955724230f3c44c300e34aee171f95d
          .await
          .expect("resolve source lineage");
      let session_meta = codex_rollout::read_session_meta_line(path.as_path())
-@@ -1308,7 +1308,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
+@@ -1311,7 +1311,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
          );
          let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
          let lineage = store
@@ -420,7 +420,7 @@ index 73cd5b88ccc23df4e4f3a2e41ac5ba8625633575..f7903dcd472f210c8b308292020e9ec0
          .expect_err("lineage should be invalid");
      assert!(err.to_string().contains(detail), "{err}");
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index c5a9b31c9f02a4e3f19390ceb2f17c9fa37cb147..6f66da3f8f698ed4afc49257e43b36d77ee786ad 100644
+index 47ea800287dab6c3126c9a77b51f50cbbc0cb9c8..a6a7cf85037d930fc0381436c30cbaebfb11cd24 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
 @@ -120,6 +120,51 @@ WHERE next_rollout_byte_offset >= 0
@@ -551,7 +551,7 @@ index c5a9b31c9f02a4e3f19390ceb2f17c9fa37cb147..6f66da3f8f698ed4afc49257e43b36d7
          "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
      ] {
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e597b6bc0 100644
+index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd85bf41ca 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 @@ -41,6 +41,8 @@ use crate::SortDirection;
@@ -563,7 +563,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 
  #[tokio::test]
  async fn post_adoption_stock_checkpoint_can_restore_positive_completeness() {
-@@ -1116,7 +1118,7 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
+@@ -1130,7 +1132,7 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
 
  #[tokio::test]
  async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
@@ -572,7 +572,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      let db = history_db(&store).await;
      for (item_id, ordinal) in [
          ("before", 10),
-@@ -1188,6 +1190,7 @@ INSERT INTO thread_realtime_items (
+@@ -1202,6 +1204,7 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime item");
      }
 
@@ -580,7 +580,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      let latest = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -1273,7 +1276,7 @@ INSERT INTO thread_realtime_items (
+@@ -1287,7 +1290,7 @@ INSERT INTO thread_realtime_items (
 
  #[tokio::test]
  async fn timeline_turn_boundaries_page_through_shared_ordinals() {
@@ -589,7 +589,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      let db = history_db(&store).await;
      let error = r#"{"message":"failed","codexErrorInfo":null,"additionalDetails":null}"#;
      for (turn_id, start, end, status, error_json) in [
-@@ -1303,6 +1306,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
+@@ -1317,6 +1320,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
      )
      .await;
 
@@ -597,7 +597,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      let all = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -1462,6 +1466,65 @@ INSERT INTO thread_realtime_items (
+@@ -1476,6 +1480,66 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime boundary");
      }
 
@@ -614,6 +614,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
 +            turn_id: "source-turn".to_string(),
 +            root_turn_id: None,
++            turn_attribution: None,
 +            trace_id: None,
 +            started_at: None,
 +            model_context_window: None,
@@ -663,7 +664,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      let page = store
          .list_timeline(ListTimelineParams {
              thread_id: child_id,
-@@ -1489,7 +1552,844 @@ INSERT INTO thread_realtime_items (
+@@ -1503,7 +1567,850 @@ INSERT INTO thread_realtime_items (
              .iter()
              .map(crate::local::thread_history::realtime::entry_key)
              .collect::<Vec<_>>(),
@@ -710,6 +711,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
 +            turn_id: "recent-turn".to_string(),
 +            root_turn_id: None,
++            turn_attribution: None,
 +            trace_id: None,
 +            started_at: Some(10),
 +            model_context_window: None,
@@ -719,6 +721,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        item("updated recent text"),
 +        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
 +            turn_id: "recent-turn".to_string(),
++            root_turn_id: None,
 +            last_agent_message: None,
 +            error: None,
 +            started_at: Some(10),
@@ -1042,6 +1045,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
 +            turn_id: "recent-turn".to_string(),
 +            root_turn_id: None,
++            turn_attribution: None,
 +            trace_id: None,
 +            started_at: Some(10),
 +            model_context_window: None,
@@ -1096,6 +1100,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        /*ordinal*/ 10,
 +        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
 +            turn_id: "recent-turn".to_string(),
++            root_turn_id: None,
 +            last_agent_message: None,
 +            error: None,
 +            started_at: None,
@@ -1198,6 +1203,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
 +            turn_id: "turn".to_string(),
 +            root_turn_id: None,
++            turn_attribution: None,
 +            trace_id: None,
 +            started_at: Some(10),
 +            model_context_window: None,
@@ -1254,6 +1260,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
 +        /*ordinal*/ 6,
 +        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
 +            turn_id: "turn".to_string(),
++            root_turn_id: None,
 +            last_agent_message: None,
 +            error: None,
 +            started_at: None,
@@ -1509,7 +1516,7 @@ index 38f27190dc0467cc01436a6675574ccbc9c96c6a..564792ab4a4edab0afdb73e4fcd8e62e
      );
  }
 
-@@ -3747,6 +4647,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+@@ -3779,6 +4686,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
      ))
  }
 
