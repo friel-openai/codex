@@ -457,6 +457,8 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let rollout_items = vec![RolloutItem::TurnContext(previous_context_item)];
@@ -503,6 +505,8 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let turn_id = previous_context_item
@@ -574,6 +578,8 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
     let mut first_context_item = turn_context.to_turn_context_item();
     first_context_item.cyber_access_program = Some(CyberAccessProgram::DaybreakBlue);
     first_context_item.root_turn_id = Some("root-turn".to_owned());
+    first_context_item.service_tier = Some("priority".to_string());
+    first_context_item.model_profile = Some("balanced".to_string());
     let first_turn_id = first_context_item
         .turn_id
         .clone()
@@ -589,6 +595,8 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
     rolled_back_context_item.model = "rolled-back-model".to_string();
     rolled_back_context_item.cyber_access_program = Some(CyberAccessProgram::DaybreakRed);
     rolled_back_context_item.root_turn_id = Some("rolled-back-root".to_owned());
+    rolled_back_context_item.service_tier = Some("standard".to_string());
+    rolled_back_context_item.model_profile = Some("alternate".to_string());
     let rolled_back_turn_id = rolled_back_context_item
         .turn_id
         .clone()
@@ -706,8 +714,20 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
         })
     );
     assert_eq!(reconstructed.turn_attribution, Some(first_attribution));
+    let retained_context_item = reconstructed
+        .reference_context_item
+        .as_ref()
+        .expect("rollback should retain the previous turn context");
     assert_eq!(
-        serde_json::to_value(reconstructed.reference_context_item)
+        retained_context_item.service_tier.as_deref(),
+        Some("priority")
+    );
+    assert_eq!(
+        retained_context_item.model_profile.as_deref(),
+        Some("balanced")
+    );
+    assert_eq!(
+        serde_json::to_value(&reconstructed.reference_context_item)
             .expect("serialize reconstructed reference context item"),
         serde_json::to_value(Some(first_context_item))
             .expect("serialize expected reference context item")
@@ -2141,6 +2161,8 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let previous_turn_id = previous_context_item
@@ -2239,6 +2261,8 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             realtime_active: Some(turn_context.realtime_active),
             cyber_access_program: None,
             effort: turn_context.reasoning_effort().cloned(),
+            service_tier: None,
+            model_profile: None,
             summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
         }))
         .expect("serialize expected reference context item")
@@ -2269,6 +2293,8 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let previous_turn_id = previous_context_item
@@ -2412,6 +2438,8 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
 
@@ -2547,6 +2575,8 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let previous_turn_id = previous_context_item
@@ -2732,6 +2762,8 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let previous_turn_id = previous_context_item

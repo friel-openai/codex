@@ -42,6 +42,11 @@ pub(crate) struct StepContext {
     pub(crate) extension_data: ExtensionData,
     /// The exact MCP connections, configuration, and catalog captured for this step.
     pub(crate) mcp: Arc<McpBinding>,
+    /// MCP servers required by user input included in this sampling request.
+    ///
+    /// A model reroute preserves these names when it rebuilds the step so steering input does not
+    /// lose a server that was not required by the original turn input.
+    pub(crate) required_mcp_servers: Vec<String>,
     /// The finalized tool plan advertised and executed for this exact sampling request.
     pub(crate) tool_router: Arc<ToolRouter>,
     /// The canonical AGENTS.md value observed with this environment snapshot.

@@ -7,6 +7,7 @@ use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::compact::CompactionReporting;
 use crate::compact::build_compaction_replacement_history;
 use crate::compact::compaction_status_from_result;
 use crate::compact_model_fallback::record_model_fallback;
@@ -76,6 +77,7 @@ const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
@@ -84,6 +86,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     world_state: Arc<WorldState>,
     reason: CompactionReason,
     phase: CompactionPhase,
+    reporting: CompactionReporting,
 ) -> CodexResult<()> {
     let compaction_metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Auto,
@@ -98,6 +101,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         Some(client_session),
         world_state,
         compaction_metadata,
+        reporting,
     )
     .await
 }
@@ -120,6 +124,7 @@ pub(crate) async fn run_remote_compact_task(
         /*client_session*/ None,
         world_state,
         compaction_metadata,
+        CompactionReporting::Immediate,
     )
     .await
 }
@@ -131,6 +136,7 @@ async fn run_remote_compact_task_inner(
     client_session: Option<&mut ModelClientSession>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
+    reporting: CompactionReporting,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let trigger = compaction_metadata.trigger();
@@ -174,11 +180,12 @@ async fn run_remote_compact_task_inner(
         world_state,
         compaction_metadata,
         &mut analytics_details,
+        reporting,
     )
     .await;
     let status = compaction_status_from_result(&result);
     let codex_error = result.as_ref().err();
-    if result.is_ok() {
+    if result.is_ok() && !reporting.defers_post_compact_hooks() {
         let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
         if let PostCompactHookOutcome::Stopped = post_compact_outcome {
             attempt
@@ -199,19 +206,22 @@ async fn run_remote_compact_task_inner(
             Err(err)
         }
         Err(err) => {
-            sess.track_turn_codex_error(turn_context, &err);
-            // Pre-turn failures are reported by run_turn after preserving the incoming prompt.
-            if !matches!(phase, CompactionPhase::PreTurn) {
-                let event = EventMsg::Error(
-                    err.to_error_event(Some("Error running remote compact task".to_string())),
-                );
-                sess.send_event(turn_context, event).await;
+            if reporting.emits_error() {
+                sess.track_turn_codex_error(turn_context, &err);
+                // Pre-turn failures are reported by run_turn after preserving the incoming prompt.
+                if !matches!(phase, CompactionPhase::PreTurn) {
+                    let event = EventMsg::Error(
+                        err.to_error_event(Some("Error running remote compact task".to_string())),
+                    );
+                    sess.send_event(turn_context, event).await;
+                }
             }
             Err(err)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
@@ -220,6 +230,7 @@ async fn run_remote_compact_task_inner_impl(
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
+    reporting: CompactionReporting,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let context_compaction_item = ContextCompactionItem::new();
@@ -231,8 +242,10 @@ async fn run_remote_compact_task_inner_impl(
         turn_context.provider.info().name.as_str(),
     );
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
-    sess.emit_turn_item_started(turn_context, &compaction_item)
-        .await;
+    if !reporting.defers_lifecycle() {
+        sess.emit_turn_item_started(turn_context, &compaction_item)
+            .await;
+    }
 
     let attempt = run_remote_compact_v2_attempt(
         sess,
@@ -362,6 +375,10 @@ async fn run_remote_compact_task_inner_impl(
     sess.recompute_token_usage(&replacement_step_context.turn)
         .await;
 
+    if reporting.defers_lifecycle() {
+        sess.emit_turn_item_started(compaction_turn_context, &compaction_item)
+            .await;
+    }
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())
