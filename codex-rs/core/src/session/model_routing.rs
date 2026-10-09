@@ -18,6 +18,7 @@ use tracing::info;
 use tracing::warn;
 
 use super::session::Session;
+use super::step_context::StepContext;
 use super::step_settings::ResolvedStepSettings;
 use super::turn_context::TurnContext;
 
@@ -110,12 +111,9 @@ impl Session {
         attempted: &HashSet<ModelRoutingCandidate>,
         settings: &ResolvedStepSettings,
     ) -> Option<ModelRoutingSelection> {
-        let profile = base
-            .config
-            .custom_models
-            .get(profile_name)?
-            .routing_profile
-            .as_ref()?;
+        let custom_model = base.config.custom_models.get(profile_name)?;
+        let profile = custom_model.routing_profile.as_ref()?;
+        let trust_candidate_constraints = custom_model.trust_candidate_constraints;
         let now = self.model_routing_now().await;
         let mut attempted = attempted.clone();
         let mut last_rejected = None;
@@ -157,15 +155,26 @@ impl Session {
                     });
                 }
             };
-            if let Some(context) = base
-                .with_routing_candidate(
+            let context = if trust_candidate_constraints {
+                Some(
+                    base.with_unchecked_routing_candidate(
+                        profile_name,
+                        &candidate,
+                        &self.services.models_manager,
+                        settings,
+                    )
+                    .await,
+                )
+            } else {
+                base.with_routing_candidate(
                     profile_name,
                     &candidate,
                     &self.services.models_manager,
                     settings,
                 )
                 .await
-            {
+            };
+            if let Some(context) = context {
                 return Some(ModelRoutingSelection {
                     context,
                     last_success: previous_success,
@@ -180,23 +189,32 @@ impl Session {
 
     pub(super) async fn record_model_routing_failure(
         &self,
-        turn_context: &TurnContext,
+        step: &StepContext,
         failure: &ModelRoutingFailure,
     ) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
+        // Sample the remaining advice before awaiting the provider clock so a suspended
+        // clock read cannot shorten the server deadline. Never restart its original delay.
+        let server_retry_delay = failure.retry_after.map(RetryAfter::remaining_delay);
         let now = self.model_routing_now().await;
+        let server_retry_at = server_retry_delay.map(|delay| {
+            chrono::Duration::from_std(delay)
+                .ok()
+                .and_then(|delay| now.checked_add_signed(delay))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        });
         self.state.lock().await.model_routing.record_failure(
             candidate,
             failure.class,
             now,
-            failure.minimum_retry_at,
+            failure.minimum_retry_at.max(server_retry_at),
         );
     }
 
-    pub(super) async fn record_model_routing_success(&self, turn_context: &TurnContext) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+    pub(super) async fn record_model_routing_success(&self, step: &StepContext) {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
         self.state
@@ -265,19 +283,30 @@ impl Session {
     }
 }
 
-pub(super) fn classify_model_routing_failure(
-    details: &CodexErrorDetails,
-) -> Option<ModelRoutingFailure> {
-    match details {
+// Sparse active settings updates can override a routed model without changing its TurnContext.
+// Attribute health only when the request still executed the resolved routing tuple.
+fn executed_routing_candidate(step: &StepContext) -> Option<&ModelRoutingCandidate> {
+    let initial = &step.turn.initial_settings;
+    (step.settings.model_info.slug == initial.model_info.slug
+        && step.settings.effective_reasoning_effort() == initial.effective_reasoning_effort()
+        && step.settings.service_tier == initial.service_tier)
+        .then_some(step.turn.model_routing_candidate.as_ref())
+        .flatten()
+}
+
+pub(super) fn classify_model_routing_failure(error: &CodexErr) -> Option<ModelRoutingFailure> {
+    match error.details() {
         CodexErrorDetails::ServerOverloaded => Some(ModelRoutingFailure {
             reason: ModelRoutingReason::TemporaryAvailability,
             minimum_retry_at: None,
             class: RoutingFailureClass::TemporaryAvailability,
+            retry_after: error.retry_after(),
         }),
-        CodexErrorDetails::UsageLimitReached(error) => Some(ModelRoutingFailure {
+        CodexErrorDetails::UsageLimitReached(limit) => Some(ModelRoutingFailure {
             reason: ModelRoutingReason::UsageLimit,
-            minimum_retry_at: error.resets_at,
+            minimum_retry_at: limit.resets_at,
             class: RoutingFailureClass::TemporaryAvailability,
+            retry_after: error.retry_after(),
         }),
         CodexErrorDetails::ModelUnavailable(_) => Some(ModelRoutingFailure {
             reason: ModelRoutingReason::ModelUnavailable,
