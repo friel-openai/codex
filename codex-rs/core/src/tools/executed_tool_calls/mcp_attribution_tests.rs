@@ -81,6 +81,155 @@ fn restores_cumulative_item_and_compaction_checkpoints() {
     ]);
 
     assert_eq!(McpAttributionRecorder::new(&history).snapshot(), cumulative);
+
+    let recorder = McpAttributionRecorder::new(&InitialHistory::Forked(Vec::new()));
+    let shared = recorder.clone();
+    recorder.restore_from_rollout_items(history.get_rollout_items());
+    assert_eq!(shared.snapshot(), cumulative);
+}
+
+#[test]
+fn startup_restoration_replaces_provisional_errors_and_keeps_source_identity() {
+    for invalid_source in [false, true] {
+        let expected = McpAttribution {
+            status: if invalid_source {
+                McpAttributionStatus::AttributionError
+            } else {
+                McpAttributionStatus::Complete
+            },
+            error_reason: invalid_source.then_some(McpAttributionErrorReason::SourceInvalid),
+            sources: vec![McpAttributionSource {
+                connector_id: Some("connector".to_string()),
+                plugin_id: Some("messages@openai-bundled".to_string()),
+                server_name: "messages".to_string(),
+                tool_name: "search".to_string(),
+                first_turn_id: "original-turn".to_string(),
+            }],
+        };
+        let recorder = McpAttributionRecorder::new(&InitialHistory::Forked(Vec::new()));
+        let shared = recorder.clone();
+        assert_eq!(
+            recorder.snapshot().error_reason,
+            Some(McpAttributionErrorReason::HistoryMissingCheckpoint)
+        );
+        recorder.restore_from_response_items(&[envelope(Some(expected.clone()))]);
+        assert_eq!(shared.snapshot(), expected);
+
+        recorder.restore_from_rollout_items(&[]);
+        recorder.restore_from_snapshot(&expected);
+        assert_eq!(shared.snapshot(), expected);
+        let (checkpoint, revision) = shared
+            .checkpoint(/*force*/ false)
+            .expect("restored startup state still needs persistence");
+        assert_eq!(checkpoint, expected);
+        shared.mark_persisted(revision);
+        assert_eq!(recorder.checkpoint(/*force*/ false), None);
+    }
+}
+
+#[test]
+fn startup_restoration_distinguishes_explicit_empty_and_missing_checkpoints() {
+    let recorder = McpAttributionRecorder::default();
+    recorder.record(source("search", "old-turn"));
+    let missing = McpAttribution {
+        status: McpAttributionStatus::AttributionError,
+        error_reason: Some(McpAttributionErrorReason::HistoryMissingCheckpoint),
+        sources: Vec::new(),
+    };
+
+    recorder.restore_from_response_items(&[envelope(Some(McpAttribution::default()))]);
+    assert_eq!(recorder.snapshot(), McpAttribution::default());
+    recorder.restore_from_response_items(&[envelope(None)]);
+    assert_eq!(recorder.snapshot(), missing);
+
+    recorder.restore_from_rollout_items(&[RolloutItem::ResponseItem(envelope(Some(
+        McpAttribution::default(),
+    )))]);
+    assert_eq!(recorder.snapshot(), McpAttribution::default());
+    recorder.restore_from_rollout_items(&[RolloutItem::ResponseItem(envelope(None))]);
+    assert_eq!(recorder.snapshot(), missing);
+
+    recorder.restore_from_snapshot(&McpAttribution::default());
+    assert_eq!(recorder.snapshot(), McpAttribution::default());
+    recorder.restore_from_response_items(&[]);
+    assert_eq!(recorder.snapshot(), missing);
+}
+
+#[test]
+fn startup_checkpoint_restoration_keeps_validation_and_first_error() {
+    let recorder = McpAttributionRecorder::default();
+    recorder.restore_from_response_items(&[
+        envelope(Some(McpAttribution {
+            status: McpAttributionStatus::Complete,
+            error_reason: None,
+            sources: vec![source("search", "first-turn")],
+        })),
+        envelope(Some(McpAttribution {
+            status: McpAttributionStatus::Complete,
+            error_reason: None,
+            sources: vec![source("search", "conflicting-turn")],
+        })),
+        envelope(Some(McpAttribution {
+            status: McpAttributionStatus::AttributionError,
+            error_reason: Some(McpAttributionErrorReason::SourceInvalid),
+            sources: Vec::new(),
+        })),
+    ]);
+    assert_eq!(
+        recorder.snapshot(),
+        McpAttribution {
+            status: McpAttributionStatus::AttributionError,
+            error_reason: Some(McpAttributionErrorReason::CheckpointSourceConflict),
+            sources: vec![source("search", "first-turn")],
+        }
+    );
+}
+
+#[test]
+fn startup_restoration_preserves_shared_execution_trackers() {
+    let mut features = codex_features::Features::default();
+    features.enable(codex_features::Feature::ExecutedToolCallMetadata);
+    let recorder =
+        super::super::ExecutedToolCalls::new(&features, &InitialHistory::Forked(Vec::new()));
+    let shared = recorder.clone();
+    let recording = {
+        let mut state = recorder.lock_state();
+        let state = state.as_mut().expect("execution metadata enabled");
+        state
+            .pending_wrapper_origins
+            .insert("pending-call".to_string());
+        Arc::clone(&state.recording)
+    };
+    recorder
+        .retained_direct_metadata_bytes
+        .store(17, std::sync::atomic::Ordering::Relaxed);
+    let expected = McpAttribution {
+        status: McpAttributionStatus::Complete,
+        error_reason: None,
+        sources: vec![source("search", "original-turn")],
+    };
+
+    for restore in 0..3 {
+        match restore {
+            0 => recorder.restore_mcp_attribution_from_snapshot(&expected),
+            1 => recorder.restore_mcp_attribution_from_rollout_items(&[RolloutItem::ResponseItem(
+                envelope(Some(expected.clone())),
+            )]),
+            _ => recorder
+                .restore_mcp_attribution_from_response_items(&[envelope(Some(expected.clone()))]),
+        }
+        assert_eq!(shared.mcp_attribution_snapshot(), expected);
+        assert_eq!(
+            shared
+                .retained_direct_metadata_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            17
+        );
+        let state = shared.lock_state();
+        let state = state.as_ref().expect("execution metadata retained");
+        assert!(Arc::ptr_eq(&state.recording, &recording));
+        assert!(state.pending_wrapper_origins.contains("pending-call"));
+    }
 }
 
 #[test]

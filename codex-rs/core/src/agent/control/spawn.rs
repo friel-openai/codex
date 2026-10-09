@@ -7,6 +7,7 @@ use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::role::apply_role_to_config;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
+use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
 use crate::agents_md_manager::SessionInstructions;
 use crate::codex_thread::CodexThread;
@@ -21,6 +22,7 @@ use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::world_state::PersistentModeState;
+use crate::session::ForkStartupItems;
 use crate::session::multi_agents::resolve_usage_hints;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
@@ -127,7 +129,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_context_baselines,
         // Child threads inherit model context, not the parent's cumulative usage state.
         RolloutItem::TokenUsageRecord(_) => false,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -1023,11 +1028,11 @@ impl LocalAgentControl {
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
         }
-        if options.fork_mode.is_none() {
+        let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
             ));
-        }
+        };
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
         }) = &session_source
@@ -1076,25 +1081,68 @@ impl LocalAgentControl {
 
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
-        let mut forked_rollout_items =
-            load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                .await?
-                .ok_or_else(|| {
-                    CodexErr::Fatal(format!(
-                        "parent thread history unavailable for fork: {parent_thread_id}"
-                    ))
-                })?
-                .items;
 
-        let selected_capability_roots = forked_rollout_items
-            .iter()
-            .find_map(|item| {
-                let RolloutItem::SessionMeta(meta_line) = item else {
-                    return None;
-                };
-                Some(meta_line.meta.selected_capability_roots.clone())
-            })
-            .unwrap_or_default();
+        let (
+            selected_capability_roots,
+            mut forked_rollout_items,
+            reference_rollout_items,
+            source_reservation,
+            forked_from_ordinal_exclusive,
+        ) = match fork_mode {
+            SpawnAgentForkMode::FullHistory
+                if parent_thread
+                    .session
+                    .services
+                    .thread_store
+                    .as_any()
+                    .is::<codex_thread_store::LocalThreadStore>() =>
+            {
+                let (reference_history, logical_history, source_reservation, end_ordinal) = state
+                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                    .await?;
+                let selected_capability_roots = logical_history
+                    .iter()
+                    .find_map(|item| match item {
+                        RolloutItem::SessionMeta(meta_line) => {
+                            Some(meta_line.meta.selected_capability_roots.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (
+                    selected_capability_roots,
+                    logical_history,
+                    Some(reference_history.get_rollout_items().to_vec()),
+                    Some(source_reservation),
+                    end_ordinal,
+                )
+            }
+            SpawnAgentForkMode::FullHistory => {
+                let parent_history =
+                    load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                        .await?
+                        .ok_or_else(|| {
+                            CodexErr::Fatal(format!(
+                                "parent thread history unavailable for fork: {parent_thread_id}"
+                            ))
+                        })?
+                        .items;
+                let selected_capability_roots = parent_history
+                    .iter()
+                    .find_map(|item| {
+                        let RolloutItem::SessionMeta(meta_line) = item else {
+                            return None;
+                        };
+                        Some(meta_line.meta.selected_capability_roots.clone())
+                    })
+                    .unwrap_or_default();
+                (selected_capability_roots, parent_history, None, None, None)
+            }
+        };
+        let unsanitized_parent_history = reference_rollout_items
+            .as_ref()
+            .map(|_| serde_json::to_value(&forked_rollout_items))
+            .transpose()?;
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
@@ -1271,12 +1319,19 @@ impl LocalAgentControl {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::RolloutReference(_) => true,
                 RolloutItem::RetainedContext(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::SecurityRiskScore(_) => false,
             }
         });
+        if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
+            (reference_rollout_items, unsanitized_parent_history)
+            && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
+        {
+            forked_rollout_items = reference_rollout_items;
+        }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.
@@ -1332,7 +1387,7 @@ impl LocalAgentControl {
 
         let fork_context = fork_context_started_at.elapsed();
         let child_create_started_at = Instant::now();
-        let new_thread = state
+        let result = state
             .fork_thread_with_source(
                 config.clone(),
                 InitialHistory::Forked(forked_rollout_items),
@@ -1347,10 +1402,17 @@ impl LocalAgentControl {
                 /*environments*/ None,
                 inherited_thread_state,
                 thread_extension_init,
+                ForkStartupItems::default()
+                    .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
             )
             .await
-            .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup))?;
+            .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup));
         let child_create = child_create_started_at.elapsed();
+        if let Ok(new_thread) = &result {
+            state.flush_fork_or_shutdown(new_thread).await?;
+        }
+        drop(source_reservation);
+        let new_thread = result?;
         Ok(SpawnedThreadResult {
             new_thread,
             fork_context: Some(fork_context),
