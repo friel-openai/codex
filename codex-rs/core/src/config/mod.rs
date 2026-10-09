@@ -1369,6 +1369,8 @@ pub struct MultiAgentV2Config {
     pub disable_direct_message: bool,
     pub message_board_in_memory: bool,
     pub message_board_remote: Option<codex_features::RemoteMessageBoardConfigToml>,
+    /// Expose same-thread adoption and promotion only after explicit opt-in.
+    pub enable_thread_adoption: bool,
     pub non_code_mode_only: bool,
 }
 
@@ -1391,6 +1393,7 @@ impl MultiAgentV2Config {
             disable_direct_message: false,
             message_board_in_memory: false,
             message_board_remote: None,
+            enable_thread_adoption: false,
             non_code_mode_only: true,
         }
     }
@@ -2830,6 +2833,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let message_board_in_memory = base
         .and_then(|config| config.message_board_in_memory)
         .unwrap_or(default.message_board_in_memory);
+    let enable_thread_adoption = base
+        .and_then(|config| config.enable_thread_adoption)
+        .unwrap_or(default.enable_thread_adoption);
     let subagent_developer_instructions = base
         .and_then(|config| config.subagent_developer_instructions.as_ref())
         .map(|instructions| instructions.trim().to_string());
@@ -2862,6 +2868,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         disable_direct_message,
         message_board_in_memory,
         message_board_remote: base.and_then(|config| config.message_board_remote.clone()),
+        enable_thread_adoption,
         non_code_mode_only,
     }
 }
