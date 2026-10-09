@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_event::ForkPanePlacement;
 use pretty_assertions::assert_eq;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -123,6 +124,37 @@ async fn slash_side_is_rejected_for_side_threads() {
 }
 
 #[tokio::test]
+async fn slash_exit_is_allowed_for_standalone_side_threads() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_standalone_side_conversation_active();
+
+    chat.dispatch_command(SlashCommand::Exit);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+}
+
+#[tokio::test]
+async fn rejected_standalone_side_slash_command_has_standalone_guidance() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_standalone_side_conversation_active();
+
+    chat.dispatch_command(SlashCommand::Review);
+
+    let event = rx
+        .try_recv()
+        .expect("expected standalone side slash command error");
+    match event {
+        AppEvent::InsertHistoryCell(cell) => {
+            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+            insta::assert_snapshot!("standalone_side_slash_command_guidance", rendered);
+        }
+        other => panic!("expected InsertHistoryCell error, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "expected no follow-up events");
+    assert!(op_rx.try_recv().is_err(), "expected no review op");
+}
+
+#[tokio::test]
 async fn side_aliases_are_rejected_during_review_mode() {
     for (command, name) in [(SlashCommand::Side, "side"), (SlashCommand::Btw, "btw")] {
         let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -201,31 +233,238 @@ async fn submit_user_message_as_plain_user_turn_does_not_run_shell_commands() {
 }
 
 #[tokio::test]
-async fn side_aliases_without_args_start_empty_side_conversations() {
-    for input in ["/side", "/btw"] {
+async fn slash_side_without_args_places_blank_side_to_the_right() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+    chat.on_task_started();
+    chat.bottom_pane
+        .set_composer_text("/side".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::StartPlacedSide {
+            parent_thread_id: emitted_parent_thread_id,
+            placement: ForkPanePlacement::Right,
+        }) if emitted_parent_thread_id == parent_thread_id
+    );
+    assert!(
+        op_rx.try_recv().is_err(),
+        "bare /side should not submit an op on the parent thread"
+    );
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+}
+
+#[tokio::test]
+async fn slash_btw_without_args_places_blank_side_to_the_right() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+    chat.on_task_started();
+    chat.bottom_pane
+        .set_composer_text("/btw".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::StartPlacedSide {
+            parent_thread_id: emitted_parent_thread_id,
+            placement: ForkPanePlacement::Right,
+        }) if emitted_parent_thread_id == parent_thread_id
+    );
+    assert!(
+        op_rx.try_recv().is_err(),
+        "bare /btw should not submit an op on the parent thread"
+    );
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+}
+
+#[tokio::test]
+async fn side_alias_placement_flags_emit_placed_side_events() {
+    for (command, placement) in [
+        ("/side --left", ForkPanePlacement::Left),
+        ("/side --right", ForkPanePlacement::Right),
+        ("/side --up", ForkPanePlacement::Up),
+        ("/side --down", ForkPanePlacement::Down),
+        ("/btw --right", ForkPanePlacement::Right),
+    ] {
         let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         let parent_thread_id = ThreadId::new();
         chat.thread_id = Some(parent_thread_id);
         chat.on_task_started();
         chat.bottom_pane
-            .set_composer_text(input.to_string(), Vec::new(), Vec::new());
+            .set_composer_text(command.to_string(), Vec::new(), Vec::new());
 
         chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+
         assert_matches!(
             rx.try_recv(),
-            Ok(AppEvent::StartSide {
+            Ok(AppEvent::StartPlacedSide {
                 parent_thread_id: emitted_parent_thread_id,
-                user_message: None,
-            }) if emitted_parent_thread_id == parent_thread_id
-        );
-        assert!(
-            op_rx.try_recv().is_err(),
-            "bare {input} should not submit an op on the parent thread"
+                placement: emitted_placement,
+            }) if emitted_parent_thread_id == parent_thread_id && emitted_placement == placement
         );
         assert!(chat.input_queue.queued_user_messages.is_empty());
+        assert!(op_rx.try_recv().is_err());
     }
+}
+
+#[tokio::test]
+async fn slash_side_placement_with_images_is_rejected_and_drained() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.on_task_started();
+    chat.set_remote_image_urls(vec!["https://example.com/side.png".to_string()]);
+    chat.bottom_pane.set_composer_text(
+        "/side --right".to_string(),
+        Vec::new(),
+        vec![PathBuf::from("/tmp/side.png")],
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    assert!(rx.try_recv().is_err());
+    assert!(op_rx.try_recv().is_err());
+    assert!(chat.remote_image_urls().is_empty());
+    assert!(chat.bottom_pane.composer_local_image_paths().is_empty());
+}
+
+#[tokio::test]
+async fn queued_invalid_side_placement_preserves_current_draft() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane
+        .set_composer_text("/side --float".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let draft = "unrelated current draft";
+    chat.bottom_pane
+        .set_composer_text(draft.to_string(), Vec::new(), Vec::new());
+    chat.thread_id = Some(ThreadId::new());
+
+    while let Ok(event) = rx.try_recv() {
+        assert_matches!(event, AppEvent::FollowTranscript);
+    }
+    chat.maybe_send_next_queued_input();
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    assert_eq!(chat.bottom_pane.composer_text(), draft);
+}
+
+#[tokio::test]
+async fn slash_side_nonflag_direction_remains_a_side_question() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+    chat.on_task_started();
+    chat.bottom_pane
+        .set_composer_text("/side right".to_string(), Vec::new(), Vec::new());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::StartSide {
+            parent_thread_id: emitted_parent_thread_id,
+            user_message: Some(UserMessage { text, .. }),
+        }) if emitted_parent_thread_id == parent_thread_id && text == "right"
+    );
+    assert!(op_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn slash_side_invalid_placement_flags_show_usage_snapshot() {
+    let mut rendered = Vec::new();
+    for command in ["/side --float", "/side --near", "/side --right extra"] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.thread_id = Some(ThreadId::new());
+        chat.on_task_started();
+        chat.bottom_pane
+            .set_composer_text(command.to_string(), Vec::new(), Vec::new());
+
+        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+        let event = rx.try_recv().expect("expected placement usage error");
+        let AppEvent::InsertHistoryCell(cell) = event else {
+            panic!("expected InsertHistoryCell error, got {event:?}");
+        };
+        rendered.push(format!(
+            "{command}\n{}",
+            lines_to_single_string(&cell.display_lines(/*width*/ 80))
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(op_rx.try_recv().is_err());
+    }
+
+    insta::assert_snapshot!(
+        "slash_side_invalid_placement_flags_show_usage",
+        rendered.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn slash_side_requests_forked_side_question_while_task_running() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let parent_thread_id = ThreadId::new();
+    chat.thread_id = Some(parent_thread_id);
+    chat.local_settings.tui.status_line = Some(vec!["model-with-reasoning".to_string()]);
+    chat.refresh_status_line();
+    chat.on_task_started();
+    chat.show_welcome_banner = false;
+    chat.bottom_pane.set_composer_text(
+        "/side explore the codebase".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::StartSide {
+            parent_thread_id: emitted_parent_thread_id,
+            user_message: Some(user_message),
+        }) if emitted_parent_thread_id == parent_thread_id
+            && user_message
+                == UserMessage {
+                    text: "explore the codebase".to_string(),
+                    local_images: Vec::new(),
+                    remote_image_urls: Vec::new(),
+                    text_elements: Vec::new(),
+                    mention_bindings: Vec::new(),
+                }
+    );
+    assert!(
+        op_rx.try_recv().is_err(),
+        "expected no op on the parent thread"
+    );
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw side conversation footer");
+    assert_chatwidget_snapshot!(
+        "slash_side_requests_forked_side_question_while_task_running",
+        normalized_backend_snapshot(terminal.backend())
+    );
 }
 
 #[tokio::test]
@@ -350,4 +589,20 @@ async fn side_context_label_shows_hidden_side_snapshot() {
         )),
     );
     assert_chatwidget_snapshot!("side_context_label_shows_hidden_side", terminal.backend());
+}
+
+#[tokio::test]
+async fn standalone_side_context_label_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.set_standalone_side_conversation_active();
+    chat.set_side_conversation_context_label(Some("Standalone side conversation".to_string()));
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw standalone side footer");
+    assert_chatwidget_snapshot!("standalone_side_context_label", terminal.backend());
 }
