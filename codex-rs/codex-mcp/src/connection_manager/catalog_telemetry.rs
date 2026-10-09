@@ -35,8 +35,15 @@ const RAW_DEFINITION_JSON_BYTES_BUCKETS: &[f64] = &[
     512.0 * MIB,
 ];
 
-pub(super) fn tool_definition_json_bytes<'a>(tools: impl Iterator<Item = &'a Tool>) -> usize {
-    tools.map(serialized_json_bytes).sum()
+pub(crate) fn tool_definition_json_bytes<'a>(
+    tools: impl Iterator<Item = &'a Tool>,
+    measurement_enabled: bool,
+) -> usize {
+    if measurement_enabled {
+        tools.map(serialized_json_bytes).sum()
+    } else {
+        0
+    }
 }
 
 pub(super) fn record_binding_catalog_size(
@@ -94,5 +101,36 @@ fn serialized_json_bytes<T: Serialize + ?Sized>(value: &T) -> usize {
         writer.0
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_definition_json_bytes;
+    use rmcp::model::JsonObject;
+    use rmcp::model::Tool;
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    #[test]
+    fn tool_definition_json_bytes_skips_disabled_measurement_and_counts_enabled_tools() {
+        let tools = ["first", "second"]
+            .map(|name| Tool::new(name, "tool description", Arc::new(JsonObject::default())));
+        let visited = Cell::new(0);
+        let observed_tools = || tools.iter().inspect(|_| visited.set(visited.get() + 1));
+
+        assert_eq!(tool_definition_json_bytes(observed_tools(), false), 0);
+        assert_eq!(visited.get(), 0);
+
+        let expected_bytes = tools
+            .iter()
+            .map(|tool| serde_json::to_vec(tool).expect("serialized tool").len())
+            .sum::<usize>();
+        assert_eq!(
+            tool_definition_json_bytes(observed_tools(), true),
+            expected_bytes
+        );
+        assert_eq!(visited.get(), tools.len());
+        assert!(expected_bytes > 0);
     }
 }
