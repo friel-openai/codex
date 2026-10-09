@@ -110,6 +110,7 @@ use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
@@ -169,6 +170,21 @@ impl LocalAgentControl {
         .map(|(agent, _)| agent)
     }
 }
+
+#[path = "control_metadata_tests.rs"]
+mod metadata_tests;
+
+#[path = "control_retirement_tests.rs"]
+mod retirement_tests;
+
+#[path = "control_retry_restoration_tests.rs"]
+mod retry_restoration_tests;
+
+#[path = "control_continuity_restoration_tests.rs"]
+mod continuity_restoration_tests;
+
+#[path = "control_request_restoration_tests.rs"]
+mod request_restoration_tests;
 
 async fn test_config_with_cli_overrides(
     mut cli_overrides: Vec<(String, TomlValue)>,
@@ -432,7 +448,8 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
         .expect("start parent thread");
     parent
         .thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent.thread.ensure_rollout_materialized().await;
     parent
@@ -714,7 +731,7 @@ fn assert_goal_supervisor_boot_history<'a>(
         history.clone().into_iter().any(|item| matches!(
             item,
             ResponseItem::FunctionCallOutput { call_id, .. }
-                if call_id == "synthetic_supervisor_list_agents"
+                if call_id.as_deref() == Some("synthetic_supervisor_list_agents")
         )),
         "goal supervisor helper should receive the synthetic list_agents output"
     );
@@ -747,7 +764,8 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
     let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent_thread.ensure_rollout_materialized().await;
     parent_thread
@@ -2532,13 +2550,17 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
         let records = [
             codex_history::ReviewInputRecord::Baseline {
                 applicability: codex_history::ReviewTranscriptApplicability::Both,
-                history: codex_history::GuardianHistoryCheckpoint(vec![saved_marker.clone()]),
+                history: codex_history::GuardianHistoryCheckpoint(vec![
+                    saved_marker.clone().into(),
+                ]),
+                root_retains_legacy_transcript: None,
             },
             codex_history::ReviewInputRecord::ResponseItem {
                 response: removed_boundary.clone().into(),
             },
             codex_history::ReviewInputRecord::Rollback {
                 boundary: removed_boundary,
+                boundary_metadata: None,
             },
         ];
         for (index, record) in records.iter().enumerate() {
@@ -3370,7 +3392,7 @@ async fn cold_delivery_waits_for_completion_cleanup_before_reloading() -> anyhow
         child_thread_id,
         Op::InterAgentCommunication {
             communication: communication.clone(),
-            start_options: Default::default(),
+            start_options: TurnStartOptions::default(),
         },
     );
     let control = harness.control.clone();
@@ -5192,9 +5214,11 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
         .session
         .persist_rollout_items(&[
             RolloutItem::Compacted(CompactedItem {
+                segment_state_checkpoint: None,
                 message: String::new(),
                 replacement_history: Some(vec![user_message("compacted parent context").into()]),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
@@ -5204,7 +5228,6 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
                 compaction_response_id: None,
                 latest_token_usage_record: Some(parent_record.clone()),
                 resume_metadata: Some(parent_resume_metadata.clone()),
-                segment_state_checkpoint: None,
             }),
             RolloutItem::TokenUsageRecord(parent_record),
             rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
@@ -5338,6 +5361,7 @@ async fn spawn_agent_full_history_fork_from_compacted_paginated_parent_preserves
                     .into(),
                 ]),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
@@ -6324,7 +6348,19 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
                         .chain([delivery.clone()])
                         .collect(),
                 ),
-                retained_context: Some(retained_context),
+                retained_context: Some(retained_context.clone()),
+                retained_context_replay: Some(codex_history::RetainedContextReplay {
+                    legacy: retained_context.clone(),
+                    thread_owned_worker: retained_context.clone(),
+                    thread_owned_root: retained_context,
+                    // Sanitization must remove the parent-only reference before child loading.
+                    review_input: Some(HistoryPosition {
+                        thread_id: ThreadId::new(),
+                        end_ordinal_exclusive: 3,
+                        end_byte_offset: 4096,
+                    }),
+                    resolved_review_input: None,
+                }),
                 guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
                     user_message("Parent-local approval must not be inherited.").into(),
                 ])),
@@ -6411,6 +6447,28 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
     let mut inherited_context = codex_history::RetainedContext::default();
     inherited_context.reserve_order();
     assert_eq!(history.retained_context(), &inherited_context);
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("flush sanitized checkpoint");
+    let (child_items, _, _) = codex_rollout::RolloutRecorder::load_rollout_items(
+        &child_thread.rollout_path().expect("child rollout"),
+    )
+    .await
+    .expect("read sanitized checkpoint");
+    let child_checkpoints = child_items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!child_checkpoints.is_empty());
+    assert!(
+        child_checkpoints
+            .iter()
+            .all(|compacted| compacted.retained_context_replay.is_none())
+    );
     assert!(
         history_contains_text(history.raw_items(), "compacted parent summary"),
         "forked child history should retain compacted non-hint content"
@@ -6540,6 +6598,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                     replacement_history.into_iter().map(Into::into).collect(),
                 ),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
@@ -6699,6 +6758,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 message: "legacy compacted summary".to_string(),
                 replacement_history: None,
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
@@ -7052,7 +7112,8 @@ async fn reference_backed_fork_persists_assignment_after_settings_across_resume(
     let harness = AgentControlHarness::new_with_multi_agent_v1().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent_thread
         .session
@@ -10041,10 +10102,13 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
 async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
     history_mode: ThreadHistoryMode,
 ) -> anyhow::Result<()> {
+    const MATERIALIZE_EPHEMERAL_ROLLOUTS: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
     const AGENTS_MARKER: &str =
         "goal-supervisor-parent-agents-marker-3b0ac7d8-55de-4cb7-a5b5-7c7ec44d9c7d";
     const USER_MARKER: &str = "goal-supervisor-global-user-instructions";
     const THREAD_MARKER: &str = "goal-supervisor-thread-provider-instructions";
+    let _materialize_ephemeral_rollouts =
+        EnvVarGuard::set(MATERIALIZE_EPHEMERAL_ROLLOUTS, OsStr::new("1"));
     let server = start_mock_server().await;
     let request_log = mount_sse_sequence(
         &server,
@@ -10244,6 +10308,18 @@ while True:
         .ensure_rollout_materialized(PersistContext::Standard)
         .await;
     parent_thread.session.flush_rollout().await?;
+    if history_mode == ThreadHistoryMode::Paginated {
+        parent_thread
+            .session
+            .services
+            .live_thread
+            .as_ref()
+            .expect("paginated parent persistence")
+            .freeze_local_segment(FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .await?
+            .expect("rotated paginated parent segment");
+        parent_thread.session.flush_rollout().await?;
+    }
     let before_thread_ids = harness.manager.list_thread_ids().await;
     let (goal_id, goal) = create_active_thread_goal_for_test(
         state_db,
@@ -10291,11 +10367,14 @@ while True:
             panic!("paginated supervisor child should load as resumed physical history");
         };
         assert!(
-            child_rollout
-                .history
-                .iter()
-                .any(|item| matches!(item, RolloutItem::RolloutReference(_))),
-            "paginated supervisor children must retain the physical RolloutReference while the model request uses materialized logical history"
+            child_rollout.history.iter().any(|item| {
+                matches!(item, RolloutItem::RolloutReference(_))
+                    || matches!(
+                        item,
+                        RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()
+                    )
+            }),
+            "paginated supervisor children must retain a physical lineage pointer while the model request uses materialized logical history"
         );
     }
     let requests = request_log.requests();
