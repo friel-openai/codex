@@ -10,6 +10,7 @@ mod completion_backfill;
 mod cyber_access_program;
 mod daybreak;
 mod ephemeral;
+mod fork;
 mod hooks;
 mod mcp_required_exit;
 mod originator;
