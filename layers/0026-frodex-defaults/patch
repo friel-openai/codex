@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index 6df145c85a742bf4b00313d10287bfb368fa0e2b..5c848bf970302be5a530a3488d8d5386214dcea8 100644
+index 21bb2d4feb8c9eda06ae06c3575cbbb306f4d5da..cc460e5bc57cc8363b976443db9b304f81d1f3ed 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-@@ -3117,12 +3117,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
+@@ -3119,12 +3119,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
  }
 
  #[tokio::test]
@@ -31,7 +31,7 @@ index 6df145c85a742bf4b00313d10287bfb368fa0e2b..5c848bf970302be5a530a3488d8d5386
          .write(codex_home.path())?;
      let thread_id = create_fake_rollout(
          codex_home.path(),
-@@ -3203,6 +3216,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
+@@ -3205,6 +3218,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
      assert!(input.contains("# Goal Supervisor Assignment"));
      assert!(input.contains("continue after app-server restart"));
 

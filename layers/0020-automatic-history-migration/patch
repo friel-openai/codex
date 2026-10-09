@@ -679,10 +679,10 @@ index 8dc623b1ec1df1279b1e2722bc5426aae2c25d01..f4e31417dc038733a8365916ab700a47
          })
          .expect("agent message must remain in repaired rollout")
 diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f64dba56da 100644
+index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..3d961eeb2bd1e36ab97d792d98e6b520d485b010 100644
 --- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 +++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-@@ -5,21 +5,931 @@ use app_test_support::MockResponsesConfig;
+@@ -5,21 +5,932 @@ use app_test_support::MockResponsesConfig;
  use app_test_support::TestAppServer;
  use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
  use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
@@ -970,6 +970,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
 +            let terminal = if interrupted {
 +                RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
 +                    turn_id: Some("empty-turn".to_string()),
++                    root_turn_id: None,
 +                    reason: TurnAbortReason::Interrupted,
 +                    error: None,
 +                    started_at: Some(1_735_905_600),
@@ -1614,7 +1615,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
 
  #[tokio::test]
  async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context() -> Result<()> {
-@@ -67,6 +977,14 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
+@@ -67,6 +978,14 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
          }),
      )
      .await??;
@@ -1629,7 +1630,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
      timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
 
      let mut secondary = TestAppServer::builder()
-@@ -111,6 +1029,10 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
+@@ -111,6 +1030,10 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
          thread: resumed, ..
      } = timeout(DEFAULT_READ_TIMEOUT, secondary.read_response(resume_id)).await??;
      assert_eq!(resumed.history_mode, ThreadHistoryMode::Paginated);
@@ -1640,7 +1641,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
 
      timeout(
          DEFAULT_READ_TIMEOUT,
-@@ -135,3 +1057,486 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
+@@ -135,3 +1058,488 @@ async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context()
 
      Ok(())
  }
@@ -2059,6 +2060,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
 +
 +fn legacy_turn_started(turn_id: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++        turn_attribution: None,
 +        turn_id: turn_id.to_string(),
 +        root_turn_id: None,
 +        trace_id: None,
@@ -2100,6 +2102,7 @@ index da20bdbea8eca132917b1f36756d9ed86fdf3b1a..597a1d750cada0dcb9a97e1f6193d3f6
 +fn legacy_turn_completed(turn_id: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
 +        turn_id: turn_id.to_string(),
++        root_turn_id: None,
 +        last_agent_message: None,
 +        error: None,
 +        started_at: Some(1_735_905_600),
@@ -2211,10 +2214,10 @@ index 3ea300257f668c3b2cda05c4eb1ffabba5693a21..bd07b14abe79109342383aea97676954
  async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
-index beee6a1b8a37d51574bb86d3d66a455c1d4e7d15..1577d6ce1274fe911d31c61e20c6ac230878d7b4 100644
+index 92a35b02bb51a76deecb717b9900f6987a268fb4..58ad033792909ff0eadf9fd07dfddc9d639470ce 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
-@@ -2494,6 +2494,7 @@ fn certified_indexed_fork_checkpoint(
+@@ -2499,6 +2499,7 @@ fn certified_indexed_fork_checkpoint(
              ]),
              guardian_history: None,
              retained_context: None,
@@ -2222,7 +2225,7 @@ index beee6a1b8a37d51574bb86d3d66a455c1d4e7d15..1577d6ce1274fe911d31c61e20c6ac23
              mcp_resource_origins: None,
              window_number: Some(1),
              first_window_id: Some(window_id.to_string()),
-@@ -2508,6 +2509,7 @@ fn certified_indexed_fork_checkpoint(
+@@ -2513,6 +2514,7 @@ fn certified_indexed_fork_checkpoint(
              model: "mock-model".to_string(),
              comp_hash: None,
              realtime_active: None,
@@ -2230,7 +2233,7 @@ index beee6a1b8a37d51574bb86d3d66a455c1d4e7d15..1577d6ce1274fe911d31c61e20c6ac23
          }),
          /*world_state*/ None,
          /*reference_context*/ None,
-@@ -3934,7 +3936,6 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
+@@ -3939,7 +3941,6 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
                  ancestor_thread_id: None,
                  section_id: None,
                  originators: None,
@@ -2239,7 +2242,7 @@ index beee6a1b8a37d51574bb86d3d66a455c1d4e7d15..1577d6ce1274fe911d31c61e20c6ac23
              .await?;
          let ThreadListResponse { data, .. } =
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index 7c955ef6f00fe9f03fa301ad3ad48e690396a9b1..e285d187a2c251193517147defac279b3e802034 100644
+index 867353731ac57fd3388bda192bd153a41e14607d..012e01ddba05d6cc988fec1f39d127d462db461d 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
 @@ -58,6 +58,7 @@ use codex_config::LoaderOverrides;
@@ -2434,7 +2437,7 @@ index 7c955ef6f00fe9f03fa301ad3ad48e690396a9b1..e285d187a2c251193517147defac279b
                  mcp_resource_origins: None,
                  window_number: Some(1),
                  first_window_id: None,
-@@ -2771,7 +2878,9 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+@@ -2765,7 +2872,9 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
  async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_history() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
      let codex_home = TempDir::new()?;
@@ -2445,7 +2448,7 @@ index 7c955ef6f00fe9f03fa301ad3ad48e690396a9b1..e285d187a2c251193517147defac279b
      let thread_id = codex_protocol::ThreadId::new();
      let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
      let store = LocalThreadStore::new(
-@@ -3818,7 +3927,9 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
+@@ -3812,7 +3921,9 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
  async fn thread_turns_list_rejects_cursor_when_anchor_turn_is_rolled_back() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
      let codex_home = TempDir::new()?;
@@ -2458,10 +2461,10 @@ index 7c955ef6f00fe9f03fa301ad3ad48e690396a9b1..e285d187a2c251193517147defac279b
      let conversation_id = create_fake_rollout_with_text_elements(
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read_warm.rs b/codex-rs/app-server/tests/suite/v2/thread_read_warm.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dee99208398dc5dfc76fa7b5214a1c2e7dd391c3
+index 0000000000000000000000000000000000000000..54c7c1a0dccae52dad4a464414b4849404516925
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read_warm.rs
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,195 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +
@@ -2631,8 +2634,11 @@ index 0000000000000000000000000000000000000000..dee99208398dc5dfc76fa7b5214a1c2e
 +        );
 +    }
 +    mcp.shutdown_gracefully().await?;
-+    mcp.wait_for_json_log_event("codex.history.rollout.open")
-+        .await?;
++    mcp.wait_for_json_log_event(
++        "codex.history.rollout.open",
++        std::time::Duration::from_secs(10),
++    )
++    .await?;
 +    let opened_paths = mcp
 +        .json_log_events()?
 +        .into_iter()
@@ -2655,10 +2661,10 @@ index 0000000000000000000000000000000000000000..dee99208398dc5dfc76fa7b5214a1c2e
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index 20967260293cdc3e6d5919e19955a935dad346be..6df145c85a742bf4b00313d10287bfb368fa0e2b 100644
+index c947e1a3583a4fff1967e781622313512523e1fd..21bb2d4feb8c9eda06ae06c3575cbbb306f4d5da 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-@@ -235,6 +235,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
+@@ -237,6 +237,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
              message: "compacted history".to_string(),
              replacement_history: Some(Vec::new()),
              retained_context: None,
@@ -10135,7 +10141,7 @@ index aab4326117792471bd2852294dbb9c13bac595fc..ed31a4ac1ba161ee96d13f6bdacc8c34
              window_number,
              first_window_id: item.first_window_id.map(Cow::into_owned),
 diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
-index 8093a172e8cb129f865a24b8dbab6e76f1f043c2..b3773b398813b50db800ac843b1b9536427bcebd 100644
+index 99b6db9db9f4c27aafd82cd49a82f63a84631391..cb8347645ac1aa0b55fe22836bd8f7dffa920d08 100644
 --- a/codex-rs/history/src/tests.rs
 +++ b/codex-rs/history/src/tests.rs
 @@ -533,6 +533,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
@@ -10283,7 +10289,7 @@ index 8093a172e8cb129f865a24b8dbab6e76f1f043c2..b3773b398813b50db800ac843b1b9536
  #[test]
  fn compacted_item_round_trips_segment_state_checkpoint() -> Result<()> {
      let value = json!({
-@@ -1037,6 +1140,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
+@@ -1038,6 +1141,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
              replacement_history: None,
              retained_context: None,
              guardian_history: None,

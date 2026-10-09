@@ -907,7 +907,7 @@ index 6d3e632ce121d20efe025dd7b0b9d7312a10a342..a3e5c82bc0844990f4cf38f026f3cafe
  mod thread_unarchive;
  mod thread_unload;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index d55fbb3e9a4002f317ae584ddcd925305266715b..1ffa16401748eca759e6cfd2e4fe128f0abedce7 100644
+index 1d4c7aed19950664b1e080a2829a8210b8098666..a7bb2eef5c6775c46860d98dc3ffd154db29948c 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
 @@ -1309,7 +1309,7 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
@@ -1206,10 +1206,10 @@ index d55fbb3e9a4002f317ae584ddcd925305266715b..1ffa16401748eca759e6cfd2e4fe128f
 
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs b/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef8a3f57d2
+index 0000000000000000000000000000000000000000..8f1dc1be0562c80f0ecec3350309232d93c2a1b5
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_subagent_history_projection.rs
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,479 @@
 +use anyhow::Result;
 +use app_test_support::MockResponsesConfig;
 +use app_test_support::TestAppServer;
@@ -1645,6 +1645,8 @@ index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef
 +fn subagent_activity_item(id: &str, agent_thread_id: ThreadId, path: &str) -> CoreTurnItem {
 +    CoreTurnItem::SubAgentActivity(SubAgentActivityItem {
 +        id: id.to_string(),
++        model: None,
++        reasoning_effort: None,
 +        kind: SubAgentActivityKind::Started,
 +        agent_thread_id,
 +        agent_path: AgentPath::try_from(format!("/root/{path}")).expect("valid test agent path"),
@@ -1654,6 +1656,8 @@ index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef
 +fn subagent_activity_event(id: &str, agent_thread_id: ThreadId, path: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::SubAgentActivity(SubAgentActivityEvent {
 +        event_id: id.to_string(),
++        model: None,
++        reasoning_effort: None,
 +        occurred_at_ms: 1,
 +        agent_thread_id,
 +        agent_path: AgentPath::try_from(format!("/root/{path}")).expect("valid test agent path"),
@@ -1663,6 +1667,7 @@ index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef
 +
 +fn turn_started(turn_id: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++        turn_attribution: None,
 +        turn_id: turn_id.to_string(),
 +        root_turn_id: None,
 +        trace_id: None,
@@ -1675,6 +1680,7 @@ index 0000000000000000000000000000000000000000..2d06a1f623260954a6530a5255e544ef
 +fn turn_completed(turn_id: &str) -> RolloutItem {
 +    RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
 +        turn_id: turn_id.to_string(),
++        root_turn_id: None,
 +        last_agent_message: None,
 +        error: None,
 +        started_at: Some(10),

@@ -94,12 +94,17 @@ class DeclarationTests(unittest.TestCase):
                 selection.load_selection(declaration(invalid))
 
     def test_limits_total_cases_across_groups(self):
-        first = group(names=[f"module::case_{index}" for index in range(128)])
+        first = group(names=[f"module::case_{index}" for index in range(154)])
         second = group("codex-core::all", list(first["tests"]), "test", "all")
         self.assertEqual(selection.load_selection(declaration(first, second)), [first, second])
         second["tests"].append("module::extra_case")
         with self.assertRaises(ValueError):
             selection.load_selection(declaration(first, second))
+
+    def test_checked_in_selection_fits_the_validated_limit(self):
+        configured = Path(__file__).resolve().parents[1] / "frodex-ci-selection.json"
+        groups = selection.load_selection(selection.load_json(configured.read_text()))
+        self.assertEqual(sum(len(group["tests"]) for group in groups), 308)
 
     def test_rejects_duplicate_json_keys_in_declarations_and_listings(self):
         duplicate_documents = [

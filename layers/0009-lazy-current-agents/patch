@@ -5364,10 +5364,10 @@ index 0000000000000000000000000000000000000000..e8a11055f3a7277e686b0a2bcb6ef5b3
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a562cef16ef5834cb495ddc1052b64571793943f
+index 0000000000000000000000000000000000000000..b267ccd018aa6de5687b77ee42860bdcd625c936
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,574 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +
@@ -5787,8 +5787,11 @@ index 0000000000000000000000000000000000000000..a562cef16ef5834cb495ddc1052b6457
 +        "the oldest evicted ephemeral worker must retain registry identity"
 +    );
 +
-+    mcp.wait_for_json_log_event("codex.current_agents.list")
-+        .await?;
++    mcp.wait_for_json_log_event(
++        "codex.current_agents.list",
++        std::time::Duration::from_secs(10),
++    )
++    .await?;
 +    let events = mcp.json_log_events()?;
 +    let relation_events = events
 +        .iter()

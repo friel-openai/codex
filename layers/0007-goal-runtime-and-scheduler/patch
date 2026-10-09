@@ -1827,7 +1827,7 @@ index 0000000000000000000000000000000000000000..02a5735b7741e62b5075ccff438ff39d
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802c8d45a39 100644
+index 4dd07f537ee008ce914625f84620bf2a2b74436d..ded779932dd4329d4465c6bd049ea45b4ca1205f 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 @@ -89,6 +89,8 @@ use codex_protocol::config_types::CollaborationMode;
@@ -1855,7 +1855,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
  use codex_protocol::protocol::TurnStartedEvent;
  use codex_protocol::user_input::ByteRange;
  use codex_protocol::user_input::TextElement;
-@@ -176,7 +180,43 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
+@@ -176,7 +180,45 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
          Some("mock_provider"),
          /*git_info*/ None,
      )?;
@@ -1863,6 +1863,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
 +    for event in [
 +        EventMsg::TurnStarted(TurnStartedEvent {
++            turn_attribution: None,
 +            turn_id: "saved-turn".to_string(),
 +            root_turn_id: None,
 +            trace_id: None,
@@ -1886,6 +1887,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
 +        }),
 +        EventMsg::TurnComplete(TurnCompleteEvent {
 +            turn_id: "saved-turn".to_string(),
++            root_turn_id: None,
 +            last_agent_message: None,
 +            error: None,
 +            started_at: Some(1),
@@ -1899,7 +1901,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      let settings: ThreadSettingsAppliedEvent = serde_json::from_value(json!({
          "thread_id": conversation_id,
          "thread_settings": {
-@@ -1249,9 +1289,11 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
+@@ -1249,9 +1291,11 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
          } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
          assert_eq!(approvals_reviewer, ApprovalsReviewer::User);
          timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
@@ -1914,7 +1916,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
          assert_eq!(
              items
                  .into_iter()
-@@ -3072,6 +3114,305 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
+@@ -3072,6 +3116,305 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
      Ok(())
  }
 
@@ -2220,7 +2222,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
  #[tokio::test]
  async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
-@@ -3117,7 +3458,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
+@@ -3117,7 +3460,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
      .await??;
      assert_eq!(
          creation_error.error.message,
@@ -2229,7 +2231,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      );
 
      let creation_id = mcp
-@@ -3131,7 +3472,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
+@@ -3131,7 +3474,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
          .await?;
      let creation: ThreadGoalSetResponse =
          timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(creation_id)).await??;
@@ -2238,7 +2240,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
 
      let clear_budget_id = mcp
          .send_raw_request(
-@@ -3141,7 +3482,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
+@@ -3141,7 +3484,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
          .await?;
      let clear_budget: ThreadGoalSetResponse =
          timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_budget_id)).await??;
@@ -2247,7 +2249,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
 
      let oversized_update_id = mcp
          .send_raw_request(
-@@ -3159,7 +3500,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
+@@ -3159,7 +3502,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
      .await??;
      assert_eq!(
          update_error.error.message,
@@ -2256,7 +2258,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      );
 
      Ok(())
-@@ -3210,26 +3551,21 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
+@@ -3210,26 +3553,21 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
      )
      .await??;
 
@@ -2296,7 +2298,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
 
      let replacement_id = mcp
          .send_raw_request(
-@@ -3244,7 +3580,7 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
+@@ -3244,7 +3582,7 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
          timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(replacement_id)).await??;
 
      assert_eq!(replacement.goal.status, ThreadGoalStatus::BudgetLimited);
@@ -2305,7 +2307,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      assert_eq!(replacement.goal.tokens_used, 0);
      assert_eq!(replacement.goal.time_used_seconds, 0);
 
-@@ -3358,7 +3694,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
+@@ -3358,7 +3696,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
                  "threadId": thread_id,
                  "objective": "keep polishing",
                  "status": "active",
@@ -2314,7 +2316,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
              })),
          )
          .await?;
-@@ -3404,7 +3740,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
+@@ -3404,7 +3742,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
                  "threadId": thread_id.to_string(),
                  "objective": "keep polishing with clearer wording",
                  "status": "active",
@@ -2323,7 +2325,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
              })),
          )
          .await?;
-@@ -3423,8 +3759,8 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
+@@ -3423,8 +3761,8 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
      assert_eq!(persisted_goal.goal_id, updated_goal.goal_id);
      assert_eq!(thread_metadata.preview.as_deref(), Some("keep polishing"));
      assert_eq!(edit.goal.objective, "keep polishing with clearer wording");
@@ -2334,7 +2336,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      assert_eq!(edit.goal.tokens_used, 50);
      assert_eq!(edit.goal.time_used_seconds, 12);
      assert_eq!(edit.goal.created_at, goal.goal.created_at);
-@@ -3433,44 +3769,23 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
+@@ -3433,44 +3771,23 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
  }
 
  #[tokio::test]
@@ -2385,7 +2387,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      ])
      .await;
      let codex_home = TempDir::new()?;
-@@ -3483,7 +3798,6 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
+@@ -3483,7 +3800,6 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
          .build_initialized()
          .await?;
      let thread = mcp.start_thread(ThreadStartParams::default()).await?.thread;
@@ -2393,7 +2395,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      let start_id = mcp
          .send_turn_start_request(TurnStartParams {
              thread_id: thread.id.clone(),
-@@ -3502,6 +3816,22 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
+@@ -3502,6 +3818,22 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
      )
      .await?;
 
@@ -2416,7 +2418,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      let injection_id = mcp
          .send_raw_request(
              "thread/inject_items",
-@@ -3520,121 +3850,30 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
+@@ -3520,121 +3852,30 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
          .await?;
      let _: serde_json::Value =
          timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(injection_id)).await??;
@@ -2550,7 +2552,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      server.shutdown().await;
      Ok(())
  }
-@@ -3659,6 +3898,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3659,6 +3900,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
      let codex_home = TempDir::new()?;
      mock_responses_config(&server.uri())
          .enable_feature(Feature::Goals)
@@ -2558,7 +2560,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
          .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
          .write(codex_home.path())?;
      mount_analytics_capture(&server, codex_home.path()).await?;
-@@ -3706,7 +3946,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3706,7 +3948,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
              Some(json!({
                  "threadId": thread.id,
                  "objective": "do not serialize this objective",
@@ -2567,7 +2569,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
              })),
          )
          .await?;
-@@ -3724,30 +3964,39 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3724,30 +3966,39 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
          .expect("created goal id");
      assert_eq!(created["event_params"]["thread_id"], thread.id);
      assert_eq!(created["event_params"]["turn_id"], serde_json::Value::Null);
@@ -2625,7 +2627,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
 
      let requests = server
          .received_requests()
-@@ -3764,17 +4013,17 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3764,17 +4015,17 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
          .expect("goal continuation should include turn metadata")
          .to_str()?;
      let metadata: serde_json::Value = serde_json::from_str(metadata_header)?;
@@ -2652,7 +2654,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      assert_eq!(
          status["event_params"]["cumulative_tokens_accounted"],
          serde_json::Value::Null
-@@ -3791,11 +4040,15 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3791,11 +4042,15 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
          .nth(1)
          .expect("externally created goal continuation request");
      let goal_request_body = goal_request.body_json::<serde_json::Value>()?;
@@ -2671,7 +2673,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      responses::assert_parent_turn(&goal_request_body, /*expected*/ None)?;
 
      let clear_id = mcp
-@@ -3816,8 +4069,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
+@@ -3816,8 +4071,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
      )
      .await??;
 
@@ -2681,7 +2683,7 @@ index 4dd07f537ee008ce914625f84620bf2a2b74436d..1f8516ee9e5d310508deac7ba9cbd802
      assert_eq!(cleared["event_params"]["goal_id"], persisted_goal_id);
      assert_eq!(cleared["event_params"]["turn_id"], serde_json::Value::Null);
 
-@@ -6221,7 +6473,9 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
+@@ -6221,7 +6475,9 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
  async fn thread_resume_reconstructs_typed_inter_agent_communication() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
      let codex_home = TempDir::new()?;

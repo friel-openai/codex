@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
-index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..16dfdd1277af4b5f2929bd8f09f67c4a722c85b4 100644
+index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..efbbcb8ad2508865ebb21b81a5ce987540816649 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
 @@ -4,17 +4,24 @@ use app_test_support::TestAppServer;
@@ -27,7 +27,7 @@ index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..16dfdd1277af4b5f2929bd8f09f67c4a
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::ItemCompletedEvent;
  use codex_protocol::protocol::SessionSource;
-@@ -230,3 +237,229 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
+@@ -230,3 +237,231 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
 
      Ok(())
  }
@@ -87,6 +87,7 @@ index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..16dfdd1277af4b5f2929bd8f09f67c4a
 +        let started_at = 10 + index;
 +        let mut items = vec![RolloutItem::EventMsg(EventMsg::TurnStarted(
 +            TurnStartedEvent {
++                turn_attribution: None,
 +                turn_id: turn_id.clone(),
 +                root_turn_id: None,
 +                trace_id: None,
@@ -129,6 +130,7 @@ index 62e3a0f9a16aede991efd39b522f6fac02eb2d36..16dfdd1277af4b5f2929bd8f09f67c4a
 +            items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
 +                TurnCompleteEvent {
 +                    turn_id,
++                    root_turn_id: None,
 +                    last_agent_message: None,
 +                    error: None,
 +                    started_at: Some(started_at),

@@ -382,7 +382,7 @@ index e8a11055f3a7277e686b0a2bcb6ef5b343bbe77c..02d838e80e031cc0b756bfada5b7d4cb
          .await?
          .data
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
-index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e374f608f 100644
+index b267ccd018aa6de5687b77ee42860bdcd625c936..2a1c379553f791dea746590c61239cd6d8305659 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 @@ -65,10 +65,10 @@ async fn thread_list_relation_includes_explicitly_resumed_archived_v1_agent() ->
@@ -596,7 +596,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      assert!(
          cold_identity_checked,
          "the oldest evicted ephemeral worker must retain registry identity"
-@@ -482,13 +414,9 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
+@@ -485,13 +417,9 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
          ..Default::default()
      })
      .await?;
@@ -613,7 +613,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
 
      let app_after_close = list_threads_for_relation(
          &mut mcp,
-@@ -509,10 +437,7 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
+@@ -512,10 +440,7 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
 
      const AFTER_CLOSE_PROMPT: &str = "list bulk membership after cold ephemeral close";
      const AFTER_CLOSE_CALL_ID: &str = "bulk-list-after-cold-ephemeral-close";
@@ -625,7 +625,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      responses::mount_sse_once_match(
          &server,
          |request: &wiremock::Request| {
-@@ -559,13 +484,14 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
+@@ -562,13 +487,14 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
              .function_call_output_text(AFTER_CLOSE_CALL_ID)
              .context("missing list_agents output after close")?,
      )?;

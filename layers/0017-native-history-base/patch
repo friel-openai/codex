@@ -986,7 +986,7 @@ index 683b0b73f1282dad0655587edf8023dfdca0d585..1e216b51c670830674f86486c896e209
      fn config_load_error_marks_cloud_config_bundle_failures_for_relogin() {
          let err = std::io::Error::other(CloudConfigBundleLoadError::new(
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
-index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c1d4e7d15 100644
+index 3b9b1a85d1802ca80455b0f8629a7540975a3b21..92a35b02bb51a76deecb717b9900f6987a268fb4 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
 @@ -59,7 +59,11 @@ use codex_config::types::AuthCredentialsStoreMode;
@@ -1268,7 +1268,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
      Ok(())
  }
 
-@@ -2403,6 +2452,9 @@ async fn thread_fork_accepts_resumed_rollout_under_symlinked_sessions_root() ->
+@@ -2408,6 +2457,9 @@ async fn thread_fork_accepts_resumed_rollout_under_symlinked_sessions_root() ->
  }
 
  const MAX_INDEXED_FORK_ROLLOUT_READER_OPENS: usize = 48;
@@ -1278,7 +1278,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
 
  /// Describes whether complete model context is already available without old rollout files.
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-@@ -2416,15 +2468,143 @@ enum IndexedForkSource {
+@@ -2421,15 +2473,143 @@ enum IndexedForkSource {
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  enum IndexedForkPresentation {
      Durable,
@@ -1422,7 +1422,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
  async fn assert_indexed_paginated_fork_rollout_file_opens_are_bounded(
      source: IndexedForkSource,
  ) -> Result<()> {
-@@ -2465,6 +2645,7 @@ async fn resumed_uncompacted_paginated_fork_rollout_file_opens_grow_linearly() -
+@@ -2470,6 +2650,7 @@ async fn resumed_uncompacted_paginated_fork_rollout_file_opens_grow_linearly() -
  async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
      source: IndexedForkSource,
  ) -> Result<()> {
@@ -1430,7 +1430,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
      for segment_count in [8, 32] {
          for presentation in [
              IndexedForkPresentation::Durable,
-@@ -2472,14 +2653,21 @@ async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
+@@ -2477,14 +2658,21 @@ async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
          ] {
              let file_open_count =
                  paginated_fork_rollout_file_open_count(segment_count, source, presentation).await?;
@@ -1458,7 +1458,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
      Ok(())
  }
 
-@@ -2487,6 +2675,23 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2492,6 +2680,23 @@ async fn paginated_fork_rollout_file_open_count(
      segment_count: usize,
      source: IndexedForkSource,
      presentation: IndexedForkPresentation,
@@ -1482,7 +1482,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
  ) -> Result<usize> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
      let codex_home = TempDir::new()?;
-@@ -2566,62 +2771,7 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2571,62 +2776,7 @@ async fn paginated_fork_rollout_file_open_count(
              },
          ))];
          if source == IndexedForkSource::ColdCompacted && index + 1 == segment_count {
@@ -1546,7 +1546,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
          }
          for (item_index, item) in [user_item, agent_item].into_iter().enumerate() {
              items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
-@@ -2652,11 +2802,15 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2657,11 +2807,15 @@ async fn paginated_fork_rollout_file_open_count(
              })
              .await?;
          if index + 1 < segment_count {
@@ -1566,7 +1566,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
                  .await?;
          }
      }
-@@ -2690,6 +2844,19 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2695,6 +2849,19 @@ async fn paginated_fork_rollout_file_open_count(
              })
              .await?;
      }
@@ -1586,7 +1586,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
      let ThreadForkResponse {
          thread: forked_thread,
          ..
-@@ -2699,40 +2866,34 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2704,40 +2871,34 @@ async fn paginated_fork_rollout_file_open_count(
              params: ThreadForkParams {
                  thread_id: source_thread_id.to_string(),
                  ephemeral: presentation == IndexedForkPresentation::Ephemeral,
@@ -1644,7 +1644,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
          }
          IndexedForkPresentation::Ephemeral => {
              assert!(forked_thread.ephemeral);
-@@ -2746,7 +2907,7 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2751,7 +2912,7 @@ async fn paginated_fork_rollout_file_open_count(
      let events = mcp.json_log_events()?;
      let fork_start_index = events
          .iter()
@@ -1653,7 +1653,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
              event["fields"]["event.name"] == "codex.history.fork.start"
                  && event["fields"]["source_thread.id"] == source_thread_id.to_string()
          })
-@@ -3057,7 +3218,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
+@@ -3062,7 +3223,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
      let forked_thread_id = forked_thread.id.clone();
      let forked_path = forked_thread.path.expect("forked rollout path");
      let forked_meta = read_session_meta_line(forked_path.as_path()).await?.meta;
@@ -1662,7 +1662,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
      assert_eq!(
          forked_meta.forked_from_ordinal_exclusive,
          Some(expected_forked_from_ordinal_exclusive)
-@@ -3066,29 +3227,41 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
+@@ -3071,29 +3232,41 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
          .lines()
          .map(codex_rollout::parse_rollout_line)
          .collect::<Result<Vec<_>, _>>()?;
@@ -1717,7 +1717,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
          RolloutItem::EventMsg(EventMsg::TurnAborted(aborted))
              if aborted.turn_id.as_deref() == Some("active-turn")
      )));
-@@ -3753,6 +3926,7 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
+@@ -3758,6 +3931,7 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
                  model_providers: None,
                  source_kinds: None,
                  archived: Some(archived),
@@ -1726,7 +1726,7 @@ index 1ad70bd77b8ee5d83a91c94c630eba9417ca79e2..beee6a1b8a37d51574bb86d3d66a455c
                  use_state_db_only: false,
                  search_term: None,
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e690396a9b1 100644
+index 7426df77fb0d955937ab13c69c2f5c2cdc12db84..867353731ac57fd3388bda192bd153a41e14607d 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
 @@ -61,14 +61,22 @@ use codex_exec_server::EnvironmentManager;
@@ -1908,7 +1908,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
                          }),
                          started_at_ms: match index {
                              4 => Some(40),
-@@ -855,12 +952,300 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
+@@ -855,15 +952,303 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
      let ThreadResumeResponse {
          thread,
          initial_turns_page,
@@ -2040,10 +2040,10 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
 +            .is_some_and(|cursor| cursor.contains("rolloutOrdinal")),
 +        "a fresh process should use the atomically published SQLite projection"
 +    );
-+
-+    Ok(())
-+}
-+
+
+     Ok(())
+ }
+
 +#[tokio::test]
 +async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> Result<()> {
 +    let server = create_mock_responses_server_repeating_assistant("Done").await;
@@ -2204,11 +2204,14 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
 +    assert_eq!(page.data[0].id, "latest-turn");
 +    assert!(turns_backwards_cursor.is_some());
 +    assert!(items_backwards_cursor.is_some());
-
++
 +    std::fs::rename(unavailable, oldest_segment)?;
-     Ok(())
- }
-
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
+     let server = create_mock_responses_server_repeating_assistant("Done").await;
 @@ -929,7 +1314,7 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
 
      let read_id = mcp
@@ -2611,23 +2614,36 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
                  resume_metadata: None,
                  segment_state_checkpoint: None,
              }));
-@@ -1902,6 +2399,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+@@ -1902,26 +2399,23 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                  turn_id: Some(turn_id.clone()),
                  root_turn_id: None,
                  disabled_plugin_ids: None,
 +                cyber_access_program: None,
                  cwd: codex_home.path().abs(),
-                 workspace_roots: None,
-                 current_date: None,
-@@ -1920,7 +2418,6 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+                 approval_policy: AskForApproval::Never,
+                 approvals_reviewer: None,
+                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                 permission_profile: None,
+                 active_permission_profile: None,
+-                network: None,
+                 file_system_sandbox_policy: None,
+                 model: "mock-model".to_string(),
+                 comp_hash: None,
+-                personality: None,
+                 collaboration_mode: None,
                  multi_agent_version: None,
-                 multi_agent_mode: None,
+-                multi_agent_mode: None,
                  realtime_active: None,
 -                cyber_access_program: None,
                  effort: None,
                  service_tier: None,
                  model_profile: None,
-@@ -1933,11 +2430,11 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+-                summary: ReasoningSummary::Auto,
++                summary: Some(ReasoningSummary::Auto),
+             }));
+         }
+         items.extend([
+@@ -1930,11 +2424,11 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                  ..Default::default()
              })),
              RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
@@ -2641,7 +2657,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
              })),
          ]);
          if *text == "fourth" {
-@@ -2333,11 +2830,11 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
+@@ -2330,11 +2824,11 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
                          ..Default::default()
                      })),
                      RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
@@ -2655,7 +2671,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
                      })),
                      paginated_turn_completed(turn_id.as_str()),
                  ],
-@@ -2376,7 +2873,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
+@@ -2373,7 +2867,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
      let first_page = read_turns_page(
          &mut app_server,
          thread_id,
@@ -2664,7 +2680,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
          Some(1),
          SortDirection::Desc,
          Some(TurnItemsView::Full),
-@@ -2385,7 +2882,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
+@@ -2382,7 +2876,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
      let repeated_first_page = read_turns_page(
          &mut app_server,
          thread_id,
@@ -2673,7 +2689,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
          Some(1),
          SortDirection::Desc,
          Some(TurnItemsView::Full),
-@@ -3244,7 +3741,7 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
+@@ -3241,7 +3735,7 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
 
      let resume_id = mcp
          .send_thread_resume_request(ThreadResumeParams {
@@ -2682,7 +2698,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
              exclude_turns: true,
              initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
                  limit: Some(2),
-@@ -3263,7 +3760,55 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
+@@ -3260,7 +3754,55 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
      assert!(thread.turns.is_empty());
      assert_eq!(
          initial_turns_page,
@@ -2739,7 +2755,7 @@ index ec6546b208090f1d37396289fe181eb48a203cf6..7c955ef6f00fe9f03fa301ad3ad48e69
      );
 
      Ok(())
-@@ -3441,6 +3986,13 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
+@@ -3438,6 +3980,13 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
          /*git_info*/ None,
      )?;
 

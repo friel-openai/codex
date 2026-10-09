@@ -52,7 +52,7 @@ index 7f3d0c94b32b5d567abf11846ef030a2d798648d..a7f9e06f924c8c8e0aabfa5a7ac14c17
                                      let items = materialized
                                          .lines
 diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-index 597a1d750cada0dcb9a97e1f6193d3f64dba56da..e13c6e260c9bb3834f086cebf4518c9ad67d7670 100644
+index 3d961eeb2bd1e36ab97d792d98e6b520d485b010..a778ccd4dfefb37f2431fbfd790b740408dcd481 100644
 --- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 +++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 @@ -67,6 +67,9 @@ use tokio::time::timeout;

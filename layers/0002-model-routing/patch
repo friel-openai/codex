@@ -1945,10 +1945,10 @@ index 0000000000000000000000000000000000000000..faf6435cc940af0e0f135172469e22a0
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index 6b7d924952bad04f16bf2ec96b6ef03aa11f58c4..d76eccaaa287e72b1dd280006215c7ec8a8d0a3c 100644
+index 6b7d924952bad04f16bf2ec96b6ef03aa11f58c4..fc43e6acca2c795d2a8e607aae9665732d5158f8 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-@@ -532,6 +532,1358 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
+@@ -532,6 +532,1355 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
      Ok(())
  }
 
@@ -2697,9 +2697,6 @@ index 6b7d924952bad04f16bf2ec96b6ef03aa11f58c4..d76eccaaa287e72b1dd280006215c7ec
 +            items.push(RolloutItem::TurnContext(TurnContextItem {
 +                turn_id: Some(turn_id.clone()),
 +                cwd: codex_home.path().abs(),
-+                workspace_roots: None,
-+                current_date: None,
-+                timezone: None,
 +                approval_policy: AskForApproval::Never,
 +                approvals_reviewer: None,
 +                sandbox_policy: SandboxPolicy::new_read_only_policy(),

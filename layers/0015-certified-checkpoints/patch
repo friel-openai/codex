@@ -131,10 +131,10 @@ index 177f80537fc29d3cb0ccb9788f19ccd4d2098666..683b0b73f1282dad0655587edf8023df
              reasoning_effort: None,
              reasoning_summary: None,
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
-index d548bd93c241b7e6059173c102105db2d2dfe8b2..1ad70bd77b8ee5d83a91c94c630eba9417ca79e2 100644
+index a6f91b84a56ef7a8d1432c4298f6c743b71ab0cc..3b9b1a85d1802ca80455b0f8629a7540975a3b21 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
-@@ -2590,6 +2590,8 @@ async fn paginated_fork_rollout_file_open_count(
+@@ -2595,6 +2595,8 @@ async fn paginated_fork_rollout_file_open_count(
                      window_id: None,
                      compaction_response_id: None,
                      latest_token_usage_record: None,
@@ -144,7 +144,7 @@ index d548bd93c241b7e6059173c102105db2d2dfe8b2..1ad70bd77b8ee5d83a91c94c630eba94
                  RolloutItem::TurnContext(TurnContextItem {
                      turn_id: Some(turn_id.clone()),
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index 1ffa16401748eca759e6cfd2e4fe128f0abedce7..ec6546b208090f1d37396289fe181eb48a203cf6 100644
+index a7bb2eef5c6775c46860d98dc3ffd154db29948c..7426df77fb0d955937ab13c69c2f5c2cdc12db84 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
 @@ -1895,6 +1895,8 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
@@ -157,10 +157,10 @@ index 1ffa16401748eca759e6cfd2e4fe128f0abedce7..ec6546b208090f1d37396289fe181eb4
              items.push(RolloutItem::TurnContext(TurnContextItem {
                  turn_id: Some(turn_id.clone()),
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index 1f8516ee9e5d310508deac7ba9cbd802c8d45a39..20967260293cdc3e6d5919e19955a935dad346be 100644
+index ded779932dd4329d4465c6bd049ea45b4ca1205f..c947e1a3583a4fff1967e781622313512523e1fd 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-@@ -244,6 +244,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
+@@ -246,6 +246,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() ->
              compaction_response_id: None,
              latest_token_usage_record: None,
              resume_metadata: None,
@@ -6029,7 +6029,7 @@ index 2c086955cf0d61aebee5a20539c7f84d759aeb1b..aab4326117792471bd2852294dbb9c13
      }
  }
 diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
-index 48162a17ec282be75207d7f86bc5db236c43a363..8093a172e8cb129f865a24b8dbab6e76f1f043c2 100644
+index 48162a17ec282be75207d7f86bc5db236c43a363..99b6db9db9f4c27aafd82cd49a82f63a84631391 100644
 --- a/codex-rs/history/src/tests.rs
 +++ b/codex-rs/history/src/tests.rs
 @@ -3,6 +3,7 @@ use codex_protocol::models::ConfigurationReasoning;
@@ -6072,7 +6072,7 @@ index 48162a17ec282be75207d7f86bc5db236c43a363..8093a172e8cb129f865a24b8dbab6e76
      };
 
      assert_eq!(
-@@ -953,6 +958,70 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
+@@ -953,6 +958,71 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
      Ok(())
  }
 
@@ -6133,6 +6133,7 @@ index 48162a17ec282be75207d7f86bc5db236c43a363..8093a172e8cb129f865a24b8dbab6e76
 +        Some(CompactionResumeMetadata {
 +            multi_agent_version: Some(MultiAgentVersion::V2),
 +            last_started_turn_id: Some("turn-3".to_string()),
++            turn_attribution: None,
 +            previous_turn_settings: None,
 +        })
 +    );
@@ -6143,7 +6144,7 @@ index 48162a17ec282be75207d7f86bc5db236c43a363..8093a172e8cb129f865a24b8dbab6e76
  #[test]
  /// Keeps legacy numeric window IDs readable in stored compacted items.
  fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
-@@ -976,6 +1045,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
+@@ -976,6 +1046,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
              compaction_response_id: None,
              latest_token_usage_record: None,
              resume_metadata: None,
@@ -6151,7 +6152,7 @@ index 48162a17ec282be75207d7f86bc5db236c43a363..8093a172e8cb129f865a24b8dbab6e76
          }
      );
      Ok(())
-@@ -1075,3 +1145,43 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
+@@ -1075,3 +1146,43 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
      );
      Ok(())
  }
