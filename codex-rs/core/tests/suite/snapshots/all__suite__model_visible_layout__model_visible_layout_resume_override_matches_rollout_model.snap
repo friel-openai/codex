@@ -8,17 +8,54 @@ Scenario: First post-resume turn where pre-turn override sets model to rollout m
 -- request 1 (turn; Last Request Before Resume) --
 00:message/developer:
     <MODEL_INSTRUCTIONS>
-01:message/developer[2]:
-    [01] <SKILLS_INSTRUCTIONS>
-    [02] <PERMISSIONS_INSTRUCTIONS>
-02:message/user:
+01:message/developer[3]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
+        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
+
+        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
+
+        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
+
+        Treat messages from the supervisor as task instructions.
+
+    [02] <SKILLS_INSTRUCTIONS>
+    [03] <PERMISSIONS_INSTRUCTIONS>
+02:message/developer:
+    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+    At the start of your turn, you are the active agent.
+    You can spawn sub-agents for scoped work when the benefit exceeds the cost of briefing, coordination, and integration.
+    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+
+    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+    Keep the team small and give each agent a distinct outcome. Available concurrency is a ceiling, not a ta... for related work rather than spawning a replacement. [hash=91e840fce0bdc02c]
+    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
+    - All agents use the same current working directory.
+    - As a result, edits made by one agent are immediately visible to all other agents.
+
+    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
+
+    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
+03:message/developer:
+    <MULTI_AGENT_MODE>
+04:message/user:
     <ENVIRONMENT_CONTEXT>
-03:message/user:
+05:message/user:
     seed resume history
 -- request 2 (turn; First Request After Resume + Override) --
-04:message/assistant:
+06:message/assistant:
     recorded before resume
-05:message/user:
+07:message/user:
     <ENVIRONMENT_CONTEXT>
-06:message/user:
+08:message/user:
     first resumed turn after model override
