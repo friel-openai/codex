@@ -1,8 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
+use app_test_support::rollout_path;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
@@ -23,6 +25,8 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_protocol::ThreadId as CoreThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::RolloutRecorder;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -148,8 +152,12 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     Ok(())
 }
 
+#[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
+#[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test]
-async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> Result<()> {
+async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -168,7 +176,11 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
         .with_provider_config("supports_websockets = false")
         .write(codex_home.path())?;
 
-    let source_thread_id = create_fake_rollout(
+    let create_rollout = match history_mode {
+        ThreadHistoryMode::Legacy => create_fake_rollout,
+        ThreadHistoryMode::Paginated => create_fake_paginated_rollout,
+    };
+    let source_thread_id = create_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
@@ -176,6 +188,23 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+    let expected_forked_from_ordinal_exclusive = match history_mode {
+        ThreadHistoryMode::Legacy => None,
+        ThreadHistoryMode::Paginated => Some(
+            RolloutRecorder::load_rollout_lines(&rollout_path(
+                codex_home.path(),
+                "2025-01-05T12-00-00",
+                &source_thread_id,
+            ))
+            .await?
+            .0
+            .into_iter()
+            .filter_map(|line| line.ordinal)
+            .max()
+            .and_then(|ordinal| ordinal.checked_add(1))
+            .expect("paginated source has a next ordinal"),
+        ),
+    };
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -216,7 +245,14 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
         metadata["forked_from_thread_id"].as_str(),
         Some(source_thread_id.as_str())
     );
-    assert!(metadata.get("forked_from_ordinal_exclusive").is_none());
+    if let Some(expected) = expected_forked_from_ordinal_exclusive {
+        assert_eq!(
+            metadata["forked_from_ordinal_exclusive"].as_u64(),
+            Some(expected)
+        );
+    } else {
+        assert!(metadata.get("forked_from_ordinal_exclusive").is_none());
+    }
     assert_eq!(metadata["thread_id"].as_str(), Some(thread.id.as_str()));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
 
