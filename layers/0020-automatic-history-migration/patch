@@ -4447,7 +4447,7 @@ index 0000000000000000000000000000000000000000..eb1c8f4d7a81afc6c0e4a819cbb7b628
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 69d1d0f0021143e08549f7cad54b8bea6fd2d69f..010c6efa61b978e1c887279e3fa1ea80d2f9f7fa 100644
+index ac2baf0e61d1ba54a9d8d3e11420c582ac01fc7d..37f10447520e446418455202399a817b6eba13f4 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -110,6 +110,7 @@ use codex_state::DirectionalThreadSpawnEdgeStatus;

@@ -2823,7 +2823,7 @@ index 95b22e7335f7242adf95fa290e02d2a660393d8a..750fa265209fbbf23071d6ecbc86a913
                  (receiver, submission_id)
              }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index b9eaf9ab1ffca4a584c5abb9d67d09c8e4fae5bd..61616573c35f97b7e18840c29c8c1b6d59636fd8 100644
+index 0220480e80520fc7212eaaee97eb2c214ab29b96..89b59ccdcec38987c58a3f4e9718f843058aae59 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1458,15 +1458,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {

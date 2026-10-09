@@ -687,7 +687,7 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
                      .await,
                  );
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index de7315c9d10bdb11a36d81650b4e99cab6a31231..5fe1395357d19ed0c9d9683e282f4fccc4358365 100644
+index 61160e17d3bb39853fd9c1c7f864087d25a1710b..50a345e9bf9a65f44b930f715d5d4d468163bda1 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -5069,6 +5069,217 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()

@@ -169,7 +169,7 @@ index ded779932dd4329d4465c6bd049ea45b4ca1205f..c947e1a3583a4fff1967e78162231351
      )
      .await?;
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 0abfb53ceaaac662f50a31ffc34224d813b03dfa..15e9d822ea8bd18f1f2c31a588723fae146a7897 100644
+index 0a08591e1b662a7fd7e62ecde7bf29f7cfc0412c..63276d3709fa83fd74e63131ee57730d72a0e0aa 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1154,6 +1154,37 @@ async fn mcp_attribution_in_constructed_request(thread: &CodexThread) -> McpAttr

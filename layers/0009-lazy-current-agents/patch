@@ -10605,7 +10605,7 @@ index 0000000000000000000000000000000000000000..9d28928f83342c7b8884d36c32fc351e
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8e4fae5bd 100644
+index f2bfdb070e9133078b657ffe3967a65eb6205521..0220480e80520fc7212eaaee97eb2c214ab29b96 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -6,6 +6,7 @@ use crate::agent::agent_status_from_event;
@@ -12059,20 +12059,39 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -9074,6 +10068,12 @@ while True:
+@@ -9074,10 +10068,28 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
+-    assert_eq!(
+-        child_body["instructions"], parent_body["instructions"],
+-        "goal supervisor helpers must preserve the parent's exact top-level instructions"
++    let base_instructions = parent_thread.session.get_prompt_base_instructions().await;
 +    assert!(
-+        parent_body["instructions"]
-+            .as_str()
-+            .is_some_and(|instructions| !instructions.is_empty()),
-+        "the parent request must exercise nonempty top-level instructions"
-+    );
++        !base_instructions.text.is_empty(),
++        "the parent request must exercise nonempty base instructions"
+     );
++    for input in [parent_input, child_input] {
++        let base_instruction_items = input
++            .iter()
++            .filter(|item| {
++                item["role"] == "developer"
++                    && item["content"].as_array().is_some_and(|content| {
++                        content.len() == 1
++                            && content[0]["text"].as_str() == Some(base_instructions.text.as_str())
++                    })
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(
++            base_instruction_items,
++            vec![&input[0]],
++            "parent and supervisor requests must begin with exactly one unchanged base-instructions developer item"
++        );
++    }
      assert_eq!(
-         child_body["instructions"], parent_body["instructions"],
-         "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -9116,266 +10116,78 @@ while True:
+         &child_input[..parent_input.len()],
+         parent_input,
+@@ -9116,266 +10128,78 @@ while True:
      for unexpected_child_context in [
          "# AGENTS.md instructions",
          "<permissions instructions>",
@@ -12404,7 +12423,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
  }
 
  #[tokio::test]
-@@ -9461,8 +10273,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9461,8 +10285,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -12422,7 +12441,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -9471,21 +10290,80 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9471,21 +10302,80 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -12510,7 +12529,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -9502,8 +10380,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9502,8 +10392,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -12520,7 +12539,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9663,13 +10540,66 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9663,13 +10552,66 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -12590,7 +12609,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9954,6 +10884,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9954,6 +10896,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -12622,7 +12641,7 @@ index f2bfdb070e9133078b657ffe3967a65eb6205521..b9eaf9ab1ffca4a584c5abb9d67d09c8
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9988,3 +10943,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9988,3 +10955,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }

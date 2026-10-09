@@ -395,7 +395,7 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 6fc80f13462faf57262225ed84fccfd68dc4d33b..de7315c9d10bdb11a36d81650b4e99cab6a31231 100644
+index e829d5162e71c5443d35d4f9f0cba7530a9faaa4..61160e17d3bb39853fd9c1c7f864087d25a1710b 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -87,6 +87,7 @@ use codex_protocol::protocol::EventMsg;

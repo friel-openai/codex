@@ -2770,7 +2770,7 @@ index 7426df77fb0d955937ab13c69c2f5c2cdc12db84..867353731ac57fd3388bda192bd153a4
          .with_codex_home(codex_home.path())
          .without_auto_env()
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 15e9d822ea8bd18f1f2c31a588723fae146a7897..69d1d0f0021143e08549f7cad54b8bea6fd2d69f 100644
+index 63276d3709fa83fd74e63131ee57730d72a0e0aa..ac2baf0e61d1ba54a9d8d3e11420c582ac01fc7d 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -4387,6 +4387,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {

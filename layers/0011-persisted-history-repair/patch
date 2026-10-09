@@ -649,7 +649,7 @@ index b267ccd018aa6de5687b77ee42860bdcd625c936..2a1c379553f791dea746590c61239cd6
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 61616573c35f97b7e18840c29c8c1b6d59636fd8..0abfb53ceaaac662f50a31ffc34224d813b03dfa 100644
+index 89b59ccdcec38987c58a3f4e9718f843058aae59..0a08591e1b662a7fd7e62ecde7bf29f7cfc0412c 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -462,6 +462,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
@@ -822,7 +822,7 @@ index 61616573c35f97b7e18840c29c8c1b6d59636fd8..0abfb53ceaaac662f50a31ffc34224d8
  }
 
  #[tokio::test]
-@@ -10157,18 +10178,52 @@ while True:
+@@ -10169,18 +10190,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -877,7 +877,7 @@ index 61616573c35f97b7e18840c29c8c1b6d59636fd8..0abfb53ceaaac662f50a31ffc34224d8
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -10179,13 +10234,8 @@ while True:
+@@ -10191,13 +10246,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
