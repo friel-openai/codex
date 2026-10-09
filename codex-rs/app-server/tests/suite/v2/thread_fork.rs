@@ -2494,6 +2494,7 @@ fn certified_indexed_fork_checkpoint(
             ]),
             guardian_history: None,
             retained_context: None,
+            retained_context_replay: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: Some(window_id.to_string()),
@@ -2508,6 +2509,7 @@ fn certified_indexed_fork_checkpoint(
             model: "mock-model".to_string(),
             comp_hash: None,
             realtime_active: None,
+            cyber_access_program: None,
         }),
         /*world_state*/ None,
         /*reference_context*/ None,
@@ -3934,7 +3936,6 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
                 ancestor_thread_id: None,
                 section_id: None,
                 originators: None,
-                project_id: None,
             })
             .await?;
         let ThreadListResponse { data, .. } =
