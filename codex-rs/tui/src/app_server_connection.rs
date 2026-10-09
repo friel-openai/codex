@@ -14,8 +14,19 @@ use codex_app_server_client::RemoteAppServerEndpoint;
 #[cfg(windows)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+/// An automatically selected daemon must implement this CLI's complete release,
+/// including Frodex build metadata; feature flags cannot establish that identity.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "shared background server version {actual_version:?} does not match this Codex version {expected_version}"
+)]
+pub(crate) struct LocalDaemonVersionMismatch {
+    expected_version: &'static str,
+    actual_version: String,
+}
+
 pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppServerClient> {
-    match target {
+    let app_server = match target {
         AppServerTarget::Embedded => {
             color_eyre::eyre::bail!("embedded sessions have no remote connection")
         }
@@ -45,5 +56,21 @@ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppS
         AppServerTarget::LocalDaemon { endpoint, .. } | AppServerTarget::Remote { endpoint } => {
             connect_remote_app_server(endpoint.clone()).await
         }
+    }?;
+    if matches!(target, AppServerTarget::LocalDaemon { .. }) {
+        let version = match &app_server {
+            AppServerClient::Remote(client) => client.server_version(),
+            AppServerClient::InProcess(_) => None,
+        };
+        if version != Some(env!("CARGO_PKG_VERSION")) {
+            let mismatch = LocalDaemonVersionMismatch {
+                expected_version: env!("CARGO_PKG_VERSION"),
+                actual_version: version.unwrap_or("unavailable").to_string(),
+            };
+            // Disconnect only this client. Other clients may still own active daemon threads.
+            let _ = app_server.shutdown().await;
+            return Err(mismatch.into());
+        }
     }
+    Ok(app_server)
 }
