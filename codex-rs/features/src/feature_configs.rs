@@ -336,6 +336,9 @@ pub struct MultiAgentV2ConfigToml {
     /// Use a session-scoped remote board instead of local storage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_board_remote: Option<RemoteMessageBoardConfigToml>,
+    /// Expose same-thread adoption and subagent promotion only when explicitly enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thread_adoption: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
 }

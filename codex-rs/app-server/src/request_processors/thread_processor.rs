@@ -4622,7 +4622,10 @@ impl ThreadRequestProcessor {
                 let thread_id = ThreadId::from_string(&params.thread_id)
                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
                 // Recheck under the same permit as client resume, including after config loading.
-                if self.thread_manager.get_thread(thread_id).await.is_ok() {
+                if get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+                    .await?
+                    .is_some()
+                {
                     if let Some(saved) = saved {
                         self.continue_daemon_turn(&params.thread_id, saved.clone())
                             .await;
@@ -8091,6 +8094,8 @@ fn build_thread_from_loaded_snapshot(
         loaded_thread.rollout_path(),
     )
 }
+
+mod goal_scheduler;
 
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]
