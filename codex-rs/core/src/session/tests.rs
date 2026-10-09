@@ -15,6 +15,7 @@ use super::*;
 mod config_refresh_tests;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
+use crate::compact::CompactionReporting;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::config::RuntimeConfigRefresh;
@@ -294,6 +295,7 @@ impl StepContext {
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
+            required_mcp_servers: Vec::new(),
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
@@ -1823,6 +1825,362 @@ exclude = ["SECRET_*", 17]
         .effective_user_config()
         .expect("current user config");
     assert_eq!(current_config, previous_config);
+}
+
+#[tokio::test]
+async fn inject_items_context_preserves_published_model_metadata() {
+    let (session, _) = make_session_and_context().await;
+    let current = session.new_default_turn().await;
+    let mut published = current.model_info().as_ref().clone();
+    published.slug = "executing-turn-model".to_string();
+    session.services.thread_extension_data.insert(published);
+
+    let injected = session.new_inject_items_context().await;
+
+    assert_eq!(injected.model_info(), current.model_info());
+    assert_eq!(
+        session
+            .services
+            .thread_extension_data
+            .get::<ModelInfo>()
+            .expect("executing turn model remains published")
+            .slug,
+        "executing-turn-model"
+    );
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_resolves_updated_alias_without_mutating_captured_turn() {
+    let (session, _) = make_session_and_context().await;
+    let alias = codex_models_manager::CustomModelConfig {
+        model: "gpt-5.2".to_string(),
+        routing_profile: None,
+        model_context_window: Some(128_000),
+        model_auto_compact_token_limit: Some(100_000),
+        trust_candidate_constraints: false,
+    };
+    let mut config = (*session.get_config().await).clone();
+    config
+        .custom_models
+        .insert("local-alias".to_string(), alias);
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, config.clone())
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+    {
+        let mut state = session.state.lock().await;
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode =
+            settings
+                .collaboration_mode
+                .with_updates(Some("local-alias".to_string()), None, None);
+    }
+    let captured = session.new_default_turn().await;
+    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
+    config.custom_models.get_mut("local-alias").unwrap().model = "gpt-5.4".to_string();
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, config)
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+    let refreshed = session.new_default_turn().await;
+    assert_eq!(refreshed.model_info().request_model_slug(), "gpt-5.4");
+    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
+    assert_eq!(refreshed.model_info().context_window, Some(128_000));
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_preserves_alias_for_stale_owner_and_mcp_only() {
+    let (session, _) = make_session_and_context().await;
+    let alias = codex_models_manager::CustomModelConfig {
+        model: "gpt-5.2".to_string(),
+        routing_profile: None,
+        model_context_window: Some(128_000),
+        model_auto_compact_token_limit: Some(100_000),
+        trust_candidate_constraints: false,
+    };
+    let aliases = HashMap::from([("selected-alias".to_string(), alias.clone())]);
+    let mut config = session.get_config().await.as_ref().clone();
+    config.custom_models = aliases.clone();
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, config)
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+    {
+        let mut state = session.state.lock().await;
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("selected-alias".to_string()),
+            None,
+            None,
+        );
+    }
+    let stale_owner = session.get_config().await;
+    assert_eq!(
+        session
+            .refresh_runtime_config(Arc::clone(&stale_owner), stale_owner.as_ref().clone())
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+    let ultrafast = stale_owner.auto_review_use_ultrafast;
+    for replacements in [
+        HashMap::from([("renamed-alias".to_string(), alias)]),
+        HashMap::new(),
+    ] {
+        let mut next = stale_owner.as_ref().clone();
+        next.custom_models = replacements;
+        next.auto_review_use_ultrafast = !ultrafast;
+        let current_owner = session.get_config().await;
+        assert_eq!(
+            session
+                .refresh_runtime_config(Arc::clone(&stale_owner), next.clone())
+                .await,
+            crate::ConfigRefreshOutcome::Stale
+        );
+        assert!(Arc::ptr_eq(&current_owner, &session.get_config().await));
+        assert_eq!(
+            session.refresh_mcp_config(current_owner, next).await,
+            crate::ConfigRefreshOutcome::Published
+        );
+        let state = session.state.lock().await;
+        assert_eq!(
+            state
+                .session_configuration
+                .step_settings
+                .collaboration_mode
+                .model(),
+            "selected-alias"
+        );
+        assert_eq!(
+            state
+                .session_configuration
+                .model_info_overrides
+                .custom_models,
+            aliases
+        );
+        assert_eq!(
+            state
+                .session_configuration
+                .original_config_do_not_use
+                .custom_models,
+            aliases
+        );
+        assert_eq!(
+            state
+                .session_configuration
+                .original_config_do_not_use
+                .auto_review_use_ultrafast,
+            ultrafast
+        );
+    }
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_health() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let primary = codex_models_manager::ModelRoutingCandidate {
+        model: "test-primary".to_string(),
+        reasoning_effort: None,
+        service_tier: None,
+    };
+    let fallback = codex_models_manager::ModelRoutingCandidate {
+        model: "test-fallback".to_string(),
+        reasoning_effort: None,
+        service_tier: None,
+    };
+    let profile = codex_models_manager::CustomModelConfig {
+        model: primary.model.clone(),
+        routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+            candidates: vec![primary, fallback.clone()],
+        }),
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
+    };
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("old-profile".to_string(), profile.clone());
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("old-profile".to_string()),
+            /*effort*/ None,
+            /*developer_instructions*/ None,
+        );
+        state.model_routing.reconcile_profile("old-profile");
+        state.model_routing.record_success(&fallback);
+    }
+    next_config.custom_models = HashMap::from([("new-profile".to_string(), profile)]);
+
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, next_config)
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
+        "new-profile"
+    );
+    assert_eq!(state.model_routing.last_success(), Some(&fallback));
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tuple() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let primary = codex_models_manager::ModelRoutingCandidate {
+        model: "test-primary".to_string(),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+        service_tier: Some("test-tier-primary".to_string()),
+    };
+    let fallback = codex_models_manager::ModelRoutingCandidate {
+        model: "test-fallback".to_string(),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+        service_tier: Some("test-tier-fallback".to_string()),
+    };
+    let profile = codex_models_manager::CustomModelConfig {
+        model: primary.model.clone(),
+        routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+            candidates: vec![primary, fallback.clone()],
+        }),
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
+    };
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("removed-profile".to_string(), profile);
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("removed-profile".to_string()),
+            /*effort*/ None,
+            /*developer_instructions*/ None,
+        );
+        state.model_routing.record_success(&fallback);
+    }
+    next_config.custom_models.clear();
+
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, next_config)
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
+        fallback.model
+    );
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .reasoning_effort(),
+        fallback.reasoning_effort
+    );
+    assert_eq!(
+        state.session_configuration.step_settings.service_tier,
+        fallback.service_tier
+    );
+    assert_eq!(state.model_routing.last_success(), None);
+    assert!(
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .custom_models
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_request_settings() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let alias = codex_models_manager::CustomModelConfig {
+        model: "test-model".to_string(),
+        routing_profile: None,
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
+    };
+    let effort = codex_protocol::openai_models::ReasoningEffort::High;
+    let service_tier = "test-tier".to_string();
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("removed-alias".to_string(), alias);
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("removed-alias".to_string()),
+            Some(Some(effort.clone())),
+            /*developer_instructions*/ None,
+        );
+        settings.service_tier = Some(service_tier.clone());
+    }
+    next_config.custom_models.clear();
+
+    assert_eq!(
+        session
+            .refresh_runtime_config(session.get_config().await, next_config)
+            .await,
+        crate::ConfigRefreshOutcome::Published
+    );
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
+        "test-model"
+    );
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .reasoning_effort(),
+        Some(effort)
+    );
+    assert_eq!(
+        state
+            .session_configuration
+            .step_settings
+            .service_tier
+            .as_deref(),
+        Some(service_tier.as_str())
+    );
+    assert_eq!(state.model_routing.last_success(), None);
 }
 
 #[tokio::test]
@@ -4347,6 +4705,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let turn_id = previous_context_item
@@ -12096,6 +12456,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         ),
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,
+        CompactionReporting::Immediate,
     )
     .await
     .expect("compaction succeeds");
