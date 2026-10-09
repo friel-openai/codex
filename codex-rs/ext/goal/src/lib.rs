@@ -6,6 +6,7 @@ mod api;
 mod events;
 mod extension;
 mod metrics;
+mod resume;
 mod runtime;
 mod scheduler;
 mod spec;
