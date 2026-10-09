@@ -143,6 +143,9 @@ impl App {
             }
             self.abort_thread_event_listener(thread_id);
             self.pending_server_profiles.remove(&thread_id);
+            self.agents_overview
+                .requested_permission_profiles
+                .remove(&thread_id);
         }
     }
 }

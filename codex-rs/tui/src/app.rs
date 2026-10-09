@@ -244,6 +244,7 @@ mod pending_interactive_replay;
 mod pending_thread_approvals;
 mod permission_shortcuts;
 mod pets;
+mod placed_side;
 mod platform_actions;
 mod plugin_mentions;
 mod rate_limit_refresh;
@@ -261,6 +262,7 @@ mod server_version_notice;
 mod session_lifecycle;
 mod session_picker;
 mod side;
+mod standalone_side;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
@@ -631,6 +633,7 @@ pub(crate) struct App {
     agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
+    standalone_side_active: bool,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     primary_thread_id: Option<ThreadId>,
