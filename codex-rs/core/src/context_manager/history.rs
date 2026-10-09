@@ -536,6 +536,11 @@ impl ContextManager {
         metadata: Option<&CodexHarnessMetadata>,
         policy: TruncationPolicy,
     ) -> ResponseItem {
+        // Independent-thread inputs already have a bounded prompt and must retain their
+        // runtime attribution and complete assignment across history replay.
+        if crate::compact::is_independent_thread_message(item) {
+            return item.clone();
+        }
         let mut processed = item.clone();
         if let ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed

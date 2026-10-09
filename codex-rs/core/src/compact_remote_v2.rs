@@ -10,6 +10,7 @@ use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::CompactionReporting;
 use crate::compact::build_compaction_replacement_history;
 use crate::compact::compaction_status_from_result;
+use crate::compact::retain_independent_thread_messages;
 use crate::compact::retain_subagent_assignment_and_recent_messages;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
@@ -324,8 +325,9 @@ async fn run_remote_compact_task_inner_impl(
             RetainedImageBudget::Disabled
         },
     );
+    let previous_history = sess.clone_history().await;
+    retain_independent_thread_messages(previous_history.annotated_items(), &mut compacted_history);
     if let Some(agent_path) = turn_context.session_source.get_agent_path() {
-        let previous_history = sess.clone_history().await;
         retain_subagent_assignment_and_recent_messages(
             previous_history.annotated_items(),
             &mut compacted_history,
