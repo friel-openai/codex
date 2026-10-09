@@ -22,6 +22,7 @@ use crate::config::Config;
 use crate::config::Constrained;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::ForkPersistence;
+use crate::session::ForkStartupItems;
 use crate::session::GitEnrichmentPolicy;
 use crate::session::SUBMISSION_CHANNEL_CAPACITY;
 use crate::session::SessionIo;
@@ -114,6 +115,7 @@ pub(crate) async fn run_codex_thread_interactive(
         extensions,
         conversation_history,
         disabled_plugin_ids: None,
+        fork_startup_items: ForkStartupItems::default(),
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,
