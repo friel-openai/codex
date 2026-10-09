@@ -3,6 +3,7 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
+use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use codex_app_server_protocol::ClientRequest;
@@ -22,10 +23,13 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_path_by_id_str;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
@@ -96,23 +100,71 @@ async fn thread_delete_rejects_paginated_writer_owned_by_another_process() -> Re
     Ok(())
 }
 
+#[test_case::test_case(false; "state_cleanup_succeeds")]
+#[test_case::test_case(true; "state_cleanup_fails_then_retries")]
 #[tokio::test]
-async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
+async fn thread_delete_deletes_spawned_descendants(fail_state_cleanup: bool) -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let parent_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 0, "parent")?;
-    let child_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 1, "child")?;
-    let grandchild_id =
-        create_delete_test_rollout(codex_home.path(), /*minute*/ 2, "grandchild")?;
-
-    let state_db = StateRuntime::init(
-        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
-    )
-    .await?;
     let parent_thread_id = ThreadId::from_string(&parent_id)?;
+    let child_id = create_fake_rollout_with_source(
+        codex_home.path(),
+        "2025-01-01T00-01-00",
+        "2025-01-01T00:01:00Z",
+        "child",
+        Some("mock_provider"),
+        /*git_info*/ None,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+    )?;
     let child_thread_id = ThreadId::from_string(&child_id)?;
+    let grandchild_id = create_fake_rollout_with_source(
+        codex_home.path(),
+        "2025-01-01T00-02-00",
+        "2025-01-01T00:02:00Z",
+        "grandchild",
+        Some("mock_provider"),
+        /*git_info*/ None,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: child_thread_id,
+            depth: 2,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+    )?;
+
+    let sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+    let state_db = StateRuntime::init(sqlite.clone(), "mock_provider".into()).await?;
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
+
+    // A closed child remains owned when its indexed source still names this parent.
+    for thread_id in [parent_thread_id, child_thread_id, grandchild_thread_id] {
+        let rollout_path = find_thread_path_by_id_str(
+            codex_home.path(),
+            &thread_id.to_string(),
+            /*state_db_ctx*/ None,
+        )
+        .await?
+        .expect("fixture thread has a rollout");
+        let (items, _, _) =
+            codex_rollout::RolloutRecorder::load_rollout_items(&rollout_path).await?;
+        let metadata = codex_rollout::builder_from_items(&items, &rollout_path)
+            .expect("fixture rollout has session metadata")
+            .build("mock_provider");
+        state_db.upsert_thread(&metadata).await?;
+    }
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
 
     for (parent, child, status) in [
         (
@@ -136,6 +188,106 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
         .without_auto_env()
         .build_initialized()
         .await?;
+
+    if fail_state_cleanup {
+        let thread_ids = [parent_thread_id, child_thread_id, grandchild_thread_id];
+        for thread_id in thread_ids {
+            let _: ThreadResumeResponse = mcp
+                .request(|request_id| ClientRequest::ThreadResume {
+                    request_id,
+                    params: ThreadResumeParams {
+                        thread_id: thread_id.to_string(),
+                        exclude_turns: true,
+                        ..Default::default()
+                    },
+                })
+                .await?;
+        }
+        let ThreadLoadedListResponse { mut data, .. } = mcp
+            .request(|request_id| ClientRequest::ThreadLoadedList {
+                request_id,
+                params: ThreadLoadedListParams::default(),
+            })
+            .await?;
+        data.sort();
+        let mut expected_loaded = thread_ids.map(|thread_id| thread_id.to_string()).to_vec();
+        expected_loaded.sort();
+        assert_eq!(data, expected_loaded);
+
+        let mut original_rows = Vec::new();
+        for thread_id in thread_ids {
+            original_rows.push(
+                state_db
+                    .get_thread(thread_id)
+                    .await?
+                    .expect("resumed thread has an indexed state row"),
+            );
+        }
+        let original_descendants = state_db
+            .list_thread_spawn_descendants(parent_thread_id)
+            .await?;
+        let pool = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_thread_delete_cleanup BEFORE DELETE ON threads \
+             BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END",
+        )
+        .execute(&pool)
+        .await?;
+
+        let delete_id = mcp
+            .send_thread_delete_request(ThreadDeleteParams {
+                thread_id: parent_id.clone(),
+            })
+            .await?;
+        let error: JSONRPCError = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(delete_id)),
+        )
+        .await??;
+        assert!(error.error.message.contains("injected cleanup failure"));
+
+        let mut deleted_ids = Vec::new();
+        for _ in 0..3 {
+            let notification: ThreadDeletedNotification = timeout(
+                DEFAULT_READ_TIMEOUT,
+                mcp.read_notification("thread/deleted"),
+            )
+            .await??;
+            deleted_ids.push(notification.thread_id);
+        }
+        assert_eq!(
+            deleted_ids,
+            vec![grandchild_id.clone(), child_id.clone(), parent_id.clone()]
+        );
+        let ThreadLoadedListResponse { data, .. } = mcp
+            .request(|request_id| ClientRequest::ThreadLoadedList {
+                request_id,
+                params: ThreadLoadedListParams::default(),
+            })
+            .await?;
+        assert_eq!(data, Vec::<String>::new());
+        for (thread_id, original_row) in thread_ids.into_iter().zip(original_rows) {
+            assert_eq!(state_db.get_thread(thread_id).await?, Some(original_row));
+            assert_eq!(
+                find_thread_path_by_id_str(
+                    codex_home.path(),
+                    &thread_id.to_string(),
+                    /*state_db_ctx*/ None,
+                )
+                .await?,
+                None
+            );
+        }
+        assert_eq!(
+            state_db
+                .list_thread_spawn_descendants(parent_thread_id)
+                .await?,
+            original_descendants
+        );
+        sqlx::query("DROP TRIGGER fail_thread_delete_cleanup")
+            .execute(&pool)
+            .await?;
+    }
 
     let _: ThreadDeleteResponse = mcp
         .request(|request_id| ClientRequest::ThreadDelete {
@@ -344,8 +496,12 @@ async fn thread_delete_handles_live_threads_before_rollout_exists() -> Result<()
     Ok(())
 }
 
+#[test_case::test_case(false; "archived_rollout_present")]
+#[test_case::test_case(true; "archived_rollout_missing")]
 #[tokio::test]
-async fn thread_delete_removes_persisted_board_even_with_feature_disabled() -> Result<()> {
+async fn thread_delete_removes_persisted_board_even_with_feature_disabled(
+    remove_archived_rollout: bool,
+) -> Result<()> {
     let server = create_mock_responses_server_sequence(vec![
         responses::sse(vec![
             responses::ev_function_call_with_namespace(
@@ -401,6 +557,24 @@ async fn thread_delete_removes_persisted_board_even_with_feature_disabled() -> R
         })
         .await?;
     app.shutdown_gracefully().await?;
+
+    if remove_archived_rollout {
+        let rollout_path = find_archived_thread_path_by_id_str(
+            home.path(),
+            &thread.id,
+            /*state_db_ctx*/ None,
+        )
+        .await?
+        .expect("archived thread has a rollout");
+        std::fs::remove_file(rollout_path)?;
+        let state_db = StateRuntime::init(sqlite.clone(), "mock_provider".into()).await?;
+        assert!(
+            state_db
+                .get_thread(ThreadId::from_string(&thread.id)?)
+                .await?
+                .is_some()
+        );
+    }
 
     MockResponsesConfig::new(&server.uri())
         .disable_feature(Feature::AgentMessageBoard)
