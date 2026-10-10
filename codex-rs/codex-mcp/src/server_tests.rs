@@ -81,6 +81,8 @@ fn connection_identity(
         ElicitationCapability::default(),
         ClientMcpExtensions::default(),
         /*previous_identity*/ None,
+        /*effective_protocol_mode*/ Some(McpProtocolMode::Legacy),
+        crate::pagination::MAX_MCP_CATALOG_ITEMS,
     )
 }
 
