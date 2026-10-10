@@ -1,7 +1,9 @@
 //! Implements shared controller operations using the existing local runtime helpers.
 //! Runtime loading, message delivery and shared state remain in their existing modules.
 
+use super::ListedAgentsPage;
 use super::LocalAgentControl;
+use super::agent_matches_prefix;
 use super::spawn::SpawnInitialInput;
 use crate::agent::api::AgentConfigUpdate;
 use crate::agent::api::AgentControl;
@@ -13,6 +15,7 @@ use crate::agent::api::DeliveryReceipt;
 use crate::agent::api::SendRequest;
 use crate::agent::api::SpawnRequest;
 use crate::agent::types::AgentExecutionGuard;
+use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent::types::MessageDeliveryMode;
 use crate::agent_communication::AgentCommunicationContext;
@@ -24,6 +27,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
@@ -47,11 +51,11 @@ impl AgentControl for LocalAgentControl {
         Box::pin(async move {
             self.runtime.register_session_root(caller, parent);
             if let Ok(thread_id) = ThreadId::from_string(target) {
+                self.ensure_open_agent_known_by_id(caller, thread_id)
+                    .await?;
                 return Ok(thread_id);
             }
-            self.runtime
-                .resolve_agent_reference(caller, source, target)
-                .await
+            self.resolve_agent_reference(caller, source, target).await
         })
     }
 
@@ -115,9 +119,14 @@ impl AgentControl for LocalAgentControl {
 
     fn ensure_child_loaded(&self, parent: ThreadId, child: ThreadId) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            let parent = self.runtime.upgrade()?.get_thread(parent).await?;
-            let config = parent.session.get_config().await.as_ref().clone();
-            self.ensure_v2_agent_loaded(config, child, Some(parent))
+            let parent_thread = self.runtime.upgrade()?.get_thread(parent).await?;
+            let parent_snapshot = parent_thread.config_snapshot().await;
+            self.runtime
+                .register_session_root(parent, parent_snapshot.parent_thread_id);
+            self.ensure_open_agent_known_by_id_for_explicit_resume(parent, child)
+                .await?;
+            let config = parent_thread.session.get_config().await.as_ref().clone();
+            self.ensure_v2_agent_loaded(config, child, Some(parent_thread))
                 .await
         })
     }
@@ -129,7 +138,7 @@ impl AgentControl for LocalAgentControl {
         version: MultiAgentVersion,
     ) -> BoxFuture<'_, Result<AgentInfo>> {
         Box::pin(async move {
-            let target = self.resolve_target(caller, &target)?;
+            let target = self.resolve_target(caller, &target).await?;
             match version {
                 MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
                     let snapshot = self.inspect_agent(target).await?;
@@ -150,32 +159,86 @@ impl AgentControl for LocalAgentControl {
     ) -> BoxFuture<'a, Result<Vec<LiveAgent>>> {
         Box::pin(async move {
             self.runtime.register_session_root(caller, parent);
-            self.list_agents(source, path_prefix).await
+            let state = self.runtime.upgrade()?;
+            let resolved_prefix = path_prefix
+                .map(|prefix| {
+                    source
+                        .get_agent_path()
+                        .unwrap_or_else(AgentPath::root)
+                        .resolve(prefix)
+                        .map_err(CodexErr::UnsupportedOperation)
+                })
+                .transpose()?;
+            let mut metadata = self.runtime.registry.live_agents();
+            let root_path = AgentPath::root();
+            if let Some(root_thread_id) = self.runtime.registry.agent_id_for_path(&root_path) {
+                metadata.push(AgentMetadata {
+                    agent_id: Some(root_thread_id),
+                    agent_path: Some(root_path),
+                    last_task_message: Some("Main thread".to_string()),
+                    ..Default::default()
+                });
+            }
+            metadata.sort_by(|left, right| {
+                left.agent_path.cmp(&right.agent_path).then_with(|| {
+                    left.agent_id
+                        .map(|id| id.to_string())
+                        .cmp(&right.agent_id.map(|id| id.to_string()))
+                })
+            });
+            let mut agents = Vec::with_capacity(metadata.len());
+            for metadata in metadata {
+                let Some(thread_id) = metadata.agent_id else {
+                    continue;
+                };
+                if resolved_prefix.as_ref().is_some_and(|prefix| {
+                    !agent_matches_prefix(metadata.agent_path.as_ref(), prefix)
+                }) {
+                    continue;
+                }
+                // The upstream list contract returns loaded runtimes; list_page includes cold identities.
+                let thread = match state.get_thread(thread_id).await {
+                    Ok(thread) => thread,
+                    Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                agents.push(LiveAgent {
+                    thread_id,
+                    metadata,
+                    status: thread.agent_status().await,
+                });
+            }
+            Ok(agents)
+        })
+    }
+
+    fn list_page<'a>(
+        &'a self,
+        caller: ThreadId,
+        parent: Option<ThreadId>,
+        source: &'a SessionSource,
+        path_prefix: Option<&'a str>,
+        cursor: Option<&'a str>,
+        limit: Option<usize>,
+    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
+        Box::pin(async move {
+            self.runtime.register_session_root(caller, parent);
+            self.list_agents_page(source, path_prefix, cursor, limit)
+                .await
         })
     }
 
     fn child_agent_paths(&self, parent: ThreadId) -> BoxFuture<'_, Vec<AgentPath>> {
         Box::pin(async move {
-            let Some(parent_path) = self
-                .runtime
-                .registry
-                .agent_metadata_for_thread(parent)
-                .and_then(|metadata| metadata.agent_path)
-            else {
+            let Ok(current_members) = self.current_agent_members().await else {
                 return Vec::new();
             };
-            let parent_prefix = format!("{parent_path}/");
-            let mut agent_paths = self
-                .runtime
-                .registry
-                .live_agents()
+            let mut agent_paths = current_members
                 .into_iter()
-                .filter_map(|metadata| metadata.agent_path)
-                .filter(|path| {
-                    path.as_str()
-                        .strip_prefix(&parent_prefix)
-                        .is_some_and(|name| !name.contains('/'))
-                })
+                .filter(|member| member.parent_thread_id == parent)
+                .filter_map(|member| member.agent_path)
                 .collect::<Vec<_>>();
             let loaded_paths = self
                 .runtime
