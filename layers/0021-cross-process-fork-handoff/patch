@@ -4069,7 +4069,7 @@ index 6da24812836712a007b977481ac537ce184363b0..24a1a8b43f78a0cdd4356228d4103723
          is_first_run,
          should_prompt_windows_sandbox_nux_at_startup,
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index 35f8247a67dda767bde452af8f79618df094f17d..d52b66b9c98815e3a43ba2ffa26ff1c4cc9d8f50 100644
+index a321689162509af96625333822863fb163aa1326..630d61fe44681cfdbb230f950461b700fdd02096 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
 @@ -115,7 +115,7 @@ pub(super) async fn run_main_inner(

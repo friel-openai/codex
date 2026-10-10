@@ -7082,10 +7082,10 @@ index 0000000000000000000000000000000000000000..0c668dc314997151a9d9f519a227fc3a
 +}
 diff --git a/codex-rs/tui/src/daemon_identity_tests.rs b/codex-rs/tui/src/daemon_identity_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287a8d67420
+index 0000000000000000000000000000000000000000..3341c976282e3f740ffd18d2ff8f8ddc394735e2
 --- /dev/null
 +++ b/codex-rs/tui/src/daemon_identity_tests.rs
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,343 @@
 +//! A local daemon must match the TUI build before it can receive session requests.
 +
 +use super::*;
@@ -7135,6 +7135,12 @@ index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287
 +                        }
 +                        "experimentalFeature/list" => {
 +                            json!({"id": request.id, "result": {"data": features, "nextCursor": null}})
++                        }
++                        "config/read" => {
++                            json!({"id": request.id, "result": {"config": {}, "layers": []}})
++                        }
++                        "configRequirements/read" => {
++                            json!({"id": request.id, "result": {"requirements": null}})
 +                        }
 +                        _ => json!({"id": request.id, "error": {
 +                            "code": -32601, "message": "unexpected session request"
@@ -7284,7 +7290,7 @@ index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287
 +                allow_embedded_fallback,
 +            };
 +            assert_eq!(
-+                daemon_startup::compatibility_warning(&target, &config).await?,
++                daemon_startup::compatibility_warning(&target, &config, &[]).await?,
 +                Some(format!(
 +                    "Running without the shared background server: shared background server version {actual_version:?} does not match this Codex version {}.",
 +                    env!("CARGO_PKG_VERSION")
@@ -7372,8 +7378,12 @@ index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287
 +        endpoint: server.endpoint.clone(),
 +        allow_embedded_fallback: false,
 +    };
++    let cli_overrides = vec![(
++        "features.api_key_model_discovery".to_string(),
++        toml::Value::Boolean(config.features.enabled(Feature::ApiKeyModelDiscovery)),
++    )];
 +    assert_eq!(
-+        daemon_startup::compatibility_warning(&target, &config).await?,
++        daemon_startup::compatibility_warning(&target, &config, &cli_overrides).await?,
 +        None
 +    );
 +    let embedded_network_policy = codex_app_server_client::EmbeddedNetworkPolicy::default();
@@ -7408,14 +7418,19 @@ index 0000000000000000000000000000000000000000..b73f98519414581f0fa8f14efb211287
 +    assert_eq!(
 +        server.finish().await,
 +        vec![
-+            vec!["initialize", "experimentalFeature/list"],
++            vec![
++                "initialize",
++                "config/read",
++                "configRequirements/read",
++                "experimentalFeature/list"
++            ],
 +            vec!["initialize"]
 +        ]
 +    );
 +    Ok(())
 +}
 diff --git a/codex-rs/tui/src/daemon_startup.rs b/codex-rs/tui/src/daemon_startup.rs
-index 6476c94c7bc6d62b431a6df8ef1b91a58799c13f..0b15fa350086a9e3685b9886f1affa5c9ec3be60 100644
+index 91c38d78373e4215282549f9f4dbc1af997c77d3..9200954004a1a888d0734dd46556b44b20a24839 100644
 --- a/codex-rs/tui/src/daemon_startup.rs
 +++ b/codex-rs/tui/src/daemon_startup.rs
 @@ -1,8 +1,9 @@
@@ -7424,23 +7439,19 @@ index 6476c94c7bc6d62b431a6df8ef1b91a58799c13f..0b15fa350086a9e3685b9886f1affa5c
 -//! require a compatible shared server and a successful connection, except when
 -//! the Windows launcher forbids detaching a missing server. Elevated local
 -//! Windows sessions use explicit embedded behavior before discovery or startup.
-+//! require compatible features and a successful connection. A different daemon release
++//! require compatible explicit feature overrides and a successful connection. A different daemon release
 +//! always uses this CLI's embedded server without replacing the shared daemon.
 +//! A Windows launcher that forbids detaching a missing server also uses embedded mode.
 +//! Elevated local Windows sessions use embedded behavior before discovery or startup.
 
  use super::*;
- use std::collections::BTreeMap;
-@@ -164,6 +165,7 @@ pub(super) async fn compatibility_warning(
+ use codex_app_server_client::TypedRequestError;
+@@ -169,10 +170,20 @@ pub(super) async fn compatibility_warning(
          return Ok(None);
      };
      let mut restart_features = None;
 +    let mut version_mismatch = false;
      let check = async {
-         // The feature-list RPC cannot report this process-scoped structured setting.
-         if !config.features.enabled(Feature::CodeModeHost)
-@@ -173,7 +175,16 @@ pub(super) async fn compatibility_warning(
-         }
          let client = app_server_connection::connect(target)
              .await
 -            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
@@ -7454,10 +7465,10 @@ index 6476c94c7bc6d62b431a6df8ef1b91a58799c13f..0b15fa350086a9e3685b9886f1affa5c
 +                    "could not connect to check daemon feature settings".to_string()
 +                }
 +            })?;
-         let (tx, rx) = tokio::sync::oneshot::channel();
-         crate::experimental_features::fetch(
-             client.request_handle(),
-@@ -212,7 +223,7 @@ pub(super) async fn compatibility_warning(
+         // File settings and defaults belong to the daemon until it restarts.
+         // Only explicit invocation flags can request a shared-service restart.
+         let mut requested = server_features(cli_kv_overrides);
+@@ -253,7 +264,7 @@ pub(super) async fn compatibility_warning(
      .await;
      match check {
          Ok(()) => Ok(None),
@@ -7467,18 +7478,18 @@ index 6476c94c7bc6d62b431a6df8ef1b91a58799c13f..0b15fa350086a9e3685b9886f1affa5c
          ))),
          Err(reason) => Err(CompatibilityError {
 diff --git a/codex-rs/tui/src/daemon_startup_tests.rs b/codex-rs/tui/src/daemon_startup_tests.rs
-index 93f169f037a90782b07f480d87689da7b2f3e9d1..c6fdb4ed43ce0599c03b768d2650601d18c48b87 100644
+index 2a6a2eaf1f5d601a72b6ea09669091e676f1ff4f..4f491ce0fa610373c7966cda6cf0bf41dfcf6477 100644
 --- a/codex-rs/tui/src/daemon_startup_tests.rs
 +++ b/codex-rs/tui/src/daemon_startup_tests.rs
-@@ -196,7 +196,7 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
-                         continue;
+@@ -203,7 +203,7 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
                      };
-                     let response = if request.method == "initialize" {
--                        json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
-+                        json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
-                     } else {
-                         assert_eq!(request.method, "experimentalFeature/list");
-                         assert_eq!(request.params.unwrap()["threadId"], json!(null));
+                     let response = match request.method.as_str() {
+                         "initialize" => {
+-                            json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
++                            json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
+                         }
+                         "config/read" => {
+                             json!({"id": request.id, "result": {"config": {}, "layers": [{
 diff --git a/codex-rs/tui/src/ghostty_fork.rs b/codex-rs/tui/src/ghostty_fork.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..3e31e5b9d0cc9c6b106674b2800338d1696e78ae
@@ -8762,7 +8773,7 @@ index 0000000000000000000000000000000000000000..878a7a620a43b8f34e09180bcfd01a11
 +    .expect_err("--no-daemon and a remote endpoint must be rejected")
 +}
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index 87c1c42f54d99c2844a9f5939659206948edc7ce..35f8247a67dda767bde452af8f79618df094f17d 100644
+index e09f18a29aeea1b9d44448b9b1819f1d7ee2be30..a321689162509af96625333822863fb163aa1326 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
 @@ -115,6 +115,7 @@ pub(super) async fn run_main_inner(
@@ -8824,7 +8835,7 @@ index 87c1c42f54d99c2844a9f5939659206948edc7ce..35f8247a67dda767bde452af8f79618d
      )?;
      let remote_cwd_override = cli
          .cwd
-@@ -911,7 +921,7 @@ pub(super) async fn run_main_inner(
+@@ -912,7 +922,7 @@ pub(super) async fn run_main_inner(
      .await
      .map_err(|err| {
          err.downcast::<std::io::Error>()
@@ -9931,3 +9942,16 @@ index 0000000000000000000000000000000000000000..0b05a8de5bb96f08f5086707f5504a1e
 +        );
 +    }
 +}
+diff --git a/codex-rs/tui/tests/suite/daemon_compatibility.rs b/codex-rs/tui/tests/suite/daemon_compatibility.rs
+index 9a0ca72974928c52024c39cc0f6dd1cdf5146674..b87c13da0e8f4547dd314bb12d471076af552c9f 100644
+--- a/codex-rs/tui/tests/suite/daemon_compatibility.rs
++++ b/codex-rs/tui/tests/suite/daemon_compatibility.rs
+@@ -34,7 +34,7 @@ async fn incompatible_daemon_falls_back_for_explicit_features() -> Result<()> {
+                 };
+                 let response = match request.method.as_str() {
+                     "initialize" => {
+-                        json!({"id": request.id, "result": {"userAgent": "daemon-test/0.0.0"}})
++                        json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
+                     }
+                     "config/read" => {
+                         json!({"id": request.id, "result": {"config": {}, "layers": []}})
