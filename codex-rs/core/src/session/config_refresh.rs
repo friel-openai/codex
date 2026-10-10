@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::RuntimeConfigRefresh;
 use crate::session::Session;
+use crate::session::model_alias_refresh;
 use codex_config::CloudConfigBundleBindingStatus;
 use codex_config::McpServerAuth;
 use codex_features::Feature;
@@ -160,6 +161,56 @@ impl Session {
             }
             let previous_config = notify_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
+            // Alias changes publish with their owning config snapshot, never a stale refresh.
+            if !matches!(scope, RuntimeConfigRefresh::Mcp)
+                && outcome == ConfigRefreshOutcome::Published
+            {
+                let selected_model = state
+                    .session_configuration
+                    .step_settings
+                    .collaboration_mode
+                    .model()
+                    .to_string();
+                let alias_update = model_alias_refresh::selected_alias_update(
+                    &selected_model,
+                    &expected_config.custom_models,
+                    &config.custom_models,
+                    state.model_routing.last_success(),
+                );
+                match alias_update {
+                    model_alias_refresh::SelectedAliasUpdate::Unchanged => {}
+                    model_alias_refresh::SelectedAliasUpdate::Renamed { alias } => {
+                        state.model_routing.rename_profile(&selected_model, &alias);
+                        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                            Some(alias),
+                            /*effort*/ None,
+                            /*developer_instructions*/ None,
+                        );
+                    }
+                    model_alias_refresh::SelectedAliasUpdate::DetachedProfile { candidate } => {
+                        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                            Some(candidate.model),
+                            Some(candidate.reasoning_effort),
+                            /*developer_instructions*/ None,
+                        );
+                        settings.service_tier = candidate.service_tier;
+                        state.model_routing = Default::default();
+                    }
+                    model_alias_refresh::SelectedAliasUpdate::DetachedAlias { model } => {
+                        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                            Some(model),
+                            /*effort*/ None,
+                            /*developer_instructions*/ None,
+                        );
+                        state.model_routing = Default::default();
+                    }
+                }
+                state.session_configuration.model_info_overrides.custom_models =
+                    config.custom_models.clone();
+            }
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
             drop(policy_guard);
             if matches!(scope, RuntimeConfigRefresh::Mcp) {

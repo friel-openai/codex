@@ -1,5 +1,6 @@
 //! A wake invalidated during context construction must not enter task startup.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
@@ -15,6 +16,7 @@ use codex_extension_api::TurnStopInput;
 use codex_extension_items::sleep::SleepItem;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::ModelsManager;
@@ -50,6 +52,14 @@ struct GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.inner.custom_models_snapshot()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.inner.replace_custom_models(custom_models);
+    }
+
     fn raw_model_catalog(
         &self,
         strategy: RefreshStrategy,
