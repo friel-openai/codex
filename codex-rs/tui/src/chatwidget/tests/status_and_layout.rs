@@ -2237,7 +2237,7 @@ async fn answer_phase_controls_working_status_snapshot() {
             crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
         terminal.set_viewport_area(viewport);
 
-        for lines in drain_insert_history(&mut rx) {
+        for lines in drain_insert_history_with_width(&mut rx, width) {
             crate::insert_history::insert_history_lines(&mut terminal, lines)
                 .expect("insert history lines");
         }
