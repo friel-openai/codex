@@ -21,6 +21,7 @@ use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_requests;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
@@ -340,6 +341,7 @@ struct ThreadSpawnRequest {
     inherited_environments: Option<TurnEnvironmentSnapshot>,
     inherited_instructions: Option<SessionInstructions>,
     inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+    inherited_thread_state: InheritedThreadState,
     user_shell_override: Option<crate::shell::Shell>,
 }
 
@@ -361,6 +363,7 @@ impl ThreadSpawnRequest {
             inherited_environments: None,
             inherited_instructions: None,
             inherited_exec_policy: None,
+            inherited_thread_state: InheritedThreadState::default(),
             user_shell_override: None,
         }
     }
@@ -407,6 +410,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) inherited_instructions: Option<SessionInstructions>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     pub(crate) client_mcp_extensions: Option<ClientMcpExtensions>,
+    pub(crate) inherited_thread_state: InheritedThreadState,
 }
 
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
@@ -1924,6 +1928,7 @@ impl ThreadManagerState {
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             /*environments*/ None,
         ))
         .await
@@ -1943,6 +1948,7 @@ impl ThreadManagerState {
         metrics_service_name: Option<String>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        inherited_thread_state: InheritedThreadState,
         environments: Option<Vec<TurnEnvironmentSelection>>,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
@@ -1967,6 +1973,7 @@ impl ThreadManagerState {
         request.forked_from_thread_id = forked_from_thread_id;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
+        request.inherited_thread_state = inherited_thread_state;
         Box::pin(self.spawn_thread(request)).await
     }
 
@@ -1985,6 +1992,7 @@ impl ThreadManagerState {
             inherited_instructions,
             inherited_exec_policy,
             client_mcp_extensions,
+            inherited_thread_state,
         } = options;
         let client_mcp_extensions = match client_mcp_extensions {
             Some(client_mcp_extensions) => client_mcp_extensions,
@@ -2010,6 +2018,7 @@ impl ThreadManagerState {
         request.inherited_environments = inherited_environments;
         request.inherited_instructions = inherited_instructions;
         request.inherited_exec_policy = inherited_exec_policy;
+        request.inherited_thread_state = inherited_thread_state;
         Box::pin(self.spawn_thread(request)).await
     }
 
@@ -2027,6 +2036,7 @@ impl ThreadManagerState {
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
+        inherited_thread_state: InheritedThreadState,
         thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
@@ -2052,6 +2062,7 @@ impl ThreadManagerState {
         request.forked_from_thread_id = forked_from_thread_id;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
+        request.inherited_thread_state = inherited_thread_state;
         Box::pin(self.spawn_thread(request)).await
     }
 
@@ -2093,6 +2104,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_instructions,
             inherited_exec_policy,
+            inherited_thread_state,
             user_shell_override,
         } = request;
         let StartThreadOptions {
@@ -2356,6 +2368,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_exec_policy,
             parent_rollout_thread_trace,
+            inherited_thread_state,
             user_shell_override,
             parent_trace,
             environment_requests,
