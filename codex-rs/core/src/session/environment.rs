@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use codex_async_utils::OrCancelExt;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::MAX_SELECTED_CAPABILITY_ROOTS;
 use codex_exec_server::SelectedCapabilityRootsStatus;
@@ -21,6 +22,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::session::Session;
 use crate::session::session::SessionConfiguration;
 use crate::session::session::SessionSettingsUpdate;
+use crate::session::turn_context::TurnContext;
 
 /// Defaults for environments that inherit their configuration from the running turn.
 pub(crate) struct ThreadEnvironmentDefaults {
@@ -210,6 +212,84 @@ impl Session {
             self.services.turn_environments.snapshot()
         };
         snapshot.await
+    }
+
+    /// Applies an explicit workspace tool transition to the running task, unlike ordinary
+    /// settings updates, which only select environments for the next task. Existing steps
+    /// retain their captured environments while later steps read `ThreadEnvironments`.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "workspace selection and task validation must use the same state version"
+    )]
+    pub(crate) async fn activate_workspace_environments(
+        &self,
+        turn: &Arc<TurnContext>,
+        configuration: &SessionConfiguration,
+    ) -> CodexResult<TurnEnvironmentSnapshot> {
+        let (task_done, cancellation_token, selections, snapshot) = {
+            let active = self.active_turn.lock().await;
+            let task = active
+                .as_ref()
+                .and_then(|active| active.task.as_ref())
+                .filter(|task| {
+                    Arc::ptr_eq(&task.turn_context, turn) && !task.cancellation_token.is_cancelled()
+                })
+                .ok_or(CodexErr::TurnAborted)?;
+            let state = self.state.lock().await;
+            if state.session_configuration.environments != configuration.environments {
+                return Err(CodexErr::InvalidRequest(
+                    "workspace settings changed while preparing the transition".to_string(),
+                ));
+            }
+            self.mark_mcp_runtime_dirty();
+            self.services
+                .turn_environments
+                .set_active_thread_defaults(configuration.inferred_environment_config());
+            self.services
+                .turn_environments
+                .update_selections(&configuration.environments);
+            (
+                Arc::clone(&task.done),
+                task.cancellation_token.clone(),
+                self.services.turn_environments.selections(),
+                self.services.turn_environments.snapshot(),
+            )
+        };
+        let environments = snapshot.or_cancel(&cancellation_token).await?;
+        for environment in environments.starting() {
+            environment
+                .wait_until_ready()
+                .or_cancel(&cancellation_token)
+                .await?
+                .map_err(|error| {
+                    CodexErr::InvalidRequest(format!(
+                        "could not prepare the linked worktree environment: {error}"
+                    ))
+                })?;
+        }
+        // A second shared snapshot could adopt a newer, unrelated workspace selection.
+        let environments = environments.refresh_readiness();
+        let active = self.active_turn.lock().await;
+        active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .filter(|task| {
+                Arc::ptr_eq(&task.done, &task_done)
+                    && Arc::ptr_eq(&task.turn_context, turn)
+                    && !task.cancellation_token.is_cancelled()
+            })
+            .ok_or(CodexErr::TurnAborted)?;
+        let state = self.state.lock().await;
+        if state.session_configuration.environments != configuration.environments
+            || self.services.turn_environments.selections() != selections
+        {
+            return Err(CodexErr::InvalidRequest(
+                "workspace settings changed while preparing the transition".to_string(),
+            ));
+        }
+        // The manager already owns the selection and readiness. Publishing this captured snapshot
+        // back into the turn could overwrite a newer environment or sparse model-settings update.
+        Ok(environments)
     }
 
     pub(crate) async fn environment_ready(

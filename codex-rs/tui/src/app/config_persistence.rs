@@ -314,7 +314,7 @@ impl App {
         match app_server.thread_settings_update(params).await {
             Ok(true) => {
                 // Omission preserves the active value on update, but uses defaults on start.
-                // Retain effective intent across consecutive requests before confirmation.
+                // Retain effective intent until confirmation while selection stays serialized.
                 let previous = self
                     .agents_overview
                     .requested_permission_profiles
@@ -332,6 +332,8 @@ impl App {
                     .insert(thread_id, selection.profile_id.clone());
                 self.agents_overview
                     .requested_permission_profiles
+                    .insert(thread_id, selection.clone());
+                self.pending_server_profiles
                     .insert(thread_id, selection.clone());
                 self.chat_widget.add_info_message(
                     format!(

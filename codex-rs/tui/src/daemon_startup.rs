@@ -1,8 +1,9 @@
 //! Local daemon launch policy. Explicit embedded launches never discover or start a daemon;
 //! optional attachment may fall back to embedded mode, while automatic launches
-//! require a compatible shared server and a successful connection, except when
-//! the Windows launcher forbids detaching a missing server. Elevated local
-//! Windows sessions use explicit embedded behavior before discovery or startup.
+//! require compatible explicit feature overrides and a successful connection. A different daemon release
+//! always uses this CLI's embedded server without replacing the shared daemon.
+//! A Windows launcher that forbids detaching a missing server also uses embedded mode.
+//! Elevated local Windows sessions use embedded behavior before discovery or startup.
 
 use super::*;
 use codex_app_server_client::TypedRequestError;
@@ -169,10 +170,20 @@ pub(super) async fn compatibility_warning(
         return Ok(None);
     };
     let mut restart_features = None;
+    let mut version_mismatch = false;
     let check = async {
         let client = app_server_connection::connect(target)
             .await
-            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
+            .map_err(|error| {
+                version_mismatch = error
+                    .downcast_ref::<app_server_connection::LocalDaemonVersionMismatch>()
+                    .is_some();
+                if version_mismatch {
+                    error.to_string()
+                } else {
+                    "could not connect to check daemon feature settings".to_string()
+                }
+            })?;
         // File settings and defaults belong to the daemon until it restarts.
         // Only explicit invocation flags can request a shared-service restart.
         let mut requested = server_features(cli_kv_overrides);
@@ -253,7 +264,7 @@ pub(super) async fn compatibility_warning(
     .await;
     match check {
         Ok(()) => Ok(None),
-        Err(reason) if *allow_embedded_fallback => Ok(Some(format!(
+        Err(reason) if *allow_embedded_fallback || version_mismatch => Ok(Some(format!(
             "Running without the shared background server: {reason}."
         ))),
         Err(reason) => Err(CompatibilityError {
