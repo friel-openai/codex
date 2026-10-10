@@ -13,10 +13,15 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::lineage::LegacyLineageMigrationPlan;
+use super::lineage::LegacyLineageTarget;
 use super::lineage::hash_file;
+use super::lineage_stage::StagedLineage;
 use super::lineage_stage::StagedLineageTarget;
 use super::migration_error;
 use super::publish::sync_parent_directory;
@@ -41,13 +46,25 @@ pub(super) enum LineageMigrationPhase {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct LineageMigrationJournal {
     version: u32,
+    /// Absent in older v4 journals, whose authenticated source graph must not be replanned.
+    #[serde(default)]
+    pub(super) reuse_native_prefixes: bool,
+    /// Absent in journals written before mixed-format rollback replay.
+    #[serde(default)]
+    pub(super) replay_native_rollbacks: bool,
     pub(super) selected_thread_id: ThreadId,
     pub(super) selected_source_rollout_id: RolloutId,
     pub(super) phase: LineageMigrationPhase,
     pub(super) sources: Vec<LineageMigrationJournalSource>,
+    /// Authenticated ancestry files omitted by a selected prefix or filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) authentication_sources: Vec<LineageMigrationJournalSource>,
     pub(super) history_bases: Vec<LineageMigrationJournalHistoryBase>,
     pub(super) reference_dependencies: Vec<LineageMigrationJournalReference>,
     pub(super) targets: Vec<LineageMigrationJournalTarget>,
+    /// Detached review inputs use the same publication phases but have no conversation projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) review_input_target: Option<LineageMigrationJournalTarget>,
 }
 
 /// Source identity rechecked before publication or recovery.
@@ -60,6 +77,13 @@ pub(super) struct LineageMigrationJournalSource {
     pub(super) byte_count: u64,
     pub(super) record_count: u64,
     pub(super) sha256: String,
+    /// Decoded source prefix used by mixed-format rollback replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) replay_end: Option<HistoryPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_replay: Option<super::lineage::NativeReplayRange>,
+    #[serde(default)]
+    pub(super) materialized_predecessor: bool,
 }
 
 /// An external Paginated prefix that must remain unchanged through selection.
@@ -83,6 +107,9 @@ pub(super) struct LineageMigrationJournalReference {
     pub(super) segment_id: SegmentId,
     pub(super) path: PathBuf,
     pub(super) end_ordinal_exclusive: u64,
+    /// Decoded JSONL boundary; older journals only retained filtered references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) end_byte_offset: Option<u64>,
     pub(super) byte_count: u64,
     pub(super) record_count: u64,
     pub(super) sha256: String,
@@ -113,25 +140,97 @@ pub(super) struct LineageMigrationJournalTarget {
     pub(super) published_sha256: Option<String>,
 }
 
+impl LineageMigrationJournalTarget {
+    /// Unused planned targets have no staged metadata; used targets persist all staged fields.
+    fn validate_review_input_metadata(&self) -> ThreadStoreResult<()> {
+        let staged_fields = [
+            self.staged_path.is_some(),
+            self.start_ordinal.is_some(),
+            self.end_ordinal_exclusive.is_some(),
+            self.byte_count.is_some(),
+            self.record_count.is_some(),
+            self.sha256.is_some(),
+        ];
+        let staged = staged_fields.iter().all(|present| *present);
+        if (!staged && staged_fields.iter().any(|present| *present))
+            || (!staged && self.published_sha256.is_some())
+        {
+            return Err(migration_error(
+                "review-input target has incomplete staged metadata",
+            ));
+        }
+        Ok(())
+    }
+
+    fn from_target(target: &LegacyLineageTarget) -> Self {
+        Self {
+            thread_id: target.thread_id,
+            rollout_id: target.rollout_id,
+            segment_id: target.segment_id,
+            path: target.path.clone(),
+            selected: target.selected,
+            predecessor_segment_id: target.predecessor_segment_id,
+            staged_path: None,
+            start_ordinal: None,
+            end_ordinal_exclusive: None,
+            byte_count: None,
+            record_count: None,
+            sha256: None,
+            published_sha256: None,
+        }
+    }
+
+    fn matches_target(&self, target: &LegacyLineageTarget) -> bool {
+        self.thread_id == target.thread_id
+            && self.rollout_id == target.rollout_id
+            && self.segment_id == target.segment_id
+            && self.path == target.path
+            && self.selected == target.selected
+            && self.predecessor_segment_id == target.predecessor_segment_id
+    }
+
+    fn record_staged(&mut self, staged: &StagedLineageTarget) -> ThreadStoreResult<()> {
+        if self.thread_id != staged.thread_id
+            || self.rollout_id != staged.rollout_id
+            || self.segment_id != staged.segment_id
+            || self.path != staged.final_path
+            || self.selected != staged.selected
+        {
+            return Err(migration_error(
+                "staged lineage target identity does not match journal",
+            ));
+        }
+        self.staged_path = Some(staged.staged_path.clone());
+        self.start_ordinal = Some(staged.start_ordinal);
+        self.end_ordinal_exclusive = Some(staged.end_ordinal_exclusive);
+        self.byte_count = Some(staged.byte_count);
+        self.record_count = Some(staged.record_count);
+        self.sha256 = Some(staged.sha256.clone());
+        Ok(())
+    }
+}
+
 impl LineageMigrationJournal {
+    pub(super) fn validate_review_input_target(&self) -> ThreadStoreResult<()> {
+        if let Some(target) = &self.review_input_target {
+            target.validate_review_input_metadata()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn from_plan(plan: &LegacyLineageMigrationPlan) -> Self {
         Self {
             version: LINEAGE_MIGRATION_JOURNAL_VERSION,
+            reuse_native_prefixes: plan.reuse_native_prefixes,
+            replay_native_rollbacks: plan.replay_native_rollbacks,
             selected_thread_id: plan.selected_thread_id,
             selected_source_rollout_id: plan.selected_rollout_id,
             phase: LineageMigrationPhase::Planned,
-            sources: plan
-                .sources
+            sources: plan.sources.iter().map(journal_source).collect(),
+            authentication_sources: plan
+                .authentication_sources
                 .iter()
-                .map(|source| LineageMigrationJournalSource {
-                    thread_id: source.thread_id,
-                    rollout_id: source.rollout_id,
-                    segment_id: source.segment_id,
-                    path: source.path.clone(),
-                    byte_count: source.byte_count,
-                    record_count: source.record_count,
-                    sha256: source.sha256.clone(),
-                })
+                .map(journal_source)
                 .collect(),
             history_bases: plan
                 .history_bases
@@ -156,6 +255,7 @@ impl LineageMigrationJournal {
                     segment_id: source.segment_id,
                     path: source.path.clone(),
                     end_ordinal_exclusive: source.end_ordinal_exclusive,
+                    end_byte_offset: Some(source.end_byte_offset),
                     byte_count: source.byte_count,
                     record_count: source.record_count,
                     sha256: source.sha256.clone(),
@@ -164,39 +264,30 @@ impl LineageMigrationJournal {
             targets: plan
                 .targets
                 .iter()
-                .map(|target| LineageMigrationJournalTarget {
-                    thread_id: target.thread_id,
-                    rollout_id: target.rollout_id,
-                    segment_id: target.segment_id,
-                    path: target.path.clone(),
-                    selected: target.selected,
-                    predecessor_segment_id: target.predecessor_segment_id,
-                    staged_path: None,
-                    start_ordinal: None,
-                    end_ordinal_exclusive: None,
-                    byte_count: None,
-                    record_count: None,
-                    sha256: None,
-                    published_sha256: None,
-                })
+                .map(LineageMigrationJournalTarget::from_target)
                 .collect(),
+            review_input_target: plan
+                .review_input_target
+                .as_ref()
+                .map(LineageMigrationJournalTarget::from_target),
         }
     }
 
     pub(super) fn verify_plan(&self, plan: &LegacyLineageMigrationPlan) -> ThreadStoreResult<()> {
-        let targets_match = self.targets.len() == plan.targets.len()
+        self.validate_review_input_target()?;
+        let review_input_target_matches =
+            match (&self.review_input_target, &plan.review_input_target) {
+                (Some(journal), Some(target)) => journal.matches_target(target),
+                (None, None) => true,
+                _ => false,
+            };
+        let targets_match = review_input_target_matches
+            && self.targets.len() == plan.targets.len()
             && self
                 .targets
                 .iter()
                 .zip(&plan.targets)
-                .all(|(journal, target)| {
-                    journal.thread_id == target.thread_id
-                        && journal.rollout_id == target.rollout_id
-                        && journal.segment_id == target.segment_id
-                        && journal.path == target.path
-                        && journal.selected == target.selected
-                        && journal.predecessor_segment_id == target.predecessor_segment_id
-                });
+                .all(|(journal, target)| journal.matches_target(target));
         let previous_selected_journal = PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS
             .contains(&self.version)
             && phase_rank(self.phase) >= phase_rank(LineageMigrationPhase::Selected);
@@ -209,12 +300,92 @@ impl LineageMigrationJournal {
         Ok(())
     }
 
-    /// Returns true when a pre-selection journal uses the previous unscoped target identity.
+    /// Accepts only a complete-record append to the selected source of an unpublished plan.
+    /// Every immutable dependency and every previously authenticated source byte must still match.
+    pub(super) async fn permits_selected_source_append(
+        &self,
+        plan: &LegacyLineageMigrationPlan,
+    ) -> ThreadStoreResult<bool> {
+        if self.version != LINEAGE_MIGRATION_JOURNAL_VERSION
+            || !matches!(
+                self.phase,
+                LineageMigrationPhase::Planned
+                    | LineageMigrationPhase::TargetsDurable
+                    | LineageMigrationPhase::ProjectionDurable
+            )
+        {
+            return Ok(false);
+        }
+        let Some(previous) = self.sources.last() else {
+            return Ok(false);
+        };
+        let Some(current) = plan.sources.last() else {
+            return Ok(false);
+        };
+        if current
+            .path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+            || current.byte_count <= previous.byte_count
+            || current.record_count <= previous.record_count
+        {
+            return Ok(false);
+        }
+        let mut previous_plan = plan.clone();
+        let Some(source) = previous_plan.sources.last_mut() else {
+            return Ok(false);
+        };
+        source.byte_count = previous.byte_count;
+        source.record_count = previous.record_count;
+        source.sha256.clone_from(&previous.sha256);
+        if !self.authenticated_inputs_match(&previous_plan)
+            || self.targets.iter().any(|old| {
+                plan.targets
+                    .iter()
+                    .any(|new| old.rollout_id == new.rollout_id)
+            })
+        {
+            return Ok(false);
+        }
+        let mut file = tokio::fs::File::open(&current.path)
+            .await
+            .map_err(migration_error)?
+            .take(previous.byte_count);
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let mut bytes = 0_u64;
+        let mut last_byte = None;
+        loop {
+            let read = file.read(&mut buffer).await.map_err(migration_error)?;
+            if read == 0 {
+                break;
+            }
+            bytes += read as u64;
+            last_byte = Some(buffer[read - 1]);
+            hasher.update(&buffer[..read]);
+        }
+        Ok(bytes == previous.byte_count
+            && last_byte == Some(b'\n')
+            && format!("{:x}", hasher.finalize()) == previous.sha256)
+    }
+
+    /// Upgrade unpublished target identities before staging new checkpoint dependencies.
     pub(super) fn requires_target_identity_upgrade(
         &self,
         plan: &LegacyLineageMigrationPlan,
     ) -> ThreadStoreResult<bool> {
         if self.version == LINEAGE_MIGRATION_JOURNAL_VERSION {
+            if self.phase == LineageMigrationPhase::Planned
+                && self.review_input_target.is_none()
+                && plan.review_input_target.is_some()
+            {
+                if !self.authenticated_inputs_match(plan) {
+                    return Err(migration_error(
+                        "review-input upgrade does not match the authenticated migration sources",
+                    ));
+                }
+                return Ok(true);
+            }
             return Ok(false);
         }
         if !PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS.contains(&self.version)
@@ -241,6 +412,9 @@ impl LineageMigrationJournal {
                         && journal.byte_count == source.byte_count
                         && journal.record_count == source.record_count
                         && journal.sha256 == source.sha256
+                        && journal.replay_end == source.replay_end
+                        && journal.native_replay == source.native_replay
+                        && journal.materialized_predecessor == source.materialized_predecessor
                 });
         let history_bases_match = self.history_bases.len() == plan.history_bases.len()
             && self
@@ -269,11 +443,20 @@ impl LineageMigrationJournal {
                         && journal.segment_id == source.segment_id
                         && journal.path == source.path
                         && journal.end_ordinal_exclusive == source.end_ordinal_exclusive
+                        && journal
+                            .end_byte_offset
+                            .is_none_or(|offset| offset == source.end_byte_offset)
                         && journal.byte_count == source.byte_count
                         && journal.record_count == source.record_count
                         && journal.sha256 == source.sha256
                 });
         self.selected_thread_id == plan.selected_thread_id
+            && self.authentication_sources
+                == plan
+                    .authentication_sources
+                    .iter()
+                    .map(journal_source)
+                    .collect::<Vec<_>>()
             && self.selected_source_rollout_id == plan.selected_rollout_id
             && sources_match
             && history_bases_match
@@ -293,36 +476,33 @@ impl LineageMigrationJournal {
 
     pub(super) fn record_staged_targets(
         &mut self,
-        staged: &[StagedLineageTarget],
+        staged: &StagedLineage,
     ) -> ThreadStoreResult<()> {
-        if staged.len() != self.targets.len() {
+        self.validate_review_input_target()?;
+        if staged.targets.len() != self.targets.len() {
             return Err(migration_error(
                 "staged lineage target count does not match journal",
             ));
         }
-        for (journal, staged) in self.targets.iter_mut().zip(staged) {
-            if journal.thread_id != staged.thread_id
-                || journal.rollout_id != staged.rollout_id
-                || journal.segment_id != staged.segment_id
-                || journal.path != staged.final_path
-                || journal.selected != staged.selected
-            {
-                return Err(migration_error(
-                    "staged lineage target identity does not match journal",
-                ));
-            }
-            journal.staged_path = Some(staged.staged_path.clone());
-            journal.start_ordinal = Some(staged.start_ordinal);
-            journal.end_ordinal_exclusive = Some(staged.end_ordinal_exclusive);
-            journal.byte_count = Some(staged.byte_count);
-            journal.record_count = Some(staged.record_count);
-            journal.sha256 = Some(staged.sha256.clone());
+        for (journal, staged) in self.targets.iter_mut().zip(&staged.targets) {
+            journal.record_staged(staged)?;
+        }
+        if let Some(staged) = &staged.review_input_target {
+            self.review_input_target
+                .as_mut()
+                .ok_or_else(|| migration_error("unplanned review-input target was staged"))?
+                .record_staged(staged)?;
         }
         self.advance(LineageMigrationPhase::TargetsDurable)
     }
 
     pub(super) async fn verify_staged_targets(&self) -> ThreadStoreResult<()> {
-        for target in &self.targets {
+        self.validate_review_input_target()?;
+        for target in self.targets.iter().chain(
+            self.review_input_target
+                .iter()
+                .filter(|target| target.staged_path.is_some()),
+        ) {
             let path = target.staged_path.as_ref().ok_or_else(|| {
                 migration_error("lineage migration journal target has no staged path")
             })?;
@@ -344,7 +524,7 @@ impl LineageMigrationJournal {
     }
 
     pub(super) async fn verify_sources(&self) -> ThreadStoreResult<()> {
-        for source in &self.sources {
+        for source in self.sources.iter().chain(&self.authentication_sources) {
             let (byte_count, sha256) = hash_file(source.path.as_path()).await?;
             if byte_count != source.byte_count || sha256 != source.sha256 {
                 return Err(migration_error(format!(
@@ -375,6 +555,21 @@ impl LineageMigrationJournal {
     }
 }
 
+fn journal_source(source: &super::lineage::LegacyLineageSource) -> LineageMigrationJournalSource {
+    LineageMigrationJournalSource {
+        thread_id: source.thread_id,
+        rollout_id: source.rollout_id,
+        segment_id: source.segment_id,
+        path: source.path.clone(),
+        byte_count: source.byte_count,
+        record_count: source.record_count,
+        sha256: source.sha256.clone(),
+        replay_end: source.replay_end,
+        native_replay: source.native_replay.clone(),
+        materialized_predecessor: source.materialized_predecessor,
+    }
+}
+
 fn phase_rank(phase: LineageMigrationPhase) -> u8 {
     match phase {
         LineageMigrationPhase::Planned => 0,
@@ -390,6 +585,7 @@ pub(super) async fn write_lineage_migration_journal(
     path: &Path,
     journal: &LineageMigrationJournal,
 ) -> ThreadStoreResult<()> {
+    journal.validate_review_input_target()?;
     let parent = path
         .parent()
         .ok_or_else(|| migration_error("lineage migration journal has no parent directory"))?;
@@ -435,5 +631,38 @@ pub(super) async fn read_lineage_migration_journal(
             journal.version
         )));
     }
+    journal.validate_review_input_target()?;
     Ok(journal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_input_metadata_requires_all_staged_fields_or_none() {
+        let rollout_id = ThreadId::new();
+        for mask in 0_u8..128 {
+            let target = LineageMigrationJournalTarget {
+                thread_id: rollout_id,
+                rollout_id,
+                segment_id: None,
+                path: PathBuf::from("review-input.jsonl"),
+                selected: false,
+                predecessor_segment_id: None,
+                staged_path: (mask & 1 != 0).then(|| PathBuf::from("staged-review-input.jsonl")),
+                start_ordinal: (mask & 2 != 0).then_some(0),
+                end_ordinal_exclusive: (mask & 4 != 0).then_some(2),
+                byte_count: (mask & 8 != 0).then_some(128),
+                record_count: (mask & 16 != 0).then_some(2),
+                sha256: (mask & 32 != 0).then(|| "staged-hash".to_owned()),
+                published_sha256: (mask & 64 != 0).then(|| "published-hash".to_owned()),
+            };
+            assert_eq!(
+                target.validate_review_input_metadata().is_ok(),
+                mask == 0 || mask & 63 == 63,
+                "metadata presence mask {mask:#09b}",
+            );
+        }
+    }
 }
