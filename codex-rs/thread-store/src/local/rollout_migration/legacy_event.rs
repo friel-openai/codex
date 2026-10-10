@@ -34,6 +34,10 @@ use codex_protocol::user_input::UserInput;
 
 use crate::ThreadStoreResult;
 
+#[cfg(test)]
+#[path = "legacy_event_tests.rs"]
+mod tests;
+
 pub(super) fn user_message_item(
     event: UserMessageEvent,
     next_item_id: &mut impl FnMut() -> ThreadStoreResult<String>,
