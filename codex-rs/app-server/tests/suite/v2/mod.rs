@@ -58,6 +58,7 @@ mod experimental_feature_list;
 mod external_agent_config;
 mod external_agent_import_sync;
 mod feedback;
+mod frodex_runtime_recovery;
 mod fs;
 #[path = "gateway_oauth_tests.rs"]
 mod gateway_oauth;
