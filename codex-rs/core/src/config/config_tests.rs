@@ -8401,6 +8401,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
 policy = "Use the user-configured guardian policy."
 extra_policy = "Use the user-configured additional policy."
 experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
+use_ultrafast = true
 "#,
     )
     .expect("TOML deserialization should succeed");
@@ -8418,6 +8419,50 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
             Some("Configured template: {{ tenant_policy_config }}"),
         )
     );
+    assert!(
+        cfg.auto_review
+            .as_ref()
+            .is_some_and(|auto_review| auto_review.use_ultrafast)
+    );
+}
+
+#[tokio::test]
+async fn auto_review_ultrafast_is_opt_in() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let default_config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(!default_config.auto_review_use_ultrafast);
+
+    let enabled_config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            auto_review: Some(AutoReviewToml {
+                circuit_break_action: None,
+                policy: None,
+                extra_policy: None,
+                experimental_policy_template: None,
+                experimental_conversation_history_prompt: None,
+                conversation_history_max_output_tokens: None,
+                use_ultrafast: true,
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(enabled_config.auto_review_use_ultrafast);
+
+    Ok(())
 }
 
 #[test_case::test_case("", codex_protocol::TranscriptFormat::Line; "default_line")]
@@ -8440,6 +8485,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
             ),
             experimental_conversation_history_prompt: None,
             conversation_history_max_output_tokens: None,
+            use_ultrafast: false,
         }),
         ..Default::default()
     };
@@ -8501,6 +8547,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
                 experimental_policy_template: None,
                 experimental_conversation_history_prompt: None,
                 conversation_history_max_output_tokens: None,
+                use_ultrafast: false,
             }),
             ..Default::default()
         };
@@ -8542,6 +8589,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
             experimental_policy_template: None,
             experimental_conversation_history_prompt: Some(String::new()),
             conversation_history_max_output_tokens: None,
+            use_ultrafast: false,
         }),
         ..Default::default()
     };
@@ -9973,6 +10021,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
             }),
             model_context_window: Some(123_456),
             model_auto_compact_token_limit: Some(100_000),
+            trust_candidate_constraints: false,
         })
     );
     Ok(())

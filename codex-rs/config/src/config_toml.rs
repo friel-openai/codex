@@ -592,6 +592,10 @@ pub struct AutoReviewToml {
     /// Maximum estimated tokens per Guardian history-tool response, before the standard
     /// serialization allowance. Defaults to 4,000; stricter parent tool limits still apply.
     pub conversation_history_max_output_tokens: Option<NonZeroUsize>,
+
+    /// Runs approval autoreview on `gpt-5.6-sol` with UltraFast preferred and Fast fallback.
+    #[serde(default)]
+    pub use_ultrafast: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
