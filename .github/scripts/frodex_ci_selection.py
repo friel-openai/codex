@@ -58,7 +58,7 @@ def load_selection(value):
             case = (binary, name)
             require(case not in seen, f"Duplicate intended case: {case}")
             seen.add(case)
-    require(len(seen) <= 308, "CI selection exceeds 308 exact cases")
+    require(len(seen) <= 333, "CI selection exceeds 333 exact cases")
     return groups
 
 

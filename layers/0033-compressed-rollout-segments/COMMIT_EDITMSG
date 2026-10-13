@@ -1,0 +1,5 @@
+Compress cold rollout segments without expanding checkpoint history
+
+Include detached segments in the existing zstd worker, preserve writer and maintenance reservations, and verify representation publication before removing JSONL. Resume certified compressed checkpoints from the active segment with decoded offsets, and support compressed legacy projection reconstruction.
+
+Resolve ordinary native predecessors by validated filenames and bound prefix reads. Preserve explicit full-history compatibility operations and legacy indexed turn ancestry. Cover compression races, rollback rejection, missing predecessors, and 10,000-segment lookup bounds.

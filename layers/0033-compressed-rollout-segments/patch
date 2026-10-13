@@ -1,0 +1,2360 @@
+diff --git a/codex-rs/rollout/src/compression.rs b/codex-rs/rollout/src/compression.rs
+index 4907b043a3e9b528ab43d56f5245afd0d0125897..d575f273fa331c21c58f509e97c72a41bdc1fc04 100644
+--- a/codex-rs/rollout/src/compression.rs
++++ b/codex-rs/rollout/src/compression.rs
+@@ -385,6 +385,8 @@ mod worker {
+     use tokio::task::JoinSet;
+
+     use crate::ARCHIVED_SESSIONS_SUBDIR;
++    use crate::ROLLOUT_SEGMENTS_SUBDIR;
++    use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
+     use crate::SESSIONS_SUBDIR;
+
+     use super::RolloutCompressionTrigger;
+@@ -556,6 +558,7 @@ mod worker {
+             for root in [
+                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+                 codex_home.join(SESSIONS_SUBDIR),
++                codex_home.join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
+             ] {
+                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
+                     stats.time_budget_exhausted = true;
+@@ -667,6 +670,13 @@ mod worker {
+         let mut stack = vec![root.to_path_buf()];
+         let mut jobs = JoinSet::new();
+         while let Some(dir) = stack.pop() {
++            // Do not follow a symlink used as a storage root or discovered directory.
++            if !tokio::fs::symlink_metadata(&dir)
++                .await
++                .is_ok_and(|metadata| metadata.is_dir())
++            {
++                continue;
++            }
+             if started_at.elapsed() >= WORKER_MAX_RUNTIME {
+                 stats.time_budget_exhausted = true;
+                 break;
+@@ -735,8 +745,33 @@ mod worker {
+                     metrics::file(trigger, "skipped_unreadable_meta");
+                     continue;
+                 };
++                // Capture identity before reading the header so replacement cannot pair a
++                // new file's bytes with the previous file's writer reservation.
++                let before = match cold_file_state(&path) {
++                    Ok(ColdFileState::Cold(state)) => state,
++                    Ok(ColdFileState::NotCold(state)) => {
++                        stats.skipped = stats.skipped.saturating_add(1);
++                        metrics::file(trigger, CompressionOutcome::SkippedNotCold.tag());
++                        if let Some(state) = state {
++                            metrics::source_bytes(trigger, "skipped_not_cold", state.len);
++                        }
++                        continue;
++                    }
++                    Err(err) => {
++                        stats.failed = stats.failed.saturating_add(1);
++                        FailureMetric::File(trigger).record("read_metadata", &err);
++                        continue;
++                    }
++                };
+                 let thread_id = match crate::read_session_meta_line(path.as_path()).await {
+-                    Ok(metadata) => metadata.meta.id,
++                    Ok(metadata) => {
++                        if !valid_segment_identity(root, &path, &metadata.meta) {
++                            stats.skipped = stats.skipped.saturating_add(1);
++                            metrics::file(trigger, "skipped_unreadable_meta");
++                            continue;
++                        }
++                        metadata.meta.id
++                    }
+                     Err(err) => {
+                         stats.scan_errors = true;
+                         let reason = err
+@@ -793,6 +828,7 @@ mod worker {
+                     // Blocking work retains maintenance ownership even if the async worker exits.
+                     let result = compress_rollout_if_cold_blocking(
+                         path.as_path(),
++                        before,
+                         &writer_locks,
+                         thread_id,
+                         &maintenance,
+@@ -809,6 +845,31 @@ mod worker {
+
+     type CompressionJobResult = (PathBuf, Duration, io::Result<CompressionMeasurement>);
+
++    /// Only the two segment layouts published by thread-store are compression candidates.
++    /// Review inputs and unknown detached files must not inherit rollout treatment.
++    fn valid_segment_identity(
++        root: &Path,
++        path: &Path,
++        meta: &codex_protocol::protocol::SessionMeta,
++    ) -> bool {
++        if root.file_name() == Some(OsStr::new(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)) {
++            let segment = meta
++                .segment_id
++                .map(|id| id.to_string())
++                .unwrap_or_else(|| "initial".to_string());
++            return path.parent() == Some(root.join(meta.id.to_string()).join(segment).as_path());
++        }
++        let native = root.join(ROLLOUT_SEGMENTS_SUBDIR);
++        if path.starts_with(&native) {
++            let Some((year, month, day)) = path.file_name().and_then(crate::rollout_date_parts)
++            else {
++                return false;
++            };
++            return path.parent() == Some(native.join(year).join(month).join(day).as_path());
++        }
++        true
++    }
++
+     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+     enum CompressionOutcome {
+         Compressed,
+@@ -923,6 +984,7 @@ mod worker {
+
+     fn compress_rollout_if_cold_blocking(
+         path: &Path,
++        before: FileState,
+         writer_locks: &Arc<crate::WriterLockCoordinator>,
+         thread_id: codex_protocol::ThreadId,
+         maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+@@ -935,21 +997,18 @@ mod worker {
+                 /*compressed_bytes*/ None,
+             ));
+         }
+-        let before = match cold_file_state(path)
+-            .inspect_err(|err| FailureMetric::File(trigger).record("read_metadata", err))?
+-        {
+-            ColdFileState::Cold(state) => state,
+-            ColdFileState::NotCold(state) => {
+-                return Ok(CompressionMeasurement::new(
+-                    CompressionOutcome::SkippedNotCold,
+-                    state.map(|state| state.len),
+-                    /*compressed_bytes*/ None,
+-                ));
+-            }
+-        };
+         let source_bytes = Some(before.len);
++        if !same_file_state(path, &before)? {
++            return Ok(CompressionMeasurement::new(
++                CompressionOutcome::SkippedChanged,
++                source_bytes,
++                /*compressed_bytes*/ None,
++            ));
++        }
+         let compressed_path = path::compressed_rollout_path(path);
+         if compressed_path.exists() {
++            // Plain takes precedence for readers. A surviving compressed sibling may
++            // predate an append or be corrupt; never discard either copy without proof.
+             return Ok(CompressionMeasurement::new(
+                 CompressionOutcome::SkippedAlreadyCompressed,
+                 source_bytes,
+@@ -968,7 +1027,7 @@ mod worker {
+             .suffix(TEMP_SUFFIX)
+             .tempfile_in(temp_dir)
+             .inspect_err(|err| FailureMetric::File(trigger).record("create_temp", err))?;
+-        if !encode_zstd_to_writer(path, temp_file.as_file_mut(), maintenance)
++        if !encode_zstd_to_writer(path, &before, temp_file.as_file_mut(), maintenance)
+             .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?
+         {
+             return Ok(CompressionMeasurement::new(
+@@ -1012,7 +1071,9 @@ mod worker {
+             .len();
+
+         // Encoding and verification do not block writers. Coordination prevents writer
+-        // acquisition while we recheck, publish, and remove the original file.
++        // acquisition while we recheck, publish, and remove the original file. Keep
++        // this reservation for sealed segments too: repair, deletion, and immutable
++        // fork readers use the same thread lock even when no append is possible.
+         let Some(_publication_guard) = writer_locks
+             .try_acquire_for_publication(thread_id)
+             .inspect_err(|err| FailureMetric::File(trigger).record("writer_lock", err))?
+@@ -1064,8 +1125,14 @@ mod worker {
+                 /*compressed_bytes*/ None,
+             ));
+         }
++        // Persist the new directory entry before unlinking the only durable source.
++        // A failure leaves both representations, with plain-file read precedence.
++        sync_directory(temp_dir)
++            .inspect_err(|err| FailureMetric::File(trigger).record("sync", err))?;
+         std::fs::remove_file(path)
+             .inspect_err(|err| FailureMetric::File(trigger).record("remove_source", err))?;
++        sync_directory(temp_dir)
++            .inspect_err(|err| FailureMetric::File(trigger).record("sync", err))?;
+         Ok(CompressionMeasurement::new(
+             CompressionOutcome::Compressed,
+             source_bytes,
+@@ -1073,14 +1140,18 @@ mod worker {
+         ))
+     }
+
++    /// The source snapshot binds header identity, encoded bytes, and publication checks.
+     struct FileState {
+         len: u64,
+         modified: SystemTime,
+         permissions: Permissions,
++        // Device, inode, and ctime (seconds, nanoseconds) detect replacement and rewrites.
++        #[cfg(unix)]
++        identity: (u64, u64, i64, i64),
+     }
+
+     fn cold_file_state(path: &Path) -> io::Result<ColdFileState> {
+-        let metadata = match std::fs::metadata(path) {
++        let metadata = match std::fs::symlink_metadata(path) {
+             Ok(metadata) => metadata,
+             Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                 return Ok(ColdFileState::NotCold(None));
+@@ -1090,11 +1161,21 @@ mod worker {
+         if !metadata.is_file() {
+             return Ok(ColdFileState::NotCold(None));
+         }
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::MetadataExt;
++            // A second name could still be a mutable rollout owned by another thread.
++            if metadata.nlink() != 1 {
++                return Ok(ColdFileState::NotCold(None));
++            }
++        }
+         let modified = metadata.modified()?;
+         let state = FileState {
+             len: metadata.len(),
+             modified,
+             permissions: metadata.permissions(),
++            #[cfg(unix)]
++            identity: file_identity(&metadata),
+         };
+         let age = SystemTime::now()
+             .duration_since(modified)
+@@ -1106,22 +1187,59 @@ mod worker {
+     }
+
+     fn same_file_state(path: &Path, expected: &FileState) -> io::Result<bool> {
+-        match std::fs::metadata(path) {
+-            Ok(metadata) => Ok(metadata.len() == expected.len
+-                && metadata.modified()? == expected.modified
+-                && metadata.permissions() == expected.permissions),
++        match std::fs::symlink_metadata(path) {
++            Ok(metadata) => matches_file_state(&metadata, expected),
+             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+             Err(err) => Err(err),
+         }
+     }
+
++    fn matches_file_state(metadata: &std::fs::Metadata, expected: &FileState) -> io::Result<bool> {
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::MetadataExt;
++            if metadata.nlink() != 1 || file_identity(metadata) != expected.identity {
++                return Ok(false);
++            }
++        }
++        Ok(metadata.is_file()
++            && metadata.len() == expected.len
++            && metadata.modified()? == expected.modified
++            && metadata.permissions() == expected.permissions)
++    }
++
++    #[cfg(unix)]
++    fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64, i64, i64) {
++        use std::os::unix::fs::MetadataExt;
++        (
++            metadata.dev(),
++            metadata.ino(),
++            metadata.ctime(),
++            metadata.ctime_nsec(),
++        )
++    }
++
++    fn sync_directory(path: &Path) -> io::Result<()> {
++        // std does not provide portable directory handles on Windows.
++        #[cfg(unix)]
++        File::open(path)?.sync_all()?;
++        #[cfg(not(unix))]
++        let _ = path;
++        Ok(())
++    }
++
+     fn encode_zstd_to_writer(
+         source: &Path,
++        expected: &FileState,
+         output: impl Write,
+         maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+     ) -> io::Result<bool> {
+         let mut input = File::open(source)?;
++        if !matches_file_state(&input.metadata()?, expected)? {
++            return Err(io::Error::other("rollout changed before encoding"));
++        }
+         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
++        encoder.include_checksum(true)?;
+         // Preserve fast byte-bound checks for paginated history without decoding the whole file.
+         encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
+         #[cfg(test)]
+@@ -1188,6 +1306,7 @@ mod worker {
+         for root in [
+             codex_home.join(SESSIONS_SUBDIR),
+             codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
++            codex_home.join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
+         ] {
+             if maintenance.should_yield()? {
+                 break;
+@@ -1215,6 +1334,12 @@ mod worker {
+         }
+         let mut stack = vec![root.to_path_buf()];
+         while let Some(dir) = stack.pop() {
++            if !tokio::fs::symlink_metadata(&dir)
++                .await
++                .is_ok_and(|metadata| metadata.is_dir())
++            {
++                continue;
++            }
+             if maintenance.should_yield()? {
+                 return Ok(errors);
+             }
+@@ -1255,7 +1380,12 @@ mod worker {
+                     && path
+                         .file_name()
+                         .and_then(OsStr::to_str)
+-                        .is_some_and(|name| name.ends_with(TEMP_SUFFIX))
++                        .is_some_and(|name| {
++                            name.ends_with(TEMP_SUFFIX)
++                                && (root.file_name()
++                                    != Some(OsStr::new(ROTATED_ROLLOUT_SEGMENTS_SUBDIR))
++                                    || name.starts_with("rollout-compress-"))
++                        })
+                 {
+                     let stale = entry
+                         .metadata()
+diff --git a/codex-rs/rollout/src/compression/segment_tests.rs b/codex-rs/rollout/src/compression/segment_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..553346d9b969605db647d39d95f4b3e3d7d407ca
+--- /dev/null
++++ b/codex-rs/rollout/src/compression/segment_tests.rs
+@@ -0,0 +1,392 @@
++use super::*;
++use codex_protocol::SegmentId;
++use pretty_assertions::assert_eq;
++use std::path::Path;
++use std::path::PathBuf;
++
++pub(super) fn native_segment_path(home: &Path, rollout_id: Uuid) -> PathBuf {
++    home.join(crate::SESSIONS_SUBDIR)
++        .join(crate::ROLLOUT_SEGMENTS_SUBDIR)
++        .join("2025/01/03")
++        .join(format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl"))
++}
++
++pub(super) fn detached_segment_path(
++    home: &Path,
++    thread_id: ThreadId,
++    segment_id: Option<SegmentId>,
++    rollout_id: Uuid,
++) -> PathBuf {
++    home.join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++        .join(thread_id.to_string())
++        .join(
++            segment_id
++                .map(|id| id.to_string())
++                .unwrap_or_else(|| "initial".to_string()),
++        )
++        .join(format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl"))
++}
++
++fn write_segment(
++    path: &Path,
++    thread_id: ThreadId,
++    segment_id: Option<SegmentId>,
++) -> anyhow::Result<()> {
++    write_paginated_rollout(path, thread_id, "sealed history", 0)?;
++    let mut lines = fs::read_to_string(path)?
++        .lines()
++        .map(crate::parse_rollout_line)
++        .collect::<Result<Vec<_>, _>>()?;
++    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
++        panic!("session metadata");
++    };
++    meta.meta.segment_id = segment_id;
++    let bytes = lines
++        .iter()
++        .map(serde_json::to_string)
++        .collect::<Result<Vec<_>, _>>()?
++        .join("\n");
++    fs::write(path, format!("{bytes}\n"))?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn worker_compresses_native_detached_and_initial_segments_without_changing_bytes()
++-> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let segment_id = SegmentId::new();
++    let paths = [
++        (native_segment_path(home.path(), Uuid::new_v4()), None),
++        (
++            detached_segment_path(home.path(), thread_id, None, Uuid::new_v4()),
++            None,
++        ),
++        (
++            detached_segment_path(home.path(), thread_id, Some(segment_id), Uuid::new_v4()),
++            Some(segment_id),
++        ),
++    ];
++    let mut expected = Vec::new();
++    for (path, id) in &paths {
++        write_segment(path, thread_id, *id)?;
++        set_old_mtime(path)?;
++        expected.push((
++            fs::read(path)?,
++            fs::metadata(path)?.modified()?,
++            open_rollout_line_reader(path).await?,
++        ));
++    }
++    worker::run(home.path().to_path_buf(), Startup).await?;
++    for ((path, _), (bytes, modified, mut open_reader)) in paths.iter().zip(expected) {
++        assert!(!path.exists());
++        let compressed = compressed_rollout_path(path);
++        assert_eq!(fs::metadata(&compressed)?.modified()?, modified);
++        assert_eq!(
++            zstd::stream::decode_all(fs::File::open(&compressed)?)?,
++            bytes
++        );
++        assert_eq!(
++            crate::read_rollout_prefix(path, bytes.len())?,
++            Some(bytes.clone())
++        );
++        let mut already_open_bytes = String::new();
++        while let Some(line) = open_reader.next_line().await? {
++            already_open_bytes.push_str(&line);
++            already_open_bytes.push('\n');
++        }
++        assert_eq!(already_open_bytes.into_bytes(), bytes);
++        let (items, id, errors) = RolloutRecorder::load_rollout_items(path).await?;
++        assert_eq!(id, Some(thread_id));
++        assert_eq!(errors, 0);
++        assert_eq!(items.len(), 2);
++        let mut corrupt = fs::read(&compressed)?;
++        *corrupt.last_mut().expect("checksum") ^= 1;
++        assert!(zstd::stream::decode_all(corrupt.as_slice()).is_err());
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn segment_age_uses_mtime_not_filename_and_rejects_future_mtime() -> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let now = SystemTime::now();
++    let mut paths = Vec::new();
++    for modified in [
++        now - Duration::from_secs(6 * 24 * 60 * 60),
++        now + Duration::from_secs(24 * 60 * 60),
++    ] {
++        for path in [
++            native_segment_path(home.path(), Uuid::new_v4()),
++            detached_segment_path(home.path(), thread_id, None, Uuid::new_v4()),
++        ] {
++            write_segment(&path, thread_id, None)?;
++            fs::File::options()
++                .write(true)
++                .open(&path)?
++                .set_times(FileTimes::new().set_modified(modified))?;
++            paths.push(path);
++        }
++    }
++    worker::run(home.path().to_path_buf(), Startup).await?;
++    for path in paths {
++        assert!(path.exists());
++        assert!(!compressed_rollout_path(&path).exists());
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn worker_preserves_young_segments_and_segments_reserved_by_writers_or_fork_readers()
++-> anyhow::Result<()> {
++    for reserved in [false, true] {
++        for fork_reader in [false, true] {
++            let home = TempDir::new()?;
++            let thread_id = ThreadId::new();
++            let paths = [
++                native_segment_path(home.path(), Uuid::new_v4()),
++                detached_segment_path(home.path(), thread_id, None, Uuid::new_v4()),
++            ];
++            let writers = std::sync::Arc::new(crate::WriterLockCoordinator::new(home.path()));
++            let guard = if reserved {
++                Some(if fork_reader {
++                    writers.acquire_fork_reader(thread_id)?
++                } else {
++                    writers.acquire(thread_id)?
++                })
++            } else {
++                None
++            };
++            for path in &paths {
++                write_segment(path, thread_id, None)?;
++                if reserved {
++                    set_old_mtime(path)?;
++                }
++            }
++            worker::run(home.path().to_path_buf(), Startup).await?;
++            for path in paths {
++                assert!(path.exists());
++                assert!(!compressed_rollout_path(&path).exists());
++            }
++            drop(guard);
++        }
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn worker_excludes_unknown_segment_layouts_and_mismatched_identities() -> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let segment_id = SegmentId::new();
++    let valid = detached_segment_path(home.path(), thread_id, Some(segment_id), Uuid::new_v4());
++    let paths = [
++        detached_segment_path(home.path(), ThreadId::new(), None, Uuid::new_v4()),
++        valid,
++        home.path()
++            .join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++            .join("unknown")
++            .join(format!(
++                "rollout-2025-01-03T12-00-00-{}.jsonl",
++                Uuid::new_v4()
++            )),
++        crate::review_input_segment_path(home.path(), thread_id),
++        native_segment_path(home.path(), Uuid::new_v4())
++            .parent()
++            .unwrap()
++            .join("extra")
++            .join(format!(
++                "rollout-2025-01-03T12-00-00-{}.jsonl",
++                Uuid::new_v4()
++            )),
++    ];
++    for path in &paths {
++        write_segment(path, thread_id, None)?;
++        set_old_mtime(path)?;
++    }
++    worker::run(home.path().to_path_buf(), Startup).await?;
++    for path in paths {
++        assert!(path.exists(), "unexpectedly compressed {path:?}");
++        assert!(!compressed_rollout_path(&path).exists());
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn worker_preserves_plain_segment_when_compressed_sibling_is_stale_or_corrupt()
++-> anyhow::Result<()> {
++    for corrupt in [false, true] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = detached_segment_path(home.path(), thread_id, None, Uuid::new_v4());
++        write_segment(&path, thread_id, None)?;
++        set_old_mtime(&path)?;
++        let expected = fs::read(&path)?;
++        let sibling = if corrupt {
++            b"not zstd".to_vec()
++        } else {
++            zstd::stream::encode_all(&b"obsolete bytes\n"[..], 3)?
++        };
++        fs::write(compressed_rollout_path(&path), &sibling)?;
++        worker::run(home.path().to_path_buf(), Startup).await?;
++        assert_eq!(fs::read(&path)?, expected);
++        assert_eq!(fs::read(compressed_rollout_path(&path))?, sibling);
++        let (items, id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
++        assert_eq!(id, Some(thread_id));
++        assert_eq!(errors, 0);
++        assert_eq!(items.len(), 2);
++    }
++    Ok(())
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn worker_preserves_linked_segments_and_does_not_follow_symlinked_roots() -> anyhow::Result<()>
++{
++    let home = TempDir::new()?;
++    let outside = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let original = detached_segment_path(outside.path(), thread_id, None, Uuid::new_v4());
++    write_segment(&original, thread_id, None)?;
++    set_old_mtime(&original)?;
++    std::os::unix::fs::symlink(
++        outside.path().join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
++        home.path().join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
++    )?;
++    let hard_link = native_segment_path(home.path(), Uuid::new_v4());
++    fs::create_dir_all(hard_link.parent().unwrap())?;
++    fs::hard_link(&original, &hard_link)?;
++    let symlink = native_segment_path(home.path(), Uuid::new_v4());
++    std::os::unix::fs::symlink(&original, &symlink)?;
++    worker::run(home.path().to_path_buf(), Startup).await?;
++    for path in [&original, &hard_link, &symlink] {
++        assert!(path.exists());
++        assert!(!compressed_rollout_path(path).exists());
++    }
++    Ok(())
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn worker_detects_segment_replacement_with_identical_size_and_mtime() -> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let path = detached_segment_path(home.path(), thread_id, None, Uuid::new_v4());
++    write_segment(&path, thread_id, None)?;
++    set_old_mtime(&path)?;
++    let modified = fs::metadata(&path)?.modified()?;
++    let original = fs::read(&path)?;
++    let (started, resume) = worker::pause_encoding(&path);
++    let compression = tokio::spawn(worker::run(home.path().to_path_buf(), Startup));
++    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(5))).await??;
++    let replacement = path.with_extension("replacement");
++    fs::write(&replacement, &original)?;
++    fs::File::options()
++        .write(true)
++        .open(&replacement)?
++        .set_times(FileTimes::new().set_modified(modified))?;
++    fs::rename(&replacement, &path)?;
++    resume.send(())?;
++    compression.await??;
++    assert_eq!(fs::read(&path)?, original);
++    assert!(!compressed_rollout_path(&path).exists());
++    Ok(())
++}
++
++#[tokio::test]
++async fn foreground_reader_cancels_segment_compression_even_after_worker_abort()
++-> anyhow::Result<()> {
++    for native in [false, true] {
++        for abort_worker in [false, true] {
++            let home = TempDir::new()?;
++            let thread_id = ThreadId::new();
++            let path = if native {
++                native_segment_path(home.path(), Uuid::new_v4())
++            } else {
++                detached_segment_path(home.path(), thread_id, None, Uuid::new_v4())
++            };
++            write_segment(&path, thread_id, None)?;
++            set_old_mtime(&path)?;
++            let expected = fs::read(&path)?;
++            let (started, resume) = worker::pause_encoding(&path);
++            let mut compression = Some(tokio::spawn(worker::run(
++                home.path().to_path_buf(),
++                Startup,
++            )));
++            tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(5)))
++                .await??;
++            let reader_home = home.path().to_path_buf();
++            let reader = tokio::spawn(async move {
++                crate::acquire_rollout_maintenance_read_lock(&reader_home).await
++            });
++            tokio::time::timeout(Duration::from_secs(5), async {
++                while !crate::maintenance::foreground_maintenance_waiting(home.path())? {
++                    tokio::task::yield_now().await;
++                }
++                Ok::<_, io::Error>(())
++            })
++            .await??;
++            if abort_worker {
++                let task = compression.take().unwrap();
++                task.abort();
++                assert!(task.await.unwrap_err().is_cancelled());
++                assert!(crate::try_acquire_rollout_maintenance_lock(home.path())?.is_none());
++            }
++            resume.send(())?;
++            let reader = tokio::time::timeout(Duration::from_secs(5), reader).await???;
++            if let Some(task) = compression {
++                task.await??;
++            }
++            assert_eq!(fs::read(&path)?, expected);
++            assert!(!compressed_rollout_path(&path).exists());
++            assert!(!home.path().join(".tmp/rollout-compression.lock").exists());
++            drop(reader);
++        }
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn writer_acquired_during_segment_encoding_prevents_publication() -> anyhow::Result<()> {
++    for native in [false, true] {
++        let home = TempDir::new()?;
++        let thread_id = ThreadId::new();
++        let path = if native {
++            native_segment_path(home.path(), Uuid::new_v4())
++        } else {
++            detached_segment_path(home.path(), thread_id, None, Uuid::new_v4())
++        };
++        write_segment(&path, thread_id, None)?;
++        set_old_mtime(&path)?;
++        let expected = fs::read(&path)?;
++        let (started, resume) = worker::pause_encoding(&path);
++        let compression = tokio::spawn(worker::run(home.path().to_path_buf(), Startup));
++        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(5))).await??;
++        let writers = std::sync::Arc::new(crate::WriterLockCoordinator::new(home.path()));
++        let writer = writers.acquire(thread_id)?;
++        resume.send(())?;
++        compression.await??;
++        assert_eq!(fs::read(&path)?, expected);
++        assert!(!compressed_rollout_path(&path).exists());
++        drop(writer);
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn detached_cleanup_removes_only_compression_temps() -> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let directory = home.path().join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR);
++    fs::create_dir_all(&directory)?;
++    let compression = directory.join("rollout-compress-stale.tmp");
++    let installer = directory.join("review-input.install-stale.tmp");
++    for path in [&compression, &installer] {
++        fs::write(path, "temporary bytes")?;
++        set_old_mtime(path)?;
++    }
++    worker::run(home.path().to_path_buf(), Startup).await?;
++    assert!(!compression.exists());
++    assert!(installer.exists());
++    Ok(())
++}
+diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
+index ccf94ae0138cafa358532179feb0d77490745c01..6905c3c6be514e6bdcc324534f0633c70961ccf9 100644
+--- a/codex-rs/rollout/src/compression_tests.rs
++++ b/codex-rs/rollout/src/compression_tests.rs
+@@ -30,6 +30,9 @@ use crate::first_rollout_content_match_snippet;
+ use crate::read_session_meta_line;
+ use crate::search_rollout_matches;
+
++#[path = "compression/segment_tests.rs"]
++mod segment_tests;
++
+ #[tokio::test]
+ async fn full_scan_capacity_preserves_plain_and_compressed_records() -> anyhow::Result<()> {
+     let home = TempDir::new()?;
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 6bcada2e5fae4176aa3e37d9faf90d23914d6a4e..b93d4ef7ff9df8f03c460472398a5a3564672354 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -219,6 +219,7 @@ pub use reference::materialize_model_context_rollout_items_from;
+ pub use reference::materialize_recent_rollout_items;
+ pub use reference::materialize_recent_rollout_lines;
+ pub use reference::materialize_recent_rollout_lines_from;
++pub use reference::materialize_recent_rollout_lines_from_with_path;
+ pub use reference::materialize_rollout_items;
+ pub use reference::materialize_rollout_lines;
+ pub use reference::materialize_rollout_lines_from;
+diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
+index 0dd9f21339dfaf97b13b1af53c0b593a69ef5f8f..8759cce23db0dea5083b13e0a2039d3b7b6f7558 100644
+--- a/codex-rs/rollout/src/reference.rs
++++ b/codex-rs/rollout/src/reference.rs
+@@ -4,7 +4,6 @@ use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::fs::Metadata;
+ use std::io;
+-use std::io::Read;
+ #[cfg(unix)]
+ use std::os::unix::fs::MetadataExt;
+ use std::path::Component;
+@@ -24,11 +23,13 @@ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::HistoryPosition;
+ use codex_protocol::protocol::RolloutReferenceItem;
++use codex_protocol::protocol::SessionMeta;
+ use codex_protocol::protocol::SessionMetaLine;
+ use codex_protocol::protocol::ThreadHistoryMode;
+
+ use crate::ARCHIVED_SESSIONS_SUBDIR;
+ use crate::ModelContextScan;
++use crate::ROLLOUT_SEGMENTS_SUBDIR;
+ use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
+ use crate::SESSIONS_SUBDIR;
+ use crate::compression;
+@@ -120,6 +121,8 @@ struct ExpansionFrame {
+     history_base: Option<HistoryPosition>,
+     /// Remove this physical identity from cycle detection when the frame completes.
+     inbound_history_base: Option<RolloutId>,
++    /// Native rotations reuse the active filename's timestamp minus one second for all ancestors.
++    native_predecessor_hint: Option<PathBuf>,
+ }
+
+ /// Applies the source reference's filter and fork cutoff after its segment finishes expanding.
+@@ -207,6 +210,7 @@ impl<'a> BoundedRolloutMaterializer<'a> {
+             &mut has_older_reference,
+             Some(&mut self.cache),
+             self.retain_source_metadata,
++            Some(self.rollout_path),
+         )
+         .await?;
+         Ok(BoundedRolloutLines {
+@@ -517,6 +521,7 @@ pub async fn materialize_rollout_lines(
+         lines,
+         MaterializationPolicy::Complete,
+         &mut has_older_reference,
++        Some(rollout_path),
+     )
+     .await
+ }
+@@ -532,6 +537,7 @@ pub async fn materialize_rollout_lines_from(
+         lines,
+         MaterializationPolicy::Complete,
+         &mut has_older_reference,
++        None,
+     )
+     .await
+ }
+@@ -577,6 +583,7 @@ pub async fn materialize_model_context_rollout_items_from(
+             &mut has_older_reference,
+             Some(&mut cache),
+             /*retain_source_metadata*/ false,
++            None,
+         )
+         .await?;
+         let mut scan = ModelContextScan::default();
+@@ -616,7 +623,27 @@ pub async fn materialize_recent_rollout_lines(
+     rollout_path: &Path,
+ ) -> io::Result<Vec<RolloutLine>> {
+     let lines = load_active_rollout_lines(rollout_path).await?;
+-    materialize_recent_rollout_lines_from(codex_home, lines).await
++    materialize_recent_rollout_lines_from_with_path(codex_home, rollout_path, lines).await
++}
++
++/// Replays caller-decoded records while retaining the physical filename for native lookup.
++///
++/// Filenames use the original local time, while SessionMeta timestamps use UTC. The filename
++/// lets ordinary native predecessor reads avoid recursively searching every historical segment.
++pub async fn materialize_recent_rollout_lines_from_with_path(
++    codex_home: &Path,
++    rollout_path: &Path,
++    lines: Vec<RolloutLine>,
++) -> io::Result<Vec<RolloutLine>> {
++    let mut has_older_reference = false;
++    materialize_rollout_lines_from_with_policy(
++        codex_home,
++        lines,
++        MaterializationPolicy::RecentSegments,
++        &mut has_older_reference,
++        Some(rollout_path),
++    )
++    .await
+ }
+
+ /// Expands already loaded root lines using the recent-segment replay policy.
+@@ -630,6 +657,7 @@ pub async fn materialize_recent_rollout_lines_from(
+         lines,
+         MaterializationPolicy::RecentSegments,
+         &mut has_older_reference,
++        None,
+     )
+     .await
+ }
+@@ -645,20 +673,13 @@ pub async fn materialize_bounded_rollout_lines(
+     ordinary_reference_limit: usize,
+ ) -> io::Result<BoundedRolloutLines> {
+     let lines = load_active_rollout_lines(rollout_path).await?;
+-    materialize_bounded_rollout_lines_from(codex_home, lines, ordinary_reference_limit).await
+-}
+-
+-async fn materialize_bounded_rollout_lines_from(
+-    codex_home: &Path,
+-    lines: Vec<RolloutLine>,
+-    ordinary_reference_limit: usize,
+-) -> io::Result<BoundedRolloutLines> {
+     let mut has_older_reference = false;
+     let lines = materialize_rollout_lines_from_with_policy(
+         codex_home,
+         lines,
+         MaterializationPolicy::OrdinaryReferenceLimit(ordinary_reference_limit),
+         &mut has_older_reference,
++        Some(rollout_path),
+     )
+     .await?;
+     Ok(BoundedRolloutLines {
+@@ -672,6 +693,7 @@ async fn materialize_rollout_lines_from_with_policy(
+     lines: Vec<RolloutLine>,
+     policy: MaterializationPolicy,
+     has_older_reference: &mut bool,
++    root_path: Option<&Path>,
+ ) -> io::Result<Vec<RolloutLine>> {
+     materialize_rollout_lines_from_with_cache(
+         codex_home,
+@@ -680,6 +702,7 @@ async fn materialize_rollout_lines_from_with_policy(
+         has_older_reference,
+         /*cache*/ None,
+         /*retain_source_metadata*/ false,
++        root_path,
+     )
+     .await
+ }
+@@ -691,6 +714,7 @@ async fn materialize_rollout_lines_from_with_cache(
+     has_older_reference: &mut bool,
+     cache: Option<&mut ImmutableRolloutCache>,
+     retain_source_metadata: bool,
++    root_path: Option<&Path>,
+ ) -> io::Result<Vec<RolloutLine>> {
+     let root_thread_id = canonical_session_meta(&lines)?.meta.id;
+     let mut state = ExpansionState {
+@@ -704,7 +728,7 @@ async fn materialize_rollout_lines_from_with_cache(
+     let mut materialized = Vec::with_capacity(lines.len());
+     materialized.push(lines[0].clone());
+     materialized.extend(
+-        expand_lines(
++        expand_lines_with_root_path(
+             codex_home,
+             lines,
+             &mut state,
+@@ -716,6 +740,7 @@ async fn materialize_rollout_lines_from_with_cache(
+             /*inherited_filter_texts*/ None,
+             policy,
+             has_older_reference,
++            root_path,
+         )
+         .await?,
+     );
+@@ -727,42 +752,50 @@ async fn materialize_rollout_lines_from_with_cache(
+ async fn load_history_base_prefix(
+     codex_home: &Path,
+     position: HistoryPosition,
+-) -> io::Result<Vec<RolloutLine>> {
+-    let path = crate::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
+-        .await?
+-        .ok_or_else(|| {
+-            io::Error::new(
+-                io::ErrorKind::NotFound,
+-                format!("history_base rollout {} was not found", position.thread_id),
+-            )
+-        })?;
+-    let path = compression::existing_rollout_path(&path)
+-        .await
+-        .ok_or_else(|| {
+-            io::Error::new(
+-                io::ErrorKind::NotFound,
+-                format!("history_base rollout {} disappeared", path.display()),
+-            )
+-        })?;
+-    // Reading ancestry must not decompress it in place or remove a compressed source that
+-    // a migration journal still fingerprints. Offsets address the uncompressed JSONL.
+-    let bytes = if compression::plain_rollout_path(&path) != path {
+-        let compressed_path = path.clone();
+-        tokio::task::spawn_blocking(move || -> io::Result<Vec<u8>> {
+-            let input = std::fs::File::open(compressed_path)?;
+-            let mut reader =
+-                zstd::stream::read::Decoder::new(input)?.take(position.end_byte_offset);
+-            let mut bytes = Vec::new();
+-            reader.read_to_end(&mut bytes)?;
+-            Ok(bytes)
+-        })
+-        .await
+-        .map_err(io::Error::other)??
+-    } else {
+-        tokio::fs::read(path.as_path()).await?
++    current_thread_id: ThreadId,
++    native_predecessor_hint: Option<&Path>,
++) -> io::Result<(Vec<RolloutLine>, PathBuf)> {
++    let mut path = None;
++    if let Some(candidate) = native_predecessor_hint
++        && let Some(candidate) = compression::existing_rollout_path(candidate).await
++        && canonical_approved_reference_path(codex_home, &candidate)
++            .await?
++            .is_some()
++    {
++        let meta = read_candidate_session_meta(&candidate).await?;
++        if meta.meta.id == current_thread_id
++            && crate::rollout_id_from_path(&candidate) == Some(position.thread_id)
++        {
++            path = Some(candidate);
++        }
++    }
++    let path = match path {
++        Some(path) => path,
++        None => {
++            #[cfg(test)]
++            native_segment_tests::record_recursive_lookup();
++            crate::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
++                .await?
++                .ok_or_else(|| {
++                    io::Error::new(
++                        io::ErrorKind::NotFound,
++                        format!("history_base rollout {} was not found", position.thread_id),
++                    )
++                })?
++        }
+     };
+     let end = usize::try_from(position.end_byte_offset)
+         .map_err(|_| io::Error::other("history_base byte offset exceeds addressable memory"))?;
++    // Both representations address original JSONL bytes. Frozen prefixes can be much shorter
++    // than their physical source; never read the remaining file merely to discard it afterward.
++    #[cfg(test)]
++    native_segment_tests::record_prefix_read();
++    let path_for_read = path.clone();
++    let bytes =
++        tokio::task::spawn_blocking(move || crate::read_rollout_prefix(&path_for_read, end))
++            .await
++            .map_err(io::Error::other)??
++            .ok_or_else(|| io::Error::other("history_base source is not a regular file"))?;
+     let prefix = bytes.get(..end).ok_or_else(|| {
+         io::Error::other(format!(
+             "history_base byte offset exceeds rollout {}",
+@@ -783,7 +816,18 @@ async fn load_history_base_prefix(
+         let value = serde_json::from_slice(encoded)?;
+         lines.push(crate::decode_rollout_line(value)?);
+     }
+-    canonical_session_meta(&lines)?;
++    let meta = canonical_session_meta(&lines)?;
++    if crate::rollout_id_from_path(&path) != Some(position.thread_id)
++        || crate::thread_id_from_path(&path) != Some(meta.meta.id)
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!(
++                "history_base rollout identity does not match {}",
++                path.display()
++            ),
++        ));
++    }
+     let actual_end = lines
+         .last()
+         .and_then(|line| line.ordinal)
+@@ -794,7 +838,42 @@ async fn load_history_base_prefix(
+             path.display()
+         )));
+     }
+-    Ok(lines)
++    Ok((lines, path))
++}
++
++/// Derives a lookup hint only; imported filenames and cross-thread predecessors retain fallback.
++fn native_predecessor_hint(
++    codex_home: &Path,
++    source_path: Option<&Path>,
++    meta: &SessionMeta,
++) -> Option<PathBuf> {
++    let position = meta.history_base?;
++    let native_root = codex_home
++        .join(SESSIONS_SUBDIR)
++        .join(ROLLOUT_SEGMENTS_SUBDIR);
++    let source_path = source_path
++        .filter(|path| crate::thread_id_from_path(path) == Some(meta.id))
++        .map(Path::to_path_buf)
++        .or_else(|| {
++            let timestamp = time::OffsetDateTime::parse(
++                &meta.timestamp,
++                &time::format_description::well_known::Rfc3339,
++            )
++            .ok()?
++            .to_offset(time::UtcOffset::UTC);
++            crate::rollout_file_name::RolloutFileName::new(timestamp, meta.id, meta.id)
++                .render()
++                .ok()
++                .map(PathBuf::from)
++        })?;
++    let predecessor = if source_path.starts_with(&native_root) {
++        crate::rollout_path_with_rollout_id(&source_path, position.thread_id)?
++    } else {
++        crate::history_rollout_path_with_rollout_id(&source_path, position.thread_id)?
++    };
++    let file_name = predecessor.file_name()?;
++    let (year, month, day) = crate::rollout_date_parts(file_name)?;
++    Some(native_root.join(year).join(month).join(day).join(file_name))
+ }
+
+ /// Expands a rollout graph and discards only physical line metadata.
+@@ -829,11 +908,39 @@ async fn expand_lines(
+     inherited_filter_texts: Option<&[String]>,
+     policy: MaterializationPolicy,
+     has_older_reference: &mut bool,
++) -> io::Result<Vec<RolloutLine>> {
++    expand_lines_with_root_path(
++        codex_home,
++        lines,
++        state,
++        cursor,
++        inherited_filter_texts,
++        policy,
++        has_older_reference,
++        None,
++    )
++    .await
++}
++
++#[expect(
++    clippy::too_many_arguments,
++    reason = "external captures do not have a confined physical root filename"
++)]
++async fn expand_lines_with_root_path(
++    codex_home: &Path,
++    lines: Vec<RolloutLine>,
++    state: &mut ExpansionState<'_>,
++    cursor: ExpansionCursor,
++    inherited_filter_texts: Option<&[String]>,
++    policy: MaterializationPolicy,
++    has_older_reference: &mut bool,
++    root_path: Option<&Path>,
+ ) -> io::Result<Vec<RolloutLine>> {
+     let metadata = canonical_session_meta(&lines)?;
+     let history_base = (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
+         .then_some(metadata.meta.history_base)
+         .flatten();
++    let root_predecessor_hint = native_predecessor_hint(codex_home, root_path, &metadata.meta);
+     let mut frames = vec![ExpansionFrame {
+         session_meta: lines[0].clone(),
+         materialized: Vec::with_capacity(lines.len()),
+@@ -844,6 +951,7 @@ async fn expand_lines(
+         inbound_reference: None,
+         history_base,
+         inbound_history_base: None,
++        native_predecessor_hint: root_predecessor_hint,
+     }];
+
+     while let Some(frame) = frames.last_mut() {
+@@ -863,9 +971,21 @@ async fn expand_lines(
+                     position.thread_id
+                 )));
+             }
+-            let predecessor = match state.captured_prefixes.as_deref_mut() {
+-                Some(prefixes) => prefixes.load_history_base(codex_home, position).await?,
+-                None => load_history_base_prefix(codex_home, position).await?,
++            let (predecessor, predecessor_path) = match state.captured_prefixes.as_deref_mut() {
++                Some(prefixes) => (
++                    prefixes.load_history_base(codex_home, position).await?,
++                    None,
++                ),
++                None => {
++                    let (lines, path) = load_history_base_prefix(
++                        codex_home,
++                        position,
++                        frame.cursor.current_thread_id,
++                        frame.native_predecessor_hint.as_deref(),
++                    )
++                    .await?;
++                    (lines, Some(path))
++                }
+             };
+             let metadata = canonical_session_meta(&predecessor)?;
+             let fork_boundary = metadata.meta.id != frame.cursor.current_thread_id;
+@@ -892,6 +1012,11 @@ async fn expand_lines(
+                 history_base: (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
+                     .then_some(metadata.meta.history_base)
+                     .flatten(),
++                native_predecessor_hint: native_predecessor_hint(
++                    codex_home,
++                    predecessor_path.as_deref(),
++                    &metadata.meta,
++                ),
+                 lines: predecessor.into_iter(),
+                 inherited_filter_texts: frame.inherited_filter_texts.clone(),
+                 inbound_reference: None,
+@@ -1018,6 +1143,8 @@ async fn expand_lines(
+         let history_base = (referenced_meta.meta.history_mode == ThreadHistoryMode::Paginated)
+             .then_some(referenced_meta.meta.history_base)
+             .flatten();
++        let referenced_predecessor_hint =
++            native_predecessor_hint(codex_home, Some(&path), &referenced_meta.meta);
+         let filter_texts = compose_compacted_replacement_history_filter_texts(
+             frame.inherited_filter_texts.as_deref(),
+             reference
+@@ -1052,6 +1179,7 @@ async fn expand_lines(
+             }),
+             history_base,
+             inbound_history_base: None,
++            native_predecessor_hint: referenced_predecessor_hint,
+         });
+     }
+
+@@ -1494,3 +1622,7 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+ #[cfg(test)]
+ #[path = "reference_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path = "reference/native_segment_tests.rs"]
++mod native_segment_tests;
+diff --git a/codex-rs/rollout/src/reference/native_segment_tests.rs b/codex-rs/rollout/src/reference/native_segment_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..266a6e62d8006fe70aebb3b42e9b6dc8222e7c40
+--- /dev/null
++++ b/codex-rs/rollout/src/reference/native_segment_tests.rs
+@@ -0,0 +1,289 @@
++use std::cell::Cell;
++use std::fs;
++use std::io;
++use std::path::Path;
++use std::path::PathBuf;
++
++use codex_history::RolloutItem;
++use codex_history::RolloutLine;
++use codex_protocol::RolloutId;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::AgentMessageEvent;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::HistoryPosition;
++use codex_protocol::protocol::SessionMeta;
++use codex_protocol::protocol::SessionMetaLine;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use tempfile::TempDir;
++
++use super::materialize_recent_rollout_lines;
++use super::materialize_recent_rollout_lines_from_with_path;
++use super::materialize_rollout_lines;
++
++tokio::task_local! {
++    // Each materialization owns its counters even when other Tokio tests run concurrently.
++    static RECURSIVE_LOOKUPS: Cell<usize>;
++    static PREFIX_READS: Cell<usize>;
++}
++
++pub(super) fn record_recursive_lookup() {
++    let _ = RECURSIVE_LOOKUPS.try_with(|count| count.set(count.get() + 1));
++}
++
++pub(super) fn record_prefix_read() {
++    let _ = PREFIX_READS.try_with(|count| count.set(count.get() + 1));
++}
++
++/// A native chain whose physical filename uses UTC-7 and metadata uses UTC.
++struct NativeChain {
++    active_path: PathBuf,
++    /// Immutable predecessors in oldest-first order.
++    predecessors: Vec<PathBuf>,
++}
++
++fn meta_line(
++    thread_id: ThreadId,
++    ordinal: u64,
++    history_base: Option<HistoryPosition>,
++) -> RolloutLine {
++    RolloutLine {
++        timestamp: "2026-07-13T00:00:00Z".to_string(),
++        ordinal: Some(ordinal),
++        item: RolloutItem::SessionMeta(SessionMetaLine {
++            meta: SessionMeta {
++                session_id: thread_id.into(),
++                id: thread_id,
++                timestamp: "2026-07-13T00:00:00Z".to_string(),
++                cwd: PathBuf::from("/tmp"),
++                originator: "test".to_string(),
++                cli_version: "test".to_string(),
++                source: SessionSource::Exec,
++                history_mode: ThreadHistoryMode::Paginated,
++                history_base,
++                ..SessionMeta::default()
++            },
++            git: None,
++        }),
++    }
++}
++
++fn message_line(ordinal: u64) -> RolloutLine {
++    RolloutLine {
++        timestamp: "2026-07-13T00:00:01Z".to_string(),
++        ordinal: Some(ordinal),
++        item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
++            message: format!("message-{ordinal}"),
++            phase: None,
++            memory_citation: None,
++            delivery: None,
++            questions: None,
++        })),
++    }
++}
++
++fn write_lines(path: &Path, lines: &[RolloutLine]) -> io::Result<()> {
++    fs::create_dir_all(path.parent().expect("rollout directory"))?;
++    let mut bytes = Vec::new();
++    for line in lines {
++        serde_json::to_writer(&mut bytes, line)?;
++        bytes.push(b'\n');
++    }
++    fs::write(path, bytes)
++}
++
++fn native_path(home: &Path, active_path: &Path, rollout_id: RolloutId) -> PathBuf {
++    let predecessor = crate::history_rollout_path_with_rollout_id(active_path, rollout_id)
++        .expect("canonical filename");
++    let name = predecessor.file_name().expect("filename");
++    let (year, month, day) = crate::rollout_date_parts(name).expect("filename date");
++    home.join(crate::SESSIONS_SUBDIR)
++        .join(crate::ROLLOUT_SEGMENTS_SUBDIR)
++        .join(year)
++        .join(month)
++        .join(day)
++        .join(name)
++}
++
++fn write_chain(home: &Path, predecessor_count: usize) -> io::Result<NativeChain> {
++    let thread_id = ThreadId::new();
++    let active_path = home
++        .join(crate::SESSIONS_SUBDIR)
++        .join("2026/07/12")
++        .join(format!("rollout-2026-07-12T17-00-00-{thread_id}.jsonl"));
++    let mut history_base = None;
++    let mut predecessors = Vec::new();
++    for index in 0..predecessor_count {
++        let rollout_id = RolloutId::new();
++        let path = native_path(home, &active_path, rollout_id);
++        let ordinal = u64::try_from(index).expect("segment count") * 2;
++        write_lines(
++            &path,
++            &[
++                meta_line(thread_id, ordinal, history_base),
++                message_line(ordinal + 1),
++            ],
++        )?;
++        history_base = Some(HistoryPosition {
++            thread_id: rollout_id,
++            end_ordinal_exclusive: ordinal + 2,
++            end_byte_offset: fs::metadata(&path)?.len(),
++        });
++        predecessors.push(path);
++    }
++    let ordinal = u64::try_from(predecessor_count).expect("segment count") * 2;
++    write_lines(
++        &active_path,
++        &[
++            meta_line(thread_id, ordinal, history_base),
++            message_line(ordinal + 1),
++        ],
++    )?;
++    Ok(NativeChain {
++        active_path,
++        predecessors,
++    })
++}
++
++async fn assert_recent_read_counts(home: &Path, chain: &NativeChain) -> io::Result<()> {
++    RECURSIVE_LOOKUPS
++        .scope(Cell::new(0), async {
++            PREFIX_READS
++                .scope(Cell::new(0), async {
++                    let (lines, _, _) =
++                        crate::RolloutRecorder::load_rollout_lines(&chain.active_path).await?;
++                    let recent = materialize_recent_rollout_lines_from_with_path(
++                        home,
++                        &chain.active_path,
++                        lines,
++                    )
++                    .await?;
++                    assert_eq!(
++                        recent
++                            .iter()
++                            .filter(|line| matches!(line.item, RolloutItem::EventMsg(_)))
++                            .count(),
++                        crate::FRODEX_RECENT_ROLLOUT_SEGMENTS
++                    );
++                    assert_eq!(
++                        PREFIX_READS.with(Cell::get),
++                        crate::FRODEX_RECENT_ROLLOUT_SEGMENTS - 1
++                    );
++                    // The recursive resolver is the only directory-enumerating operation in
++                    // native prefix resolution. Direct candidates perform no read_dir calls.
++                    assert_eq!(RECURSIVE_LOOKUPS.with(Cell::get), 0);
++                    Ok(())
++                })
++                .await
++        })
++        .await
++}
++
++#[tokio::test]
++async fn native_recent_lookup_is_bounded_across_ten_thousand_non_utc_segments() -> io::Result<()> {
++    for count in [8, 10_000] {
++        let home = TempDir::new()?;
++        let chain = write_chain(home.path(), count)?;
++        assert_recent_read_counts(home.path(), &chain).await?;
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn native_compressed_recent_read_does_not_resolve_the_sixth_segment() -> io::Result<()> {
++    let home = TempDir::new()?;
++    let chain = write_chain(home.path(), 8)?;
++    for path in &chain.predecessors {
++        let compressed = zstd::stream::encode_all(fs::File::open(path)?, 0)?;
++        fs::write(path.with_extension("jsonl.zst"), compressed)?;
++        fs::remove_file(path)?;
++    }
++    let excluded_index = chain.predecessors.len() - crate::FRODEX_RECENT_ROLLOUT_SEGMENTS;
++    fs::remove_file(chain.predecessors[excluded_index].with_extension("jsonl.zst"))?;
++    assert_recent_read_counts(home.path(), &chain).await?;
++    assert!(
++        materialize_rollout_lines(home.path(), &chain.active_path)
++            .await
++            .is_err()
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn native_lookup_falls_back_for_relocated_predecessors() -> io::Result<()> {
++    let home = TempDir::new()?;
++    let chain = write_chain(home.path(), 1)?;
++    let source = &chain.predecessors[0];
++    let relocated = home
++        .path()
++        .join(crate::ARCHIVED_SESSIONS_SUBDIR)
++        .join(source.file_name().expect("filename"));
++    fs::create_dir_all(relocated.parent().expect("archive directory"))?;
++    fs::rename(source, relocated)?;
++    RECURSIVE_LOOKUPS
++        .scope(Cell::new(0), async {
++            materialize_recent_rollout_lines(home.path(), &chain.active_path).await?;
++            assert_eq!(RECURSIVE_LOOKUPS.with(Cell::get), 1);
++            Ok(())
++        })
++        .await
++}
++
++#[tokio::test]
++async fn native_lookup_rejects_a_spoofed_same_thread_candidate() -> io::Result<()> {
++    let home = TempDir::new()?;
++    let chain = write_chain(home.path(), 1)?;
++    let source = &chain.predecessors[0];
++    let original_len = fs::metadata(source)?.len();
++    write_lines(
++        source,
++        &[meta_line(ThreadId::new(), 0, None), message_line(1)],
++    )?;
++    assert_eq!(fs::metadata(source)?.len(), original_len);
++    let error = materialize_recent_rollout_lines(home.path(), &chain.active_path)
++        .await
++        .err()
++        .expect("a matching filename cannot authenticate another thread's records");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    Ok(())
++}
++
++#[tokio::test]
++async fn native_lookup_preserves_cross_thread_fallback() -> io::Result<()> {
++    let home = TempDir::new()?;
++    let chain = write_chain(home.path(), 1)?;
++    let source = &chain.predecessors[0];
++    let parent_thread_id = ThreadId::new();
++    let parent_rollout_id = crate::rollout_id_from_path(source).expect("rollout id");
++    let parent_path = source.with_file_name(format!(
++        "rollout-2026-07-12T16-59-59-{parent_thread_id}_{parent_rollout_id}.jsonl"
++    ));
++    write_lines(
++        &parent_path,
++        &[meta_line(parent_thread_id, 0, None), message_line(1)],
++    )?;
++    fs::remove_file(source)?;
++    RECURSIVE_LOOKUPS
++        .scope(Cell::new(0), async {
++            let lines = materialize_recent_rollout_lines(home.path(), &chain.active_path).await?;
++            assert_eq!(lines.len(), 3);
++            assert_eq!(RECURSIVE_LOOKUPS.with(Cell::get), 1);
++            Ok(())
++        })
++        .await
++}
++
++#[tokio::test]
++async fn native_prefix_ignores_bytes_after_its_frozen_boundary() -> io::Result<()> {
++    use std::io::Write;
++
++    let home = TempDir::new()?;
++    let chain = write_chain(home.path(), 1)?;
++    let mut source = fs::OpenOptions::new()
++        .append(true)
++        .open(&chain.predecessors[0])?;
++    source.write_all(&vec![b'x'; 4 * 1024 * 1024])?;
++    let lines = materialize_rollout_lines(home.path(), &chain.active_path).await?;
++    assert_eq!(lines.len(), 3);
++    Ok(())
++}
+diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
+index 474b2e0c32677a00ce564012cd737f4b50af4bde..a8ef52258dfa5b1753577e90cdf5c75ffc6c4407 100644
+--- a/codex-rs/rollout/src/reference_tests.rs
++++ b/codex-rs/rollout/src/reference_tests.rs
+@@ -3354,6 +3354,17 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
+
+ #[tokio::test]
+ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::Result<()> {
++    assert_recent_materialization_bounds_deep_reference_chains(false).await
++}
++
++#[tokio::test]
++async fn recent_materialization_bounds_compressed_reference_chains() -> io::Result<()> {
++    assert_recent_materialization_bounds_deep_reference_chains(true).await
++}
++
++async fn assert_recent_materialization_bounds_deep_reference_chains(
++    compressed: bool,
++) -> io::Result<()> {
+     let home = TempDir::new()?;
+     let thread_id = ThreadId::new();
+     let deepest_segment = SegmentId::new();
+@@ -3498,6 +3509,23 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+         ],
+     )?;
+
++    if compressed {
++        for path in [
++            &deepest_path,
++            &oldest_path,
++            &older_path,
++            &old_path,
++            &middle_path,
++            &current_path,
++        ] {
++            let source = fs::read(path)?;
++            fs::write(
++                path.with_extension("jsonl.zst"),
++                zstd::stream::encode_all(source.as_slice(), 3)?,
++            )?;
++            fs::remove_file(path)?;
++        }
++    }
+     let bounded = materialize_recent_rollout_lines(home.path(), current_path.as_path()).await?;
+     assert_eq!(
+         event_messages(&bounded),
+diff --git a/codex-rs/rollout/src/rollout_reference_index.rs b/codex-rs/rollout/src/rollout_reference_index.rs
+index 00f35ed8f6a46d036b7a3f05ba6c882a8c9771eb..86c0a14d5b8b9a9d04576bc0f14ea6751969d91d 100644
+--- a/codex-rs/rollout/src/rollout_reference_index.rs
++++ b/codex-rs/rollout/src/rollout_reference_index.rs
+@@ -213,8 +213,9 @@ impl RolloutReferenceIndex {
+ }
+
+ /// Immutable snapshot references protect the snapshot path, not the mutable rollout that supplied
+-/// its bytes. The snapshot lives outside the active and archived roots maintained by compression
+-/// and thread deletion, so indexing its source rollout ID would incorrectly pin that mutable file.
++/// its bytes. The snapshot lives outside mutable thread discovery and deletion roots, so indexing
++/// its source rollout ID would incorrectly pin that mutable file. Compression may replace either
++/// snapshot representation without changing which logical segment the reference protects.
+ fn references_detached_segment(codex_home: &Path, reference: &RolloutReferenceItem) -> bool {
+     let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id) else {
+         return false;
+diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
+index 3135ccc708c5a900dd73189e6ea8aac3fecee071..df20f9e2949277d9cc0058d1e98c535f3bcd8d72 100644
+--- a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
++++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
+@@ -86,6 +86,7 @@ pub(super) struct GoalSupervisorHistoryAccess {
+
+ pub(super) struct CertifiedActiveHistorySnapshot {
+     pub(super) rollout_path: PathBuf,
++    /// End of the uncompressed JSONL, including when rollout_path is a zstd representation.
+     pub(super) end_byte_offset: u64,
+     pub(super) head: super::rollout_lineage::RolloutHead,
+     pub(super) scan: super::model_context::ActiveModelContextScan,
+@@ -714,8 +715,9 @@ async fn scan_root_for_access(
+ ///
+ /// A certified segment checkpoint makes older active-file records irrelevant to latest-state
+ /// reconstruction. Inspecting only that suffix avoids buffering a multi-gigabyte active JSONL on
+-/// every resume or latest fork. An invalid or absent checkpoint, a parse rejection, or detected
+-/// legacy damage falls back to the complete physical repair scan.
++/// every resume or latest fork. A compressed active segment uses the bounded decoder instead of
++/// ancestry traversal. An invalid or absent checkpoint, a parse rejection, or detected legacy
++/// damage falls back to the complete physical repair scan.
+ async fn scan_clean_certified_active_root(
+     thread_id: ThreadId,
+     rollout_path: &Path,
+@@ -726,12 +728,13 @@ async fn scan_clean_certified_active_root(
+         .ok_or_else(|| ThreadStoreError::InvalidRequest {
+             message: format!("rollout {} does not exist", rollout_path.display()),
+         })?;
+-    if physical_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
++    let plain_path = codex_rollout::plain_rollout_path(&physical_path);
++    if plain_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+         return Ok(None);
+     }
+     let head = super::rollout_lineage::read_rollout_head(physical_path.as_path()).await?;
+     let session_meta = head.session_meta.clone();
+-    let Some(scan) = super::model_context::scan_plain_active_model_context_snapshot(
++    let Some(scan) = super::model_context::scan_active_model_context_snapshot(
+         physical_path.as_path(),
+         session_meta.clone(),
+     )
+@@ -742,10 +745,9 @@ async fn scan_clean_certified_active_root(
+     if !scan.segment_checkpoint {
+         return Ok(None);
+     }
+-    let end_byte_offset = tokio::fs::metadata(physical_path.as_path())
+-        .await
+-        .map_err(thread_store_io_error)?
+-        .len();
++    let Some(end_byte_offset) = scan.source_end_byte_offset else {
++        return Ok(None);
++    };
+     let mut bounded_lines = scan.suffix_lines.clone();
+     if session_meta.meta.id != thread_id {
+         return Ok(None);
+@@ -771,7 +773,7 @@ async fn scan_clean_certified_active_root(
+         path: codex_rollout::plain_rollout_path(rollout_path),
+         end_byte_offset: None,
+         source_sha256: String::new(),
+-        source_was_compressed: false,
++        source_was_compressed: physical_path != plain_path,
+         include_references: false,
+         reference_policy,
+         needs_repair: false,
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 436fd9b56a38483806ad70640cb89288557ddc82..81e3e0a11da8f9fef5d185d291b8a68cfd275eb3 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -437,17 +437,6 @@ async fn build_segmented_legacy_history_projection(
+     }
+
+     let lineage = segmented_legacy_rollout_paths(store, thread_id, rollout_path).await?;
+-    for segment in &lineage {
+-        if segment
+-            .file_name()
+-            .and_then(|name| name.to_str())
+-            .is_some_and(|name| name.ends_with(".jsonl.zst"))
+-        {
+-            return Err(ThreadStoreError::Unsupported {
+-                operation: "compressed_legacy_history_projection",
+-            });
+-        }
+-    }
+
+     let rollout_id = super::thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
+         rollout_path,
+@@ -455,10 +444,9 @@ async fn build_segmented_legacy_history_projection(
+         ThreadHistoryMode::Legacy,
+     )?;
+     let projection = super::thread_history::projection_state(store, rollout_id).await?;
+-    let active_rollout_len = tokio::fs::metadata(rollout_path)
++    let active_rollout_len = legacy_rollout_jsonl_len(rollout_path)
+         .await
+-        .map_err(thread_store_io_error)?
+-        .len();
++        .map_err(thread_store_io_error)?;
+     if projection
+         .is_some_and(|state| state.next_ordinal > 0 && state.next_byte_offset == active_rollout_len)
+     {
+@@ -527,6 +515,20 @@ async fn build_segmented_legacy_history_projection(
+     Ok(builder)
+ }
+
++/// Projection offsets address JSONL bytes, including for a compressed active rollout.
++pub(super) async fn legacy_rollout_jsonl_len(path: &std::path::Path) -> std::io::Result<u64> {
++    let path = path.to_path_buf();
++    tokio::task::spawn_blocking(move || {
++        // A pledged frame size is only a lower bound when zstd frames are concatenated.
++        // The existing reader decodes every frame without replacing the durable rollout.
++        codex_rollout::open_rollout_seekable_reader(&path)?
++            .metadata()
++            .map(|metadata| metadata.len())
++    })
++    .await
++    .map_err(std::io::Error::other)?
++}
++
+ async fn segmented_legacy_rollout_paths(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+@@ -653,9 +655,18 @@ async fn stream_segmented_legacy_history_builder(
+     let mut builder = ThreadHistoryBuilder::new();
+     builder.handle_rollout_item_with_changes(&canonical_session_meta);
+     for rollout_path in lineage {
+-        let file = tokio::fs::File::open(rollout_path)
+-            .await
+-            .map_err(thread_store_io_error)?;
++        // The reducer needs complete history even when SQLite is current. Decode immutable
++        // compressed segments without replacing their files, and bound reads in JSONL bytes.
++        let rollout_path_for_reader = rollout_path.clone();
++        let file = tokio::task::spawn_blocking(move || {
++            codex_rollout::open_rollout_seekable_reader(&rollout_path_for_reader)
++        })
++        .await
++        .map_err(|error| ThreadStoreError::Internal {
++            message: format!("failed to join segmented legacy history reader: {error}"),
++        })?
++        .map(tokio::fs::File::from_std)
++        .map_err(thread_store_io_error)?;
+         let read_limit = file.metadata().await.map_err(thread_store_io_error)?.len();
+         let mut reader = BufReader::new(file.take(read_limit));
+         let mut line_bytes = Vec::new();
+diff --git a/codex-rs/thread-store/src/local/model_context.rs b/codex-rs/thread-store/src/local/model_context.rs
+index f6e1637197267f62464736a3f29f81e14b197286..a2a861ea441991f9e7e1b8decd7a6435c1f4893a 100644
+--- a/codex-rs/thread-store/src/local/model_context.rs
++++ b/codex-rs/thread-store/src/local/model_context.rs
+@@ -196,12 +196,11 @@ pub(super) async fn load_from_rollout_path(
+     })
+ }
+
+-/// Uses an indexed active checkpoint without traversing immutable same-thread predecessors.
++/// Uses a certified active checkpoint without traversing immutable same-thread predecessors.
+ ///
+-/// The SQLite projection proves that the active file was fully indexed. A completed
+-/// `ModelContextScan` then proves the active segment contains all checkpoint and turn metadata
+-/// needed for resume. Any unprojected, inherited, incomplete, or concurrently replaced rollout
+-/// preserves the existing complete-lineage implementation.
++/// A completed `ModelContextScan` proves the active segment contains all checkpoint and turn
++/// metadata needed for resume, independently of SQLite. An incomplete or concurrently replaced
++/// rollout preserves the existing complete-lineage implementation.
+ pub(super) async fn scan_projected_active_model_context(
+     _store: &LocalThreadStore,
+     _rollout_id: codex_protocol::RolloutId,
+@@ -272,6 +271,8 @@ pub(super) async fn scan_projected_active_model_context(
+ }
+
+ pub(super) struct ActiveModelContextScan {
++    /// Logical JSONL length when scanned from a file, never the compressed byte count.
++    pub(super) source_end_byte_offset: Option<u64>,
+     pub(super) items: Vec<RolloutItem>,
+     pub(super) suffix_lines: Vec<RolloutLine>,
+     pub(super) segment_checkpoint: bool,
+@@ -303,6 +304,7 @@ fn scan_loaded_active_model_context(
+             items.insert(0, RolloutItem::SessionMeta(session_meta));
+             suffix_lines.reverse();
+             return Some(ActiveModelContextScan {
++                source_end_byte_offset: None,
+                 items,
+                 suffix_lines,
+                 segment_checkpoint,
+@@ -331,6 +333,7 @@ fn scan_projected_active_model_context_blocking_with_limit(
+     max_scan_bytes: u64,
+ ) -> io::Result<Option<ActiveModelContextScan>> {
+     let file = File::open(path)?;
++    let source_end_byte_offset = file.metadata()?.len();
+     let mut scanner = ReverseJsonlScanner::new(file)?
+         .with_max_record_bytes(MAX_INTERACTIVE_MODEL_CONTEXT_RECORD_BYTES);
+     let mut scan = ModelContextScan::default();
+@@ -375,6 +378,7 @@ fn scan_projected_active_model_context_blocking_with_limit(
+             items.insert(0, RolloutItem::SessionMeta(session_meta));
+             suffix_lines.reverse();
+             return Ok(Some(ActiveModelContextScan {
++                source_end_byte_offset: Some(source_end_byte_offset),
+                 items,
+                 suffix_lines,
+                 segment_checkpoint,
+@@ -436,7 +440,12 @@ fn scan_compressed_active_model_context_blocking_with_limit(
+             lines.push(line);
+         }
+     }
+-    Ok(scan_loaded_active_model_context(lines, session_meta))
++    Ok(
++        scan_loaded_active_model_context(lines, session_meta).map(|mut scan| {
++            scan.source_end_byte_offset = Some(decoded_bytes);
++            scan
++        }),
++    )
+ }
+
+ fn interactive_model_context_too_large() -> io::Error {
+@@ -508,6 +517,27 @@ pub(super) async fn scan_plain_active_model_context_snapshot(
+     active_model_context_scan_or_fallback(result)
+ }
+
++/// Certifies one physical segment without resolving its historical predecessors.
++/// Compressed input must be decoded through its end: a later rollback can invalidate an earlier
++/// checkpoint. The decoder uses the same byte and record limits as the plain reverse scan.
++pub(super) async fn scan_active_model_context_snapshot(
++    path: &Path,
++    session_meta: SessionMetaLine,
++) -> ThreadStoreResult<Option<ActiveModelContextScan>> {
++    if codex_rollout::plain_rollout_path(path) == path {
++        return scan_plain_active_model_context_snapshot(path, session_meta).await;
++    }
++    let path = path.to_path_buf();
++    let result = tokio::task::spawn_blocking(move || {
++        scan_compressed_active_model_context_blocking(&path, session_meta)
++    })
++    .await
++    .map_err(|err| ThreadStoreError::Internal {
++        message: format!("failed to join compressed active model context scan: {err}"),
++    })?;
++    active_model_context_scan_or_fallback(result)
++}
++
+ fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
+     if before.len() != after.len() || before.modified()? != after.modified()? {
+         return Ok(false);
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index 8c4dbac7878a309823b1ee96062d1b1abc2844ce..ab427c76b890924058f0953702f4f274afa42c80 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -255,6 +255,15 @@ async fn active_scan_limit_yields_to_unmarked_paginated_compatibility_reader() {
+
+ #[tokio::test]
+ async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
++    assert_certified_active_checkpoint_skips_predecessor(false).await;
++}
++
++#[tokio::test]
++async fn compressed_certified_active_checkpoint_does_not_open_missing_predecessor() {
++    assert_certified_active_checkpoint_skips_predecessor(true).await;
++}
++
++async fn assert_certified_active_checkpoint_skips_predecessor(compressed: bool) {
+     let home = TempDir::new().expect("temp dir");
+     let uuid = Uuid::from_u128(/*v*/ 2040);
+     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+@@ -277,8 +286,20 @@ async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
+     })];
+     items.extend(certified_cleared_checkpoint("active checkpoint").into_items());
+     append_items(path.as_path(), items);
++    let jsonl_len = std::fs::metadata(&path).expect("metadata").len();
++    let compressed_bytes = compressed.then(|| compress_fixture(&path));
+     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
++    let (physical_path, mut access) = prepare_history_access(&store, thread_id, path.clone())
++        .await
++        .expect("repair preflight must also avoid ancestors");
++    let snapshot = access
++        .take_certified_active_snapshot()
++        .expect("certified snapshot from either representation");
++    assert_eq!(snapshot.end_byte_offset, jsonl_len);
++    assert_eq!(snapshot.rollout_path, physical_path);
++    drop(access);
++
+     let context = store
+         .load_latest_model_context(LoadThreadHistoryParams {
+             thread_id,
+@@ -296,6 +317,59 @@ async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
+     read_thread::load_history_items(home.path(), path.as_path())
+         .await
+         .expect_err("complete history still requires the predecessor");
++    if let Some(bytes) = compressed_bytes {
++        assert!(
++            !path.exists(),
++            "read-only resume must not materialize JSONL"
++        );
++        assert_eq!(
++            std::fs::read(&physical_path).expect("compressed bytes"),
++            bytes
++        );
++        store
++            .resume_thread(crate::ResumeThreadParams {
++                history_revision: context.revision,
++                thread_id,
++                rollout_path: Some(physical_path),
++                history: Some(std::sync::Arc::new(context.items)),
++                include_archived: false,
++                metadata: crate::ThreadPersistenceMetadata {
++                    cwd: Some(home.path().to_path_buf()),
++                    model_provider: "test-provider".to_string(),
++                    memory_mode: codex_protocol::protocol::ThreadMemoryMode::Enabled,
++                },
++            })
++            .await
++            .expect("open writer without obsolete predecessor");
++        store
++            .append_items(crate::AppendThreadItemsParams {
++                thread_id,
++                items: vec![user_message("after compressed checkpoint resume")],
++            })
++            .await
++            .expect("append after cold resume");
++        store
++            .flush_thread(thread_id)
++            .await
++            .expect("flush resumed writer");
++        store
++            .shutdown_thread(thread_id)
++            .await
++            .expect("shutdown resumed writer");
++        assert!(
++            std::fs::read_to_string(path)
++                .expect("materialized active JSONL")
++                .contains("after compressed checkpoint resume")
++        );
++    }
++}
++
++fn compress_fixture(path: &Path) -> Vec<u8> {
++    let bytes = std::fs::read(path).expect("read JSONL fixture");
++    let encoded = zstd::stream::encode_all(bytes.as_slice(), 3).expect("compress fixture");
++    std::fs::write(path.with_extension("jsonl.zst"), &encoded).expect("write compressed fixture");
++    std::fs::remove_file(path).expect("remove plain fixture");
++    encoded
+ }
+
+ #[tokio::test]
+@@ -362,6 +436,22 @@ async fn certified_active_checkpoint_accepts_literal_decimal_rate_limits() {
+
+ #[tokio::test]
+ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
++    assert_checkpoint_requires_predecessor(false, false).await;
++}
++
++#[tokio::test]
++async fn compressed_invalid_active_checkpoint_does_not_hide_missing_predecessor() {
++    assert_checkpoint_requires_predecessor(true, false).await;
++}
++
++#[tokio::test]
++async fn rollback_after_certified_checkpoint_requires_missing_predecessor() {
++    for compressed in [false, true] {
++        assert_checkpoint_requires_predecessor(compressed, true).await;
++    }
++}
++
++async fn assert_checkpoint_requires_predecessor(compressed: bool, rolled_back: bool) {
+     let home = TempDir::new().expect("temp dir");
+     let uuid = Uuid::from_u128(/*v*/ 2041);
+     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+@@ -376,11 +466,13 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+     let Some(RolloutItem::Compacted(compacted)) = checkpoint.first_mut() else {
+         panic!("checkpoint must start with compaction");
+     };
+-    compacted
+-        .segment_state_checkpoint
+-        .as_mut()
+-        .expect("checkpoint descriptor")
+-        .version += 1;
++    if !rolled_back {
++        compacted
++            .segment_state_checkpoint
++            .as_mut()
++            .expect("checkpoint descriptor")
++            .version += 1;
++    }
+     let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+         rollout_id: Some(thread_id),
+         rollout_path: home.path().join("missing-predecessor.jsonl"),
+@@ -392,7 +484,15 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+         compacted_replacement_history_filter_texts: None,
+     })];
+     items.extend(checkpoint);
++    if rolled_back {
++        items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
++            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
++        )));
++    }
+     append_items(path.as_path(), items);
++    if compressed {
++        compress_fixture(&path);
++    }
+     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+     store
+@@ -401,7 +501,7 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+             include_archived: false,
+         })
+         .await
+-        .expect_err("invalid checkpoint must not hide missing predecessor");
++        .expect_err("invalid or rolled-back checkpoint must not hide missing predecessor");
+ }
+
+ #[tokio::test]
+@@ -775,6 +875,15 @@ async fn empty_wake_requires_surviving_full_world_state_and_matching_context() {
+
+ #[tokio::test]
+ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
++    assert_projected_checkpoint_resume_skips_older_segments(false).await;
++}
++
++#[tokio::test]
++async fn compressed_checkpoint_resume_does_not_expand_513_older_segments() {
++    assert_projected_checkpoint_resume_skips_older_segments(true).await;
++}
++
++async fn assert_projected_checkpoint_resume_skips_older_segments(compressed: bool) {
+     const SEGMENT_COUNT: usize = 514;
+     let home = TempDir::new().expect("temp dir");
+     let uuid = Uuid::from_u128(/*v*/ 2015);
+@@ -855,6 +964,11 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+     let active_len = std::fs::metadata(active_path.as_path())
+         .expect("active metadata")
+         .len();
++    if compressed {
++        for path in &paths {
++            compress_fixture(path);
++        }
++    }
+     let store = projected_thread_store(
+         home.path(),
+         thread_id,
+@@ -862,7 +976,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+         u64::try_from(SEGMENT_COUNT * 16).expect("ordinal"),
+     )
+     .await;
+-    std::fs::remove_file(&paths[SEGMENT_COUNT - 2])
++    let predecessor = if compressed {
++        paths[SEGMENT_COUNT - 2].with_extension("jsonl.zst")
++    } else {
++        paths[SEGMENT_COUNT - 2].clone()
++    };
++    std::fs::remove_file(predecessor)
+         .expect("remove predecessor that a bounded checkpoint must not open");
+
+     let context = store
+@@ -876,6 +995,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+     assert!(context.items.iter().any(|item| {
+         matches!(item, RolloutItem::Compacted(item) if item.message == "latest checkpoint")
+     }));
++    if compressed {
++        assert!(
++            !active_path.exists(),
++            "resume must leave compressed storage intact"
++        );
++    }
+ }
+
+ #[tokio::test]
+diff --git a/codex-rs/thread-store/src/local/read_thread.rs b/codex-rs/thread-store/src/local/read_thread.rs
+index 9d67c553f6b0463c222683a9208c0286a324c6f9..5e13e2f5633e4ea210a0a544d6ba892c95608f9b 100644
+--- a/codex-rs/thread-store/src/local/read_thread.rs
++++ b/codex-rs/thread-store/src/local/read_thread.rs
+@@ -449,15 +449,17 @@ pub(super) async fn load_history_items(
+                 ),
+             });
+         }
+-        return codex_rollout::materialize_recent_rollout_lines_from(codex_home, lines)
+-            .await
+-            .map(|lines| lines.into_iter().map(|line| line.item).collect())
+-            .map_err(|err| ThreadStoreError::Internal {
+-                message: format!(
+-                    "failed to materialize thread history {}: {err}",
+-                    path.display()
+-                ),
+-            });
++        return codex_rollout::materialize_recent_rollout_lines_from_with_path(
++            codex_home, path, lines,
++        )
++        .await
++        .map(|lines| lines.into_iter().map(|line| line.item).collect())
++        .map_err(|err| ThreadStoreError::Internal {
++            message: format!(
++                "failed to materialize thread history {}: {err}",
++                path.display()
++            ),
++        });
+     }
+     Ok(lines.into_iter().map(|line| line.item).collect())
+ }
+diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
+index cba2fc1d787e715873c8b401622dc19e240d973a..1f032d1c0b66faf95b08ce4ca2a463dfd43c86ab 100644
+--- a/codex-rs/thread-store/src/local/segment_tests.rs
++++ b/codex-rs/thread-store/src/local/segment_tests.rs
+@@ -2764,6 +2764,54 @@ async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {
+
+ #[tokio::test]
+ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
++    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(false, false).await;
++}
++
++#[tokio::test]
++async fn resumed_compressed_segmented_legacy_history_preserves_projected_item_identity() {
++    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(true, false).await;
++}
++
++#[tokio::test]
++async fn compressed_active_legacy_backfill_preserves_decoded_offsets_and_projected_item_identity() {
++    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(true, true).await;
++}
++
++#[tokio::test]
++async fn legacy_projection_length_counts_all_compressed_frames() {
++    let home = TempDir::new().expect("temp dir");
++    let plain = home.path().join("rollout.jsonl");
++    let compressed = plain.with_extension("jsonl.zst");
++    let records = [b"first record\n".as_slice(), b"second record\n".as_slice()];
++    let mut frames = Vec::new();
++    for record in records {
++        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("encoder");
++        encoder
++            .set_pledged_src_size(Some(record.len() as u64))
++            .expect("pledged size");
++        std::io::Write::write_all(&mut encoder, record).expect("encode record");
++        frames.extend(encoder.finish().expect("complete frame"));
++    }
++    std::fs::write(&compressed, &frames).expect("write frames");
++    for path in [&plain, &compressed] {
++        assert_eq!(
++            super::super::live_writer::legacy_rollout_jsonl_len(path)
++                .await
++                .expect("decoded length"),
++            records
++                .iter()
++                .map(|record| record.len() as u64)
++                .sum::<u64>()
++        );
++    }
++    assert!(!plain.exists());
++    assert_eq!(std::fs::read(compressed).expect("unchanged frames"), frames);
++}
++
++async fn assert_resumed_segmented_legacy_history_preserves_projected_item_identity(
++    compress_predecessor: bool,
++    compress_active: bool,
++) {
+     let home = TempDir::new().expect("temp dir");
+     let thread_id = ThreadId::new();
+     let params = create_params(thread_id, ThreadHistoryMode::Legacy);
+@@ -2774,7 +2822,7 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+         .await
+         .expect("create legacy thread");
+     append_message(&store, thread_id, "first indexed message").await;
+-    store
++    let first_segment = store
+         .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+         .await
+         .expect("index first legacy segment");
+@@ -2798,6 +2846,9 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+         .shutdown_thread(thread_id)
+         .await
+         .expect("shutdown initial recorder");
++    if compress_predecessor {
++        compress_rollout_for_test(&first_segment.reference.rollout_path);
++    }
+
+     let rollout_id = ThreadId::new();
+     let file_name = rollout_path
+@@ -2813,10 +2864,22 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+     tokio::fs::rename(rollout_path.as_path(), selected_path.as_path())
+         .await
+         .expect("rename selected physical rollout");
++    let selected_jsonl_len = tokio::fs::metadata(&selected_path)
++        .await
++        .expect("selected JSONL metadata")
++        .len();
++    let (physical_selected_path, compressed_active_bytes) = if compress_active {
++        compress_rollout_for_test(&selected_path);
++        let physical_path = selected_path.with_extension("jsonl.zst");
++        let bytes = std::fs::read(&physical_path).expect("compressed active bytes");
++        (physical_path, Some(bytes))
++    } else {
++        (selected_path.clone(), None)
++    };
+     let state_db = store.state_db().await.expect("state runtime");
+     let mut selected_metadata = codex_state::ThreadMetadataBuilder::new(
+         thread_id,
+-        selected_path.clone(),
++        physical_selected_path.clone(),
+         chrono::Utc::now(),
+         SessionSource::Exec,
+     );
+@@ -2850,10 +2913,48 @@ WHERE thread_id = ?
+     super::super::live_writer::backfill_segmented_legacy_projection(
+         &resumed,
+         thread_id,
+-        selected_path.as_path(),
++        physical_selected_path.as_path(),
+     )
+     .await
+     .expect("backfill selected physical rollout projection");
++    assert_eq!(
++        super::super::thread_history::projection_state(&resumed, rollout_id)
++            .await
++            .expect("read selected projection")
++            .expect("selected projection exists")
++            .next_byte_offset,
++        selected_jsonl_len
++    );
++    assert!(
++        super::super::thread_history::has_complete_segmented_legacy_projection(&resumed, thread_id)
++            .await
++            .expect("check selected legacy projection")
++    );
++    if let Some(bytes) = compressed_active_bytes {
++        // A second backfill exercises the current-projection reducer, not just reconstruction.
++        super::super::live_writer::backfill_segmented_legacy_projection(
++            &resumed,
++            thread_id,
++            &physical_selected_path,
++        )
++        .await
++        .expect("reuse compressed active projection");
++        assert!(!selected_path.exists());
++        assert_eq!(
++            std::fs::read(&physical_selected_path).expect("unchanged compressed active"),
++            bytes
++        );
++    }
++    if compress_predecessor {
++        assert!(!first_segment.reference.rollout_path.exists());
++        assert!(
++            first_segment
++                .reference
++                .rollout_path
++                .with_extension("jsonl.zst")
++                .exists()
++        );
++    }
+     assert_eq!(
+         resumed
+             .projected_history_position(thread_id)
+@@ -2867,7 +2968,7 @@ WHERE thread_id = ?
+         .resume_thread(ResumeThreadParams {
+             history_revision: None,
+             thread_id,
+-            rollout_path: Some(selected_path.clone()),
++            rollout_path: Some(physical_selected_path),
+             history: Some(Arc::new(history)),
+             include_archived: true,
+             metadata,
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index 6c90b4d47a327521e256bafa6f99da9909f83a6d..7b414c00f16950d26a1a3f5308aaf7c67354169a 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -509,10 +509,11 @@ async fn existing_legacy_projection(
+         break;
+     }
+
+-    let rollout_len = match tokio::fs::metadata(&metadata.rollout_path).await {
+-        Ok(metadata) => metadata.len(),
+-        Err(_) => return Ok(None),
+-    };
++    let rollout_len =
++        match super::super::live_writer::legacy_rollout_jsonl_len(&metadata.rollout_path).await {
++            Ok(len) => len,
++            Err(_) => return Ok(None),
++        };
+
+     let db_path = store.config.sqlite.thread_history_db_path();
+     let db_exists = tokio::fs::try_exists(db_path)
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 9b8b11a44aeaacdfd9b8b9339ad411dd85bf41ca..cb5d991c86027b846369d55a8bd88064f83738cf 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -341,6 +341,11 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+         )
+         .await;
+     }
++    sqlx::query("UPDATE thread_turns SET root_turn_id = 'causal-root' WHERE thread_id = ?")
++        .bind(thread_id.to_string())
++        .execute(db)
++        .await
++        .expect("retain turn ancestry in indexed rows before publishing completeness");
+     sqlx::query(
+         "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
+     )
+@@ -388,6 +393,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+     )
+     .await;
+     assert_eq!(turn_ids(&first_turn_page), vec!["turn-5", "turn-4"]);
++    assert!(
++        first_turn_page
++            .turns
++            .iter()
++            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
++    );
+     assert_eq!(
+         first_turn_page.turns[0].items,
+         vec![
+@@ -409,6 +420,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+     )
+     .await;
+     assert_eq!(turn_ids(&older_turn_page), vec!["turn-3", "turn-2"]);
++    assert!(
++        older_turn_page
++            .turns
++            .iter()
++            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
++    );
+     assert!(older_turn_page.turns[0].items.is_empty());
+
+     let oldest_turn_page = indexed_projected_turn_page(
+diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
+index 8e48ad87f9d4bb3b5a7fa5d63f056291a71cd513..8af4610c786a590ce352d549555cea1afb13281d 100644
+--- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
++++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
+@@ -204,6 +204,7 @@ pub(super) async fn page_indexed_turn_rows(
+         r#"
+ SELECT
+     turn_id,
++    root_turn_id,
+     rollout_ordinal,
+     status,
+     error_json,
+diff --git a/docs/rollout-segment-compression.md b/docs/rollout-segment-compression.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c27aa47e348577cd153d882db4af212e087fdddc
+--- /dev/null
++++ b/docs/rollout-segment-compression.md
+@@ -0,0 +1,97 @@
++# Compressed rollout segments and bounded resume
++
++`features.local_thread_store_compression` controls the background compression
++worker and defaults to false. The worker covers session root files, immutable
++segments in `rotated_rollout_segments/<thread>/<segment>/`, and native predecessors
++in `sessions/rollout_segments/YYYY/MM/DD/`.
++
++The worker selects ordinary files with canonical rollout names whose modification
++time is at least seven days old. It preserves modification time and permissions,
++writes a level-3 zstd frame with a checksum, verifies decoding, and publishes
++without replacing an existing compressed file. Publication retains the same
++maintenance and thread-writer reservations used by repair, deletion and fork
++readers. A live writer can postpone compression of its old segments. Compression
++does not change JSONL contents, ordinals, references, or fork boundaries.
++
++Detached directory identities must match session metadata. Unknown layouts,
++review inputs, symlinks and, on Unix, multiply linked files are excluded. Unix
++inode/ctime checks reject replacement or modification during encoding. The
++compressed file and its directory entry are synced before unlinking the plain
++source; the directory is synced again afterward. Windows retains file sync and
++no-clobber publication but does not get the Unix directory-sync guarantee.
++If both representations already exist, neither is overwritten or removed: readers
++prefer plain JSONL, which may contain newer appended records.
++
++## What resume reads
++
++Model context and a complete transcript are different requests:
++
++| Operation | Required history |
++| --- | --- |
++| Latest model context with a valid certified active checkpoint | One active segment, plain or compressed; no predecessor contents |
++| Recent transcript replay | At most five ordinary same-thread segments; explicit cross-thread/fork cutoffs retain their existing semantics |
++| Complete indexed paginated timeline | SQLite rows when its selected-rollout projection is current |
++| Full transcript, historical fork, repair/migration, or projection reconstruction | The requested canonical history, potentially every segment |
++
++`persist_segment_checkpoint` validates and publishes all checkpoint records into
++the continuation. `ModelContextScan` validates the checkpoint and later records
++before accepting it. Compressed roots use this same certification during history
++repair preflight, rather than resolving all ancestors before the checkpoint can
++be used. Offsets always count decoded JSONL bytes, not compressed bytes. Read-only
++context loading leaves the zstd representation intact; acquiring an append writer
++may materialize the active file back to JSONL.
++
++A compressed active segment must be decoded through its end because later
++rollbacks or settings can invalidate an earlier checkpoint. The fast scan has a
++64 MiB decoded-byte limit and a per-record limit; exceeding either limit yields
++to compatibility reconstruction, not silent truncation. Ordinary legacy histories
++without a certified surviving checkpoint can require all older segments. The
++five-segment presentation limit must never be used to discard model context.
++
++Legacy projection reducers also require their historical state to retain stable
++generated item and turn IDs on the next append. Their compatibility rebuild now
++accepts compressed predecessors using decoded, seekable temporary files; it
++does not overwrite immutable compressed segments. This operation remains
++intentionally exhaustive, even if a model-only checkpoint read was bounded.
++
++## Consumer audit and limits
++
++The audit covered checkpoint resume, recent reference expansion, native
++history-base reads, timeline projection readers, reference metadata, legacy
++projection builders, fork preparation and complete-history readers. Transparent
++readers and anonymous seekable decoding already understand `.jsonl.zst`.
++Compressed active-root repair preflight and legacy projection reconstruction now
++use those readers and decoded offsets. Legacy indexed paging also selects
++`root_turn_id`, which its row decoder requires, so it can preserve ancestry
++without falling back to old segment contents.
++
++For ordinary native rotations, recent replay derives the predecessor filename
++from the active filename and validates its thread and rollout IDs. Subsequent
++predecessors retain the same timestamp. This also works when filenames use local
++time and session metadata uses UTC. Reads stop at each frozen JSONL byte offset
++for both plain and compressed files.
++
++Native `HistoryPosition` contains a rollout ID and byte/ordinal bounds, not a
++filename. Imported or relocated files, cross-thread references and callers
++without a physical filename may still require recursive filename lookup. The
++five-segment limit does not bound arbitrary cross-thread fork graphs. Full-history
++export/search, one-time migration and missing-index recovery remain exhaustive.
++
++Tests retain plain variants and add compressed checkpoint resume with missing
++predecessors, 514-segment context recovery, five-segment presentation with corrupt
++history outside the window, rollback rejection, and exact projection identity
++after compressed legacy resume/append/rotation. Native lookup tests compare eight
++and 10,000 predecessors: both require four predecessor prefix reads and zero
++recursive lookups. Compressed-active projection tests check decoded offsets,
++including concatenated zstd frames. Compression tests cover age, identity,
++reservations, reader continuity, cancellation and representation-switch races.
++
++## Compatibility and rollback
++
++Enable compression only where every reader sharing the store supports zstd
++rollouts. Current transparent readers accept old frames without checksums and
++new checksummed frames. No schema or reference change is required. Disabling the
++feature stops future compression; it does not decompress old files. Returning
++to a plain-only reader requires a separate offline decompression procedure under
++exclusive ownership. Do not use a rollback or this feature to rewrite a live
++store without coordinating every process using it.
