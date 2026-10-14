@@ -491,6 +491,10 @@ impl ContextManager {
             .map(|snapshot| WorldStateItem::full(snapshot.into_object()))
     }
 
+    pub(crate) fn world_state_baseline(&self) -> Option<WorldStateSnapshot> {
+        self.world_state_baseline.clone()
+    }
+
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
         match &mut self.token_info {
             Some(info) => info.fill_to_context_window(context_window),
@@ -789,7 +793,6 @@ impl ContextManager {
             items,
             review_history,
             retained_context,
-            guardian_context_mode,
             guardian_review_mode,
             retain_inherited_user_messages,
             history_version,
@@ -812,7 +815,6 @@ impl ContextManager {
                 }
                 _ => false,
             }
-            && guardian_context_mode == &other.guardian_context_mode
             && guardian_review_mode == &other.guardian_review_mode
             && retain_inherited_user_messages == &other.retain_inherited_user_messages
             && history_version == &other.history_version

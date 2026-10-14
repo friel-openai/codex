@@ -33,6 +33,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SegmentStateCheckpoint;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -306,6 +307,11 @@ pub struct CompactedItem {
     /// Resume metadata for values not represented by the companion rollout records.
     /// Presence distinguishes explicitly persisted values from legacy fallback reconstruction.
     pub resume_metadata: Option<CompactionResumeMetadata>,
+    /// Certifies that this compaction and its adjacent state records form a complete current-state
+    /// checkpoint for the active rollout segment.
+    ///
+    /// Older compactions omit this field and continue to require recursive rollout replay.
+    pub segment_state_checkpoint: Option<SegmentStateCheckpoint>,
 }
 
 impl Serialize for CompactedItem {
@@ -574,7 +580,13 @@ fn multi_agent_version_from_items(
         _ => None,
     });
 
-    session_meta_version.or_else(|| items.iter().rev().find_map(resume_multi_agent_version))
+    session_meta_version.or_else(|| {
+        items
+            .iter()
+            .rev()
+            .find_map(resume_multi_agent_version)
+            .flatten()
+    })
 }
 
 #[cfg(test)]

@@ -333,14 +333,14 @@ async fn run_remote_compact_task_inner_impl(
         );
     }
     analytics_details.retained_image_count = Some(retained_images);
-    let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (new_history, world_state_baseline) = build_compaction_replacement_history(
-        sess.as_ref(),
-        replacement_step_context,
-        &world_state,
-        compacted_history,
-    )
-    .await;
+    let (new_history, world_state_baseline, prepared_window_advance) =
+        build_compaction_replacement_history(
+            sess.as_ref(),
+            replacement_step_context,
+            &world_state,
+            compacted_history,
+        )
+        .await;
 
     if let Some(trace_input_history) = trace_input_history.as_deref() {
         let replacement_history = new_history
@@ -367,22 +367,20 @@ async fn run_remote_compact_task_inner_impl(
         None
     };
     sess.replace_compacted_history(
+        &replacement_step_context.turn,
         new_history,
         replacement_step_context.to_turn_context_item(),
         world_state_baseline,
         CompactedHistoryMetadata {
             input_goal_ids,
             message: String::new(),
-            window_number: new_window_number,
-            window_ids: new_window_ids,
             compaction_response_id: Some(compaction_response_id),
             compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash,
+            prepared_window_advance,
         },
     )
     .await?;
-    sess.recompute_token_usage(&replacement_step_context.turn)
-        .await;
 
     if reporting.defers_lifecycle() {
         sess.emit_turn_item_started(compaction_turn_context, &compaction_item)
