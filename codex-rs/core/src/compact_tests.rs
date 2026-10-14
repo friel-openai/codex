@@ -435,6 +435,70 @@ fn collect_user_messages_filters_legacy_warnings() {
 }
 
 #[test]
+fn collect_user_messages_deduplicates_only_consecutive_user_messages() {
+    let items = vec![
+        user_message("repeat"),
+        user_message("repeat"),
+        user_message("Warning: The maximum number of unified exec processes is 60"),
+        user_message("repeat"),
+        user_message("repeat"),
+        ResponseItem::Other,
+        user_message("repeat"),
+    ];
+
+    assert_eq!(
+        collect_user_messages(&items),
+        vec![
+            compacted_user_message("repeat", &items[0]),
+            compacted_user_message("repeat", &items[3]),
+            compacted_user_message("repeat", &items[6]),
+        ]
+    );
+}
+
+#[test]
+fn compacted_deduplicated_user_message_preserves_content_and_identity() {
+    let original = ResponseItemEnvelope {
+        item: serde_json::from_value(json!({
+            "type": "message", "role": "user",
+            "id": ResponseItemId::with_suffix("msg", "first"),
+            "content": [
+                {"type": "input_text", "text": "first"},
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "second"}
+            ],
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": "turn-1",
+                "content_item_kinds": ["user.text", "user.text", "user.text"]
+            }
+        }))
+        .unwrap(),
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let mut duplicate = original.clone();
+    duplicate
+        .item
+        .set_id(Some(ResponseItemId::with_suffix("msg", "duplicate")));
+    let items = vec![original.clone(), duplicate];
+
+    let history = build_compacted_history(
+        Vec::new(),
+        &collect_annotated_user_messages(&items),
+        "summary",
+    );
+
+    assert_eq!(
+        history,
+        vec![
+            original,
+            ResponseItemEnvelope::new(ContextualUserFragment::into(CompactionSummary::new(
+                "summary"
+            ))),
+        ]
+    );
+}
+
+#[test]
 fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
     // Use a small truncation limit so the test remains fast while still validating
     // that oversized user content is truncated.

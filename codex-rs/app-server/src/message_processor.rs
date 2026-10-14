@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -107,6 +108,37 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
 use crate::turn_admission::TurnAdmission;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
+/// Erases a selected handler's future so the dispatcher does not retain every request variant.
+type InitializedRequestFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>>
+            + Send
+            + 'static,
+    >,
+>;
+
+#[inline(never)]
+fn build_boxed_request_future<Builder, RequestFuture>(builder: Builder) -> InitializedRequestFuture
+where
+    Builder: FnOnce() -> RequestFuture,
+    RequestFuture:
+        Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>> + Send + 'static,
+{
+    Box::pin(builder())
+}
+
+// Awaiting inside one match makes the dispatcher's debug poll reserve stack for every handler.
+// Build and erase only the selected future before the dispatcher awaits it.
+macro_rules! boxed_request_future {
+    ($request:expr, { $($pattern:pat => $body:expr $(,)?)+ }) => {
+        match $request {
+            $(
+                $pattern => build_boxed_request_future(move || async move { $body }),
+            )+
+        }
+    };
+}
 
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
     reject_obsolete_request_fields(&request)?;
@@ -1069,6 +1101,7 @@ impl MessageProcessor {
         Ok(())
     }
 
+    #[deny(clippy::large_stack_frames)]
     async fn handle_initialized_client_request(
         self: Arc<Self>,
         connection_request_id: ConnectionRequestId,
@@ -1085,9 +1118,13 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
-        let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
+        let response_request_id = request_id.clone();
+        let response_outgoing = Arc::clone(&self.outgoing);
+        let request_future = boxed_request_future!(codex_request, {
             ClientRequest::Initialize { .. } => {
-                panic!("Initialize should be handled before initialized request dispatch");
+                Err(invalid_request(
+                    "Initialize should be handled before initialized request dispatch",
+                ))
             }
             ClientRequest::UserVerificationCancel { params, .. } => {
                 self.outgoing
@@ -1132,7 +1169,7 @@ impl MessageProcessor {
                     self.outgoing
                         .send_response_as_checked(request_id.clone(), payload, check)
                         .await;
-                    Ok(())
+                    Ok(None)
                 })
                 .await;
             }
@@ -1887,17 +1924,20 @@ impl MessageProcessor {
             ClientRequest::FeedbackUpload { params, .. } => {
                 self.feedback_processor.feedback_upload(params).await
             }
-        };
+        });
+        let result = request_future.await;
 
         match result {
             Ok(Some(response)) => {
-                self.outgoing
-                    .send_response_as(request_id.clone(), response)
+                response_outgoing
+                    .send_response_as(response_request_id.clone(), response)
                     .await;
             }
             Ok(None) => {}
             Err(error) => {
-                self.outgoing.send_error(request_id.clone(), error).await;
+                response_outgoing
+                    .send_error(response_request_id.clone(), error)
+                    .await;
             }
         }
         Ok(())
