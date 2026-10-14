@@ -105,12 +105,45 @@ impl LocalThreadStore {
         &self,
         requested_thread_id: ThreadId,
     ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Resolve)
+            .await
+    }
+
+    /// Authenticates lineage heads; consumers authenticate byte boundaries only when read.
+    pub(super) async fn resolve_rollout_lineage_deferred(
+        &self,
+        requested_thread_id: ThreadId,
+    ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Deferred)
+            .await
+    }
+
+    async fn resolve_rollout_lineage_with_offsets(
+        &self,
+        requested_thread_id: ThreadId,
+        offset_mode: LineageOffsetMode,
+    ) -> ThreadStoreResult<RolloutLineage> {
         let resolved =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
                 .await?
                 .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
-        self.resolve_rollout_lineage_from_path(requested_thread_id, &resolved.path)
-            .await
+        let mut active_paths = HashSet::new();
+        let segments = resolve_path(
+            self,
+            requested_thread_id,
+            resolved.rollout_id,
+            resolved.path,
+            /*end*/ None,
+            /*inherited_filter_texts*/ None,
+            /*graph_depth*/ 0,
+            &mut active_paths,
+            offset_mode,
+        )
+        .await?;
+        Ok(RolloutLineage {
+            root_rollout_id: resolved.rollout_id,
+            segments,
+        })
     }
 
     /// Resolves the lineage rooted at one explicit physical rollout rather than the thread's
@@ -1624,7 +1657,10 @@ async fn trim_to_history_position(
 }
 
 /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
-fn validated_history_byte_offset(bytes: &[u8], end: HistoryPosition) -> ThreadStoreResult<u64> {
+pub(super) fn validated_history_byte_offset(
+    bytes: &[u8],
+    end: HistoryPosition,
+) -> ThreadStoreResult<u64> {
     let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
         malformed_lineage(
             end.thread_id,
