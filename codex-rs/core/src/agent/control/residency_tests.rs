@@ -2,7 +2,7 @@ use super::is_resident_session_source;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::agent::LocalAgentControl;
-use crate::agent::registry::AgentMetadata;
+use crate::agent::types::AgentMetadata;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
 use crate::config::test_config;
