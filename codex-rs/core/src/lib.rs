@@ -70,7 +70,6 @@ pub use agent::api::DeliveryReceipt;
 pub use agent::api::SendRequest;
 pub use agent::api::SpawnRequest;
 pub use agent::control::ListedAgent;
-pub use agent::control::ListedAgentsPage;
 pub use agent::types::AgentExecutionGuard;
 pub use agent::types::AgentMessage;
 pub use agent::types::AgentMetadata;

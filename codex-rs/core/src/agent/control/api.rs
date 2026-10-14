@@ -1,7 +1,7 @@
 //! Implements shared controller operations using the existing local runtime helpers.
 //! Runtime loading, message delivery and shared state remain in their existing modules.
 
-use super::ListedAgentsPage;
+use super::ListedAgent;
 use super::LocalAgentControl;
 use super::agent_matches_prefix;
 use super::spawn::SpawnInitialInput;
@@ -196,7 +196,7 @@ impl AgentControl for LocalAgentControl {
                 }) {
                     continue;
                 }
-                // The upstream list contract returns loaded runtimes; list_page includes cold identities.
+                // The upstream list contract returns loaded runtimes; list_canonical includes cold identities.
                 let thread = match state.get_thread(thread_id).await {
                     Ok(thread) => thread,
                     Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
@@ -214,19 +214,16 @@ impl AgentControl for LocalAgentControl {
         })
     }
 
-    fn list_page<'a>(
+    fn list_canonical<'a>(
         &'a self,
         caller: ThreadId,
         parent: Option<ThreadId>,
         source: &'a SessionSource,
         path_prefix: Option<&'a str>,
-        cursor: Option<&'a str>,
-        limit: Option<usize>,
-    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
+    ) -> BoxFuture<'a, Result<Vec<ListedAgent>>> {
         Box::pin(async move {
             self.runtime.register_session_root(caller, parent);
-            self.list_agents_page(source, path_prefix, cursor, limit)
-                .await
+            self.list_agents_canonical(source, path_prefix).await
         })
     }
 
