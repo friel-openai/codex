@@ -31,6 +31,7 @@ use super::confined_publication::ConfinedMutationOutcome;
 use super::confined_publication::ConfinedRootIdentity;
 use super::confined_publication::confined_entry_exists_under_root;
 use super::confined_publication::confined_root_identity;
+use super::confined_publication::confined_staged_entries_exist_under_root;
 use super::confined_publication::ensure_confined_directory_under_root;
 use super::confined_publication::install_confined_file_under_root;
 use super::confined_publication::read_confined_file_under_root;
@@ -63,6 +64,10 @@ static PUBLISHED_REPLACEMENTS: LazyLock<Mutex<std::collections::HashMap<PathBuf,
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 #[cfg(all(test, unix))]
 static CODEX_HOME_RETARGETS: LazyLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+// Retarget only after the read-only check has bound its managed directory.
+#[cfg(all(test, unix))]
+static MANAGED_ROOT_RETARGETS: LazyLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Durability result after an active rollout replacement becomes visible.
@@ -113,6 +118,7 @@ pub(crate) struct HistoryRepairMaintenanceLease {
     _guard: codex_rollout::RolloutMaintenanceGuard,
 }
 
+#[cfg(test)]
 pub(crate) async fn reserve_history_repair_maintenance(
     store: &LocalThreadStore,
 ) -> ThreadStoreResult<Option<HistoryRepairMaintenanceLease>> {
@@ -130,6 +136,26 @@ pub(crate) async fn reserve_history_repair_maintenance(
         canonical_home,
         _guard: guard,
     }))
+}
+
+pub(crate) async fn acquire_history_repair_maintenance(
+    store: &LocalThreadStore,
+) -> ThreadStoreResult<HistoryRepairMaintenanceLease> {
+    let canonical_home = fs::canonicalize(store.config.codex_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let root_identity = confined_root_identity(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let guard = codex_rollout::acquire_rollout_maintenance_lock(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    Ok(HistoryRepairMaintenanceLease {
+        store_identity: store_identity(store),
+        root_identity,
+        canonical_home,
+        _guard: guard,
+    })
 }
 
 pub(crate) async fn reserve_history_repair_lifecycle(
@@ -534,7 +560,7 @@ fn validate_segment_identity(
 ) -> ThreadStoreResult<()> {
     let mut saw_meta = false;
     for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<RolloutLine>(physical_line) else {
+        let Some(line) = parse_physical_rollout_line(physical_line) else {
             continue;
         };
         let RolloutItem::SessionMeta(meta) = line.item else {
@@ -850,6 +876,81 @@ pub(crate) async fn recover_history_repair_publication(
         .await
 }
 
+/// A clean reader may inspect names, but only an exclusive repair owner may clean up a
+/// displaced source or resolve ambiguous plain/compressed representations.
+pub(crate) async fn history_repair_publication_needs_exclusive(
+    codex_home: &Path,
+    selected_path: &Path,
+) -> ThreadStoreResult<bool> {
+    let authority = ConfinedRepairAuthority::bind(codex_home).await?;
+    // Reading a managed sessions symlink is supported even when its target is
+    // outside CODEX_HOME. Bind that directory, not an arbitrary source parent;
+    // descriptor traversal still rejects symlinks below the bound root. This
+    // read-only binding grants no permission to publish a repair there.
+    let mut managed_path = None;
+    for directory in [
+        codex_rollout::SESSIONS_SUBDIR,
+        codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
+    ] {
+        let lexical_root = authority.lexical_home.join(directory);
+        let physical_root = match fs::canonicalize(authority.canonical_home.join(directory)).await {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(thread_store_io_error(error)),
+        };
+        if let Ok(relative) = selected_path
+            .strip_prefix(&lexical_root)
+            .or_else(|_| selected_path.strip_prefix(&physical_root))
+        {
+            let identity = confined_root_identity(&physical_root)
+                .await
+                .map_err(thread_store_io_error)?;
+            #[cfg(all(test, unix))]
+            if let Some(target) = MANAGED_ROOT_RETARGETS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&lexical_root)
+            {
+                std::fs::remove_file(&lexical_root).map_err(thread_store_io_error)?;
+                std::os::unix::fs::symlink(target, &lexical_root).map_err(thread_store_io_error)?;
+            }
+            managed_path = Some((physical_root.join(relative), physical_root, identity));
+            break;
+        }
+    }
+    let (selected_path, read_root, read_identity) = match managed_path {
+        Some(binding) => binding,
+        None => (
+            authority.bind_path(selected_path)?,
+            authority.canonical_home.clone(),
+            authority.root_identity,
+        ),
+    };
+    reject_immutable_publication_target(&authority.canonical_home, &selected_path).await?;
+    let parent = selected_path
+        .parent()
+        .ok_or_else(|| ThreadStoreError::Conflict {
+            message: "history repair source has no parent".to_string(),
+        })?;
+    validate_real_directory_tree(&read_root, parent).await?;
+    validate_regular_file_in_parent(&selected_path, parent).await?;
+    let plain_path = codex_rollout::plain_rollout_path(&selected_path);
+    let sibling = if plain_path == selected_path {
+        compressed_sibling(&plain_path)
+    } else {
+        plain_path
+    };
+    if confined_entry_exists_under_root(&read_root, &sibling, &read_identity)
+        .await
+        .map_err(thread_store_io_error)?
+    {
+        return Ok(true);
+    }
+    confined_staged_entries_exist_under_root(&read_root, &selected_path, &read_identity)
+        .await
+        .map_err(thread_store_io_error)
+}
+
 async fn recover_history_repair_publication_authorized(
     writer: &impl HistoryRepairWriterAuthorization,
     codex_home: &Path,
@@ -1085,8 +1186,16 @@ async fn reject_immutable_publication_target(
         .await
         .map_err(thread_store_io_error)?;
     let rotated = canonical_home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR);
+    let canonical_rotated = match fs::canonicalize(&rotated).await {
+        Ok(root) => Some(root),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(thread_store_io_error(error)),
+    };
     if stable_path.starts_with(codex_home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR))
         || canonical_stable.starts_with(rotated.as_path())
+        || canonical_rotated
+            .as_ref()
+            .is_some_and(|root| canonical_stable.starts_with(root))
     {
         return Err(ThreadStoreError::Conflict {
             message: format!(
@@ -1198,7 +1307,7 @@ fn validate_mutable_rollout_identity(
     path: &Path,
 ) -> ThreadStoreResult<(ThreadId, Option<SegmentId>)> {
     for physical_line in source.split_inclusive(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<RolloutLine>(physical_line) else {
+        let Some(line) = parse_physical_rollout_line(physical_line) else {
             continue;
         };
         let RolloutItem::SessionMeta(meta) = line.item else {
@@ -1227,8 +1336,8 @@ fn validate_replacement_semantics(
     let replacement_records = physical_records(replacement);
     let mut replacement_segment_id = None;
     let session_index = source_records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     });
     let equivalent = source_records.len() == replacement_records.len()
         && source_records
@@ -1237,10 +1346,10 @@ fn validate_replacement_semantics(
             .enumerate()
             .all(|(index, (source_record, replacement_record))| {
                 match (
-                    serde_json::from_slice::<RolloutLine>(source_record),
-                    serde_json::from_slice::<RolloutLine>(replacement_record),
+                    parse_physical_rollout_line(source_record),
+                    parse_physical_rollout_line(replacement_record),
                 ) {
-                    (Ok(source_line), Ok(replacement_line)) => {
+                    (Some(source_line), Some(replacement_line)) => {
                         let identity_matches = match (&source_line.item, &replacement_line.item) {
                             (
                                 RolloutItem::SessionMeta(source_meta),
@@ -1276,7 +1385,7 @@ fn validate_replacement_semantics(
                                     &replacement_line,
                                 )
                     }
-                    (Err(_), Err(_)) => source_record == replacement_record,
+                    (None, None) => source_record == replacement_record,
                     _ => false,
                 }
             });
@@ -1303,6 +1412,12 @@ fn physical_records(source: &[u8]) -> Vec<&[u8]> {
     source.split_inclusive(|byte| *byte == b'\n').collect()
 }
 
+fn parse_physical_rollout_line(record: &[u8]) -> Option<RolloutLine> {
+    codex_rollout::RolloutRecorder::parse_rollout_line_bytes(record)
+        .ok()
+        .flatten()
+}
+
 fn identity_cleared_preimage(
     bytes: &[u8],
     thread_id: ThreadId,
@@ -1310,20 +1425,19 @@ fn identity_cleared_preimage(
 ) -> ThreadStoreResult<Vec<u8>> {
     let records = physical_records(bytes);
     let Some(session_index) = records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     }) else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment contains no session metadata".to_string(),
         });
     };
     let session_record = records[session_index];
-    let first_line = serde_json::from_slice::<RolloutLine>(session_record).map_err(|_| {
-        ThreadStoreError::Conflict {
+    let first_line =
+        parse_physical_rollout_line(session_record).ok_or_else(|| ThreadStoreError::Conflict {
             message: "immutable history repair segment does not start with session metadata"
                 .to_string(),
-        }
-    })?;
+        })?;
     let RolloutItem::SessionMeta(meta) = &first_line.item else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment does not start with session metadata"
@@ -1355,8 +1469,8 @@ fn rewrite_physical_segment_id(
 ) -> ThreadStoreResult<Vec<u8>> {
     let records = physical_records(bytes);
     let Some(session_index) = records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     }) else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment contains no session metadata".to_string(),

@@ -26,6 +26,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ElicitationAction;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
@@ -207,11 +208,12 @@ async fn mcp_app_ui_survives_tool_events_and_resume(
         .items
         .into_iter()
         .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::McpToolCallEnd(end)) if end.call_id == call_id => {
-                Some(EventMsg::McpToolCallEnd(end))
-            }
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => Some(event),
             _ => None,
         })
+        // Paginated history stores canonical items rather than legacy tool events.
+        .flat_map(|event| event.as_legacy_events(/*show_raw_agent_reasoning*/ false))
+        .filter(|event| matches!(event, EventMsg::McpToolCallEnd(end) if end.call_id == call_id))
         .collect::<Vec<_>>();
     assert_eq!(
         serde_json::to_value(completed_history)?,
