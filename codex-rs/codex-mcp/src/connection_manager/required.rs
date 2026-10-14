@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -27,12 +28,19 @@ impl McpConnectionSet {
                     continue;
                 };
                 if view.allows_cached_startup()
-                    && view.cached_startup_tools(/*fallback*/ None).is_some()
+                    && view
+                        .cached_startup_tools(server_name, /*fallback*/ None)
+                        .is_some()
                 {
                     continue;
                 }
 
-                match view.connection.client().await {
+                view.trigger_startup().await;
+                match view
+                    .connection
+                    .await_current_startup(Arc::clone(&self.session_route))
+                    .await
+                {
                     Ok(_) => {}
                     Err(error) => failures.push(McpStartupFailure {
                         server: server_name.clone(),

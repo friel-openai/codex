@@ -7706,6 +7706,7 @@ async fn mcp_runtime_keeps_local_backend_without_a_selected_local_environment() 
         },
         &[],
         /*elicitation_reviewer*/ None,
+        codex_mcp::McpConnectionPoolMode::Reuse,
     );
     assert_eq!(
         runtime.config.environment_use_mxc,
@@ -10984,6 +10985,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         codex_mcp::configured_mcp_servers(current.config()).contains_key("refreshed"),
         "the refreshed state should remain globally current"
     );
+}
+
+#[tokio::test]
+async fn mcp_publication_clears_inherited_tool_snapshot() {
+    let (session, _turn_context) = make_session_and_context().await;
+    *session.services.mcp_tool_snapshot.lock().await =
+        Some(crate::state::McpToolSnapshot::default());
+
+    session.clear_inherited_mcp_tool_snapshot().await;
+
+    assert!(session.services.mcp_tool_snapshot.lock().await.is_none());
 }
 
 #[tokio::test]
