@@ -37,7 +37,6 @@ pub(crate) struct GoalToolExecutor {
     analytics: GoalAnalytics,
     event_emitter: GoalEventEmitter,
     metrics: GoalMetrics,
-    max_goal_token_budget: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -64,7 +63,9 @@ struct UpdateGoalArgs {
 #[serde(rename_all = "camelCase")]
 struct GoalToolResponse {
     goal: Option<ThreadGoal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     remaining_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     completion_budget_report: Option<String>,
 }
 
@@ -92,7 +93,6 @@ impl GoalToolExecutor {
             analytics,
             event_emitter,
             metrics,
-            max_goal_token_budget: None,
         }
     }
 
@@ -103,7 +103,7 @@ impl GoalToolExecutor {
         analytics: GoalAnalytics,
         event_emitter: GoalEventEmitter,
         metrics: GoalMetrics,
-        max_goal_token_budget: Option<i64>,
+        _max_goal_token_budget: Option<i64>,
     ) -> Self {
         Self {
             kind: GoalToolKind::Create,
@@ -114,7 +114,6 @@ impl GoalToolExecutor {
             analytics,
             event_emitter,
             metrics,
-            max_goal_token_budget,
         }
     }
 
@@ -135,7 +134,6 @@ impl GoalToolExecutor {
             analytics,
             event_emitter,
             metrics,
-            max_goal_token_budget: None,
         }
     }
 }
@@ -201,13 +199,20 @@ impl GoalToolExecutor {
         &self,
         invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
-        let mut request: CreateGoalRequest = parse_arguments(invocation.function_arguments()?)?;
+        let arguments = invocation.function_arguments()?;
+        let token_budget_present = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|arguments| arguments.contains_key("token_budget"));
+        let mut request: CreateGoalRequest = parse_arguments(arguments)?;
         request.objective = request.objective.trim().to_string();
         validate_thread_goal_objective(&request.objective)
             .map_err(FunctionCallError::RespondToModel)?;
-        request.token_budget = request.token_budget.or(self.max_goal_token_budget);
-        validate_goal_budget(request.token_budget, self.max_goal_token_budget)
-            .map_err(FunctionCallError::RespondToModel)?;
+        if token_budget_present {
+            return Err(FunctionCallError::RespondToModel(
+                "goal token budgets are disabled in Frodex".to_string(),
+            ));
+        }
 
         let goal = self
             .state_db
@@ -216,7 +221,7 @@ impl GoalToolExecutor {
                 self.thread_id,
                 request.objective.as_str(),
                 codex_state::ThreadGoalStatus::Active,
-                request.token_budget,
+                /*token_budget*/ None,
             )
             .await
             .map_err(|err| FunctionCallError::RespondToModel(format!("failed to create goal: {err}")))?
@@ -420,26 +425,6 @@ where
         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
 }
 
-pub(crate) fn validate_goal_budget(
-    value: Option<i64>,
-    max_goal_token_budget: Option<i64>,
-) -> Result<(), String> {
-    if let Some(value) = value
-        && value <= 0
-    {
-        return Err("goal budgets must be positive when provided".to_string());
-    }
-    if let Some(value) = value
-        && let Some(max_goal_token_budget) = max_goal_token_budget
-        && value > max_goal_token_budget
-    {
-        return Err(format!(
-            "goal token budget {value} exceeds the maximum allowed goal token budget of {max_goal_token_budget}"
-        ));
-    }
-    Ok(())
-}
-
 fn goal_response(
     goal: Option<ThreadGoal>,
     completion_budget_report: CompletionBudgetReport,
@@ -523,12 +508,8 @@ pub(crate) fn state_status_from_protocol(
 }
 
 fn completion_budget_report(goal: &ThreadGoal) -> Option<String> {
-    if goal.token_budget.is_none() && goal.time_used_seconds <= 0 {
-        None
-    } else {
-        Some(
-            "Goal achieved. Report final usage from this tool result's structured goal fields. If `goal.tokenBudget` is present, include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
-                .to_string(),
-        )
-    }
+    goal.token_budget.map(|_| {
+        "Goal achieved. Report final usage from this tool result's structured goal fields. Include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
+            .to_string()
+    })
 }
