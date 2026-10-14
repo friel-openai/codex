@@ -341,6 +341,11 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
         )
         .await;
     }
+    sqlx::query("UPDATE thread_turns SET root_turn_id = 'causal-root' WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(db)
+        .await
+        .expect("retain turn ancestry in indexed rows before publishing completeness");
     sqlx::query(
         "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
     )
@@ -388,6 +393,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
     )
     .await;
     assert_eq!(turn_ids(&first_turn_page), vec!["turn-5", "turn-4"]);
+    assert!(
+        first_turn_page
+            .turns
+            .iter()
+            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
+    );
     assert_eq!(
         first_turn_page.turns[0].items,
         vec![
@@ -409,6 +420,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
     )
     .await;
     assert_eq!(turn_ids(&older_turn_page), vec!["turn-3", "turn-2"]);
+    assert!(
+        older_turn_page
+            .turns
+            .iter()
+            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
+    );
     assert!(older_turn_page.turns[0].items.is_empty());
 
     let oldest_turn_page = indexed_projected_turn_page(

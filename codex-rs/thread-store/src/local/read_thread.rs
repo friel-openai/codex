@@ -449,15 +449,17 @@ pub(super) async fn load_history_items(
                 ),
             });
         }
-        return codex_rollout::materialize_recent_rollout_lines_from(codex_home, lines)
-            .await
-            .map(|lines| lines.into_iter().map(|line| line.item).collect())
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!(
-                    "failed to materialize thread history {}: {err}",
-                    path.display()
-                ),
-            });
+        return codex_rollout::materialize_recent_rollout_lines_from_with_path(
+            codex_home, path, lines,
+        )
+        .await
+        .map(|lines| lines.into_iter().map(|line| line.item).collect())
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!(
+                "failed to materialize thread history {}: {err}",
+                path.display()
+            ),
+        });
     }
     Ok(lines.into_iter().map(|line| line.item).collect())
 }
