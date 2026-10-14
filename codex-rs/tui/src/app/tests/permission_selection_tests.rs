@@ -236,10 +236,22 @@ async fn custom_permission_selection_uses_server_definition_and_preserves_state_
         turn_completed_notification(thread_id, "turn-1", TurnStatus::Completed),
         /*replay_kind*/ None,
     );
-    // Unchanged re-selection is accepted without requiring a notification.
+    // Named profiles are re-read by the server, so re-selection still needs confirmation.
     app.select_permission_profile(&mut server, selection.clone())
         .await;
+    assert!(app.pending_server_profiles.contains_key(&thread_id));
+    let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ThreadSettingsUpdated(settings),
+    )
+    .await?;
     assert!(!app.reject_pending_permission_change());
+    assert!(
+        !app.agents_overview
+            .requested_permission_profiles
+            .contains_key(&thread_id)
+    );
     let confirmed = RuntimePermissionProfileOverride::from_config(app.chat_widget.config_ref());
     let confirmed_config = app.config.clone();
     app.select_permission_profile(
@@ -272,7 +284,7 @@ async fn custom_permission_selection_uses_server_definition_and_preserves_state_
     app.change_working_directory(&mut tui, &mut server, client_home.path().abs())
         .await;
     assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
-    insta::assert_snapshot!(next_history_message(&mut events), @"■ Changing directories with an unconfirmed named profile is not supported.");
+    insta::assert_snapshot!(next_history_message(&mut events), @"■ Permission profile has different settings.");
     let side = server
         .fork_side_thread(
             &app.local_settings,
@@ -300,7 +312,10 @@ async fn custom_permission_selection_uses_server_definition_and_preserves_state_
         app.handle_event(
             &mut tui,
             &mut server,
-            AppEvent::ForkCurrentSession { name: None },
+            AppEvent::ForkCurrentSession {
+                name: None,
+                placement: None,
+            },
         )
         .await?;
         assert_ne!(app.chat_widget.thread_id(), previous_thread_id);

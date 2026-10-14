@@ -113,6 +113,15 @@ pub(super) async fn reconnect(
         let result = tokio::time::timeout_at(deadline, attempt).await;
         match result {
             Ok(Ok(connected)) => return Ok(connected),
+            Ok(Err(error))
+                if error
+                    .downcast_ref::<crate::app_server_connection::LocalDaemonVersionMismatch>()
+                    .is_some() =>
+            {
+                // A different release cannot safely resume this session. Keep the TUI offline;
+                // only a fresh launch may choose an embedded server instead.
+                return Err(error);
+            }
             Ok(Err(_)) => {}
             Err(_) => break,
         }
@@ -337,11 +346,12 @@ impl App {
         // The displayed task was resumed above. Keep offscreen selections pending until those
         // tasks can be resumed from the server too; their old confirmations cannot arrive.
         let pending_displayed_profile = displayed.and_then(|id| {
-            self.pending_server_profiles.remove(&id).or_else(|| {
-                self.agents_overview
-                    .requested_permission_profiles
-                    .remove(&id)
-            })
+            let pending = self.pending_server_profiles.remove(&id);
+            let requested = self
+                .agents_overview
+                .requested_permission_profiles
+                .remove(&id);
+            pending.or(requested)
         });
         if let Some(selection) = &pending_displayed_profile {
             self.runtime_approval_policy_override = None;

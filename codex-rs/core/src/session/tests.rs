@@ -305,6 +305,7 @@ impl StepContext {
                 &[],
             )),
             loaded_agents_md: None,
+            context_transition: Default::default(),
         })
     }
 
@@ -8594,6 +8595,50 @@ async fn submit_with_trace_captures_current_span_trace_context() {
 }
 
 #[tokio::test]
+async fn submit_with_trace_cancelled_when_queue_full_does_not_enqueue() {
+    let (tx_sub, rx_sub) = async_channel::bounded(1);
+    let (_tx_event, rx_event) = async_channel::unbounded();
+    let io = SessionIo {
+        tx_sub,
+        rx_event,
+        agent_status: watch::channel(AgentStatus::PendingInit).1,
+        session_loop_termination: completed_session_loop_termination(),
+    };
+    io.submit(Op::Interrupt)
+        .await
+        .expect("fill submission queue");
+    let submit_settings = || {
+        io.submit_with_trace(
+            Op::ThreadSettings {
+                thread_settings: ThreadSettingsOverrides::default(),
+                reply: None,
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .now_or_never()
+    };
+    assert!(submit_settings().is_none());
+    assert!(matches!(
+        rx_sub.try_recv().expect("original op").op,
+        Op::Interrupt
+    ));
+    assert!(
+        rx_sub.try_recv().is_err(),
+        "cancelled settings must not be queued"
+    );
+    let id = submit_settings()
+        .expect("queue has capacity")
+        .expect("accepted");
+    let submitted = rx_sub.try_recv().expect("accepted settings");
+    assert_eq!(submitted.id, id);
+    assert!(matches!(submitted.op, Op::ThreadSettings { .. }));
+    assert!(rx_sub.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn new_default_turn_captures_current_span_trace_id() {
     let (session, _turn_context) = make_session_and_context().await;
 
@@ -12272,9 +12317,9 @@ impl SessionTask for ExtensionInterruptedTask {
     }
 }
 
-pub(super) struct HeldStepTask {
-    pub(super) kind: TaskKind,
-    pub(super) finish: Arc<Notify>,
+pub(crate) struct HeldStepTask {
+    pub(crate) kind: TaskKind,
+    pub(crate) finish: Arc<Notify>,
 }
 
 impl SessionTask for HeldStepTask {

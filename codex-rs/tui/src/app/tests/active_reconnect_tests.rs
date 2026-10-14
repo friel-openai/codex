@@ -28,6 +28,54 @@ async fn reconnect_restores_launch_reviewer_without_a_profile_override() -> Resu
 }
 
 #[tokio::test]
+async fn automatic_daemon_reconnect_rejects_changed_release_without_resuming() -> Result<()> {
+    let mut app = make_test_app().await;
+    let server = crate::daemon_identity_tests::InitializeServer::start(
+        vec![Some(format!("codex/{}+other", env!("CARGO_PKG_VERSION")))],
+        Vec::new(),
+    )
+    .await;
+    let thread_id = ThreadId::new();
+    app.app_server_target = AppServerTarget::LocalDaemon {
+        endpoint: server.endpoint.clone(),
+        allow_embedded_fallback: false,
+    };
+    app.active_thread_id = Some(thread_id);
+    app.primary_thread_id = Some(thread_id);
+    app.chat_widget
+        .restore_user_message_to_composer("keep this offline draft".into());
+    assert!(app.begin_reconnect());
+
+    let result = reconnect(
+        app.app_server_target.clone(),
+        app.config.clone(),
+        app.local_settings.clone(),
+        Some(thread_id),
+        /*remote_cwd*/ None,
+        crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+        ReconnectPresentation::Conversation,
+    )
+    .await;
+
+    let error = result
+        .err()
+        .expect("different daemon release must not resume");
+    assert!(
+        error
+            .downcast_ref::<crate::app_server_connection::LocalDaemonVersionMismatch>()
+            .is_some()
+    );
+    assert!(app.is_offline());
+    assert_eq!(app.active_thread_id, Some(thread_id));
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "keep this offline draft"
+    );
+    assert_eq!(server.finish().await, vec![vec!["initialize".to_string()]]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Result<()> {
     for (recovered_queue, edit_offline, resume_error_code, deferred_notice, notice_enabled) in [
         (true, false, -32603, false, false),
@@ -235,6 +283,10 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
                     approvals_reviewer: None,
                     display_label: "server-only".into(),
                 },
+            );
+            app.pending_server_profiles.insert(
+                id,
+                app.agents_overview.requested_permission_profiles[&id].clone(),
             );
         }
         if edit_offline {
@@ -522,6 +574,9 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
             display_label: "server-only".into(),
         },
     );
+    app.agents_overview
+        .requested_permission_profiles
+        .insert(primary, app.pending_server_profiles[&primary].clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     app.app_server_target = AppServerTarget::Remote {
@@ -586,11 +641,21 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
     )
     .await?;
     assert!(app.pending_server_profiles.contains_key(&primary));
+    assert!(
+        app.agents_overview
+            .requested_permission_profiles
+            .contains_key(&primary)
+    );
 
     app.select_agent_thread(&mut tui, &mut session, primary)
         .await?;
     assert!(!app.thread_unavailable(primary));
     assert!(!app.pending_server_profiles.contains_key(&primary));
+    assert!(
+        !app.agents_overview
+            .requested_permission_profiles
+            .contains_key(&primary)
+    );
     assert_eq!(
         app.chat_widget
             .config_ref()

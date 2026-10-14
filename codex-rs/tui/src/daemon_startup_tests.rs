@@ -203,7 +203,7 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
                     };
                     let response = match request.method.as_str() {
                         "initialize" => {
-                            json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
+                            json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
                         }
                         "config/read" => {
                             json!({"id": request.id, "result": {"config": {}, "layers": [{

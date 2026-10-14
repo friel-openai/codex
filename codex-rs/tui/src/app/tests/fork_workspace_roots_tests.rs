@@ -107,7 +107,10 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
     Box::pin(app.handle_event(
         &mut tui,
         &mut server,
-        AppEvent::ForkCurrentSession { name: None },
+        AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        },
     ))
     .await?;
 

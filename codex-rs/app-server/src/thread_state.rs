@@ -110,6 +110,8 @@ pub(crate) struct ThreadState {
     pub(crate) experimental_raw_events: bool,
     pub(crate) listener_generation: u64,
     last_thread_settings: Option<ThreadSettings>,
+    /// Explicit settings requests need confirmation even when their snapshot is unchanged.
+    pub(crate) pending_thread_settings_confirmations: HashSet<String>,
     listener_command_tx: Option<mpsc::UnboundedSender<ThreadListenerCommand>>,
     current_turn_history: ThreadHistoryBuilder,
     listener_thread: Option<Weak<CodexThread>>,
@@ -136,6 +138,7 @@ impl ThreadState {
         }
         self.listener_generation = self.listener_generation.wrapping_add(1);
         self.last_thread_settings = Some(thread_settings_baseline);
+        self.pending_thread_settings_confirmations.clear();
         let (listener_command_tx, listener_command_rx) = mpsc::unbounded_channel();
         self.listener_command_tx = Some(listener_command_tx);
         self.listener_thread = Some(Arc::downgrade(conversation));
@@ -149,6 +152,7 @@ impl ThreadState {
         }
         self.shutdown_drain_waiter = None;
         self.listener_command_tx = None;
+        self.pending_thread_settings_confirmations.clear();
         self.current_turn_history.reset();
         self.listener_thread = None;
         self.watch_registration = WatchRegistration::default();
@@ -196,6 +200,10 @@ impl ThreadState {
     }
 
     pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
+        if matches!(event, EventMsg::Error(_)) {
+            self.pending_thread_settings_confirmations
+                .remove(event_turn_id);
+        }
         if let EventMsg::TurnStarted(payload) = event {
             self.turn_summary.started_at = payload.started_at;
         }
@@ -222,6 +230,18 @@ impl ThreadState {
         let changed = self.last_thread_settings.as_ref() != Some(&thread_settings);
         self.last_thread_settings = Some(thread_settings);
         changed
+    }
+
+    pub(crate) fn note_thread_settings_applied(
+        &mut self,
+        submission_id: &str,
+        thread_settings: ThreadSettings,
+    ) -> bool {
+        let confirmation = self
+            .pending_thread_settings_confirmations
+            .remove(submission_id);
+        let changed = self.note_thread_settings(thread_settings);
+        changed || confirmation
     }
 }
 
@@ -283,6 +303,39 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn explicit_settings_confirmation_preserves_dedup_and_cleans_up() {
+        let mut state = ThreadState::default();
+        let settings = thread_settings("mock-model");
+        assert!(state.note_thread_settings(settings.clone()));
+        state
+            .pending_thread_settings_confirmations
+            .insert("requested".into());
+        assert!(!state.note_thread_settings_applied("unrelated", settings.clone()));
+        assert!(state.note_thread_settings_applied("requested", settings.clone()));
+        assert!(!state.note_thread_settings_applied("requested", settings.clone()));
+        assert!(state.pending_thread_settings_confirmations.is_empty());
+
+        state
+            .pending_thread_settings_confirmations
+            .insert("failed".into());
+        state.track_current_turn_event(
+            "failed",
+            &EventMsg::Error(codex_protocol::protocol::ErrorEvent {
+                message: "settings rejected".into(),
+                codex_error_info: None,
+                misalignment: None,
+            }),
+        );
+        assert!(!state.note_thread_settings_applied("failed", settings.clone()));
+        assert!(state.pending_thread_settings_confirmations.is_empty());
+        state
+            .pending_thread_settings_confirmations
+            .insert("closed".into());
+        state.clear_listener();
+        assert!(state.pending_thread_settings_confirmations.is_empty());
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {
