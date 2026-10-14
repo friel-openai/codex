@@ -371,7 +371,7 @@ async fn run_remote_compact_task_inner_impl(
             reviewer_compaction_hash,
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(&replacement_step_context.turn)
         .await;
 
