@@ -6307,6 +6307,7 @@ async fn turn_context_with_model_updates_model_fields() {
             Arc::clone(&settings.model_info),
             &codex_features::Features::with_defaults(),
         );
+        settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::AutoReview);
     });
     Arc::make_mut(&mut turn_context.config).service_tier =
         turn_context.initial_settings.service_tier.clone();
@@ -6318,11 +6319,13 @@ async fn turn_context_with_model_updates_model_fields() {
         .collaboration_mode
         .settings
         .reasoning_effort = Some(ReasoningEffortConfig::High);
-    let current = Arc::new(ResolvedStepSettings::new(
+    let mut current_settings = ResolvedStepSettings::new(
         Arc::new(current_selection),
         Arc::clone(turn_context.model_info()),
         &codex_features::Features::with_defaults(),
-    ));
+    );
+    current_settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::User);
+    let current = Arc::new(current_settings);
     turn_context.next_step_settings.store(Arc::clone(&current));
     let updated = turn_context
         .with_model("gpt-5.5".to_string(), &session.services.models_manager)
@@ -6364,6 +6367,21 @@ async fn turn_context_with_model_updates_model_fields() {
         &turn_context.next_step_settings.load_full()
     ));
     assert!(!Arc::ptr_eq(&captured, &updated.initial_settings));
+    assert_eq!(
+        updated.initial_settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    assert_eq!(
+        captured.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    assert_eq!(
+        turn_context
+            .next_step_settings
+            .load()
+            .mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::User)
+    );
     assert!(Arc::ptr_eq(
         &updated.initial_settings,
         &updated.next_step_settings.load_full()
