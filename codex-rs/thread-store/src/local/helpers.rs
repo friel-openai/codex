@@ -61,7 +61,8 @@ pub(super) fn scoped_rollout_path(
     }
 }
 
-/// Accepts managed roots reached through symlinks without allowing nested symlinks to escape.
+/// Keeps CODEX_HOME confinement while permitting explicitly managed roots outside it.
+/// A nested symlink cannot authorize a target outside both the home and its managed roots.
 pub(super) fn scoped_reference_rollout_path(
     codex_home: &Path,
     rollout_path: &Path,
@@ -73,6 +74,9 @@ pub(super) fn scoped_reference_rollout_path(
         ),
     };
     let canonical = std::fs::canonicalize(rollout_path).map_err(|_| outside_managed_roots())?;
+    if std::fs::canonicalize(codex_home).is_ok_and(|root| canonical.starts_with(root)) {
+        return Ok(canonical);
+    }
     let managed = [
         codex_rollout::SESSIONS_SUBDIR,
         codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
