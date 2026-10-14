@@ -82,6 +82,8 @@ use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::TurnStartAdmission;
 use codex_feedback::CodexFeedback;
+use codex_goal_extension::GoalActivator;
+use codex_goal_extension::GoalSchedulerHandle;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
@@ -196,6 +198,7 @@ pub(crate) struct MessageProcessor {
     project_processor: ProjectRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
+    goal_scheduler: Option<GoalSchedulerHandle>,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_queue_processor: ThreadQueueRequestProcessor,
     thread_processor: ThreadRequestProcessor,
@@ -328,6 +331,7 @@ impl MessageProcessor {
         let gateway_login_control =
             codex_login::GatewayLoginControl::for_runtime(&auth_manager.runtime_config());
         gateway_login_control.require_explicit_login();
+        let start_goal_scheduler = !matches!(rpc_transport, AppServerRpcTransport::InProcess);
         let thread_state_manager = ThreadStateManager::new();
         outgoing.watch_user_verification_auth(Arc::clone(&auth_manager));
         // The thread store is intentionally process-scoped. Config reloads can
@@ -560,6 +564,22 @@ impl MessageProcessor {
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             config_warnings,
         );
+        let goal_scheduler = if start_goal_scheduler {
+            state_db.as_ref().map(|state_db| {
+                let thread_processor = thread_processor.clone();
+                let activator: GoalActivator = Arc::new(move |schedule| {
+                    let thread_processor = thread_processor.clone();
+                    Box::pin(async move {
+                        thread_processor
+                            .activate_goal_supervisor_schedule(schedule)
+                            .await
+                    })
+                });
+                GoalSchedulerHandle::start(Arc::clone(state_db), activator)
+            })
+        } else {
+            None
+        };
         let turn_processor = TurnRequestProcessor::new(
             auth_manager,
             Arc::clone(&thread_manager),
@@ -642,6 +662,7 @@ impl MessageProcessor {
             project_processor,
             remote_control_processor,
             search_processor,
+            goal_scheduler,
             thread_goal_processor,
             thread_queue_processor,
             thread_processor,
@@ -656,6 +677,9 @@ impl MessageProcessor {
         self.apps_processor.shutdown();
         self.models_refresh_worker.shutdown();
         self.skills_watcher.shutdown();
+        if let Some(goal_scheduler) = self.goal_scheduler.as_ref() {
+            goal_scheduler.stop();
+        }
     }
 
     pub(crate) async fn process_request(

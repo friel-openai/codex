@@ -43,6 +43,9 @@ use wiremock::ResponseTemplate;
 use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_matching_analytics_event;
 
+#[path = "compaction_goal.rs"]
+mod compaction_goal;
+
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
 // subprocesses or processing test RPCs under load.
 #[cfg(any(target_os = "macos", windows))]
