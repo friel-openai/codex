@@ -174,20 +174,30 @@ pub(super) async fn resume_thread(
             if !matches!(
                 history.first(),
                 Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == params.thread_id
-            ) => history,
+            ) =>
+        {
+            history
+        }
         Some(history)
             if params.history_revision.is_some()
-                && params.history_revision == super::history_revision::read(&rollout_path).await =>
+                && params.history_revision
+                    == super::history_revision::read(&rollout_path).await =>
         {
             history
         }
         _ => Arc::new(
-            super::model_context::load_from_rollout_path(store, params.thread_id, &rollout_path)
-                .await?
-                .items,
+            super::model_context::load_from_rollout_path(
+                store,
+                params.thread_id,
+                &rollout_path,
+                history_access.take_certified_active_snapshot(),
+            )
+            .await?
+            .items,
         ),
     };
     let history_mode = canonical_history_mode_from_rollout_items(&history);
+    super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
     let cwd = params
         .metadata
         .cwd
@@ -692,7 +702,9 @@ pub(super) async fn shutdown_thread(
             warn!("failed to project durable rollout during shutdown for {thread_id}: {err}");
         }
     }
-    sync_materialized_rollout_path(store, thread_id, rollout_path.as_path()).await?;
+    // The recorder has stopped, so metadata errors must not retain its writer ownership.
+    let metadata_sync_result =
+        sync_materialized_rollout_path(store, thread_id, rollout_path.as_path()).await;
     if let Some(metrics) = codex_otel::global()
         && let Ok(metadata) = tokio::fs::metadata(&rollout_path).await
     {
@@ -713,7 +725,7 @@ pub(super) async fn shutdown_thread(
     if !rollout_exists && pending_metadata.take().is_some() {
         store.pending_thread_metadata.remove(thread_id).await;
     }
-    Ok(())
+    metadata_sync_result
 }
 
 pub(super) async fn discard_thread(
@@ -790,10 +802,7 @@ pub(super) async fn sync_materialized_rollout_path(
         Ok(())
     }
     .await;
-    if let Err(err) = result {
-        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
-    }
-    Ok(())
+    result
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
