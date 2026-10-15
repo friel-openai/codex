@@ -154,7 +154,14 @@
         "agent::control::tests::spawn_agent_full_history_fork_from_compacted_paginated_parent_preserves_summary",
         "client::tests::ephemeral_root_fork_cache_key_survives_transitive_subagent_forks",
         "client::tests::guardian_scoped_cache_key_is_not_inherited_by_forks",
-        "thread_manager::tests::thread_id_generator_applies_to_roots_children_and_forks"
+        "thread_manager::tests::thread_id_generator_applies_to_roots_children_and_forks",
+        "agent::control::tests::self_contained_paginated_forks_work_without_state_db",
+        "agent::control::tests::repeated_ephemeral_supervisors_do_not_publish_parent_snapshots",
+        "agent::control::tests::goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
+        "thread_manager::tests::unchanged_resume_does_not_append_settings_but_changed_settings_and_explicit_checkpoints_do",
+        "agent::control::tests::goal_supervisor_execution_settings_change_restarts_running_helper",
+        "thread_manager::tests::reference_backed_fork_reserves_source_until_child_reference_is_durable",
+        "agent::control::tests::request_restoration_tests::goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume"
       ]
     },
     {
@@ -239,7 +246,32 @@
         "local::update_thread_metadata::tests::update_thread_metadata_recreates_missing_archived_sqlite_row_as_archived",
         "local::thread_history_materialization::tests::legacy_projection_materializes_visible_messages_without_rollout_ordinals",
         "local::thread_history_materialization::tests::paginated_command_history_caps_aggregated_output",
-        "local::thread_history_materialization::tests::paginated_mcp_history_caps_large_results"
+        "local::thread_history_materialization::tests::paginated_mcp_history_caps_large_results",
+        "local::prune_archived::tests::prune_header_discovery_rejects_invalid_first_records_without_skipping_them",
+        "local::prune_archived::tests::prune_missing_database_does_not_create_metadata_or_delete_rollouts",
+        "local::prune_archived::tests::prune_refuses_symlinked_history_entries",
+        "local::prune_archived::tests::prune_rechecks_archived_state_after_scan_before_deleting",
+        "local::prune_archived::tests::prune_refuses_active_writer_maintenance_and_lifecycle_reservations",
+        "local::prune_archived::tests::prune_orders_same_thread_physical_children_before_ancestors",
+        "local::prune_archived::tests::prune_refuses_conflicting_owners_in_plain_and_compressed_deletion_siblings",
+        "local::prune_archived::tests::prune_requires_positive_duration_and_explicit_offline_assertion",
+        "local::prune_archived::tests::prune_without_state_handle_refuses_selected_alias_outside_canonical_deletion_set",
+        "local::prune_archived::tests::prune_apply_deletes_only_expired_archive_and_is_repeatable",
+        "local::prune_archived::tests::prune_scans_compressed_siblings_and_can_delete_compressed_archives",
+        "local::prune_archived::tests::prune_preview_uses_archive_age_and_strict_cutoff_without_deletion",
+        "local::prune_archived::tests::prune_deletes_expired_children_before_their_expired_ancestors",
+        "local::prune_archived::tests::prune_retains_native_physical_history_base_and_detached_references",
+        "local::prune_archived::tests::prune_completed_threads_are_removed_from_metadata_before_later_failure",
+        "local::prune_archived::tests::prune_runs_host_cleanup_only_for_threads_being_deleted_not_preview",
+        "local::prune_archived::tests::prune_header_discovery_bounds_plain_and_compressed_first_records",
+        "local::prune_archived::tests::prune_retains_transitive_nonleading_references_from_active_and_recent_threads",
+        "local::prune_archived::tests::prune_refuses_corrupt_truncated_missing_and_inflight_history_before_deletion",
+        "local::segment::tests::cancelling_snapshot_install_removes_only_its_temporary_file",
+        "local::segment::tests::cancelling_immutable_install_removes_only_its_temporary_file",
+        "local::segment::tests::immutable_install_missing_source_removes_temporary_file",
+        "local::segment::tests::snapshot_install_success_and_conflict_remove_temporary_files",
+        "local::segment::tests::immutable_install_copies_source_and_rejects_different_existing_contents",
+        "local::segment::tests::immutable_install_rejects_existing_symlink_without_mutating_its_target"
       ]
     },
     {
@@ -459,6 +491,16 @@
         "protocol::tests::turn_started_roundtrips_nonempty_turn_attribution",
         "protocol::tests::thread_settings_environments_persist_locations_without_owner_config",
         "protocol::tests::thread_settings_environments_read_legacy_selections_and_absence"
+      ]
+    },
+    {
+      "package": "codex-cli",
+      "binary": "codex-cli::bin/codex",
+      "kind": "bin",
+      "target": "codex",
+      "tests": [
+        "prune_archived::tests::prune_duration_rejects_implicit_zero_negative_and_overflow_values",
+        "prune_archived::tests::prune_requires_period_and_offline_for_apply"
       ]
     }
   ],

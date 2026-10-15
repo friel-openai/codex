@@ -913,7 +913,7 @@ index cf2bc92ace3e7d26aadcd69e4daccdb9c896118e..89fd8672059aa56a7faee29f2a6e0ef6
      selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
  }
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 3503485fe0fe75835f9080614754d57ec7063a22..5f2514284d2c05ac741f240d764c5dcf30042127 100644
+index d95dd59f65ef2398a17ce851f267396b16ef4d46..fed7b4f3b1dbe9735d80a38771d6dee9aae1f957 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -416,6 +416,11 @@ async fn reserve_segment_writers(

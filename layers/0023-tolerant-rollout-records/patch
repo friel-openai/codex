@@ -2849,7 +2849,7 @@ index c79923b3d93a1aa6a500c1b3779121d1b7e23919..691b93a398f7457b515fc51707af6ffd
          file,
          "{}",
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index e2011b3ee30a805a36dc3eaef1e043ad793a4b0f..5c6654dd68ce27d3150c78a73c3879f0d4703df1 100644
+index 3a03d3f6e026bde43ea28ee0d114c800688f6e68..96e11d0785a1ee8efa11b6fdd029d40a279ac849 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -989,8 +989,13 @@ async fn freeze_thread_segment_reserved_with_publication(
@@ -3005,10 +3005,10 @@ index e2011b3ee30a805a36dc3eaef1e043ad793a4b0f..5c6654dd68ce27d3150c78a73c3879f0
  ///
  /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 09137a748bdeb6a5f99b815b16bc6bc592eed14b..cba2fc1d787e715873c8b401622dc19e240d973a 100644
+index 03d49365c04a794d0445dd09f49a942a83b960b5..af5e59fdb8db318a2ce3e3ac9a7569eb5cd6d24c 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
-@@ -4007,6 +4007,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -4155,6 +4155,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
      assert_eq!(projection_state, (replacement_len, 3));
  }
 

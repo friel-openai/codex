@@ -49,6 +49,17 @@ class DeclarationTests(unittest.TestCase):
         groups = [group(), group("codex-core::all", kind="test", target="all")]
         self.assertEqual(selection.load_selection(declaration(*groups)), groups)
 
+    def test_cli_binary_uses_an_explicit_bin_target(self):
+        selected = dict(group("codex-cli::bin/codex", kind="bin", target="codex"),
+                        package="codex-cli")
+        self.assertEqual(selection.load_selection(declaration(selected)), [selected])
+        arguments = selection.command_arguments(selected, Path("nextest.toml"))
+        self.assertEqual(arguments[arguments.index("--bin") + 1], "codex")
+        self.assertNotIn("--test", arguments)
+        for target in [None, "", "codex --lib", "../codex"]:
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                selection.load_selection(declaration(dict(selected, target=target)))
+
     def test_rejects_duplicate_test_and_binary_declarations(self):
         values = [
             declaration(group(names=["module::exact_case", "module::exact_case"])),
@@ -94,7 +105,7 @@ class DeclarationTests(unittest.TestCase):
                 selection.load_selection(declaration(invalid))
 
     def test_limits_total_cases_across_groups(self):
-        first = group(names=[f"module::case_{index}" for index in range(166)])
+        first = group(names=[f"module::case_{index}" for index in range(183)])
         second = group("codex-core::all", list(first["tests"]), "test", "all")
         second["tests"].append("module::legacy_paging_case")
         self.assertEqual(selection.load_selection(declaration(first, second)), [first, second])
@@ -105,7 +116,7 @@ class DeclarationTests(unittest.TestCase):
     def test_checked_in_selection_fits_the_validated_limit(self):
         configured = Path(__file__).resolve().parents[1] / "frodex-ci-selection.json"
         groups = selection.load_selection(selection.load_json(configured.read_text()))
-        self.assertEqual(sum(len(group["tests"]) for group in groups), 333)
+        self.assertEqual(sum(len(group["tests"]) for group in groups), 367)
 
     def test_rejects_duplicate_json_keys_in_declarations_and_listings(self):
         duplicate_documents = [

@@ -1725,7 +1725,7 @@ index d964c2475edbe887632cdbf969d3cb43fccf9c9d..b0d5d2ed60b9f6b05d872088a06d3983
                  let logical_history = copied_history.as_ref().clone();
                  let model_history = prepared.model_context.as_ref().clone();
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 330cc17da96b3b1db36876d3c3cfb0a2a30e38f5..bb0f6f30d2ace3b94669725bd5e68d5ebf45e623 100644
+index 0d2334613f95c93e8a3f873c53b799b0e310fd0e..481151fd1920b297db9e9f39dd48d6772dcba68f 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -649,7 +649,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime

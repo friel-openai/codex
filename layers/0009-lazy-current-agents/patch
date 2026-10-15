@@ -13890,7 +13890,7 @@ index 2f92707d43ef674106b3bd61e66d88f9448f4853..f634d56fcfddc06cf803507f3ffc42cd
          let mut state = sess.state.lock().await;
          // Stop admission and take the current warmup together so resume cannot replace it.
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767aa8c5da5 100644
+index 587895bfe8d4adb62c8a7bef9d8727ab8116b1e1..e49b60c1924ee9a42cafc3fa307128d9a69293f6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -271,6 +271,7 @@ mod mcp_runtime;
@@ -13927,7 +13927,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
      }
 
      pub(crate) async fn set_thread_memory_mode(
-@@ -4133,8 +4142,9 @@ impl Session {
+@@ -4147,8 +4156,9 @@ impl Session {
              .iter()
              .map(|envelope| envelope.item.clone())
              .collect::<Vec<_>>();
@@ -13938,7 +13938,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
              state
                  .current_time_reminder
                  .note_recorded_items(&response_items);
-@@ -4174,7 +4184,8 @@ impl Session {
+@@ -4188,7 +4198,8 @@ impl Session {
              state
                  .history
                  .record_annotated_items(&mut items, model_info.truncation_policy.into());
@@ -13948,7 +13948,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
          for image in image_preparations {
              self.services
                  .analytics_events_client
-@@ -4185,13 +4196,14 @@ impl Session {
+@@ -4199,13 +4210,14 @@ impl Session {
          }
          let rollout_items: Vec<RolloutItem> =
              items.into_iter().map(RolloutItem::ResponseItem).collect();
@@ -13964,7 +13964,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
          if turn_context.config.memories.disable_on_external_context
              && let Some(item) = response_items
                  .iter()
-@@ -4519,21 +4531,24 @@ impl Session {
+@@ -4533,21 +4545,24 @@ impl Session {
          for mut recording in pending {
              let _ = recording.changed().await;
          }
@@ -13992,7 +13992,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
          drop(boundary);
          self.send_raw_response_items(turn_context, items).await;
      }
-@@ -5149,6 +5164,11 @@ impl Session {
+@@ -5163,6 +5178,11 @@ impl Session {
 
      #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
      pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
@@ -14004,7 +14004,7 @@ index e9df79e8ac8d4ae309cb65a5a1be1db3954caf23..48e66c282b148a991811d95e10afb767
          if self.persistence_restart_required() {
              error!("failed to record rollout items: thread persistence requires a restart");
              return false;
-@@ -5433,12 +5453,14 @@ impl Session {
+@@ -5447,12 +5467,14 @@ impl Session {
          // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
          // durable baseline. This normally records one item per user turn; a tool that changes the
          // active context may record another item before the next model step in that turn.
@@ -15711,7 +15711,7 @@ index 0000000000000000000000000000000000000000..4c8989c78070aa00eee1d209a570251a
 +        .expect("shutdown legacy runtime");
 +}
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index e670497b9a768692816834bb5f3e486c71edefa3..e3e0f9d7ee0032f8dfce74315edd26e9354ef451 100644
+index 432da4525ab3ed9188ec8296831f864503a836b8..3bc80e11096a64ff809a0828674264fb067c7c09 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -283,6 +283,44 @@ async fn thread_analytics_opt_out_overrides_shared_client() {

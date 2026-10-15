@@ -3468,10 +3468,10 @@ index 0000000000000000000000000000000000000000..2e59047e45e9ca45cabb3db0780edac7
 +}
 diff --git a/codex-rs/core/src/agent/control_request_restoration_tests.rs b/codex-rs/core/src/agent/control_request_restoration_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e91e0d2d2
+index 0000000000000000000000000000000000000000..022dfc6d6dd2a60c606b24cbc2145c2a16c70758
 --- /dev/null
 +++ b/codex-rs/core/src/agent/control_request_restoration_tests.rs
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,499 @@
 +use super::*;
 +use codex_models_manager::CustomModelConfig;
 +use codex_models_manager::model_info::model_info_from_slug;
@@ -3482,6 +3482,7 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +use pretty_assertions::assert_eq;
 +
 +#[test]
++#[serial(fork_env)]
 +fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume() -> anyhow::Result<()> {
 +    run_goal_supervisor_test(
 +        "goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume",
@@ -3497,6 +3498,10 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +    const OLD_GUIDANCE: &str = "Preserve the original alias-backed context.";
 +    const NEW_GUIDANCE: &str = "Preserve the updated alias-backed context.";
 +
++    // Persist this fixture through the existing debug opt-in at startup. Ordinary
++    // ephemeral supervisors must not be converted into saved tasks on resume.
++    let _materialize_ephemeral_rollouts =
++        EnvVarGuard::set("CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS", OsStr::new("1"));
 +    let server = start_mock_server().await;
 +    let request_log = mount_sse_sequence(
 +        &server,
@@ -3694,7 +3699,11 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +    );
 +    let resumed_thread_id = harness
 +        .control
-+        .resume_agent_from_rollout(resumed_config, child_thread_id, child_source)
++        .resume_agent_from_rollout(
++            resumed_config.clone(),
++            child_thread_id,
++            child_source.clone(),
++        )
 +        .await?;
 +    assert_eq!(resumed_thread_id, child_thread_id);
 +    let resumed_thread = harness
@@ -3702,7 +3711,9 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +        .get_thread(resumed_thread_id)
 +        .await
 +        .expect("cold-resumed supervisor should be registered");
-+    // Helpers are normally ephemeral; this fixture also checks durable cold-resume state.
++    assert!(resumed_thread.config_snapshot().await.ephemeral);
++    // Debug materialization attaches the writer during startup without converting
++    // this ephemeral supervisor into an ordinary saved task.
 +    resumed_thread
 +        .session
 +        .try_ensure_rollout_materialized(PersistContext::Standard)
@@ -3743,9 +3754,10 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +        .await?
 +        .0;
 +    assert!(
-+        original_items
++        !original_items
 +            .iter()
-+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
++            .any(|item| matches!(item, RolloutItem::RolloutReference(_))),
++        "an ephemeral supervisor's debug rollout is self-contained, not backed by a leaked parent snapshot"
 +    );
 +    let physical_items = RolloutRecorder::load_rollout_items(resumed_rollout_path.as_path())
 +        .await?
@@ -3756,12 +3768,12 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +        .collect::<Vec<_>>();
 +    let [
 +        RolloutItem::WorldState(checkpoint_baseline),
-+        RolloutItem::WorldState(usage_hint_tombstone),
++        RolloutItem::WorldState(helper_context_update),
 +        RolloutItem::WorldState(context_guidance),
 +    ] = world_states.as_slice()
 +    else {
 +        panic!(
-+            "expected checkpoint baseline, usage-hint tombstone, and updated context guidance: {world_states:#?}"
++            "expected checkpoint baseline, helper context update, and updated context guidance: {world_states:#?}"
 +        );
 +    };
 +    assert!(checkpoint_baseline.full);
@@ -3772,12 +3784,21 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +            .and_then(serde_json::Value::as_str),
 +        Some(OLD_GUIDANCE)
 +    );
-+    assert!(!usage_hint_tombstone.full);
++    // The inherited Exec checkpoint is proactive, but a ThreadSpawn child must
++    // replace that policy with ExplicitRequestOnly as well as remove the root hint.
 +    assert_eq!(
-+        serde_json::Value::Object(usage_hint_tombstone.state.clone()),
++        checkpoint_baseline.state["multi_agent_mode"]["mode"],
++        serde_json::json!("proactive")
++    );
++    assert!(!helper_context_update.full);
++    assert_eq!(
++        serde_json::Value::Object(helper_context_update.state.clone()),
 +        serde_json::json!({
 +            "context_window": "/root/goal_supervisor",
-+            "multi_agent_mode": {"usage_hint_hash": null},
++            "multi_agent_mode": {
++                "mode": "explicitRequestOnly",
++                "usage_hint_hash": null,
++            },
 +            "multi_agent_usage_hint": null,
 +        })
 +    );
@@ -3786,6 +3807,47 @@ index 0000000000000000000000000000000000000000..364cec05948b882b0cbc85bb86f4898e
 +        serde_json::Value::Object(context_guidance.state.clone()),
 +        serde_json::json!({"context_window_guidance": NEW_GUIDANCE})
 +    );
++
++    // Exercise segmented cold resume through an explicit debug rotation, rather than
++    // relying on the obsolete parent snapshot created by an ephemeral fork.
++    let expected_history = resumed_thread.session.clone_history().await;
++    let frozen = resumed_thread
++        .session
++        .services
++        .live_thread
++        .as_ref()
++        .expect("debug materialization attached the helper writer")
++        .freeze_local_segment(FreezeRolloutSegmentParams::rotate(Vec::new()))
++        .await?
++        .expect("rotated debug helper");
++    assert!(frozen.reference.rollout_path.exists());
++    let rotated_items = RolloutRecorder::load_rollout_items(resumed_rollout_path.as_path())
++        .await?
++        .0;
++    assert!(rotated_items.iter().any(|item| {
++        matches!(item, RolloutItem::RolloutReference(_))
++            || matches!(item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some())
++    }));
++    let _ = harness
++        .control
++        .shutdown_live_agent(resumed_thread_id)
++        .await?;
++    let segmented_thread_id = harness
++        .control
++        .resume_agent_from_rollout(resumed_config, resumed_thread_id, child_source)
++        .await?;
++    let segmented_thread = harness.manager.get_thread(segmented_thread_id).await?;
++    assert!(segmented_thread.config_snapshot().await.ephemeral);
++    assert_eq!(
++        segmented_thread
++            .session
++            .clone_history()
++            .await
++            .annotated_items(),
++        expected_history.annotated_items(),
++        "cold resume through a real segment must preserve the complete alias-backed model context"
++    );
++    assert_eq!(request_log.requests().len(), 3);
 +
 +    let _ = parent_thread.submit(Op::Shutdown {}).await?;
 +    Ok(())
@@ -5435,7 +5497,7 @@ index 43a21c46f4e9ea00286efb99e979104881321afc..54680d3ca003b6abed83f28e1aea7d4d
              window_number: Some(state.auto_compact_window_number()),
              first_window_id: Some(window_ids.first_window_id.to_string()),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c665c81de 100644
+index a35fd6ec871b68490b5c685d1d546f3c654f1ecb..24a18e6adc4bf4309cf7b62e09511b9dde85b0c0 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -656,6 +656,18 @@ impl ForkStartupItems {
@@ -5457,7 +5519,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
      pub(crate) fn has_model_history_override(&self) -> bool {
          self.model_history_override.is_some()
      }
-@@ -2085,7 +2097,11 @@ impl Session {
+@@ -2099,7 +2111,11 @@ impl Session {
                  Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
                  let mut logical_rollout_items =
                      match fork_startup_items.model_history_override.take() {
@@ -5470,7 +5532,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
                          None => {
                              self.materialize_forked_history(
                                  &rollout_items,
-@@ -2280,11 +2296,16 @@ impl Session {
+@@ -2294,11 +2310,16 @@ impl Session {
          rollout_items: &[RolloutItem],
          materialization: ForkedHistoryMaterialization,
      ) -> CodexResult<Vec<RolloutItem>> {
@@ -5492,7 +5554,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
          }
          let (codex_home, history_mode) = {
              let state = self.state.lock().await;
-@@ -2312,7 +2333,7 @@ impl Session {
+@@ -2326,7 +2347,7 @@ impl Session {
                              .is_some()
              )
          });
@@ -5501,7 +5563,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
              ForkedHistoryMaterialization::Recent => Ok(materialize_recent_rollout_lines_from(
                  codex_home.as_path(),
                  lines,
-@@ -2335,7 +2356,10 @@ impl Session {
+@@ -2349,7 +2370,10 @@ impl Session {
                      .map(|line| line.item)
                      .collect(),
              ),
@@ -5513,7 +5575,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
      }
 
      #[instrument(
-@@ -2497,8 +2521,10 @@ impl Session {
+@@ -2511,8 +2535,10 @@ impl Session {
                  );
              }
              state.turn_attribution = turn_attribution;
@@ -5526,7 +5588,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
                  guardian_history.as_ref(),
                  reviewer_compaction_hash,
              );
-@@ -2575,11 +2601,19 @@ impl Session {
+@@ -2589,11 +2615,19 @@ impl Session {
      ) -> CertifiedSegmentStateCheckpoint {
          let (info, rate_limits) = state.token_info_and_rate_limits();
          let window_ids = state.auto_compact_window_ids();
@@ -5547,7 +5609,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
                  guardian_history: state.history.guardian_history_checkpoint(),
                  mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
                  compaction_response_id: None,
-@@ -2610,7 +2644,7 @@ impl Session {
+@@ -2624,7 +2658,7 @@ impl Session {
                  .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
              state.reference_context_item(),
              ThreadSettingsAppliedEvent {
@@ -5556,7 +5618,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
                  thread_settings: state
                      .session_configuration
                      .thread_settings_snapshot(&state.session_configuration.environments),
-@@ -4895,6 +4929,7 @@ impl Session {
+@@ -4909,6 +4943,7 @@ impl Session {
              message,
              replacement_history: Some(items.clone()),
              retained_context: None,
@@ -5564,7 +5626,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
              guardian_history: None,
              mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
              compaction_response_id,
-@@ -4937,7 +4972,7 @@ impl Session {
+@@ -4951,7 +4986,7 @@ impl Session {
                      realtime_active: settings.realtime_active,
                  });
          let thread_settings = ThreadSettingsAppliedEvent {
@@ -5573,7 +5635,7 @@ index fce7b8261eb2205cd2194c0b001ddc2698ecb983..85264566f68cabea5f8641b04d996c2c
              thread_settings: state
                  .session_configuration
                  .thread_settings_snapshot(&state.session_configuration.environments),
-@@ -5009,11 +5044,13 @@ impl Session {
+@@ -5023,11 +5058,13 @@ impl Session {
          }
          state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
          state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
@@ -41561,7 +41623,7 @@ index ca2734f2887e5bac94c0087e061e61bfdcb5ec4b..c79923b3d93a1aa6a500c1b3779121d1
 +#[path = "rollout_migration/review_input_storage_tests.rs"]
 +mod review_input_storage_tests;
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 999696ce3721c9b21d20be8ae1fd769f39e900f5..6ab516a044efddca59e6c75d72c8691e8c080d8e 100644
+index 93ae85150828416e78f31aba1aca0676c0ef4d17..87de56d29280cf348be2f108aaec5edfde9eea57 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -1132,7 +1132,10 @@ async fn freeze_thread_segment_reserved_with_publication(
@@ -42019,7 +42081,7 @@ index f9e79c82a15ebc9a961a59dbcc8f510807d93831..e47fb9fa7ade1aea855cb9e61dea8524
          return Err(ThreadStoreError::Conflict {
              message: "immutable history repair segment contains no session metadata".to_string(),
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index bb5d6055b1ebea6214710182ae9fe824b3333e99..ee2fe64c2e3c31971fde67c87ae8ac3830573c37 100644
+index 3d4ba9795cf0d3028952edf6a157a9bfcae85d1c..c2c11d12cef5edbec474af450988fb5ad2b49806 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -1285,11 +1285,40 @@ async fn missing_projection_rebuilds_compressed_segmented_paginated_lineage() {
@@ -42140,7 +42202,7 @@ index bb5d6055b1ebea6214710182ae9fe824b3333e99..ee2fe64c2e3c31971fde67c87ae8ac38
      );
  }
 
-@@ -3837,6 +3882,34 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -3985,6 +4030,34 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
          vec![Some(1)]
      );
 
@@ -42175,7 +42237,7 @@ index bb5d6055b1ebea6214710182ae9fe824b3333e99..ee2fe64c2e3c31971fde67c87ae8ac38
      let pool = codex_state::open_thread_history_db(&sqlite)
          .await
          .expect("open history db");
-@@ -3858,7 +3931,129 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -4006,7 +4079,129 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
              .len(),
      )
      .expect("replacement length");
@@ -42306,7 +42368,7 @@ index bb5d6055b1ebea6214710182ae9fe824b3333e99..ee2fe64c2e3c31971fde67c87ae8ac38
  }
 
  #[tokio::test]
-@@ -4674,6 +4869,7 @@ fn certified_checkpoint_with_replacement(
+@@ -4822,6 +5017,7 @@ fn certified_checkpoint_with_replacement(
                      .collect(),
              ),
              retained_context: None,

@@ -3177,7 +3177,7 @@ index 0000000000000000000000000000000000000000..f2b914c028cc901790390483f7a7eae8
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 48e66c282b148a991811d95e10afb767aa8c5da5..8fefc7a8f735cb882963bfb0078c005cd8aebe85 100644
+index e49b60c1924ee9a42cafc3fa307128d9a69293f6..70c4cc03cd718da8d3afb59f33e3fef008f92195 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -1063,13 +1063,20 @@ impl Session {

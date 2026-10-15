@@ -1,0 +1,1840 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index d294afa10ced8a59e3f8bea44f702ace60828b92..0b534d334ddd54a50ff38303d6634dd7000fa446 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -2518,6 +2518,7 @@ dependencies = [
+  "chrono",
+  "clap",
+  "clap_complete",
++ "codex-agent-message-board-extension",
+  "codex-api",
+  "codex-app-server",
+  "codex-app-server-client",
+diff --git a/codex-rs/cli/Cargo.toml b/codex-rs/cli/Cargo.toml
+index 608921c370a184c0c465e5cf079be947f0a9664a..58510aeb3972b0e1e3d830f6af53b674307ca4ca 100644
+--- a/codex-rs/cli/Cargo.toml
++++ b/codex-rs/cli/Cargo.toml
+@@ -28,6 +28,7 @@ anyhow = { workspace = true }
+ chrono = { workspace = true }
+ clap = { workspace = true, features = ["derive", "env"] }
+ clap_complete = { workspace = true }
++codex-agent-message-board-extension = { workspace = true }
+ codex-app-server = { workspace = true }
+ codex-app-server-daemon = { workspace = true }
+ codex-app-server-protocol = { workspace = true }
+diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
+index b9de518ef9cfd0ddcaa2008347d31b56bdc7c411..6dd8cbd6602706fad26df089e168f1a6bf5ce68c 100644
+--- a/codex-rs/cli/src/main.rs
++++ b/codex-rs/cli/src/main.rs
+@@ -75,6 +75,7 @@ mod mcp_cmd;
+ mod mcp_login;
+ mod migrate_rollouts;
+ mod plugin_cmd;
++mod prune_archived;
+ mod queue_cmd;
+ mod remote_control_cmd;
+ #[cfg(target_os = "windows")]
+@@ -221,6 +222,9 @@ enum Subcommand {
+     /// Inspect or migrate legacy local sessions to paginated thread history.
+     MigrateRollouts(migrate_rollouts::MigrateRolloutsCommand),
+
++    /// Preview archived-thread expiry, or explicitly delete while all other Codex processes are stopped.
++    PruneArchived(prune_archived::PruneArchivedCommand),
++
+     /// Unarchive a saved session by id or session name.
+     Unarchive(SessionArchiveCommand),
+
+@@ -1536,6 +1540,14 @@ async fn cli_main(
+             )?;
+             migrate_rollouts::run(command, root_config_overrides).await?;
+         }
++        Some(Subcommand::PruneArchived(command)) => {
++            reject_remote_mode_for_subcommand(
++                root_remote.as_deref(),
++                root_remote_auth_token_env.as_deref(),
++                "prune-archived",
++            )?;
++            prune_archived::run(command, root_config_overrides).await?;
++        }
+         Some(Subcommand::Unarchive(cmd)) => {
+             let output = run_session_archive_cli_command(
+                 codex_tui::SessionArchiveAction::Unarchive,
+@@ -2281,6 +2293,7 @@ fn unsupported_subcommand_name_for_strict_config(
+         Some(Subcommand::Mcp(_)) => Some("mcp"),
+         Some(Subcommand::Plugin(_)) => Some("plugin"),
+         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
++        Some(Subcommand::PruneArchived(_)) => Some("prune-archived"),
+         #[cfg(any(target_os = "macos", target_os = "windows"))]
+         Some(Subcommand::App(_)) => Some("app"),
+         Some(Subcommand::Login(_)) => Some("login"),
+diff --git a/codex-rs/cli/src/prune_archived.rs b/codex-rs/cli/src/prune_archived.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..303481b2c901dcc604933fa49f3e4168662da1fa
+--- /dev/null
++++ b/codex-rs/cli/src/prune_archived.rs
+@@ -0,0 +1,170 @@
++use std::time::Duration;
++
++use clap::Parser;
++use codex_agent_message_board_extension::LocalAgentMessageBoard;
++use codex_core::config::ConfigBuilder;
++use codex_thread_store::LocalThreadStore;
++use codex_thread_store::LocalThreadStoreConfig;
++use codex_utils_cli::CliConfigOverrides;
++
++/// A one-time, explicitly requested archive retention operation.
++#[derive(Debug, Parser)]
++pub(crate) struct PruneArchivedCommand {
++    /// Required archive age: a positive integer followed by h (hours), d (days), or w (weeks).
++    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
++    older_than: Duration,
++
++    /// Permanently delete eligible threads. Without this flag, only preview the deletion set.
++    #[arg(long, requires = "offline")]
++    apply: bool,
++
++    /// Confirm ALL other processes using this Codex home are stopped and will remain stopped.
++    /// Includes app servers, fork/import/restore operations, and older Codex versions.
++    #[arg(long)]
++    offline: bool,
++
++    /// Emit the complete report as JSON.
++    #[arg(long)]
++    json: bool,
++}
++
++fn parse_duration(value: &str) -> Result<Duration, String> {
++    let (digits, multiplier) = match value.as_bytes().last() {
++        Some(b'h') => (&value[..value.len() - 1], 3_600_u64),
++        Some(b'd') => (&value[..value.len() - 1], 86_400_u64),
++        Some(b'w') => (&value[..value.len() - 1], 604_800_u64),
++        _ => {
++            return Err(
++                "use a positive integer followed by h, d, or w (for example 30d)".to_string(),
++            );
++        }
++    };
++    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
++        return Err(
++            "retention must be a positive whole number of hours, days, or weeks".to_string(),
++        );
++    }
++    let seconds = digits
++        .parse::<u64>()
++        .ok()
++        .and_then(|count| count.checked_mul(multiplier))
++        .filter(|seconds| *seconds > 0 && *seconds <= i64::MAX as u64 / 1_000)
++        .ok_or_else(|| "retention duration is zero or out of range".to_string())?;
++    Ok(Duration::from_secs(seconds))
++}
++
++pub(crate) async fn run(
++    command: PruneArchivedCommand,
++    config_overrides: CliConfigOverrides,
++) -> anyhow::Result<()> {
++    let config = ConfigBuilder::default()
++        .cli_overrides(
++            config_overrides
++                .parse_overrides()
++                .map_err(anyhow::Error::msg)?,
++        )
++        .build()
++        .await?;
++    // Do not initialize or backfill SQLite for preview: absent archive dates never authorize expiry.
++    let sqlite = config.sqlite.clone();
++    let store = LocalThreadStore::new(LocalThreadStoreConfig::from_config(&config), None)
++        .with_thread_data_cleanup(move |thread_ids| {
++            let sqlite = sqlite.clone();
++            Box::pin(async move {
++                let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
++                LocalAgentMessageBoard::delete_boards(&sqlite, &boards)
++                    .await
++                    .map_err(|error| codex_thread_store::ThreadStoreError::Internal {
++                        message: format!("failed to delete agent message boards: {error}"),
++                    })
++            })
++        });
++    eprintln!("Inspecting complete local rollout history. Large archives may take a long time.");
++    let report = store
++        .prune_archived(command.older_than, command.apply, command.offline)
++        .await?;
++    if command.json {
++        println!("{}", serde_json::to_string_pretty(&report)?);
++    } else {
++        println!("Archive cutoff: {} (strictly older).", report.cutoff);
++        if !report.archive_metadata_available {
++            println!("No existing archive metadata database; no threads are eligible.");
++        }
++        println!(
++            "{} eligible; {} retained because other history references them; {} deleted.",
++            report.eligible_thread_ids.len(),
++            report.referenced_thread_ids.len(),
++            report.deleted_thread_ids.len()
++        );
++        for id in &report.eligible_thread_ids {
++            println!("{id}");
++        }
++        if !command.apply {
++            println!("Preview only. No threads were deleted. No retention policy was saved.");
++            println!(
++                "To delete, stop every other process using this Codex home, then repeat with --apply --offline."
++            );
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pretty_assertions::assert_eq;
++
++    #[test]
++    fn prune_requires_period_and_offline_for_apply() {
++        assert!(PruneArchivedCommand::try_parse_from(["prune-archived"]).is_err());
++        assert!(
++            PruneArchivedCommand::try_parse_from(["prune-archived", "--apply", "--offline"])
++                .is_err()
++        );
++        assert!(
++            PruneArchivedCommand::try_parse_from([
++                "prune-archived",
++                "--older-than",
++                "30d",
++                "--apply"
++            ])
++            .is_err()
++        );
++        let preview =
++            PruneArchivedCommand::try_parse_from(["prune-archived", "--older-than", "30d"])
++                .expect("preview");
++        assert!(!preview.apply);
++        assert!(!preview.offline);
++        assert_eq!(preview.older_than, Duration::from_secs(30 * 86_400));
++        let apply = PruneArchivedCommand::try_parse_from([
++            "prune-archived",
++            "--older-than",
++            "30d",
++            "--apply",
++            "--offline",
++        ])
++        .expect("explicit offline apply");
++        assert!(apply.apply && apply.offline);
++    }
++
++    #[test]
++    fn prune_duration_rejects_implicit_zero_negative_and_overflow_values() {
++        for value in [
++            "",
++            "30",
++            "0d",
++            "-1d",
++            "1.5d",
++            "+1d",
++            "1m",
++            "18446744073709551615w",
++        ] {
++            assert!(parse_duration(value).is_err(), "{value}");
++        }
++        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7_200));
++        assert_eq!(
++            parse_duration("3w").unwrap(),
++            Duration::from_secs(21 * 86_400)
++        );
++    }
++}
+diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
+index 01b1e4e7de6b62a8305cb2b3881add117b71b0cd..6274870f5f64e2d9ff6d7ca1a811fd6b73527822 100644
+--- a/codex-rs/thread-store/src/lib.rs
++++ b/codex-rs/thread-store/src/lib.rs
+@@ -33,6 +33,7 @@ pub use in_memory::InMemoryThreadStore;
+ pub use in_memory::InMemoryThreadStoreCalls;
+ pub use live_thread::LiveThread;
+ pub use live_thread::LiveThreadInitGuard;
++pub use local::ArchivedRetentionReport;
+ pub use local::LocalThreadStore;
+ pub use local::LocalThreadStoreConfig;
+ pub use local::RolloutMigrationAdditionalFreeSpace;
+diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
+index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e6691e222 100644
+--- a/codex-rs/thread-store/src/local/delete_thread.rs
++++ b/codex-rs/thread-store/src/local/delete_thread.rs
+@@ -31,8 +31,8 @@ use crate::ThreadStoreResult;
+
+ /// A physical rollout whose ownership has been checked before any deletion-side effects.
+ #[derive(Clone)]
+-struct OwnedRollout {
+-    path: std::path::PathBuf,
++pub(super) struct OwnedRollout {
++    pub(super) path: std::path::PathBuf,
+     rollout_id: RolloutId,
+     /// Noncanonical files are authenticated individually and must not authorize sibling deletion.
+     authenticated_noncanonical: bool,
+@@ -229,7 +229,7 @@ where
+     })
+ }
+
+-async fn delete_state_rows(
++pub(super) async fn delete_state_rows(
+     store: &LocalThreadStore,
+     thread_ids: &[ThreadId],
+ ) -> ThreadStoreResult<u64> {
+@@ -281,7 +281,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
+     }
+ }
+
+-async fn owned_rollouts_for_thread(
++pub(super) async fn owned_rollouts_for_thread(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+ ) -> ThreadStoreResult<Vec<OwnedRollout>> {
+@@ -426,7 +426,7 @@ async fn owned_rollouts_for_thread(
+     Ok(owned_rollouts)
+ }
+
+-async fn delete_thread_after_reference_check(
++pub(super) async fn delete_thread_after_reference_check(
+     store: &LocalThreadStore,
+     thread_id: codex_protocol::ThreadId,
+     owned_rollouts: Vec<OwnedRollout>,
+@@ -487,9 +487,9 @@ async fn delete_thread_after_reference_check(
+ }
+
+ /// Records whether a failed deletion has already removed the thread's readable rollout data.
+-struct DeleteThreadFailure {
+-    error: ThreadStoreError,
+-    thread_unavailable: bool,
++pub(super) struct DeleteThreadFailure {
++    pub(super) error: ThreadStoreError,
++    pub(super) thread_unavailable: bool,
+ }
+
+ impl DeleteThreadFailure {
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index f5a3920dc3fe3da90a9077efcbc564ff7f08842c..ba5bc09950664b740ade670c6aa1d5a04b774f68 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -17,6 +17,7 @@ mod paginated_fork;
+ mod pending_thread_metadata;
+ mod projection_rebuild;
+ mod projects;
++mod prune_archived;
+ mod read_thread;
+ mod revert_thread;
+ mod rollout_migration;
+@@ -146,6 +147,7 @@ use crate::UpdateProjectParams;
+ use crate::UpdateThreadMetadataParams;
+ use crate::UpdatedProject;
+
++pub use prune_archived::ArchivedRetentionReport;
+ pub use rollout_migration::RolloutMigrationAdditionalFreeSpace;
+ pub use rollout_migration::RolloutMigrationFailureReason;
+ pub use rollout_migration::RolloutMigrationHistoryBaseDependency;
+diff --git a/codex-rs/thread-store/src/local/prune_archived.rs b/codex-rs/thread-store/src/local/prune_archived.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..22729b2b587b85fbfa74f0b0f141f2f6edf68929
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/prune_archived.rs
+@@ -0,0 +1,749 @@
++//! Explicit offline expiry. Archive timestamps select candidates; complete physical history
++//! determines which candidates must remain because retained files reference them.
++
++use std::collections::BTreeMap;
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::fs::File;
++use std::io;
++use std::io::BufRead;
++use std::io::BufReader;
++use std::io::Read;
++use std::path::Path;
++use std::path::PathBuf;
++use std::time::Duration;
++
++use chrono::DateTime;
++use chrono::Utc;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::RolloutReferenceItem;
++use codex_rollout::RolloutItem;
++use serde::Serialize;
++use sqlx::Row;
++
++use super::LocalThreadStore;
++use super::delete_thread;
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++
++// A malformed record must not allocate memory proportional to an entire rollout file.
++const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
++
++/// The result of one explicit retention request, not a persisted expiry policy.
++#[derive(Debug, Serialize)]
++pub struct ArchivedRetentionReport {
++    pub cutoff: DateTime<Utc>,
++    /// Old archived threads with no references from files outside the deletion set.
++    pub eligible_thread_ids: Vec<ThreadId>,
++    /// Old archived threads retained to preserve other history files.
++    pub referenced_thread_ids: Vec<ThreadId>,
++    pub deleted_thread_ids: Vec<ThreadId>,
++    /// False means no existing metadata database could supply archive timestamps.
++    pub archive_metadata_available: bool,
++}
++
++/// An existing SQLite selection and its authoritative archive time.
++#[derive(Debug, PartialEq, Eq)]
++struct ArchiveMetadata {
++    selected_path: PathBuf,
++    archived: bool,
++    archived_at: Option<i64>,
++}
++
++/// Every physical representation contributes edges, including non-leading references.
++struct PhysicalRollout {
++    owner: ThreadId,
++    rollout_id: Option<ThreadId>,
++    references: Vec<Reference>,
++}
++
++/// References use physical rollout IDs, not necessarily the stable owning thread ID.
++enum Reference {
++    Id(ThreadId),
++    Rollout(RolloutReferenceItem),
++    ReviewInput(ThreadId),
++}
++
++impl LocalThreadStore {
++    /// Inspect or expire archived threads older than an explicitly supplied duration.
++    ///
++    /// `offline` is an operator assertion: all other processes using this Codex home must be
++    /// stopped and stay stopped. Per-thread locks cannot fence a paused fork that has released
++    /// its source writer reservation, nor older binaries that publish new references.
++    pub async fn prune_archived(
++        &self,
++        older_than: Duration,
++        apply: bool,
++        offline: bool,
++    ) -> ThreadStoreResult<ArchivedRetentionReport> {
++        self.prune_archived_at(older_than, apply, offline, Utc::now())
++            .await
++    }
++
++    async fn prune_archived_at(
++        &self,
++        older_than: Duration,
++        apply: bool,
++        offline: bool,
++        now: DateTime<Utc>,
++    ) -> ThreadStoreResult<ArchivedRetentionReport> {
++        if older_than.is_zero() {
++            return Err(invalid("retention duration must be positive"));
++        }
++        if apply && !offline {
++            return Err(invalid(
++                "deletion requires --offline: stop all other processes using this Codex home and keep them stopped until completion",
++            ));
++        }
++        let duration = chrono::Duration::from_std(older_than).map_err(internal)?;
++        let cutoff = now
++            .checked_sub_signed(duration)
++            .ok_or_else(|| invalid("retention duration is out of range"))?;
++        let mut report = ArchivedRetentionReport {
++            cutoff,
++            eligible_thread_ids: Vec::new(),
++            referenced_thread_ids: Vec::new(),
++            deleted_thread_ids: Vec::new(),
++            archive_metadata_available: false,
++        };
++        let Some(metadata) = read_archive_metadata(self).await? else {
++            return Ok(report);
++        };
++        report.archive_metadata_available = true;
++        let candidates = metadata
++            .iter()
++            .filter_map(|(id, meta)| {
++                (meta.archived
++                    && meta
++                        .archived_at
++                        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
++                        .is_some_and(|archived_at| archived_at < cutoff))
++                .then_some(*id)
++            })
++            .collect::<HashSet<_>>();
++        if candidates.is_empty() {
++            return Ok(report);
++        }
++
++        let home = std::fs::canonicalize(&self.config.codex_home).map_err(internal)?;
++        let paths = inventory(&home).map_err(internal)?;
++        let stamps = file_stamps(&paths).map_err(internal)?;
++        // Header discovery precedes reservations; a second inventory and complete scan below
++        // reject changes. Offline apply additionally forbids new publishers throughout the run.
++        let header_paths = paths.clone();
++        let mut owners = tokio::task::spawn_blocking(move || {
++            header_paths
++                .iter()
++                .map(|path| read_owner(path))
++                .collect::<io::Result<HashSet<_>>>()
++        })
++        .await
++        .map_err(internal)?
++        .map_err(internal)?;
++        owners.extend(metadata.keys().copied());
++        let mut owners = owners.into_iter().collect::<Vec<_>>();
++        owners.sort_unstable_by_key(ToString::to_string);
++        let mut lifecycle_guards = Vec::new();
++        let mut writer_mutexes = Vec::new();
++        let mut writer_guards = Vec::new();
++        for &id in &owners {
++            let lifecycle = self
++                .live_writer_locks
++                .coordination(id)
++                .await
++                .lifecycle
++                .clone()
++                .try_write_owned()
++                .map_err(|_| invalid(format!("thread {id} has an active lifecycle operation")))?;
++            let writer_mutex = self.live_writer_locks.try_lock(id).await?;
++            if self.live_recorders.lock().await.contains_key(&id) {
++                return Err(invalid(format!(
++                    "thread {id} has an active writer; stop it before pruning"
++                )));
++            }
++            let writer = self.acquire_writer_lock(id)?;
++            // Offline is an operator precondition, not established by these conflict checks.
++            // Retained threads need not consume one open lock file each throughout the scan.
++            if candidates.contains(&id) {
++                lifecycle_guards.push(lifecycle);
++                writer_mutexes.push(writer_mutex);
++                writer_guards.push(writer);
++            }
++        }
++        let _maintenance = codex_rollout::try_acquire_rollout_maintenance_lock(&home)
++            .map_err(internal)?
++            .ok_or_else(|| invalid("rollout maintenance is active; retry after it finishes"))?;
++        if inventory(&home).map_err(internal)? != paths
++            || read_archive_metadata(self).await?.as_ref() != Some(&metadata)
++        {
++            return Err(invalid(
++                "thread metadata or rollout inventory changed; retry with all other Codex processes stopped",
++            ));
++        }
++        let scan_paths = paths.clone();
++        let files = tokio::task::spawn_blocking(move || scan_files(&scan_paths))
++            .await
++            .map_err(internal)?
++            .map_err(internal)?;
++        let edges = resolve_edges(&home, &files).await?;
++        for (id, meta) in &metadata {
++            let selected = codex_rollout::existing_rollout_path(&meta.selected_path).await
++                .ok_or_else(|| invalid(format!("thread {id} has a missing selected rollout; cannot establish complete history")))?;
++            let selected = std::fs::canonicalize(selected).map_err(internal)?;
++            if files.get(&selected).is_none_or(|file| file.owner != *id) {
++                return Err(invalid(format!(
++                    "thread {id} selects history outside the authenticated inventory"
++                )));
++            }
++        }
++        let archived_root = home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
++        let mut owned_by_thread = HashMap::new();
++        for &id in &candidates {
++            let selected = codex_rollout::existing_rollout_path(&metadata[&id].selected_path)
++                .await
++                .ok_or_else(|| {
++                    invalid(format!(
++                        "archived thread {id} has a missing selected rollout"
++                    ))
++                })?;
++            let selected = std::fs::canonicalize(selected).map_err(internal)?;
++            if !selected.starts_with(&archived_root)
++                || files.get(&selected).is_none_or(|file| file.owner != id)
++            {
++                return Err(invalid(format!(
++                    "archived thread {id} does not select an authenticated archived rollout"
++                )));
++            }
++            let mut owned = delete_thread::owned_rollouts_for_thread(self, id).await?;
++            if owned.is_empty() {
++                return Err(invalid(format!("cannot enumerate archived thread {id}")));
++            }
++            let mut deletion_representations = HashSet::new();
++            for rollout in &mut owned {
++                let path = std::fs::canonicalize(&rollout.path).map_err(internal)?;
++                if files.get(&path).is_none_or(|file| file.owner != id) {
++                    return Err(invalid(format!(
++                        "cannot authenticate owned rollout {}",
++                        path.display()
++                    )));
++                }
++                // A mixed active/archive selection is not an expired archived thread.
++                if !path.starts_with(&archived_root) {
++                    return Err(invalid(format!(
++                        "archived thread {id} still has unarchived rollout files"
++                    )));
++                }
++                rollout.path = path;
++                // Canonical deletion removes both physical representations, while discovery
++                // prefers plain JSONL. Authenticate the exact files deletion will remove.
++                let plain = codex_rollout::plain_rollout_path(&rollout.path);
++                for sibling in [plain.clone(), plain.with_extension("jsonl.zst")] {
++                    if !sibling.exists() {
++                        continue;
++                    }
++                    if files.get(&sibling).is_none_or(|file| file.owner != id) {
++                        return Err(invalid(format!(
++                            "conflicting ownership for deletion sibling {}",
++                            sibling.display()
++                        )));
++                    }
++                    deletion_representations.insert(sibling);
++                }
++            }
++            // A store opened without a state handle discovers canonical names only. Do not
++            // delete the thread's state while its selected noncanonical alias remains intact.
++            if !deletion_representations.contains(&selected) {
++                return Err(invalid(format!(
++                    "selected archived rollout for thread {id} is outside its authenticated deletion set"
++                )));
++            }
++            owned_by_thread.insert(id, owned);
++        }
++        let mut eligible = candidates.clone();
++        loop {
++            let mut deletable_paths = HashSet::new();
++            for id in &eligible {
++                for rollout in &owned_by_thread[id] {
++                    let plain = codex_rollout::plain_rollout_path(&rollout.path);
++                    for sibling in [plain.clone(), plain.with_extension("jsonl.zst")] {
++                        if sibling.exists() {
++                            deletable_paths
++                                .insert(std::fs::canonicalize(sibling).map_err(internal)?);
++                        }
++                    }
++                }
++            }
++            let mut retained = files
++                .keys()
++                .filter(|path| !deletable_paths.contains(*path))
++                .cloned()
++                .collect::<HashSet<_>>();
++            let mut pending = retained.iter().cloned().collect::<Vec<_>>();
++            while let Some(path) = pending.pop() {
++                for target in &edges[&path] {
++                    if retained.insert(target.clone()) {
++                        pending.push(target.clone());
++                    }
++                }
++            }
++            let before = eligible.len();
++            eligible.retain(|id| {
++                !retained
++                    .iter()
++                    .any(|path| deletable_paths.contains(path) && files[path].owner == *id)
++            });
++            if eligible.len() == before {
++                break;
++            }
++        }
++        report.eligible_thread_ids = eligible.iter().copied().collect();
++        report.referenced_thread_ids = candidates.difference(&eligible).copied().collect();
++        report
++            .eligible_thread_ids
++            .sort_unstable_by_key(ToString::to_string);
++        report
++            .referenced_thread_ids
++            .sort_unstable_by_key(ToString::to_string);
++        if !apply || eligible.is_empty() {
++            return Ok(report);
++        }
++        #[cfg(test)]
++        tests::before_apply(self).await;
++        // Recheck archive timestamps after the potentially long scan, before any destructive work.
++        if inventory(&home).map_err(internal)? != paths
++            || file_stamps(&paths).map_err(internal)? != stamps
++            || read_archive_metadata(self).await?.as_ref() != Some(&metadata)
++        {
++            return Err(invalid(
++                "thread metadata or rollout inventory changed during inspection; nothing was deleted",
++            ));
++        }
++        let deletion_order = deletion_order(&eligible, &files, &edges)?;
++        for id in &deletion_order {
++            order_owned_rollouts(owned_by_thread.get_mut(id).expect("planned thread"), &edges)?;
++        }
++        let mut store = self.clone();
++        if store.state_db.is_none() {
++            store.state_db = Some(
++                codex_state::StateRuntime::init(
++                    self.config.sqlite.clone(),
++                    self.config.default_model_provider_id.clone(),
++                )
++                .await
++                .map_err(internal)?,
++            );
++        }
++        for id in deletion_order {
++            #[cfg(test)]
++            tests::before_thread_delete(&store, id)?;
++            if let Some(cleanup) = &store.thread_data_cleanup {
++                cleanup(vec![id]).await?;
++            }
++            if let Err(failure) = delete_thread::delete_thread_after_reference_check(
++                &store,
++                id,
++                owned_by_thread.remove(&id).expect("planned thread"),
++                &mut writer_guards,
++            )
++            .await
++            {
++                if failure.thread_unavailable
++                    || codex_rollout::existing_rollout_path(&metadata[&id].selected_path)
++                        .await
++                        .is_none()
++                {
++                    delete_thread::delete_state_rows(&store, &[id]).await?;
++                }
++                return Err(failure.error);
++            }
++            // Keep completed deletions retryable if the next thread fails. Leaving their state
++            // selections behind would make the next strict inventory look incomplete.
++            delete_thread::delete_state_rows(&store, &[id]).await?;
++            report.deleted_thread_ids.push(id);
++        }
++        Ok(report)
++    }
++}
++
++async fn read_archive_metadata(
++    store: &LocalThreadStore,
++) -> ThreadStoreResult<Option<HashMap<ThreadId, ArchiveMetadata>>> {
++    let path = store.config.sqlite.state_db_path();
++    if !path.try_exists().map_err(internal)? {
++        return Ok(None);
++    }
++    let pool = store
++        .config
++        .sqlite
++        .open_read_only_pool(&path, Some(Duration::from_secs(5)))
++        .await
++        .map_err(internal)?;
++    let rows = sqlx::query("SELECT id, rollout_path, archived, archived_at FROM threads")
++        .fetch_all(&pool)
++        .await;
++    pool.close().await;
++    let mut metadata = HashMap::new();
++    for row in rows.map_err(internal)? {
++        let id: String = row.try_get("id").map_err(internal)?;
++        metadata.insert(
++            ThreadId::from_string(&id).map_err(internal)?,
++            ArchiveMetadata {
++                selected_path: PathBuf::from(
++                    row.try_get::<String, _>("rollout_path").map_err(internal)?,
++                ),
++                archived: row.try_get("archived").map_err(internal)?,
++                archived_at: row.try_get("archived_at").map_err(internal)?,
++            },
++        );
++    }
++    Ok(Some(metadata))
++}
++
++fn inventory(home: &Path) -> io::Result<Vec<PathBuf>> {
++    let mut pending = vec![
++        home.join(codex_rollout::SESSIONS_SUBDIR),
++        home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR),
++        home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
++    ];
++    let mut files = Vec::new();
++    while let Some(path) = pending.pop() {
++        let meta = match std::fs::symlink_metadata(&path) {
++            Ok(meta) => meta,
++            Err(error)
++                if error.kind() == io::ErrorKind::NotFound && path.parent() == Some(home) =>
++            {
++                continue;
++            }
++            Err(error) => return Err(error),
++        };
++        if meta.is_dir() {
++            for entry in std::fs::read_dir(path)? {
++                pending.push(entry?.path());
++            }
++        } else if meta.is_file()
++            && path
++                .file_name()
++                .and_then(|name| name.to_str())
++                .is_some_and(|name| name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
++        {
++            files.push(path);
++        } else {
++            return Err(io::Error::other(format!(
++                "unsupported or in-flight rollout entry {}; nothing can be pruned",
++                path.display()
++            )));
++        }
++    }
++    files.sort();
++    Ok(files)
++}
++
++fn file_stamps(paths: &[PathBuf]) -> io::Result<Vec<(u64, std::time::SystemTime)>> {
++    paths
++        .iter()
++        .map(|path| {
++            let metadata = std::fs::symlink_metadata(path)?;
++            if !metadata.is_file() {
++                return Err(io::Error::other("rollout representation changed"));
++            }
++            Ok((metadata.len(), metadata.modified()?))
++        })
++        .collect()
++}
++
++fn order_owned_rollouts(
++    owned: &mut Vec<delete_thread::OwnedRollout>,
++    edges: &HashMap<PathBuf, HashSet<PathBuf>>,
++) -> ThreadStoreResult<()> {
++    let groups = owned
++        .iter()
++        .map(|rollout| codex_rollout::plain_rollout_path(&rollout.path))
++        .collect::<HashSet<_>>();
++    let mut dependencies: HashMap<PathBuf, HashSet<PathBuf>> = groups
++        .iter()
++        .map(|path| (path.clone(), HashSet::new()))
++        .collect();
++    for (path, targets) in edges {
++        let source = codex_rollout::plain_rollout_path(path);
++        if let Some(parents) = dependencies.get_mut(&source) {
++            for target in targets {
++                let target = codex_rollout::plain_rollout_path(target);
++                if target != source && groups.contains(&target) {
++                    parents.insert(target);
++                }
++            }
++        }
++    }
++    let mut incoming = groups
++        .iter()
++        .map(|path| (path.clone(), 0_usize))
++        .collect::<HashMap<_, _>>();
++    for parents in dependencies.values() {
++        for parent in parents {
++            *incoming.get_mut(parent).expect("owned parent") += 1;
++        }
++    }
++    let mut ready = incoming
++        .iter()
++        .filter_map(|(path, count)| (*count == 0).then_some(path.clone()))
++        .collect::<Vec<_>>();
++    let mut order = HashMap::new();
++    while let Some(path) = ready.pop() {
++        order.insert(path.clone(), order.len());
++        for parent in &dependencies[&path] {
++            let count = incoming.get_mut(parent).expect("owned parent");
++            *count -= 1;
++            if *count == 0 {
++                ready.push(parent.clone());
++            }
++        }
++    }
++    if order.len() != groups.len() {
++        return Err(invalid(
++            "cyclic references within an expired thread; refusing partial deletion",
++        ));
++    }
++    owned.sort_by_key(|rollout| order[&codex_rollout::plain_rollout_path(&rollout.path)]);
++    Ok(())
++}
++
++// Children are removed before parents. If a later I/O operation fails, surviving threads do
++// not reference an already-deleted parent. Cycles cannot provide this retry guarantee.
++fn deletion_order(
++    eligible: &HashSet<ThreadId>,
++    files: &BTreeMap<PathBuf, PhysicalRollout>,
++    edges: &HashMap<PathBuf, HashSet<PathBuf>>,
++) -> ThreadStoreResult<Vec<ThreadId>> {
++    let mut dependencies: HashMap<ThreadId, HashSet<ThreadId>> =
++        eligible.iter().map(|id| (*id, HashSet::new())).collect();
++    for (path, targets) in edges {
++        let owner = files[path].owner;
++        if let Some(dependencies) = dependencies.get_mut(&owner) {
++            for target in targets {
++                let parent = files[target].owner;
++                if parent != owner && eligible.contains(&parent) {
++                    dependencies.insert(parent);
++                }
++            }
++        }
++    }
++    let mut incoming: HashMap<ThreadId, usize> = eligible.iter().map(|id| (*id, 0)).collect();
++    for parents in dependencies.values() {
++        for parent in parents {
++            *incoming.get_mut(parent).expect("candidate parent") += 1;
++        }
++    }
++    let mut ready = incoming
++        .iter()
++        .filter_map(|(id, count)| (*count == 0).then_some(*id))
++        .collect::<Vec<_>>();
++    let mut order = Vec::new();
++    while !ready.is_empty() {
++        ready.sort_unstable_by_key(ToString::to_string);
++        let id = ready.remove(0);
++        order.push(id);
++        for parent in &dependencies[&id] {
++            let count = incoming.get_mut(parent).expect("candidate parent");
++            *count -= 1;
++            if *count == 0 {
++                ready.push(*parent);
++            }
++        }
++    }
++    if order.len() != eligible.len() {
++        return Err(invalid(
++            "cyclic references between expired threads; refusing partial deletion",
++        ));
++    }
++    Ok(order)
++}
++
++fn scan_files(paths: &[PathBuf]) -> io::Result<BTreeMap<PathBuf, PhysicalRollout>> {
++    paths
++        .iter()
++        .map(|path| scan_file(path).map(|file| (path.clone(), file)))
++        .collect()
++}
++
++fn open_physical_reader(path: &Path) -> io::Result<BufReader<Box<dyn Read>>> {
++    let file = File::open(path)?;
++    let input: Box<dyn Read> = if path.extension().is_some_and(|ext| ext == "zst") {
++        Box::new(zstd::stream::read::Decoder::new(file)?)
++    } else {
++        Box::new(file)
++    };
++    Ok(BufReader::new(input))
++}
++
++fn read_bounded_record(
++    reader: &mut impl BufRead,
++    path: &Path,
++    line: &mut Vec<u8>,
++) -> io::Result<bool> {
++    line.clear();
++    let read = reader.take(MAX_RECORD_BYTES + 1).read_until(b'\n', line)?;
++    if read == 0 {
++        return Ok(false);
++    }
++    if read as u64 > MAX_RECORD_BYTES || !line.ends_with(b"\n") {
++        return Err(io::Error::other(format!(
++            "oversized or truncated rollout record in {}",
++            path.display()
++        )));
++    }
++    Ok(true)
++}
++
++fn read_owner(path: &Path) -> io::Result<ThreadId> {
++    let mut reader = open_physical_reader(path)?;
++    let mut line = Vec::new();
++    if !read_bounded_record(&mut reader, path, &mut line)? {
++        return Err(io::Error::other(format!(
++            "empty rollout {}",
++            path.display()
++        )));
++    }
++    let RolloutItem::SessionMeta(meta) = codex_rollout::parse_rollout_line_bytes(&line)?.item
++    else {
++        return Err(io::Error::other(format!(
++            "missing rollout header in {}",
++            path.display()
++        )));
++    };
++    Ok(meta.meta.id)
++}
++
++fn scan_file(path: &Path) -> io::Result<PhysicalRollout> {
++    let mut reader = open_physical_reader(path)?;
++    let mut line = Vec::new();
++    let mut result = None;
++    let review_input = codex_rollout::plain_rollout_path(path)
++        .file_name()
++        .is_some_and(|name| name == "review-input.jsonl");
++    while read_bounded_record(&mut reader, path, &mut line)? {
++        if review_input && result.is_some() {
++            #[derive(serde::Deserialize)]
++            struct ReviewLine {
++                record: codex_rollout::ReviewInputRecord,
++            }
++            let record: ReviewLine = serde_json::from_slice(&line)?;
++            let _ = record.record;
++            continue;
++        }
++        let item = codex_rollout::parse_rollout_line_bytes(&line)?.item;
++        if result.is_none() {
++            let RolloutItem::SessionMeta(meta) = &item else {
++                return Err(io::Error::other(format!(
++                    "missing rollout header in {}",
++                    path.display()
++                )));
++            };
++            result = Some(PhysicalRollout {
++                owner: meta.meta.id,
++                rollout_id: codex_rollout::rollout_id_from_path(path),
++                references: Vec::new(),
++            });
++        }
++        let physical = result.as_mut().expect("authenticated header");
++        match item {
++            RolloutItem::SessionMeta(meta) => {
++                if meta.meta.id != physical.owner {
++                    return Err(io::Error::other("conflicting session metadata"));
++                }
++                if let Some(base) = meta.meta.history_base {
++                    physical.references.push(Reference::Id(base.thread_id));
++                }
++            }
++            RolloutItem::RolloutReference(reference) => {
++                physical.references.push(Reference::Rollout(reference))
++            }
++            RolloutItem::Compacted(compacted) => {
++                if let Some(position) = compacted
++                    .retained_context_replay
++                    .and_then(|replay| replay.review_input)
++                {
++                    physical
++                        .references
++                        .push(Reference::ReviewInput(position.thread_id));
++                }
++            }
++            _ => {}
++        }
++    }
++    result.ok_or_else(|| io::Error::other(format!("empty rollout {}", path.display())))
++}
++
++async fn resolve_edges(
++    home: &Path,
++    files: &BTreeMap<PathBuf, PhysicalRollout>,
++) -> ThreadStoreResult<HashMap<PathBuf, HashSet<PathBuf>>> {
++    let mut by_id: HashMap<ThreadId, Vec<PathBuf>> = HashMap::new();
++    for (path, file) in files {
++        if let Some(id) = file.rollout_id {
++            by_id.entry(id).or_default().push(path.clone());
++        }
++    }
++    let mut edges = HashMap::new();
++    for (path, file) in files {
++        let mut targets = HashSet::new();
++        for reference in &file.references {
++            match reference {
++                Reference::Id(id) => {
++                    targets.extend(
++                        by_id
++                            .get(id)
++                            .ok_or_else(|| {
++                                invalid(format!(
++                                    "missing history_base {id} referenced by {}",
++                                    path.display()
++                                ))
++                            })?
++                            .iter()
++                            .cloned(),
++                    );
++                }
++                Reference::Rollout(reference) => {
++                    let resolved = codex_rollout::resolve_rollout_reference_path(home, reference)
++                        .await
++                        .map_err(internal)?;
++                    let resolved = std::fs::canonicalize(resolved).map_err(internal)?;
++                    if !files.contains_key(&resolved) {
++                        return Err(invalid(format!(
++                            "reference from {} leaves the inspected history",
++                            path.display()
++                        )));
++                    }
++                    targets.insert(resolved);
++                }
++                Reference::ReviewInput(id) => {
++                    let target = codex_rollout::review_input_segment_path(home, *id);
++                    let target = codex_rollout::existing_rollout_path(&target)
++                        .await
++                        .ok_or_else(|| invalid(format!("missing review input {id}")))?;
++                    let target = std::fs::canonicalize(target).map_err(internal)?;
++                    if !files.contains_key(&target) {
++                        return Err(invalid("review input leaves the inspected history"));
++                    }
++                    targets.insert(target);
++                }
++            }
++        }
++        edges.insert(path.clone(), targets);
++    }
++    Ok(edges)
++}
++
++fn invalid(message: impl Into<String>) -> ThreadStoreError {
++    ThreadStoreError::InvalidRequest {
++        message: message.into(),
++    }
++}
++fn internal(error: impl std::fmt::Display) -> ThreadStoreError {
++    ThreadStoreError::Internal {
++        message: error.to_string(),
++    }
++}
++
++#[cfg(test)]
++#[path = "prune_archived_tests.rs"]
++mod tests;
+diff --git a/codex-rs/thread-store/src/local/prune_archived_tests.rs b/codex-rs/thread-store/src/local/prune_archived_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..39371bc13a3e1e4d8f075f621c8682626bc6990d
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/prune_archived_tests.rs
+@@ -0,0 +1,671 @@
++use super::*;
++use std::io::Write;
++use std::sync::LazyLock;
++use std::sync::Mutex;
++
++use codex_protocol::protocol::SessionSource;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++use uuid::Uuid;
++
++use crate::local::test_support::test_config;
++use crate::local::test_support::write_archived_session_file;
++use crate::local::test_support::write_session_file;
++
++const DAY: Duration = Duration::from_secs(86_400);
++
++/// Isolated metadata changes at the last pre-deletion check, keyed by each test's home.
++static UNARCHIVE_BEFORE_APPLY: LazyLock<Mutex<HashMap<PathBuf, ThreadId>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++
++/// A one-shot failure before a selected thread's destructive work starts.
++static FAIL_BEFORE_DELETE: LazyLock<Mutex<HashMap<PathBuf, ThreadId>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++
++pub(super) fn before_thread_delete(
++    store: &LocalThreadStore,
++    id: ThreadId,
++) -> ThreadStoreResult<()> {
++    let mut failures = FAIL_BEFORE_DELETE.lock().unwrap();
++    if failures.get(&store.config.codex_home) == Some(&id) {
++        failures.remove(&store.config.codex_home);
++        return Err(invalid("injected thread deletion failure"));
++    }
++    Ok(())
++}
++
++pub(super) async fn before_apply(store: &LocalThreadStore) {
++    let id = UNARCHIVE_BEFORE_APPLY
++        .lock()
++        .unwrap()
++        .remove(&store.config.codex_home);
++    if let Some(id) = id {
++        let pool = store
++            .config
++            .sqlite
++            .open_read_write_pool(&store.config.sqlite.state_db_path())
++            .await
++            .unwrap();
++        sqlx::query("UPDATE threads SET archived = 0, archived_at = NULL WHERE id = ?")
++            .bind(id.to_string())
++            .execute(&pool)
++            .await
++            .unwrap();
++        pool.close().await;
++    }
++}
++
++fn now() -> DateTime<Utc> {
++    DateTime::from_timestamp(1_800_000_000, 0).unwrap()
++}
++
++async fn store(home: &TempDir) -> LocalThreadStore {
++    let config = test_config(home.path());
++    let db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    LocalThreadStore::new(config, Some(db))
++}
++
++async fn add_thread(
++    store: &LocalThreadStore,
++    number: u128,
++    archived_at: Option<DateTime<Utc>>,
++    archived: bool,
++) -> (ThreadId, PathBuf) {
++    let uuid = Uuid::from_u128(number);
++    let id = ThreadId::from_string(&uuid.to_string()).unwrap();
++    let path = if archived {
++        write_archived_session_file(&store.config.codex_home, "2025-01-03T12-00-00", uuid).unwrap()
++    } else {
++        write_session_file(&store.config.codex_home, "2025-01-03T12-00-00", uuid).unwrap()
++    };
++    let mut metadata = codex_state::ThreadMetadataBuilder::new(
++        id,
++        path.clone(),
++        now() - chrono::Duration::days(100),
++        SessionSource::Cli,
++    )
++    .build("test-provider");
++    metadata.cwd = store.config.codex_home.clone();
++    metadata.archived_at = archived_at;
++    store
++        .state_db
++        .as_ref()
++        .unwrap()
++        .upsert_thread(&metadata)
++        .await
++        .unwrap();
++    // Keep archive status and archive date independently testable, including legacy unknown dates.
++    let pool = store
++        .config
++        .sqlite
++        .open_read_write_pool(&store.config.sqlite.state_db_path())
++        .await
++        .unwrap();
++    sqlx::query("UPDATE threads SET archived = ? WHERE id = ?")
++        .bind(archived)
++        .bind(id.to_string())
++        .execute(&pool)
++        .await
++        .unwrap();
++    pool.close().await;
++    (id, path)
++}
++
++fn append_reference(path: &Path, target: &Path, id: ThreadId, rollout_id: ThreadId) {
++    let item = codex_rollout::RolloutLine {
++        timestamp: "2025-01-03T12:00:00Z".to_string(),
++        ordinal: None,
++        item: RolloutItem::RolloutReference(RolloutReferenceItem {
++            rollout_path: target.to_path_buf(),
++            thread_id: Some(id),
++            rollout_id: Some(rollout_id),
++            rollout_timestamp: None,
++            segment_id: None,
++            max_depth: 100,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        }),
++    };
++    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
++    writeln!(file, "{}", serde_json::to_string(&item).unwrap()).unwrap();
++}
++
++fn set_history_base(path: &Path, id: ThreadId) {
++    let contents = std::fs::read_to_string(path).unwrap();
++    let mut lines = contents
++        .lines()
++        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
++        .collect::<Vec<_>>();
++    lines[0]["payload"]["history_base"] =
++        serde_json::json!({"thread_id": id, "end_ordinal_exclusive": 1, "end_byte_offset": 1});
++    let mut file = File::create(path).unwrap();
++    for line in lines {
++        writeln!(file, "{line}").unwrap();
++    }
++}
++
++#[test]
++fn prune_header_discovery_bounds_plain_and_compressed_first_records() {
++    let home = TempDir::new().unwrap();
++    let plain = home.path().join("oversized.jsonl");
++    File::create(&plain)
++        .unwrap()
++        .set_len(MAX_RECORD_BYTES + 1)
++        .unwrap();
++    let compressed = plain.with_extension("jsonl.zst");
++    let mut encoder =
++        zstd::stream::write::Encoder::new(File::create(&compressed).unwrap(), 1).unwrap();
++    io::copy(&mut File::open(&plain).unwrap(), &mut encoder).unwrap();
++    encoder.finish().unwrap();
++    for path in [&plain, &compressed] {
++        let error = read_owner(path).unwrap_err();
++        assert!(error.to_string().contains("oversized or truncated"));
++    }
++}
++
++#[test]
++fn prune_header_discovery_rejects_invalid_first_records_without_skipping_them() {
++    let home = TempDir::new().unwrap();
++    let uuid = Uuid::from_u128(1);
++    let path = write_session_file(home.path(), "2025-01-03T12-00-00", uuid).unwrap();
++    let valid = std::fs::read(&path).unwrap();
++    let id = ThreadId::from_string(&uuid.to_string()).unwrap();
++    assert_eq!(read_owner(&path).unwrap(), id);
++    for prefix in [b"\n".as_slice(), b"malformed\n", b"{}\n"] {
++        let mut file = File::create(&path).unwrap();
++        file.write_all(prefix).unwrap();
++        file.write_all(&valid).unwrap();
++        assert!(read_owner(&path).is_err());
++    }
++}
++
++#[tokio::test]
++async fn prune_missing_database_does_not_create_metadata_or_delete_rollouts() {
++    let home = TempDir::new().unwrap();
++    let store = LocalThreadStore::new(test_config(home.path()), None);
++    let path = write_archived_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(1))
++        .unwrap();
++    let before = std::fs::read(&path).unwrap();
++    for apply in [false, true] {
++        let report = store
++            .prune_archived_at(DAY, apply, true, now())
++            .await
++            .unwrap();
++        assert!(!report.archive_metadata_available);
++        assert!(report.eligible_thread_ids.is_empty());
++    }
++    assert!(!store.config.sqlite.state_db_path().exists());
++    assert_eq!(std::fs::read(path).unwrap(), before);
++}
++
++#[tokio::test]
++async fn prune_preview_uses_archive_age_and_strict_cutoff_without_deletion() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (eligible, path) = add_thread(&store, 1, Some(old), true).await;
++    let (_, boundary) = add_thread(&store, 2, Some(now() - chrono::Duration::days(1)), true).await;
++    let (_, recent) = add_thread(&store, 3, Some(now()), true).await;
++    let (_, active) = add_thread(&store, 4, Some(old), false).await;
++    let (_, unknown) = add_thread(&store, 5, None, true).await;
++    let before = std::fs::read(&path).unwrap();
++    let report = store
++        .prune_archived_at(DAY, false, false, now())
++        .await
++        .unwrap();
++    assert_eq!(report.eligible_thread_ids, vec![eligible]);
++    assert!(report.deleted_thread_ids.is_empty());
++    assert_eq!(std::fs::read(path).unwrap(), before);
++    for path in [boundary, recent, active, unknown] {
++        assert!(path.exists());
++    }
++}
++
++#[tokio::test]
++async fn prune_requires_positive_duration_and_explicit_offline_assertion() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (_, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    assert!(
++        store
++            .prune_archived_at(Duration::ZERO, true, true, now())
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .prune_archived_at(DAY, true, false, now())
++            .await
++            .is_err()
++    );
++    assert!(path.exists());
++}
++
++#[tokio::test]
++async fn prune_apply_deletes_only_expired_archive_and_is_repeatable() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (id, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    let (_, recent) = add_thread(&store, 2, Some(now()), true).await;
++    let report = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(report.deleted_thread_ids, vec![id]);
++    assert!(!path.exists());
++    assert!(recent.exists());
++    assert!(
++        store
++            .state_db
++            .as_ref()
++            .unwrap()
++            .get_thread(id)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let report = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert!(report.deleted_thread_ids.is_empty());
++}
++
++#[tokio::test]
++async fn prune_retains_transitive_nonleading_references_from_active_and_recent_threads() {
++    for archived_child in [false, true] {
++        let home = TempDir::new().unwrap();
++        let store = store(&home).await;
++        let old = now() - chrono::Duration::days(2);
++        let (ancestor_id, ancestor) = add_thread(&store, 1, Some(old), true).await;
++        let (parent_id, parent) = add_thread(&store, 2, Some(old), true).await;
++        let (_, child) =
++            add_thread(&store, 3, archived_child.then_some(now()), archived_child).await;
++        append_reference(&parent, &ancestor, ancestor_id, ancestor_id);
++        append_reference(&child, &parent, parent_id, parent_id);
++        let report = store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .unwrap();
++        assert!(report.deleted_thread_ids.is_empty());
++        assert_eq!(report.referenced_thread_ids.len(), 2);
++        for path in [ancestor, parent, child] {
++            assert!(path.exists());
++        }
++    }
++}
++
++#[tokio::test]
++async fn prune_retains_native_physical_history_base_and_detached_references() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (id, original) = add_thread(&store, 1, Some(old), true).await;
++    let physical = ThreadId::from_string(&Uuid::from_u128(101).to_string()).unwrap();
++    let path = codex_rollout::rollout_path_with_rollout_id(&original, physical).unwrap();
++    std::fs::rename(&original, &path).unwrap();
++    store
++        .state_db
++        .as_ref()
++        .unwrap()
++        .mark_archived(id, &path, old)
++        .await
++        .unwrap();
++    let (_, child) = add_thread(&store, 2, None, false).await;
++    set_history_base(&child, physical);
++    let (other_id, other) = add_thread(&store, 3, Some(old), true).await;
++    let detached_root = home
++        .path()
++        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++        .join("snapshot");
++    std::fs::create_dir_all(&detached_root).unwrap();
++    let detached = detached_root.join("snapshot.jsonl");
++    std::fs::copy(&child, &detached).unwrap();
++    append_reference(&detached, &other, other_id, other_id);
++    let report = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(report.referenced_thread_ids.len(), 2);
++    assert!(report.deleted_thread_ids.is_empty());
++    for file in [path, other, detached] {
++        assert!(file.exists());
++    }
++}
++
++#[tokio::test]
++async fn prune_scans_compressed_siblings_and_can_delete_compressed_archives() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (parent_id, parent) = add_thread(&store, 1, Some(old), true).await;
++    let (_, child) = add_thread(&store, 2, None, false).await;
++    let plain_child = std::fs::read(&child).unwrap();
++    append_reference(&child, &parent, parent_id, parent_id);
++    let compressed_child = child.with_extension("jsonl.zst");
++    std::fs::write(
++        &compressed_child,
++        zstd::stream::encode_all(File::open(&child).unwrap(), 1).unwrap(),
++    )
++    .unwrap();
++    std::fs::write(&child, plain_child).unwrap();
++    let (delete_id, delete) = add_thread(&store, 3, Some(old), true).await;
++    let compressed_delete = delete.with_extension("jsonl.zst");
++    std::fs::write(
++        &compressed_delete,
++        zstd::stream::encode_all(File::open(&delete).unwrap(), 1).unwrap(),
++    )
++    .unwrap();
++    std::fs::remove_file(&delete).unwrap();
++    let report = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(report.deleted_thread_ids, vec![delete_id]);
++    assert_eq!(report.referenced_thread_ids, vec![parent_id]);
++    assert!(!compressed_delete.exists());
++    assert!(parent.exists());
++    assert!(compressed_child.exists());
++}
++
++#[tokio::test]
++async fn prune_refuses_conflicting_owners_in_plain_and_compressed_deletion_siblings() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (_, archived) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    let (_, active) = add_thread(&store, 2, None, false).await;
++    let compressed = archived.with_extension("jsonl.zst");
++    let bytes = zstd::stream::encode_all(File::open(&active).unwrap(), 1).unwrap();
++    std::fs::write(&compressed, &bytes).unwrap();
++    let before = std::fs::read(&archived).unwrap();
++    let error = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("conflicting ownership"));
++    assert_eq!(std::fs::read(archived).unwrap(), before);
++    assert_eq!(std::fs::read(compressed).unwrap(), bytes);
++    assert!(active.exists());
++}
++
++#[tokio::test]
++async fn prune_without_state_handle_refuses_selected_alias_outside_canonical_deletion_set() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (id, canonical) = add_thread(&store, 1, Some(old), true).await;
++    let alias = canonical.with_file_name("selected-alias.jsonl");
++    let bytes = std::fs::read(&canonical).unwrap();
++    std::fs::write(&alias, &bytes).unwrap();
++    store
++        .state_db
++        .as_ref()
++        .unwrap()
++        .mark_archived(id, &alias, old)
++        .await
++        .unwrap();
++    let cli_store = LocalThreadStore::new(test_config(home.path()), None);
++    for apply in [false, true] {
++        let error = cli_store
++            .prune_archived_at(DAY, apply, true, now())
++            .await
++            .unwrap_err();
++        assert!(
++            error
++                .to_string()
++                .contains("outside its authenticated deletion set")
++        );
++    }
++    assert_eq!(std::fs::read(&canonical).unwrap(), bytes);
++    assert_eq!(std::fs::read(&alias).unwrap(), bytes);
++    let metadata = store
++        .state_db
++        .as_ref()
++        .unwrap()
++        .get_thread(id)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(metadata.rollout_path, alias);
++    assert_eq!(metadata.archived_at, Some(old));
++}
++
++#[tokio::test]
++async fn prune_refuses_corrupt_truncated_missing_and_inflight_history_before_deletion() {
++    for corruption in ["malformed", "truncated", "missing", "inflight"] {
++        let home = TempDir::new().unwrap();
++        let store = store(&home).await;
++        let (_, archived) =
++            add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++        let (_, active) = add_thread(&store, 2, None, false).await;
++        match corruption {
++            "malformed" => {
++                writeln!(
++                    std::fs::OpenOptions::new()
++                        .append(true)
++                        .open(&active)
++                        .unwrap(),
++                    "not json"
++                )
++                .unwrap();
++            }
++            "truncated" => {
++                write!(
++                    std::fs::OpenOptions::new()
++                        .append(true)
++                        .open(&active)
++                        .unwrap(),
++                    "{{"
++                )
++                .unwrap();
++            }
++            "missing" => {
++                set_history_base(
++                    &active,
++                    ThreadId::from_string(&Uuid::from_u128(99).to_string()).unwrap(),
++                );
++            }
++            "inflight" => {
++                std::fs::write(active.with_extension("tmp"), "pending publication").unwrap();
++            }
++            _ => unreachable!(),
++        }
++        let before = std::fs::read(&archived).unwrap();
++        assert!(
++            store
++                .prune_archived_at(DAY, true, true, now())
++                .await
++                .is_err(),
++            "{corruption}"
++        );
++        assert_eq!(std::fs::read(archived).unwrap(), before);
++    }
++}
++
++#[tokio::test]
++async fn prune_refuses_active_writer_maintenance_and_lifecycle_reservations() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (id, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    let other_store = LocalThreadStore::new(test_config(home.path()), None);
++    let writer = other_store.acquire_writer_lock(id).unwrap();
++    assert!(
++        store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .is_err()
++    );
++    drop(writer);
++    let maintenance = codex_rollout::try_acquire_rollout_maintenance_lock(home.path())
++        .unwrap()
++        .unwrap();
++    assert!(
++        store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .is_err()
++    );
++    drop(maintenance);
++    let lifecycle = store.live_writer_locks.reserve_lifecycle(id).await;
++    assert!(
++        store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .is_err()
++    );
++    drop(lifecycle);
++    assert!(path.exists());
++}
++
++#[tokio::test]
++async fn prune_rechecks_archived_state_after_scan_before_deleting() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (id, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    UNARCHIVE_BEFORE_APPLY
++        .lock()
++        .unwrap()
++        .insert(home.path().to_path_buf(), id);
++    let error = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("changed during inspection"));
++    assert!(path.exists());
++}
++
++#[tokio::test]
++async fn prune_deletes_expired_children_before_their_expired_ancestors() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (parent_id, parent) = add_thread(&store, 1, Some(old), true).await;
++    let (child_id, child) = add_thread(&store, 2, Some(old), true).await;
++    append_reference(&child, &parent, parent_id, parent_id);
++    let report = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(report.deleted_thread_ids, vec![child_id, parent_id]);
++    assert!(!parent.exists() && !child.exists());
++}
++
++#[tokio::test]
++async fn prune_completed_threads_are_removed_from_metadata_before_later_failure() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let old = now() - chrono::Duration::days(2);
++    let (parent_id, parent) = add_thread(&store, 1, Some(old), true).await;
++    let (child_id, child) = add_thread(&store, 2, Some(old), true).await;
++    append_reference(&child, &parent, parent_id, parent_id);
++    FAIL_BEFORE_DELETE
++        .lock()
++        .unwrap()
++        .insert(home.path().to_path_buf(), parent_id);
++    assert!(
++        store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .unwrap_err()
++            .to_string()
++            .contains("injected")
++    );
++    assert!(!child.exists());
++    assert!(parent.exists());
++    assert!(
++        store
++            .state_db
++            .as_ref()
++            .unwrap()
++            .get_thread(child_id)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        store
++            .state_db
++            .as_ref()
++            .unwrap()
++            .get_thread(parent_id)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let retry = store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(retry.deleted_thread_ids, vec![parent_id]);
++    assert!(!parent.exists());
++}
++
++#[tokio::test]
++async fn prune_orders_same_thread_physical_children_before_ancestors() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (id, selected) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    let physical = ThreadId::from_string(&Uuid::from_u128(101).to_string()).unwrap();
++    let ancestor =
++        codex_rollout::history_rollout_path_with_rollout_id(&selected, physical).unwrap();
++    std::fs::copy(&selected, &ancestor).unwrap();
++    set_history_base(&selected, physical);
++    let files = scan_files(&inventory(home.path()).unwrap()).unwrap();
++    let edges = resolve_edges(home.path(), &files).await.unwrap();
++    let mut owned = delete_thread::owned_rollouts_for_thread(&store, id)
++        .await
++        .unwrap();
++    assert_eq!(owned[0].path, ancestor);
++    order_owned_rollouts(&mut owned, &edges).unwrap();
++    assert_eq!(owned[0].path, selected);
++    assert_eq!(owned[1].path, ancestor);
++}
++
++#[tokio::test]
++async fn prune_runs_host_cleanup_only_for_threads_being_deleted_not_preview() {
++    let home = TempDir::new().unwrap();
++    let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
++    let observed = calls.clone();
++    let store = store(&home).await.with_thread_data_cleanup(move |ids| {
++        let observed = observed.clone();
++        Box::pin(async move {
++            observed.lock().unwrap().extend(ids);
++            Ok(())
++        })
++    });
++    let (id, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    let (_, recent) = add_thread(&store, 2, Some(now()), true).await;
++    store
++        .prune_archived_at(DAY, false, false, now())
++        .await
++        .unwrap();
++    assert!(calls.lock().unwrap().is_empty());
++    store
++        .prune_archived_at(DAY, true, true, now())
++        .await
++        .unwrap();
++    assert_eq!(*calls.lock().unwrap(), vec![id]);
++    assert!(!path.exists());
++    assert!(recent.exists());
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn prune_refuses_symlinked_history_entries() {
++    let home = TempDir::new().unwrap();
++    let store = store(&home).await;
++    let (_, path) = add_thread(&store, 1, Some(now() - chrono::Duration::days(2)), true).await;
++    std::os::unix::fs::symlink(&path, path.with_file_name("alias.jsonl")).unwrap();
++    assert!(
++        store
++            .prune_archived_at(DAY, true, true, now())
++            .await
++            .is_err()
++    );
++    assert!(path.exists());
++}
+diff --git a/docs/archived-thread-retention.md b/docs/archived-thread-retention.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..45e4efcf988479c2da2323f9366daa0bb3c161eb
+--- /dev/null
++++ b/docs/archived-thread-retention.md
+@@ -0,0 +1,70 @@
++# Archived-thread retention
++
++Archiving a thread does not expire it. Codex has no default retention period and
++does not schedule deletion. `prune-archived` performs one inspection or deletion
++using a period you supply for that invocation.
++
++Preview threads archived more than 30 days ago:
++
++```sh
++codex prune-archived --older-than 30d
++```
++
++`--older-than` is required. It accepts a positive whole number followed by `h`
++(hours), `d` (24-hour days), or `w` (seven-day weeks). Eligibility uses the saved
++`archived_at` timestamp, not thread creation time or file modification time.
++Threads archived exactly at the cutoff, recent archives, unarchived threads, and
++threads without a known archive timestamp remain. A missing metadata database
++does not get created for preview and authorizes no deletion.
++
++## Delete while Codex is stopped
++
++Stop **every other process using the same Codex home**, including app servers,
++interactive sessions, imports, restores, and fork operations. Keep them stopped
++until the command finishes. Then explicitly request deletion:
++
++```sh
++codex prune-archived --older-than 30d --apply --offline
++```
++
++`--offline` is your assertion that those processes are stopped, not a request for
++Codex to stop them. This requirement includes upstream and older Codex versions.
++The command checks writer, lifecycle, and maintenance reservations, but those
++checks cannot detect every paused fork or prevent another process from starting.
++Do not run deletion concurrently with another process using that Codex home.
++
++Without `--apply`, no threads are deleted. `--apply` without `--offline` is an
++error. Neither command saves a policy or enables future automatic deletion.
++Use `--json` for thread IDs, the cutoff, and the deletion result.
++
++## History preservation
++
++Before deletion, Codex reads every physical JSONL and compressed JSONL history
++file under `sessions`, `archived_sessions`, and `rotated_rollout_segments`.
++Both plain and compressed representations contribute references when both exist.
++The scan includes native `history_base` references, non-leading
++`rollout_reference` records, and detached review inputs. A reference from a
++retained file preserves the referenced archived thread and its ancestors.
++Threads eligible for the same operation can be deleted together; children are
++deleted before their ancestors.
++
++This is a full history scan and can take a long time on large archives. Records
++are decoded one at a time, with a 64 MiB record limit. The command retains file
++identities and references in memory, not complete transcripts. It refuses to
++delete when it encounters unreadable or malformed records, incomplete records,
++missing references, missing indexed history, symbolic links, unknown directory
++entries, pending temporary files, or conflicting reservations. It checks file
++sizes, modification times, archive timestamps, and file inventory again before
++deletion. Stop other processes and resolve the reported problem before retrying;
++do not remove unknown history files merely to make pruning proceed.
++
++This command deletes expired archived threads through the local thread deletion
++implementation. It does not collect orphaned detached segments, prune active
++thread snapshots, or shrink SQLite database files. Detached segments remain,
++even when no retained thread needs them. Physical files outside an archived
++thread's deletion set remain and can preserve additional ancestors. Consequently,
++the number of deleted threads does not predict how much disk space will be freed.
++
++Deletion is permanent and is not an atomic transaction across files. An I/O
++failure can leave a partially deleted thread; the command reports an error.
++Back up history you need before using `--apply`.

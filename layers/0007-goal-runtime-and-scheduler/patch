@@ -15106,7 +15106,7 @@ index c569b04ec95770768385fcafcaeee5f1aa2fc26e..2f92707d43ef674106b3bd61e66d88f9
                      false
                  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3954caf23 100644
+index a934fb3a39cb5b2e792477e6bdea5e426f9f934a..587895bfe8d4adb62c8a7bef9d8727ab8116b1e1 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -323,7 +323,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
@@ -15160,7 +15160,7 @@ index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3
              resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
          });
          let history_mode = conversation_history.get_history_mode(
-@@ -2018,11 +2035,6 @@ impl Session {
+@@ -2032,11 +2049,6 @@ impl Session {
                      .iter()
                      .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                  Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
@@ -15172,7 +15172,7 @@ index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3
                  let mut logical_rollout_items =
                      match fork_startup_items.model_history_override.take() {
                          Some(model_history) => model_history,
-@@ -2112,7 +2124,7 @@ impl Session {
+@@ -2126,7 +2138,7 @@ impl Session {
                          turn_context.model_info().truncation_policy.into(),
                      );
                  }
@@ -15181,7 +15181,7 @@ index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3
                      .into_iter()
                      .map(ResponseItemEnvelope::new)
                      .map(RolloutItem::ResponseItem)
-@@ -2162,7 +2174,9 @@ impl Session {
+@@ -2176,7 +2188,9 @@ impl Session {
                          persisted_rollout_items.push(thread_settings_applied);
                      }
                  }
@@ -15192,7 +15192,7 @@ index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3
 
                  // Agent spawn owns its final durability barrier so it can overlap the edge write.
                  let persist_context = match self.fork_persistence {
-@@ -2653,6 +2667,11 @@ impl Session {
+@@ -2667,6 +2681,11 @@ impl Session {
          }
      }
 
@@ -15204,7 +15204,7 @@ index 3711d1e90a3ddd063e53105d57c513e3e263eaea..e9df79e8ac8d4ae309cb65a5a1be1db3
      pub(crate) async fn session_source(&self) -> SessionSource {
          let state = self.state.lock().await;
          state.session_configuration.session_source.clone()
-@@ -5143,6 +5162,30 @@ impl Session {
+@@ -5157,6 +5176,30 @@ impl Session {
          true
      }
 
@@ -15794,7 +15794,7 @@ index a17eb8b8ce18f972e36c76fc990066a22d71a887..6a05074d7507d562636b02790fedb476
          request.inherited_thread_state = inherited_thread_state;
          request.fork_startup_items = fork_startup_items;
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 1dd11a61ae3be980f0bd006911ac2197351f50a8..e670497b9a768692816834bb5f3e486c71edefa3 100644
+index 7b41f9306f0bc793b9b19a6ead5012e6c37d6ecc..432da4525ab3ed9188ec8296831f864503a836b8 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -283,6 +283,46 @@ async fn thread_analytics_opt_out_overrides_shared_client() {

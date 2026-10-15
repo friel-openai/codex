@@ -2827,7 +2827,7 @@ index 63276d3709fa83fd74e63131ee57730d72a0e0aa..ac2baf0e61d1ba54a9d8d3e11420c582
          })
          .await
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 65dfcb8bd18b91e4f9399ae2e64439bd944ce463..fce7b8261eb2205cd2194c0b001ddc2698ecb983 100644
+index 12bf4a1b45747e2b93d75ffb0c3c33fdfe8cf4a2..a35fd6ec871b68490b5c685d1d546f3c654f1ecb 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -762,6 +762,12 @@ async fn initial_rollout_ordinal(
@@ -2843,7 +2843,7 @@ index 65dfcb8bd18b91e4f9399ae2e64439bd944ce463..fce7b8261eb2205cd2194c0b001ddc26
      if !items
          .iter()
          .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
-@@ -2068,9 +2074,14 @@ impl Session {
+@@ -2082,9 +2088,14 @@ impl Session {
              }
              InitialHistory::Forked(mut rollout_items) => {
                  let turn_context = self.new_default_turn().await;
@@ -2861,7 +2861,7 @@ index 65dfcb8bd18b91e4f9399ae2e64439bd944ce463..fce7b8261eb2205cd2194c0b001ddc26
                  Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
                  let mut logical_rollout_items =
                      match fork_startup_items.model_history_override.take() {
-@@ -2170,8 +2181,14 @@ impl Session {
+@@ -2184,8 +2195,14 @@ impl Session {
                      self.state.lock().await.latest_token_usage_record =
                          Self::last_token_usage_record_from_rollout(&logical_rollout_items);
                  }
@@ -2878,7 +2878,7 @@ index 65dfcb8bd18b91e4f9399ae2e64439bd944ce463..fce7b8261eb2205cd2194c0b001ddc26
                  if !startup_response_items.is_empty() {
                      let mut state = self.state.lock().await;
                      state.history.record_items(
-@@ -2185,39 +2202,40 @@ impl Session {
+@@ -2199,39 +2216,40 @@ impl Session {
                      .map(RolloutItem::ResponseItem)
                      .collect::<Vec<_>>();
 
@@ -3432,7 +3432,7 @@ index 7b7ac4372a31bd3150427014cfef1ee3957d51e2..7ebcb7e7271e82ca90da1f301bd343cf
                          FullHistorySourceReservation::Prepared {
                              _prepared: Box::new(prepared),
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index bc228d24a1478f3fc1dfa3c6cbfdf3444c05f151..330cc17da96b3b1db36876d3c3cfb0a2a30e38f5 100644
+index 9ed05f637e59046dfb0fae863abe26a90507b50b..0d2334613f95c93e8a3f873c53b799b0e310fd0e 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -642,14 +642,16 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
@@ -19017,7 +19017,7 @@ index babb05fbc142fb524b4da8f4a160f0a74f74b9cc..ca2734f2887e5bac94c0087e061e61bf
 
  #[tokio::test]
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f39e900f5 100644
+index a0aae084cafaf31e2eebb13c527bd85a965d12b0..93ae85150828416e78f31aba1aca0676c0ef4d17 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -15,6 +15,7 @@ use codex_protocol::RolloutId;
@@ -19500,21 +19500,21 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
      if let Err(err) = staged_recorder
 -        .record_canonical_items(initial_items.as_slice())
 +        .record_canonical_items(&[RolloutItem::RolloutReference(reference.clone())])
-         .await
-     {
-         let _ = staged_recorder.shutdown().await;
-         let _ = fs::remove_file(staged_path.as_path()).await;
-         return Err(thread_store_io_error(err));
-     }
-+    crash_segment_rotation_at(thread_id, "reference_recorded_before_checkpoint");
-+    if let Err(err) = staged_recorder
-+        .record_canonical_items(params.initial_items())
 +        .await
 +    {
 +        let _ = staged_recorder.shutdown().await;
 +        let _ = fs::remove_file(staged_path.as_path()).await;
 +        return Err(thread_store_io_error(err));
 +    }
++    crash_segment_rotation_at(thread_id, "reference_recorded_before_checkpoint");
++    if let Err(err) = staged_recorder
++        .record_canonical_items(params.initial_items())
+         .await
+     {
+         let _ = staged_recorder.shutdown().await;
+         let _ = fs::remove_file(staged_path.as_path()).await;
+         return Err(thread_store_io_error(err));
+     }
 +    crash_segment_rotation_at(thread_id, "checkpoint_recorded_before_flush");
      if let Err(err) = staged_recorder.flush().await {
          let _ = staged_recorder.shutdown().await;
@@ -19832,7 +19832,36 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
      path.starts_with(
          codex_home
              .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-@@ -1905,6 +2421,27 @@ fn validate_ordinals(
+@@ -1798,19 +2314,25 @@ async fn install_snapshot_segment(
+     fs::create_dir_all(parent.as_path())
+         .await
+         .map_err(thread_store_io_error)?;
+-    let temporary_path = immutable_segment_temporary_path(destination);
++    let (mut temporary_file, temporary_path) =
++        create_immutable_segment_file(immutable_segment_temporary_path(destination))
++            .await
++            .map_err(thread_store_io_error)?;
+     let write_result = async {
+-        let mut temporary_file = create_immutable_segment_file(temporary_path.as_path()).await?;
+         for encoded in canonical_snapshot_lines(lines, segment_id).map_err(io::Error::other)? {
+             temporary_file.write_all(encoded.as_slice()).await?;
+             temporary_file.write_all(b"\n").await?;
++            #[cfg(test)]
++            {
++                temporary_file.flush().await?;
++                pause_immutable_segment_install(destination, /*published*/ false).await;
++            }
+         }
+         temporary_file.sync_all().await?;
+         Ok::<(), io::Error>(())
+     }
+     .await;
+     if let Err(err) = write_result {
+-        let _ = fs::remove_file(temporary_path.as_path()).await;
+         return Err(thread_store_io_error(err));
+     }
+     commit_immutable_segment(temporary_path, destination, parent).await
+@@ -1905,6 +2427,27 @@ fn validate_ordinals(
      }
  }
 
@@ -19860,7 +19889,7 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
  fn rollout_config(store: &LocalThreadStore, meta: &SessionMeta) -> RolloutConfig {
      RolloutConfig {
          codex_home: store.config.codex_home.clone(),
-@@ -1918,6 +2455,78 @@ fn rollout_config(store: &LocalThreadStore, meta: &SessionMeta) -> RolloutConfig
+@@ -1918,6 +2461,78 @@ fn rollout_config(store: &LocalThreadStore, meta: &SessionMeta) -> RolloutConfig
      }
  }
 
@@ -19939,8 +19968,42 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
  fn immutable_segment_path(
      codex_home: &Path,
      thread_id: ThreadId,
-@@ -1992,10 +2601,10 @@ async fn commit_immutable_segment(
-         match fs::hard_link(temporary_path.as_path(), destination).await {
+@@ -1950,16 +2565,19 @@ async fn install_immutable_segment(source: &Path, destination: &Path) -> ThreadS
+         .map_err(thread_store_io_error)?;
+     // Copy and flush before installing the destination name. Linking the live source directly
+     // would let later appends mutate a segment that references already treat as immutable.
+-    let temporary_path = immutable_segment_temporary_path(destination);
++    let (mut temporary_file, temporary_path) =
++        create_immutable_segment_file(immutable_segment_temporary_path(destination))
++            .await
++            .map_err(thread_store_io_error)?;
+     let copy_result = async {
+         let mut source_file = fs::File::open(source).await?;
+-        let mut temporary_file = create_immutable_segment_file(temporary_path.as_path()).await?;
+         tokio::io::copy(&mut source_file, &mut temporary_file).await?;
++        #[cfg(test)]
++        pause_immutable_segment_install(destination, /*published*/ false).await;
+         temporary_file.sync_all().await
+     }
+     .await;
+     if let Err(err) = copy_result {
+-        let _ = fs::remove_file(temporary_path.as_path()).await;
+         return Err(thread_store_io_error(err));
+     }
+     commit_immutable_segment(temporary_path, destination, parent).await
+@@ -1984,18 +2602,18 @@ fn immutable_segment_temporary_path(destination: &Path) -> PathBuf {
+ }
+
+ async fn commit_immutable_segment(
+-    temporary_path: PathBuf,
++    temporary_path: tempfile::TempPath,
+     destination: &Path,
+     parent: PathBuf,
+ ) -> ThreadStoreResult<()> {
+-    let result = async {
+-        match fs::hard_link(temporary_path.as_path(), destination).await {
++    async {
++        match fs::hard_link(&*temporary_path, destination).await {
              Ok(()) => {}
              Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
 -                let metadata = fs::symlink_metadata(destination)
@@ -19952,13 +20015,13 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
                      return Err(ThreadStoreError::Conflict {
                          message: format!(
                              "immutable rollout segment {} already exists but is not a regular file",
-@@ -2003,7 +2612,13 @@ async fn commit_immutable_segment(
+@@ -2003,7 +2621,13 @@ async fn commit_immutable_segment(
                          ),
                      });
                  }
 -                if !files_equal(temporary_path.as_path(), destination).await? {
 +                if !files_equal_and_sync_destination(
-+                    temporary_path.as_path(),
++                    &temporary_path,
 +                    destination,
 +                    destination_metadata,
 +                )
@@ -19967,7 +20030,16 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
                      // The existing segment may already be referenced. Never replace its contents
                      // while recovering an interrupted rotation; fail closed instead.
                      return Err(ThreadStoreError::Conflict {
-@@ -2034,7 +2649,9 @@ async fn commit_immutable_segment(
+@@ -2023,6 +2647,8 @@ async fn commit_immutable_segment(
+                 });
+             }
+         }
++        #[cfg(test)]
++        pause_immutable_segment_install(destination, /*published*/ true).await;
+         let destination_metadata = fs::symlink_metadata(destination)
+             .await
+             .map_err(thread_store_io_error)?;
+@@ -2034,7 +2660,9 @@ async fn commit_immutable_segment(
                  ),
              });
          }
@@ -19978,21 +20050,33 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
          #[cfg(unix)]
          tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
              .await
-@@ -2051,52 +2668,6 @@ async fn commit_immutable_segment(
-     result
+@@ -2046,88 +2674,102 @@ async fn commit_immutable_segment(
+         let _ = parent;
+         Ok(())
+     }
+-    .await;
+-    let _ = fs::remove_file(temporary_path.as_path()).await;
+-    result
++    .await
  }
 
 -async fn sync_immutable_destination(
 -    destination: PathBuf,
 -    expected_metadata: std::fs::Metadata,
 -) -> ThreadStoreResult<()> {
--    tokio::task::spawn_blocking(move || {
--        let mut options = std::fs::OpenOptions::new();
++async fn create_immutable_segment_file(
++    path: PathBuf,
++) -> io::Result<(fs::File, tempfile::TempPath)> {
++    // Creation and cleanup ownership must happen in the same blocking task. If the caller is
++    // cancelled while creation runs, dropping its eventual result still removes only this temp.
+     tokio::task::spawn_blocking(move || {
+         let mut options = std::fs::OpenOptions::new();
 -        options.read(true).write(true);
--        #[cfg(unix)]
--        {
++        options.create_new(true).write(true);
+         #[cfg(unix)]
+         {
 -            use std::os::unix::fs::MetadataExt;
--            use std::os::unix::fs::OpenOptionsExt;
+             use std::os::unix::fs::OpenOptionsExt;
 -            use std::os::unix::fs::PermissionsExt;
 -
 -            options.custom_flags(libc::O_NOFOLLOW);
@@ -20008,9 +20092,13 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
 -            }
 -            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
 -            file.sync_all()
--        }
++            options.mode(0o600);
+         }
 -        #[cfg(not(unix))]
--        {
++        let file = options.open(&path)?;
++        let temporary_path = tempfile::TempPath::from_path(path);
++        #[cfg(unix)]
+         {
 -            let file = options.open(destination.as_path())?;
 -            if !file.metadata()?.file_type().is_file() {
 -                return Err(io::Error::other(format!(
@@ -20019,20 +20107,55 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
 -                )));
 -            }
 -            file.sync_all()
--        }
--    })
--    .await
++            use std::os::unix::fs::PermissionsExt;
++            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+         }
++        Ok((fs::File::from_std(file), temporary_path))
+     })
+     .await
 -    .map_err(|error| ThreadStoreError::Internal {
 -        message: format!("failed to join immutable segment synchronization: {error}"),
 -    })?
 -    .map_err(thread_store_io_error)
--}
--
- async fn create_immutable_segment_file(path: &Path) -> io::Result<fs::File> {
-     let mut options = fs::OpenOptions::new();
-     options.create_new(true).write(true);
-@@ -2114,20 +2685,49 @@ async fn create_immutable_segment_file(path: &Path) -> io::Result<fs::File> {
-     Ok(file)
++    .map_err(io::Error::other)?
+ }
+
+-async fn create_immutable_segment_file(path: &Path) -> io::Result<fs::File> {
+-    let mut options = fs::OpenOptions::new();
+-    options.create_new(true).write(true);
+-    #[cfg(unix)]
+-    {
+-        options.mode(0o600);
+-    }
+-    let file = options.open(path).await?;
+-    #[cfg(unix)]
+-    {
+-        use std::os::unix::fs::PermissionsExt;
+-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+-            .await?;
++#[cfg(test)]
++static IMMUTABLE_SEGMENT_INSTALL_PAUSES: LazyLock<
++    StdMutex<HashMap<(PathBuf, bool), Arc<ImmutableSegmentInstallPause>>>,
++> = LazyLock::new(|| StdMutex::new(HashMap::new()));
++
++/// Destination-scoped suspension points let tests cancel only their own installation.
++#[cfg(test)]
++struct ImmutableSegmentInstallPause {
++    entered: Notify,
++    release: Notify,
++}
++
++#[cfg(test)]
++async fn pause_immutable_segment_install(destination: &Path, published: bool) {
++    let pause = IMMUTABLE_SEGMENT_INSTALL_PAUSES
++        .lock()
++        .expect("immutable install pause mutex")
++        .remove(&(destination.to_path_buf(), published));
++    if let Some(pause) = pause {
++        pause.entered.notify_one();
++        pause.release.notified().await;
+     }
+-    Ok(file)
  }
 
 -async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
@@ -20087,7 +20210,7 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
      let mut left_buffer = vec![0; 64 * 1024];
      let mut right_buffer = vec![0; 64 * 1024];
      loop {
-@@ -2143,6 +2743,15 @@ async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
+@@ -2143,6 +2785,15 @@ async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
              return Ok(false);
          }
          if left_count == 0 {
@@ -20103,7 +20226,7 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
              return Ok(true);
          }
      }
-@@ -2151,10 +2760,15 @@ async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
+@@ -2151,10 +2802,15 @@ async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
  async fn replace_stable_rollout(
      staged: PathBuf,
      stable: PathBuf,
@@ -20119,7 +20242,7 @@ index a0aae084cafaf31e2eebb13c527bd85a965d12b0..999696ce3721c9b21d20be8ae1fd769f
          let contents = std::fs::read_to_string(staged_for_write.as_path())?;
          codex_utils_path::write_atomically(stable_for_write.as_path(), contents.as_str())
      })
-@@ -2207,6 +2821,51 @@ fn staged_rollout_path(stable_path: &Path) -> PathBuf {
+@@ -2207,6 +2863,51 @@ fn staged_rollout_path(stable_path: &Path) -> PathBuf {
      PathBuf::from(staged)
  }
 
@@ -20217,7 +20340,7 @@ index dd10f6af633a8754b3a2b4c3a1eb460f25263d29..96d9a754a6cdfa6f57e4c075f8399efe
  }
 
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824b3333e99 100644
+index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..3d4ba9795cf0d3028952edf6a157a9bfcae85d1c 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -9,7 +9,9 @@ use codex_protocol::config_types::WindowsSandboxLevel;
@@ -20294,10 +20417,10 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
 +    );
 +    assert_eq!(
 +        tokio::fs::read(frozen.reference.rollout_path.as_path())
-             .await
-             .expect("read immutable paginated segment"),
-         source_bytes
-     );
++            .await
++            .expect("read immutable paginated segment"),
++        source_bytes
++    );
 +    let active_path = store
 +        .live_rollout_path(thread_id)
 +        .await
@@ -21554,7 +21677,9 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
 +        sqlx::query(statement)
 +            .bind(rollout_id.to_string())
 +            .execute(&pool)
-+            .await
+             .await
+-            .expect("read immutable paginated segment"),
+-        source_bytes
 +            .expect("clear projection before abandoned rebuild");
 +    }
 +
@@ -21904,7 +22029,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
 +    assert!(
 +        coordination.writer.try_lock().is_err(),
 +        "the reservation clone must retain same-store writer exclusion"
-+    );
+     );
 +    let competing = Arc::new(WriterLockCoordinator::new(home.path()));
 +    let error = competing
 +        .acquire(thread_id)
@@ -21923,10 +22048,24 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
  }
 
  #[tokio::test]
-@@ -660,6 +2307,183 @@ async fn external_writer_lock_rejects_segment_publication_and_fork_preparation()
-         .await
-         .expect("check immutable root")
-     );
+@@ -647,19 +2294,196 @@ async fn external_writer_lock_rejects_segment_publication_and_fork_preparation()
+     }
+
+     assert_eq!(
+-        tokio::fs::read(stable_path.as_path())
++        tokio::fs::read(stable_path.as_path())
++            .await
++            .expect("read unchanged source"),
++        stable_bytes
++    );
++    assert!(
++        !tokio::fs::try_exists(
++            home.path()
++                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++        )
++        .await
++        .expect("check immutable root")
++    );
 +
 +    let source_rollout_id = codex_rollout::rollout_id_from_path(&stable_path)
 +        .expect("source has a canonical rollout filename");
@@ -22077,10 +22216,17 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
 +    );
 +    assert_eq!(
 +        tokio::fs::read(&source_path)
-+            .await
+             .await
+-            .expect("read unchanged source"),
+-        stable_bytes
 +            .expect("read source after capture"),
 +        source_bytes
-+    );
+     );
+-    assert!(
+-        !tokio::fs::try_exists(
+-            home.path()
+-                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+-        )
 +    let error = reader
 +        .acquire_writer_lock(thread_id)
 +        .expect_err("capture must retain the other store's writer lease");
@@ -22093,7 +22239,9 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
 +    append_canonical_message(&owner, thread_id, "owner append after capture").await;
 +    owner
 +        .flush_thread(thread_id)
-+        .await
+         .await
+-        .expect("check immutable root")
+-    );
 +        .expect("original writer still appends while the capture is retained");
 +    assert!(!has_canonical_message(copied, "owner append after capture"));
 +    assert!(!has_canonical_message(
@@ -22136,7 +22284,169 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
      assert_eq!(
          child_snapshot.reference.rollout_path,
          parent.reference.rollout_path
-@@ -1997,7 +3834,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -1754,6 +3591,147 @@ async fn legacy_rotation_rejects_malformed_rollout_reference_records() {
+     }
+ }
+
++#[tokio::test]
++async fn cancelling_snapshot_install_removes_only_its_temporary_file() {
++    assert_cancelled_segment_install(/*snapshot*/ true, /*published*/ false).await;
++    assert_cancelled_segment_install(/*snapshot*/ true, /*published*/ true).await;
++}
++
++#[tokio::test]
++async fn cancelling_immutable_install_removes_only_its_temporary_file() {
++    assert_cancelled_segment_install(/*snapshot*/ false, /*published*/ false).await;
++    assert_cancelled_segment_install(/*snapshot*/ false, /*published*/ true).await;
++}
++
++async fn assert_cancelled_segment_install(snapshot: bool, published: bool) {
++    let home = TempDir::new().expect("temp dir");
++    let source = home.path().join("source.jsonl");
++    let destination = home.path().join("segment.jsonl");
++    let unrelated = home.path().join("segment.jsonl.install-unrelated.tmp");
++    let lines = ["first", "second"].map(|message| RolloutLine {
++        timestamp: "2026-10-15T00:00:00Z".to_string(),
++        ordinal: None,
++        item: user_message_item(message),
++    });
++    let mut expected = Vec::new();
++    for line in super::canonical_snapshot_lines(&lines, None).expect("encode snapshot") {
++        expected.extend_from_slice(&line);
++        expected.push(b'\n');
++    }
++    tokio::fs::write(&source, &expected).await.expect("source");
++    tokio::fs::write(&unrelated, b"unrelated")
++        .await
++        .expect("unrelated temp");
++    let pause = Arc::new(super::ImmutableSegmentInstallPause {
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    super::IMMUTABLE_SEGMENT_INSTALL_PAUSES
++        .lock()
++        .expect("install pauses")
++        .insert((destination.clone(), published), Arc::clone(&pause));
++    let task_source = source.clone();
++    let task_destination = destination.clone();
++    let install = tokio::spawn(async move {
++        if snapshot {
++            super::install_snapshot_segment(&lines, &task_destination, None).await
++        } else {
++            install_immutable_segment(&task_source, &task_destination).await
++        }
++    });
++    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
++        .await
++        .expect("reach install cancellation boundary");
++    let temporary = std::fs::read_dir(home.path())
++        .expect("list staged files")
++        .map(|entry| entry.expect("directory entry").path())
++        .find(|path| path != &unrelated && path.to_string_lossy().ends_with(".tmp"))
++        .expect("owned temporary file exists before cancellation");
++    if snapshot && !published {
++        // The hook flushes the first record before the second record is written.
++        let partial_len = std::fs::metadata(&temporary)
++            .expect("temporary metadata")
++            .len();
++        assert!(partial_len > 0 && partial_len < expected.len() as u64);
++    }
++    install.abort();
++    assert!(install.await.expect_err("cancel installer").is_cancelled());
++    assert!(
++        !temporary.exists(),
++        "cancelled installation leaked its temporary file"
++    );
++    assert_eq!(
++        tokio::fs::read(&source).await.expect("original source"),
++        expected
++    );
++    assert_eq!(
++        tokio::fs::read(&unrelated).await.expect("unrelated temp"),
++        b"unrelated"
++    );
++    if published {
++        assert_eq!(
++            tokio::fs::read(&destination)
++                .await
++                .expect("published destination"),
++            expected
++        );
++    } else {
++        assert!(!destination.exists());
++    }
++}
++
++#[tokio::test]
++async fn immutable_install_missing_source_removes_temporary_file() {
++    let home = TempDir::new().expect("temp dir");
++    let source = home.path().join("missing.jsonl");
++    let destination = home.path().join("segment.jsonl");
++    install_immutable_segment(&source, &destination)
++        .await
++        .expect_err("missing source must fail");
++    assert_eq!(
++        std::fs::read_dir(home.path()).expect("directory").count(),
++        0
++    );
++}
++
++#[tokio::test]
++async fn snapshot_install_success_and_conflict_remove_temporary_files() {
++    let home = TempDir::new().expect("temp dir");
++    let destination = home.path().join("segment.jsonl");
++    let lines = [RolloutLine {
++        timestamp: "2026-10-15T00:00:00Z".to_string(),
++        ordinal: None,
++        item: user_message_item("original"),
++    }];
++    super::install_snapshot_segment(&lines, &destination, None)
++        .await
++        .expect("install snapshot");
++    let original = tokio::fs::read(&destination)
++        .await
++        .expect("original snapshot");
++    super::install_snapshot_segment(&lines, &destination, None)
++        .await
++        .expect("reuse snapshot");
++    let different = [RolloutLine {
++        item: user_message_item("different"),
++        ..lines[0].clone()
++    }];
++    assert!(matches!(
++        super::install_snapshot_segment(&different, &destination, None).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert_eq!(
++        tokio::fs::read(&destination)
++            .await
++            .expect("preserved snapshot"),
++        original
++    );
++    assert_eq!(
++        std::fs::read_dir(home.path()).expect("directory").count(),
++        1
++    );
++}
++
+ #[tokio::test]
+ async fn immutable_install_copies_source_and_rejects_different_existing_contents() {
+     #[cfg(unix)]
+@@ -1854,6 +3832,13 @@ async fn immutable_install_copies_source_and_rejects_different_existing_contents
+             .expect("read destination after conflict"),
+         destination_before_conflict
+     );
++    assert_eq!(
++        std::fs::read_dir(destination.parent().expect("segment directory"))
++            .expect("list installed segments")
++            .count(),
++        1,
++        "success and conflict must remove their temporary files"
++    );
+     #[cfg(unix)]
+     assert_eq!(
+         tokio::fs::metadata(destination.as_path())
+@@ -1997,7 +3982,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
      assert_eq!(parse_errors, 0);
      assert_eq!(
          lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
@@ -22145,7 +22455,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
      );
 
      let pool = codex_state::open_thread_history_db(&sqlite)
-@@ -2006,7 +3843,11 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -2006,7 +3991,11 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
      let projection_state = sqlx::query_as::<_, (i64, i64)>(
          "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
      )
@@ -22158,7 +22468,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
      .fetch_one(&pool)
      .await
      .expect("read projection state");
-@@ -2017,7 +3858,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
+@@ -2017,7 +4006,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
              .len(),
      )
      .expect("replacement length");
@@ -22167,7 +22477,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
  }
 
  #[tokio::test]
-@@ -2171,22 +4012,47 @@ async fn assert_segmentless_source_freezes(history_mode: ThreadHistoryMode) {
+@@ -2171,22 +4160,47 @@ async fn assert_segmentless_source_freezes(history_mode: ThreadHistoryMode) {
          .expect("freeze segmentless source");
      assert_eq!(frozen.source_session_meta.meta.segment_id, None);
      assert_eq!(frozen.reference.segment_id, None);
@@ -22225,7 +22535,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
          .await
          .expect("read replacement metadata");
      assert!(replacement_meta.meta.segment_id.is_some());
-@@ -2204,6 +4070,292 @@ async fn state_backed_store(codex_home: &Path) -> LocalThreadStore {
+@@ -2204,6 +4218,292 @@ async fn state_backed_store(codex_home: &Path) -> LocalThreadStore {
      LocalThreadStore::new(config, Some(state_db))
  }
 
@@ -22518,7 +22828,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
  async fn stored_parent_and_children_bytes(
      history_mode: ThreadHistoryMode,
      parent_message_count: usize,
-@@ -2328,6 +4480,27 @@ async fn append_message(store: &LocalThreadStore, thread_id: ThreadId, message:
+@@ -2328,6 +4628,27 @@ async fn append_message(store: &LocalThreadStore, thread_id: ThreadId, message:
          .expect("append message");
  }
 
@@ -22546,7 +22856,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
  fn user_message_item(message: &str) -> RolloutItem {
      RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
          message: message.to_string(),
-@@ -2348,44 +4521,55 @@ async fn append_turn(
+@@ -2348,44 +4669,55 @@ async fn append_turn(
      store
          .append_items(AppendThreadItemsParams {
              thread_id,
@@ -22635,7 +22945,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
  fn has_message(items: &[RolloutItem], message: &str) -> bool {
      items.iter().any(|item| {
          matches!(
-@@ -2395,13 +4579,34 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
+@@ -2395,13 +4727,34 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
      })
  }
 
@@ -22675,7 +22985,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
              )
          })
          .count()
-@@ -2419,14 +4624,55 @@ fn compaction_count(items: &[RolloutItem], message: &str) -> usize {
+@@ -2419,14 +4772,55 @@ fn compaction_count(items: &[RolloutItem], message: &str) -> usize {
          .count()
  }
 
@@ -22732,7 +23042,7 @@ index 394b9ae6c51b08d6ad5198cbc5eef4510c69f6cb..bb5d6055b1ebea6214710182ae9fe824
              retained_context: None,
              guardian_history: None,
              mcp_resource_origins: None,
-@@ -2499,6 +4745,18 @@ async fn append_malformed_historical_records(path: &Path) {
+@@ -2499,6 +4893,18 @@ async fn append_malformed_historical_records(path: &Path) {
      file.flush().await.expect("flush historical records");
  }
 

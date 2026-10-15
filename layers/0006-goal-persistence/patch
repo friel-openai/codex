@@ -525,7 +525,7 @@ index 547ae2a5f1285a733d53a12f2d7065434ecde728..5d5e54818c2604be8cbb38f86e1bc606
      CompactedUserMessage {
          message: text.to_string(),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 37a35e6e38b7218b041d35ea8404dfb01cd7319c..3711d1e90a3ddd063e53105d57c513e3e263eaea 100644
+index 2e4fc5d44edd5348e8e4cb0974efdde0c80c87ce..a934fb3a39cb5b2e792477e6bdea5e426f9f934a 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -319,7 +319,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
@@ -602,7 +602,7 @@ index 37a35e6e38b7218b041d35ea8404dfb01cd7319c..3711d1e90a3ddd063e53105d57c513e3
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2614,6 +2653,11 @@ impl Session {
+@@ -2628,6 +2667,11 @@ impl Session {
          }
      }
 

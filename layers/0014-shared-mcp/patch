@@ -11618,7 +11618,7 @@ index bc42d6c44f28fd1fa3b98b53208552c3898fb70a..268e5e26fdd4a6eb795dd19a80703af6
                      crate::session::ForkStartupItems::default(),
                  );
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index e3e0f9d7ee0032f8dfce74315edd26e9354ef451..880627c0336961e5dc8431855cff2a075c2b4e7d 100644
+index 3bc80e11096a64ff809a0828674264fb067c7c09..1481095f0617e993741ff9c5572c2487fa9a524f 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -2006,22 +2006,19 @@ async fn selected_capability_roots_round_trip_through_fork() {

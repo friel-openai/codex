@@ -745,7 +745,7 @@ index f634d56fcfddc06cf803507f3ffc42cdf09a1303..27b1ac5733ef376d37e057788e8b9958
                          crate::goal_supervisor::restart_active_helper_for_execution_settings_change(&sess).await;
                      }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd944ce463 100644
+index 70c4cc03cd718da8d3afb59f33e3fef008f92195..12bf4a1b45747e2b93d75ffb0c3c33fdfe8cf4a2 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -174,6 +174,7 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
@@ -841,7 +841,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  }
                  self.state.lock().await.latest_token_usage_record =
                      Self::last_token_usage_record_from_rollout(&logical_rollout_items);
-@@ -2133,6 +2154,24 @@ impl Session {
+@@ -2147,6 +2168,24 @@ impl Session {
                  for item in &mut startup_response_items {
                      Self::assign_missing_response_item_id(item);
                  }
@@ -866,7 +866,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  if !startup_response_items.is_empty() {
                      let mut state = self.state.lock().await;
                      state.history.record_items(
-@@ -2146,21 +2185,7 @@ impl Session {
+@@ -2160,21 +2199,7 @@ impl Session {
                      .map(RolloutItem::ResponseItem)
                      .collect::<Vec<_>>();
 
@@ -889,7 +889,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  match &self.fork_persistence {
                      ForkPersistence::Referenced {
                          inherited_item_count,
-@@ -2174,22 +2199,25 @@ impl Session {
+@@ -2188,22 +2213,25 @@ impl Session {
                              .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
                              .cloned()
                              .collect();
@@ -919,7 +919,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  persisted_rollout_items.append(&mut startup_rollout_items);
                  self.persist_initial_rollout_items(&persisted_rollout_items)
                      .await?;
-@@ -2316,25 +2344,55 @@ impl Session {
+@@ -2330,25 +2358,55 @@ impl Session {
 
      async fn apply_rollout_reconstruction_with_shared_history(
          &self,
@@ -990,7 +990,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
              .reconstruct_history_from_rollout(turn_context, rollout_items)
              .await;
          // Keep the recorded rollout unchanged. Prepare its reconstructed history before
-@@ -2342,8 +2400,9 @@ impl Session {
+@@ -2356,8 +2414,9 @@ impl Session {
          // will be processed again if the rollout is reconstructed in a future session.
          // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
          // the prior batch behavior and carry history-only metadata in a positional sidecar.
@@ -1002,7 +1002,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  .into_iter()
                  .map(|envelope| (envelope.item, envelope.metadata))
                  .unzip();
-@@ -2365,76 +2424,80 @@ impl Session {
+@@ -2379,76 +2438,80 @@ impl Session {
                  metadata.len(),
                  "replay media preparation must remain one-to-one when resize notices are disabled"
              );
@@ -1145,7 +1145,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          }
          previous_turn_settings
      }
-@@ -2455,11 +2518,93 @@ impl Session {
+@@ -2469,11 +2532,93 @@ impl Session {
          state.set_auto_compact_window_estimated_prefill(tokens);
      }
 
@@ -1244,7 +1244,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
      }
 
      fn last_token_usage_record_from_rollout(
-@@ -2516,6 +2661,11 @@ impl Session {
+@@ -2530,6 +2675,11 @@ impl Session {
          let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
          let (commit, previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
              let mut state = self.state.lock().await;
@@ -1256,7 +1256,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
              let updated = match self.apply_session_settings(&state.session_configuration, &updates)
              {
                  Ok(updated) => updated,
-@@ -4631,8 +4781,13 @@ impl Session {
+@@ -4645,8 +4795,13 @@ impl Session {
          state.replace_history(items, reference_context_item);
      }
 
@@ -1270,7 +1270,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          mut items: Vec<ResponseItemEnvelope>,
          reference_context_item: TurnContextItem,
          world_state_baseline: WorldStateSnapshot,
-@@ -4651,6 +4806,14 @@ impl Session {
+@@ -4665,6 +4820,14 @@ impl Session {
                      revision
                  })
              });
@@ -1285,7 +1285,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          if let Some(checkpoint) = items.iter_mut().rev().find(|envelope| {
              matches!(
                  envelope.item,
-@@ -4660,85 +4823,137 @@ impl Session {
+@@ -4674,85 +4837,137 @@ impl Session {
              checkpoint
                  .metadata
                  .get_or_insert_default()
@@ -1494,7 +1494,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                      ))
                      .await,
              )
-@@ -4749,6 +4964,7 @@ impl Session {
+@@ -4763,6 +4978,7 @@ impl Session {
          let persisted = match checkpoint_outcome {
              Some(SegmentCheckpointPersistenceOutcome::Committed) => true,
              Some(SegmentCheckpointPersistenceOutcome::NotCommitted { error }) => {
@@ -1502,7 +1502,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  self.persistence_restart_required
                      .store(false, Ordering::Release);
                  warn!(%error, "failed to persist compacted history without changing durable history");
-@@ -4770,23 +4986,26 @@ impl Session {
+@@ -4784,23 +5000,26 @@ impl Session {
                  .executed_tool_calls
                  .mark_mcp_attribution_persisted(revision);
          }
@@ -1541,7 +1541,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          Ok(())
      }
 
-@@ -4797,6 +5016,22 @@ impl Session {
+@@ -4811,6 +5030,22 @@ impl Session {
                  .is_some_and(LiveThread::persistence_restart_required)
      }
 
@@ -1564,7 +1564,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
      fn require_restart_after_checkpoint_failure(&self) {
          self.persistence_restart_required
              .store(true, Ordering::Release);
-@@ -4890,23 +5125,62 @@ impl Session {
+@@ -4904,23 +5139,62 @@ impl Session {
          &self,
          step_context: &StepContext,
          world_state: &WorldState,
@@ -1629,7 +1629,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          {
              developer_sections.push(DeveloperInstructions::new(&role_prompt).render_fragment());
          }
-@@ -5255,6 +5529,7 @@ impl Session {
+@@ -5269,6 +5543,7 @@ impl Session {
                  last_started_turn_id: state.last_started_turn_id.clone(),
                  turn_attribution: state.turn_attribution.clone(),
                  latest_token_usage_record: state.latest_token_usage_record.clone(),
@@ -1637,7 +1637,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
                  window_number: state.auto_compact_window_number(),
                  window_ids: state.auto_compact_window_ids(),
              }
-@@ -5271,6 +5546,7 @@ impl Session {
+@@ -5285,6 +5560,7 @@ impl Session {
              || state.last_started_turn_id != source_model_state.last_started_turn_id
              || state.turn_attribution != source_model_state.turn_attribution
              || state.latest_token_usage_record != source_model_state.latest_token_usage_record
@@ -1645,7 +1645,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
              || state.auto_compact_window_number() != source_model_state.window_number
              || state.auto_compact_window_ids() != source_model_state.window_ids
          {
-@@ -5295,6 +5571,14 @@ impl Session {
+@@ -5309,6 +5585,14 @@ impl Session {
          )
      }
 
@@ -1660,7 +1660,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
      pub(crate) async fn advance_auto_compact_window(&self) -> (u64, AutoCompactWindowIds) {
          let mut state = self.state.lock().await;
          state.advance_auto_compact_window()
-@@ -5315,7 +5599,6 @@ impl Session {
+@@ -5329,7 +5613,6 @@ impl Session {
          step_context: &StepContext,
          world_state: Arc<WorldState>,
      ) -> CodexResult<u64> {
@@ -1668,7 +1668,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
          let history = self.clone_history().await;
          let input_goal_ids = crate::context::UserGoalUpdate::message_ids(history.raw_items());
          let retained_client_developer_messages =
-@@ -5334,13 +5617,13 @@ impl Session {
+@@ -5348,13 +5631,13 @@ impl Session {
              } else {
                  Vec::new()
              };
@@ -1688,7 +1688,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
              .await;
          let context_items =
              crate::context_manager::updates::merge_world_state_updates(context_updates)
-@@ -5350,22 +5633,21 @@ impl Session {
+@@ -5364,22 +5647,21 @@ impl Session {
                  .collect();
          let turn_context_item = step_context.to_turn_context_item();
          self.replace_compacted_history(
@@ -1714,7 +1714,7 @@ index 8fefc7a8f735cb882963bfb0078c005cd8aebe85..65dfcb8bd18b91e4f9399ae2e64439bd
      }
 
      pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
-@@ -5566,46 +5848,57 @@ impl Session {
+@@ -5580,46 +5862,57 @@ impl Session {
          Ok(())
      }
 
@@ -5361,7 +5361,7 @@ index 4e5798589e31520ef086434ff56549c774b36f2b..7b7ac4372a31bd3150427014cfef1ee3
              ..StartThreadOptions::new(config)
          };
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 880627c0336961e5dc8431855cff2a075c2b4e7d..bc228d24a1478f3fc1dfa3c6cbfdf3444c05f151 100644
+index 1481095f0617e993741ff9c5572c2487fa9a524f..9ed05f637e59046dfb0fae863abe26a90507b50b 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -19,8 +19,13 @@ use codex_history::InitialHistory;

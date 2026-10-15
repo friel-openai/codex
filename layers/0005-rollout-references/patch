@@ -7731,7 +7731,7 @@ index 6ff5ab358960273d3de2c237b2dd50c4724d146f..f76707cd3c2d156d9aa60107ae440e1b
      assert_eq!(restored.annotated_items(), expected.annotated_items());
      assert_eq!(restored.retained_context(), expected.retained_context());
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb01cd7319c 100644
+index baea474e54878442922f567ae971b958932458a9..2e4fc5d44edd5348e8e4cb0974efdde0c80c87ce 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -9,6 +9,7 @@ use std::path::Path;
@@ -8113,9 +8113,9 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
 -                    Self::last_token_usage_record_from_rollout(&rollout_items);
 +                    Self::last_token_usage_record_from_rollout(&logical_rollout_items);
 
-                 // Checkpoint effective settings even when no turn follows the resume.
-                 self.persist_rollout_items(&[RolloutItem::EventMsg(
-@@ -1763,18 +1975,122 @@ impl Session {
+                 // Resume can run for every background goal check-in without starting a turn.
+                 // Preserve changed settings and ownership upgrades, but do not append another
+@@ -1777,18 +1989,122 @@ impl Session {
              }
              InitialHistory::Forked(mut rollout_items) => {
                  let turn_context = self.new_default_turn().await;
@@ -8243,7 +8243,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
 
                  let thread_settings_applied =
                      RolloutItem::EventMsg(thread_settings::applied_event(self).await);
-@@ -1785,24 +2101,29 @@ impl Session {
+@@ -1799,24 +2115,29 @@ impl Session {
                      } => {
                          // Ancestor records remain behind history_base; only effective child
                          // settings and boundaries synthesized by snapshot processing are local.
@@ -8280,7 +8280,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
 
                  // Agent spawn owns its final durability barrier so it can overlap the edge write.
                  let persist_context = match self.fork_persistence {
-@@ -1811,7 +2132,11 @@ impl Session {
+@@ -1825,7 +2146,11 @@ impl Session {
                          PersistContext::Standard
                      }
                  };
@@ -8293,7 +8293,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
 
                  // Flush after seeding history and any persisted rollout copy.
                  if !is_subagent {
-@@ -1832,6 +2157,70 @@ impl Session {
+@@ -1846,6 +2171,70 @@ impl Session {
                      .await;
              }
          }
@@ -8364,7 +8364,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
      }
 
      #[instrument(
-@@ -1846,6 +2235,22 @@ impl Session {
+@@ -1860,6 +2249,22 @@ impl Session {
          &self,
          turn_context: &Arc<TurnContext>,
          rollout_items: &[RolloutItem],
@@ -8387,7 +8387,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
      ) -> Option<PreviousTurnSettings> {
          let rollout_reconstruction::RolloutReconstruction {
              mut history,
-@@ -1868,64 +2273,85 @@ impl Session {
+@@ -1882,64 +2287,85 @@ impl Session {
          // will be processed again if the rollout is reconstructed in a future session.
          // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
          // the prior batch behavior and carry history-only metadata in a positional sidecar.
@@ -8525,7 +8525,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
          }
          let prefix_tokens = if matches!(
              turn_context.config.model_auto_compact_token_limit_scope,
-@@ -4126,7 +4552,7 @@ impl Session {
+@@ -4140,7 +4566,7 @@ impl Session {
          reference_context_item: TurnContextItem,
          world_state_baseline: WorldStateSnapshot,
          metadata: CompactedHistoryMetadata,
@@ -8534,7 +8534,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
          for envelope in &mut items {
              Self::assign_missing_response_item_id(&mut envelope.item);
          }
-@@ -4155,8 +4581,9 @@ impl Session {
+@@ -4169,8 +4595,9 @@ impl Session {
          // overtaking the current settings snapshot while its checkpoint is written.
          let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
          let world_state_item = WorldStateItem::full(world_state_baseline.clone().into_object());
@@ -8545,7 +8545,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
              // Goal edits are published outside the running task. Keep edits accepted after
              // the compaction input snapshot, in their original order, after its replacement.
              let replacement_goal_ids = crate::context::UserGoalUpdate::message_ids(
-@@ -4176,21 +4603,14 @@ impl Session {
+@@ -4190,21 +4617,14 @@ impl Session {
                      })
                      .cloned(),
              );
@@ -8573,7 +8573,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
                  mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
                  window_number: Some(metadata.window_number),
                  first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
-@@ -4209,25 +4629,92 @@ impl Session {
+@@ -4223,25 +4643,92 @@ impl Session {
                  }),
              }
          };
@@ -8674,7 +8674,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
      }
 
      pub fn enabled(&self, feature: Feature) -> bool {
-@@ -4599,6 +5086,10 @@ impl Session {
+@@ -4613,6 +5100,10 @@ impl Session {
 
      #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
      pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
@@ -8685,7 +8685,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
          if let Some(live_thread) = self.live_thread()
              && let Err(e) = live_thread.append_items(items).await
          {
-@@ -4629,6 +5120,51 @@ impl Session {
+@@ -4643,6 +5134,51 @@ impl Session {
          state.history.conversation_history_snapshot()
      }
 
@@ -8737,7 +8737,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
      pub(crate) async fn current_window_id(&self) -> String {
          self.current_window().await.0
      }
-@@ -4664,7 +5200,7 @@ impl Session {
+@@ -4678,7 +5214,7 @@ impl Session {
          &self,
          step_context: &StepContext,
          world_state: Arc<WorldState>,
@@ -8746,7 +8746,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
          let turn_context = step_context.turn.as_ref();
          let history = self.clone_history().await;
          let input_goal_ids = crate::context::UserGoalUpdate::message_ids(history.raw_items());
-@@ -4713,8 +5249,9 @@ impl Session {
+@@ -4727,8 +5263,9 @@ impl Session {
                  reviewer_compaction_hash: None,
              },
          )
@@ -8757,7 +8757,7 @@ index 5abe33afe557ba55c59b45510b193692dae67ef4..37a35e6e38b7218b041d35ea8404dfb0
      }
 
      pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
-@@ -5141,6 +5678,11 @@ impl Session {
+@@ -5155,6 +5692,11 @@ impl Session {
      }
 
      pub(crate) async fn hook_transcript_path(&self) -> Option<PathBuf> {
@@ -11636,7 +11636,7 @@ index 27fe8c9a27e9afab222e70927a1cc9db7a0394a1..bc42d6c44f28fd1fa3b98b53208552c3
                  tokio::select! {
                      biased;
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197351f50a8 100644
+index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..7b41f9306f0bc793b9b19a6ead5012e6c37d6ecc 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -43,6 +43,7 @@ use codex_protocol::protocol::TokenUsage;
@@ -11953,7 +11953,7 @@ index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197
      std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
      let auth_manager =
-@@ -3221,12 +3394,327 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
+@@ -3221,12 +3394,343 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
      }));
  }
 
@@ -12181,7 +12181,7 @@ index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197
 +        .await
 +        .expect("read source history");
 +
-+    let fork = tokio::spawn({
++    let mut fork = tokio::spawn({
 +        let manager = Arc::clone(&manager);
 +        let config = config.clone();
 +        async move {
@@ -12194,9 +12194,17 @@ index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197
 +                .await
 +        }
 +    });
-+    tokio::time::timeout(Duration::from_secs(5), observer.entered.notified())
-+        .await
-+        .expect("child should reach blocked startup");
++    tokio::select! {
++        result = &mut fork => {
++            match result.expect("fork task should not panic") {
++                Ok(_) => panic!("fork completed without entering blocked startup"),
++                Err(error) => panic!("fork failed before blocked startup: {error}"),
++            }
++        }
++        result = tokio::time::timeout(Duration::from_secs(5), observer.entered.notified()) => {
++            result.expect("child should reach blocked startup");
++        }
++    }
 +
 +    let mut delete = Box::pin(
 +        manager
@@ -12223,13 +12231,21 @@ index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197
 +        .thread
 +        .rollout_path()
 +        .expect("child rollout path should exist");
-+    delete
++    // The durable child references a snapshot owned by the source thread. Once
++    // the preparation reservation ends, reference protection must take over.
++    let error = delete
 +        .await
-+        .expect("immutable child reference should permit source deletion");
++        .expect_err("durable child reference must protect the source snapshot");
++    assert_eq!(
++        error.to_string(),
++        format!(
++            "invalid thread-store request: cannot delete thread {source_thread_id}: forked history still references it"
++        )
++    );
 +    let child_items =
 +        codex_rollout::materialize_rollout_items(config.codex_home.as_path(), &child_path)
 +            .await
-+            .expect("child history should remain readable after source deletion");
++            .expect("child history should remain readable after refused source deletion");
 +    assert!(
 +        child_items.iter().any(|item| matches!(
 +            item,
@@ -12282,7 +12298,7 @@ index c9c6fdea1b7edbbb51896472281f74bf11f6ae02..1dd11a61ae3be980f0bd006911ac2197
      std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
      let auth_manager =
-@@ -3322,11 +3810,13 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
+@@ -3322,11 +3826,13 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
          .thread
          .rollout_path()
          .expect("re-forked rollout path should exist");

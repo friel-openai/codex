@@ -40,14 +40,14 @@ def load_selection(value):
         package, binary = group["package"], group["binary"]
         require(isinstance(package, str) and re.fullmatch(r"codex-[a-z0-9-]+", package),
                 "Invalid Cargo package")
-        require(isinstance(binary, str) and re.fullmatch(r"[A-Za-z0-9_:-]+", binary),
+        require(isinstance(binary, str) and re.fullmatch(r"[A-Za-z0-9_:/-]+", binary),
                 "Invalid nextest binary ID")
         require(binary not in binaries, f"Duplicate binary group: {binary}")
         binaries.add(binary)
         require((group["kind"] == "lib" and group["target"] is None)
-                or (group["kind"] == "test" and isinstance(group["target"], str)
+                or (group["kind"] in {"test", "bin"} and isinstance(group["target"], str)
                     and re.fullmatch(r"[A-Za-z0-9_-]+", group["target"])),
-                "Use a library target or an explicit integration-test target")
+                "Use a library target or an explicit integration-test or binary target")
         names = group["tests"]
         require(isinstance(names, list) and names, "Each group requires exact test names")
         for name in names:
@@ -58,7 +58,7 @@ def load_selection(value):
             case = (binary, name)
             require(case not in seen, f"Duplicate intended case: {case}")
             seen.add(case)
-    require(len(seen) <= 333, "CI selection exceeds 333 exact cases")
+    require(len(seen) <= 367, "CI selection exceeds 367 exact cases")
     return groups
 
 
@@ -93,7 +93,7 @@ def command_arguments(group, config):
     if group["kind"] == "lib":
         arguments.append("--lib")
     else:
-        arguments.extend(["--test", group["target"]])
+        arguments.extend(["--bin" if group["kind"] == "bin" else "--test", group["target"]])
     arguments.extend(["-E", " | ".join(f"test(={name})" for name in group["tests"])])
     return arguments
 

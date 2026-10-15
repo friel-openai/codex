@@ -906,7 +906,7 @@ index fc220a6513c7415fd3ac4e4106e3f1ba58100433..908591ac3c44e1794125c634310ed864
          &self,
          selection: &TurnEnvironmentSelection,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 3e8a23b722fb9e678cbb34a3dc75a147def7b4cc..5abe33afe557ba55c59b45510b193692dae67ef4 100644
+index 3e8a23b722fb9e678cbb34a3dc75a147def7b4cc..baea474e54878442922f567ae971b958932458a9 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -303,6 +303,7 @@ use self::turn::agent_message_text;
@@ -917,7 +917,38 @@ index 3e8a23b722fb9e678cbb34a3dc75a147def7b4cc..5abe33afe557ba55c59b45510b193692
  #[cfg(test)]
  mod rollout_reconstruction_tests;
 
-@@ -3985,6 +3986,7 @@ impl Session {
+@@ -1747,11 +1748,25 @@ impl Session {
+                 self.state.lock().await.latest_token_usage_record =
+                     Self::last_token_usage_record_from_rollout(&rollout_items);
+
+-                // Checkpoint effective settings even when no turn follows the resume.
+-                self.persist_rollout_items(&[RolloutItem::EventMsg(
+-                    thread_settings::applied_event(self).await,
+-                )])
+-                .await;
++                // Resume can run for every background goal check-in without starting a turn.
++                // Preserve changed settings and ownership upgrades, but do not append another
++                // identical checkpoint. Explicit settings requests still emit confirmations.
++                let settings = thread_settings::applied_event(self).await;
++                let previous_settings = logical_rollout_items.iter().rev().find_map(|item| {
++                    if let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = item {
++                        Some(event)
++                    } else {
++                        None
++                    }
++                });
++                let unchanged = matches!(
++                    &settings,
++                    EventMsg::ThreadSettingsApplied(current) if Some(current) == previous_settings
++                );
++                if !unchanged {
++                    self.persist_rollout_items(&[RolloutItem::EventMsg(settings)])
++                        .await;
++                }
+
+                 // Defer seeding the session's initial context until the first turn starts so
+                 // turn/start overrides can be merged before we write model-visible context.
+@@ -3985,6 +4000,7 @@ impl Session {
              required_mcp_servers: required_servers.to_vec(),
              tool_router,
              loaded_agents_md,
@@ -925,7 +956,7 @@ index 3e8a23b722fb9e678cbb34a3dc75a147def7b4cc..5abe33afe557ba55c59b45510b193692
          }))
      }
 
-@@ -4804,8 +4806,9 @@ impl Session {
+@@ -4804,8 +4820,9 @@ impl Session {
          if only_world_state_changed {
              return Ok(());
          }

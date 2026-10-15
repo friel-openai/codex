@@ -2021,7 +2021,7 @@ index 9d67c553f6b0463c222683a9208c0286a324c6f9..5e13e2f5633e4ea210a0a544d6ba892c
      Ok(lines.into_iter().map(|line| line.item).collect())
  }
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index cba2fc1d787e715873c8b401622dc19e240d973a..1f032d1c0b66faf95b08ce4ca2a463dfd43c86ab 100644
+index af5e59fdb8db318a2ce3e3ac9a7569eb5cd6d24c..6f521d82d33da72398f66202195f0227e6e57081 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -2764,6 +2764,54 @@ async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {

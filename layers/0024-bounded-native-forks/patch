@@ -586,21 +586,119 @@ index 58ad033792909ff0eadf9fd07dfddc9d639470ce..9bd77002c29ab351354e488cb4bb1e59
      let parent_thread_id = create_fake_rollout(
          codex_home.path(),
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754adb609d797 100644
+index cb58fd8ddb2dba0b5320afd857775271b58df450..7ff1df54abb132f78803ad1738f6ec14c214bc65 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -1048,7 +1048,7 @@ impl LocalAgentControl {
+@@ -1048,8 +1048,25 @@ impl LocalAgentControl {
          let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
              .then_some(ThreadHistoryMode::Paginated);
 
 -        let mut supervisor_continuity_history = None;
 +        let mut supervisor_last_parent_message_at = None;
          let mut supervisor_model_history = None;
++        let ephemeral_supervisor_store = if is_goal_supervisor_helper
++            && config.ephemeral
++            && parent_history_mode == ThreadHistoryMode::Paginated
++        {
++            match parent_thread
++                .session
++                .services
++                .thread_store
++                .as_any()
++                .downcast_ref::<codex_thread_store::LocalThreadStore>()
++            {
++                Some(store) if store.state_db().await.is_some() => Some(store),
++                _ => None,
++            }
++        } else {
++            None
++        };
          let (
              selected_capability_roots,
-@@ -1065,17 +1065,29 @@ impl LocalAgentControl {
+             mut forked_rollout_items,
+@@ -1057,25 +1074,108 @@ impl LocalAgentControl {
+             source_reservation,
+             forked_from_ordinal_exclusive,
+         ) = match fork_mode {
++            SpawnAgentForkMode::FullHistory if ephemeral_supervisor_store.is_some() => {
++                let store = ephemeral_supervisor_store.expect("local store checked above");
++                let rollout_path = parent_thread
++                    .session
++                    .current_rollout_path()
++                    .await
++                    .map_err(|err| CodexErr::Fatal(err.to_string()))?
++                    .ok_or_else(|| CodexErr::Fatal("supervisor parent has no rollout".into()))?;
++                let rollout_id = codex_rollout::rollout_id_from_path(rollout_path.as_path())
++                    .ok_or_else(|| CodexErr::Fatal("supervisor parent has no rollout ID".into()))?;
++                // Ephemeral helpers never publish a child reference. Freezing their source
++                // would retain a full snapshot after every check-in, including failed spawns.
++                let prepared = store
++                    .prepare_fork_without_response_history_for_rollout(
++                        codex_thread_store::PrepareForkParams {
++                            thread_id: parent_thread_id,
++                            boundary: codex_thread_store::ForkBoundary::Latest,
++                        },
++                        rollout_id,
++                        /*ephemeral_context_only*/ true,
++                    )
++                    .await
++                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
++                let mut cursor = None;
++                loop {
++                    let page = store
++                        .list_turns(codex_thread_store::ListTurnsParams {
++                            thread_id: parent_thread_id,
++                            include_archived: false,
++                            cursor,
++                            page_size: 32,
++                            sort_direction: codex_thread_store::SortDirection::Desc,
++                            items_view: codex_thread_store::StoredTurnItemsView::NotLoaded,
++                        })
++                        .await
++                        .map_err(|err| CodexErr::Fatal(err.to_string()))?;
++                    supervisor_last_parent_message_at =
++                        page.turns.iter().find_map(|turn| turn.completed_at);
++                    if supervisor_last_parent_message_at.is_some() || page.next_cursor.is_none() {
++                        break;
++                    }
++                    cursor = page.next_cursor;
++                }
++                let mut model_history = prepared.model_context.as_ref().clone();
++                let selected_capability_roots = model_history
++                    .iter_mut()
++                    .find_map(|item| {
++                        let RolloutItem::SessionMeta(meta) = item else {
++                            return None;
++                        };
++                        // This copy already contains the inherited model context. Debug
++                        // materialization must not prepend its original history_base again.
++                        meta.meta.history_base = None;
++                        Some(meta.meta.selected_capability_roots.clone())
++                    })
++                    .unwrap_or_default();
++                supervisor_model_history = Some(model_history.clone());
++                let end_ordinal = prepared.source_end_ordinal_exclusive;
++                (
++                    selected_capability_roots,
++                    model_history,
++                    None,
++                    Some(
++                        crate::thread_manager::FullHistorySourceReservation::Prepared {
++                            _prepared: Box::new(prepared),
++                        },
++                    ),
++                    end_ordinal,
++                )
++            }
+             SpawnAgentForkMode::FullHistory
+                 if parent_thread
+                     .session
+                     .services
+                     .thread_store
                      .as_any()
-                     .is::<codex_thread_store::LocalThreadStore>() =>
+-                    .is::<codex_thread_store::LocalThreadStore>() =>
++                    .is::<codex_thread_store::LocalThreadStore>()
++                    && !(is_goal_supervisor_helper && config.ephemeral) =>
              {
 +                let materialization = if is_goal_supervisor_helper {
 +                    crate::thread_manager::FullHistoryLogicalMaterialization::SupervisorContinuity
@@ -629,7 +727,7 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
                      .find_map(|item| match item {
                          RolloutItem::SessionMeta(meta_line) => {
                              Some(meta_line.meta.selected_capability_roots.clone())
-@@ -1084,7 +1096,7 @@ impl LocalAgentControl {
+@@ -1084,7 +1184,7 @@ impl LocalAgentControl {
                      })
                      .unwrap_or_default();
                  if is_goal_supervisor_helper {
@@ -638,7 +736,49 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
                      supervisor_model_history = Some(model_history);
                  }
                  let reference_rollout_items = reference_history.get_rollout_items().to_vec();
-@@ -1121,7 +1133,13 @@ impl LocalAgentControl {
+@@ -1102,7 +1202,23 @@ impl LocalAgentControl {
+                 )
+             }
+             SpawnAgentForkMode::FullHistory => {
+-                let parent_history =
++                let mut parent_history = if is_goal_supervisor_helper
++                    && config.ephemeral
++                    && parent_thread
++                        .session
++                        .services
++                        .thread_store
++                        .as_any()
++                        .is::<codex_thread_store::LocalThreadStore>()
++                {
++                    state
++                        .load_latest_model_context(LoadThreadHistoryParams {
++                            thread_id: parent_thread_id,
++                            include_archived: true,
++                        })
++                        .await?
++                        .items
++                } else {
+                     load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                         .await?
+                         .ok_or_else(|| {
+@@ -1110,18 +1226,28 @@ impl LocalAgentControl {
+                                 "parent thread history unavailable for fork: {parent_thread_id}"
+                             ))
+                         })?
+-                        .items;
++                        .items
++                };
+                 let selected_capability_roots = parent_history
+-                    .iter()
++                    .iter_mut()
+                     .find_map(|item| {
+                         let RolloutItem::SessionMeta(meta_line) = item else {
+                             return None;
+                         };
++                        if is_goal_supervisor_helper && config.ephemeral {
++                            meta_line.meta.history_base = None;
++                        }
+                         Some(meta_line.meta.selected_capability_roots.clone())
                      })
                      .unwrap_or_default();
                  if is_goal_supervisor_helper {
@@ -653,7 +793,7 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
                      supervisor_model_history = Some(parent_history.clone());
                  }
                  (selected_capability_roots, parent_history, None, None, None)
-@@ -1320,9 +1338,21 @@ impl LocalAgentControl {
+@@ -1320,9 +1446,21 @@ impl LocalAgentControl {
              });
              if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
                  (reference_rollout_items, unsanitized_parent_history)
@@ -677,7 +817,7 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
              }
          }
          // Full forks reuse the parent's reference context instead of rebuilding it. If that
-@@ -1395,7 +1425,7 @@ impl LocalAgentControl {
+@@ -1395,7 +1533,7 @@ impl LocalAgentControl {
                          &parent_thread.session,
                          &goal_id,
                          &parent_goal,
@@ -687,7 +827,7 @@ index cb58fd8ddb2dba0b5320afd857775271b58df450..3acfafe248232a6ccbdd135fe39754ad
                      .await,
                  );
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 61160e17d3bb39853fd9c1c7f864087d25a1710b..50a345e9bf9a65f44b930f715d5d4d468163bda1 100644
+index 61160e17d3bb39853fd9c1c7f864087d25a1710b..004b817d1be6abe60a84c3ce187695f02a1b1a3f 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -5069,6 +5069,217 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
@@ -908,6 +1048,288 @@ index 61160e17d3bb39853fd9c1c7f864087d25a1710b..50a345e9bf9a65f44b930f715d5d4d46
  #[test_case::test_case(MultiAgentVersion::V1, true, false; "v1_gate_enabled")]
  #[test_case::test_case(MultiAgentVersion::V2, false, false; "v2_gate_disabled")]
  #[test_case::test_case(MultiAgentVersion::V2, true, true; "v2_gate_enabled")]
+@@ -9635,9 +9846,56 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
+     let _ = config.features.enable(Feature::Goals);
+     let _ = config.features.enable(Feature::GoalSupervisor);
+     let _ = config.features.enable(Feature::MultiAgentV2);
++    let _ = config.features.enable(Feature::FastMode);
++    // Retired bundled models fall back to metadata with no service tiers. This test
++    // requires both selected models to advertise priority routing explicitly.
++    config.model = Some("gpt-5.2".to_string());
++    config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
++        models: ["gpt-5.2", "gpt-5.4"]
++            .into_iter()
++            .map(|slug| {
++                let mut model = codex_models_manager::model_info::model_info_from_slug(slug);
++                model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
++                    id: ServiceTier::Fast.request_value().to_string(),
++                    name: "Fast".to_string(),
++                    description: "Test priority routing".to_string(),
++                }];
++                model
++            })
++            .collect(),
++    });
+     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+     config.model_provider.supports_websockets = false;
+-    let harness = AgentControlHarness::new_with_config(home, config).await;
++    // The shared harness constructor intentionally uses the bundled catalog. Install
++    // this test's explicit catalog in the manager that resolves every helper model.
++    let state_db = init_state_db(&config).await;
++    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++    crate::thread_manager::set_thread_manager_test_mode_for_tests(true);
++    let manager = ThreadManager::new(
++        &config,
++        Arc::clone(&auth_manager),
++        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::CodexAppsToolsCache::default(),
++        SessionSource::Exec,
++        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++        empty_extension_registry(),
++        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
++        /*analytics_events_client*/ None,
++        crate::thread_manager::passthrough_image_store(),
++        crate::thread_manager::thread_store_from_config(&config, state_db.clone()),
++        crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
++        uuid::Uuid::new_v4().to_string(),
++        /*attestation_provider*/ None,
++        /*external_time_provider*/ None,
++    );
++    let control = manager.agent_control();
++    let harness = AgentControlHarness {
++        _home: home,
++        config,
++        state_db,
++        manager,
++        control,
++    };
+     let state_db = harness
+         .state_db
+         .as_ref()
+@@ -9900,6 +10158,7 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
+         "Keep retrying after transient supervisor failures.",
+     )
+     .await?;
++    let before_segments = supervisor_test_segment_files(harness.config.codex_home.as_path())?;
+
+     // Reserve in the parent's registry; the harness control owns a separate agent tree.
+     let parent_control = parent_thread
+@@ -10083,6 +10342,11 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
+         2,
+         "the second implicit failure should advance the backoff tier"
+     );
++    assert_eq!(
++        supervisor_test_segment_files(harness.config.codex_home.as_path())?,
++        before_segments,
++        "failed ephemeral supervisor attempts must not retain parent snapshots or installation temporaries"
++    );
+     Ok(())
+ }
+
+@@ -10093,6 +10357,7 @@ fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> an
+         "goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
+         goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+             ThreadHistoryMode::Legacy,
++            false,
+         ),
+     )
+ }
+@@ -10104,10 +10369,46 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+         "paginated_goal_supervisor_helper_preserves_parent_request_prefix",
+         goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+             ThreadHistoryMode::Paginated,
++            false,
+         ),
+     )
+ }
+
++#[test]
++#[serial(fork_env)]
++fn repeated_ephemeral_supervisors_do_not_publish_parent_snapshots() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "repeated_ephemeral_supervisors_do_not_publish_parent_snapshots",
++        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
++            ThreadHistoryMode::Paginated,
++            true,
++        ),
++    )
++}
++
++fn supervisor_test_segment_files(
++    home: &std::path::Path,
++) -> anyhow::Result<Vec<std::path::PathBuf>> {
++    let mut files = Vec::new();
++    for root in [
++        home.join(codex_rollout::SESSIONS_SUBDIR)
++            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR),
++        home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
++    ] {
++        if !root.exists() {
++            continue;
++        }
++        for entry in walkdir::WalkDir::new(root) {
++            let entry = entry?;
++            if entry.file_type().is_file() {
++                files.push(entry.into_path());
++            }
++        }
++    }
++    files.sort();
++    Ok(files)
++}
++
+ #[test]
+ #[serial(fork_env)]
+ fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record() -> anyhow::Result<()> {
+@@ -10515,6 +10816,7 @@ async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inne
+
+ async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+     history_mode: ThreadHistoryMode,
++    repeat_helper: bool,
+ ) -> anyhow::Result<()> {
+     const MATERIALIZE_EPHEMERAL_ROLLOUTS: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+     const AGENTS_MARKER: &str =
+@@ -10524,20 +10826,23 @@ async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_i
+     let _materialize_ephemeral_rollouts =
+         EnvVarGuard::set(MATERIALIZE_EPHEMERAL_ROLLOUTS, OsStr::new("1"));
+     let server = start_mock_server().await;
+-    let request_log = mount_sse_sequence(
+-        &server,
+-        vec![
+-            sse(vec![
+-                ev_response_created("resp-parent"),
+-                ev_completed("resp-parent"),
+-            ]),
+-            sse(vec![
+-                ev_response_created("resp-child"),
+-                ev_completed("resp-child"),
+-            ]),
+-        ],
+-    )
+-    .await;
++    let mut responses = vec![
++        sse(vec![
++            ev_response_created("resp-parent"),
++            ev_completed("resp-parent"),
++        ]),
++        sse(vec![
++            ev_response_created("resp-child"),
++            ev_completed("resp-child"),
++        ]),
++    ];
++    if repeat_helper {
++        responses.push(sse(vec![
++            ev_response_created("resp-child-repeat"),
++            ev_completed("resp-child-repeat"),
++        ]));
++    }
++    let request_log = mount_sse_sequence(&server, responses).await;
+     let (home, mut config) = test_config().await;
+     let _ = config.features.enable(Feature::AgentPromptInjection);
+     let _ = config.features.enable(Feature::MultiAgentV2);
+@@ -10735,6 +11040,13 @@ while True:
+         parent_thread.session.flush_rollout().await?;
+     }
+     let before_thread_ids = harness.manager.list_thread_ids().await;
++    let before_segments = supervisor_test_segment_files(harness.config.codex_home.as_path())?;
++    let parent_rollout_path = parent_thread
++        .session
++        .current_rollout_path()
++        .await?
++        .expect("materialized parent rollout");
++    let parent_rollout_before = std::fs::read(parent_rollout_path.as_path())?;
+     let (goal_id, goal) = create_active_thread_goal_for_test(
+         state_db,
+         parent_thread_id,
+@@ -10781,16 +11093,22 @@ while True:
+             panic!("paginated supervisor child should load as resumed physical history");
+         };
+         assert!(
+-            child_rollout.history.iter().any(|item| {
++            !child_rollout.history.iter().any(|item| {
+                 matches!(item, RolloutItem::RolloutReference(_))
+                     || matches!(
+                         item,
+                         RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()
+                     )
+             }),
+-            "paginated supervisor children must retain a physical lineage pointer while the model request uses materialized logical history"
++            "debug materialization of an ephemeral supervisor must be self-contained, not publish a parent snapshot reference"
+         );
+     }
++    assert!(child_thread.config_snapshot().await.ephemeral);
++    assert_eq!(
++        supervisor_test_segment_files(harness.config.codex_home.as_path())?,
++        before_segments,
++        "an ephemeral supervisor must not install a parent snapshot or installation temporary"
++    );
+     let requests = request_log.requests();
+     assert_eq!(requests.len(), 2);
+     let parent_body = requests[0].body_json();
+@@ -10862,6 +11180,16 @@ while True:
+         "goal supervisor helpers must preserve the exact parent request prefix, including both instruction providers and workspace AGENTS.md in their original order"
+     );
+     let child_suffix = &child_input[parent_input.len()..];
++    let continuity_text = child_suffix
++        .iter()
++        .flat_map(|item| item["content"].as_array().into_iter().flatten())
++        .filter_map(|item| item["text"].as_str())
++        .find(|text| text.contains("last_parent_message_at_utc"))
++        .expect("supervisor continuity context");
++    assert!(
++        !continuity_text.contains("\"last_parent_message_at_utc\": null"),
++        "context-only preparation must retain the completed parent turn timestamp"
++    );
+     assert!(
+         child_suffix.iter().all(|item| {
+             item["content"]
+@@ -10994,6 +11322,46 @@ while True:
+         "the inherited MCP snapshot should be discoverable through tool_search: {child_body:#}"
+     );
+
++    if repeat_helper {
++        timeout(Duration::from_secs(5), async {
++            while harness.manager.get_thread(child_thread_id).await.is_ok() {
++                sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .expect("completed ephemeral supervisor must leave the live thread registry");
++        let repeated_id =
++            crate::goal_supervisor::spawn_supervisor_helper_for_test(&parent_thread.session, &goal)
++                .await?;
++        assert_ne!(repeated_id, child_thread_id);
++        let repeated_thread = harness.manager.get_thread(repeated_id).await?;
++        wait_for_turn_complete(repeated_thread.as_ref()).await;
++        assert!(repeated_thread.config_snapshot().await.ephemeral);
++        let requests = request_log.requests();
++        assert_eq!(requests.len(), 3);
++        let repeated_body = requests[2].body_json();
++        let repeated_input = repeated_body["input"].as_array().expect("repeated input");
++        assert_eq!(&repeated_input[..parent_input.len()], parent_input);
++        assert_eq!(
++            repeated_body["prompt_cache_key"],
++            child_body["prompt_cache_key"]
++        );
++        assert_eq!(
++            non_agent_tools(&repeated_body),
++            non_agent_tools(&parent_body)
++        );
++        assert_eq!(
++            supervisor_test_segment_files(harness.config.codex_home.as_path())?,
++            before_segments,
++            "repeated ephemeral check-ins must not retain additional parent snapshots"
++        );
++    }
++    parent_thread.session.flush_rollout().await?;
++    assert!(
++        std::fs::read(parent_rollout_path.as_path())?.starts_with(&parent_rollout_before),
++        "supervisor preparation must preserve the parent's persisted history"
++    );
++
+     Ok(())
+ }
+
 diff --git a/codex-rs/core/src/goal_supervisor.rs b/codex-rs/core/src/goal_supervisor.rs
 index 493a4b625704b66dbed93e7e9a879bdc0475a841..c5ac175adb7d1ab8a8917bdc7c8cccfa9ba2337b 100644
 --- a/codex-rs/core/src/goal_supervisor.rs
@@ -1382,7 +1804,7 @@ index aef8e878cc38af49065ad7eed198d6775062b2a8..1cba0c82a463624809c62e4b6b571fbf
                              _prepared: Box::new(prepared),
                          },
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index bb0f6f30d2ace3b94669725bd5e68d5ebf45e623..8a2bad76aee842245bf4d80a32ccf773ce3ed8ce 100644
+index 481151fd1920b297db9e9f39dd48d6772dcba68f..7e116377d932e9fbd0dfc70d25141b9a32292c00 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -557,8 +557,16 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
@@ -1490,7 +1912,179 @@ index bb0f6f30d2ace3b94669725bd5e68d5ebf45e623..8a2bad76aee842245bf4d80a32ccf773
      forked
          .thread
          .shutdown_and_wait()
-@@ -732,7 +789,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
+@@ -681,6 +738,171 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+         .expect("shutdown forked thread");
+ }
+
++#[tokio::test]
++async fn unchanged_resume_does_not_append_settings_but_changed_settings_and_explicit_checkpoints_do()
++ {
++    let temp_dir = tempdir().expect("tempdir");
++    let mut config = test_config().await;
++    config.codex_home = temp_dir.path().join("codex-home").abs();
++    config.cwd = config.codex_home.clone();
++    config
++        .permissions
++        .approval_policy
++        .set(AskForApproval::Never)
++        .expect("seed approval policy");
++    std::fs::create_dir_all(config.codex_home.as_path()).expect("create codex home");
++    let manager = ThreadManager::with_models_provider_and_home_for_tests(
++        CodexAuth::from_api_key("dummy"),
++        config.model_provider.clone(),
++        config.codex_home.to_path_buf(),
++        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++    );
++    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++    let source = manager
++        .start_thread(StartThreadOptions::new(config.clone()))
++        .await
++        .expect("start source");
++    source.thread.ensure_rollout_materialized().await;
++    source
++        .thread
++        .append_rollout_items(&[RolloutItem::ResponseItem(
++            user_msg("retained user context").into(),
++        )])
++        .await
++        .expect("persist user context");
++    source
++        .thread
++        .checkpoint_thread_settings()
++        .await
++        .expect("seed settings");
++    let path = source.thread.rollout_path().expect("source rollout");
++    source
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("stop source");
++    manager.remove_thread(&source.thread_id).await;
++
++    let settings_count = |history: &InitialHistory| {
++        history
++            .get_rollout_items()
++            .iter()
++            .filter(|item| {
++                matches!(
++                    item,
++                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
++                )
++            })
++            .count()
++    };
++    let initial_count = settings_count(
++        &RolloutRecorder::get_rollout_history(&path)
++            .await
++            .expect("initial history"),
++    );
++    assert_eq!(initial_count, 1);
++    let mut expected_context = None;
++    for changed in [false, false, true, false] {
++        if changed {
++            config.service_tier = Some("priority".to_string());
++            config
++                .permissions
++                .approval_policy
++                .set(AskForApproval::OnRequest)
++                .expect("change approval policy");
++        }
++        let resumed = manager
++            .resume_legacy_thread_from_rollout(
++                config.clone(),
++                path.clone(),
++                auth_manager.clone(),
++                None,
++                ClientMcpExtensions::default(),
++            )
++            .await
++            .expect("resume saved history");
++        resumed
++            .thread
++            .flush_rollout()
++            .await
++            .expect("flush resumed settings");
++        let history = RolloutRecorder::get_rollout_history(&path)
++            .await
++            .expect("saved history");
++        let expected_count = if config.service_tier.is_none() {
++            initial_count
++        } else {
++            initial_count + 1
++        };
++        assert_eq!(settings_count(&history), expected_count);
++        let snapshot = resumed.thread.thread_settings_snapshot().await;
++        assert_eq!(snapshot.service_tier, config.service_tier);
++        if changed {
++            assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
++        }
++        let context = resumed
++            .thread
++            .session
++            .clone_history()
++            .await
++            .annotated_items()
++            .to_vec();
++        if let Some(expected) = expected_context.as_ref() {
++            assert_eq!(
++                &context, expected,
++                "resume deduplication must not change replayed model context"
++            );
++        } else {
++            assert!(context.iter().any(|envelope| matches!(
++                &envelope.item,
++                ResponseItem::Message { content, .. }
++                    if content.iter().any(|item| matches!(
++                        item,
++                        ContentItem::OutputText { text }
++                            if text == "retained user context"
++                    ))
++            )));
++            expected_context = Some(context);
++        }
++        resumed
++            .thread
++            .shutdown_and_wait()
++            .await
++            .expect("stop resumed thread");
++        manager.remove_thread(&resumed.thread_id).await;
++    }
++
++    let resumed = manager
++        .resume_legacy_thread_from_rollout(
++            config,
++            path.clone(),
++            auth_manager,
++            None,
++            ClientMcpExtensions::default(),
++        )
++        .await
++        .expect("resume for explicit checkpoint");
++    resumed
++        .thread
++        .checkpoint_thread_settings()
++        .await
++        .expect("explicit checkpoint");
++    assert_eq!(
++        settings_count(
++            &RolloutRecorder::get_rollout_history(&path)
++                .await
++                .expect("explicit history")
++        ),
++        initial_count + 2,
++        "explicit checkpoint requests must not be deduplicated"
++    );
++    resumed
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("stop explicit checkpoint thread");
++}
++
+ #[tokio::test]
+ async fn cold_resume_uses_checkpoint_environment_selections() {
+     let temp_dir = tempdir().expect("tempdir");
+@@ -732,7 +954,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
              serde_json::to_string(&codex_rollout::RolloutLine {
                  timestamp: "2026-08-13T00:00:00Z".to_string(),
                  ordinal: Some(0),
@@ -1499,7 +2093,7 @@ index bb0f6f30d2ace3b94669725bd5e68d5ebf45e623..8a2bad76aee842245bf4d80a32ccf773
              })
              .expect("serialize resumed metadata")
          ),
-@@ -744,12 +801,16 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
+@@ -744,12 +966,16 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
              config.clone(),
              InitialHistory::Resumed(ResumedHistory {
                  conversation_id: thread_id,
@@ -1522,7 +2116,7 @@ index bb0f6f30d2ace3b94669725bd5e68d5ebf45e623..8a2bad76aee842245bf4d80a32ccf773
                  rollout_path: Some(rollout_path),
              }),
              auth_manager,
-@@ -936,6 +997,44 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
+@@ -936,6 +1162,44 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
          .expect("shutdown parent");
  }
 
@@ -2328,7 +2922,7 @@ index 9cdbcc5c94c4b141ecc95a3697617ba7060aae62..fd4e24af9dbdc6d520e18e6cf65d7dce
          segment.end_byte_offset = None;
          return Ok(());
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 5c6654dd68ce27d3150c78a73c3879f0d4703df1..3503485fe0fe75835f9080614754d57ec7063a22 100644
+index 96e11d0785a1ee8efa11b6fdd029d40a279ac849..d95dd59f65ef2398a17ce851f267396b16ef4d46 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -1820,17 +1820,7 @@ async fn freeze_paginated_prefix_reserved_inner(
