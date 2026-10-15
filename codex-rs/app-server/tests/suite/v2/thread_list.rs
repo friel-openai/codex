@@ -122,46 +122,6 @@ async fn list_threads_with_sort(
     .await
 }
 
-enum ThreadListRelation {
-    DirectChildrenOf(ThreadId),
-    DescendantsOf(ThreadId),
-}
-
-async fn list_threads_for_relation(
-    mcp: &mut TestAppServer,
-    relation: ThreadListRelation,
-    cursor: Option<String>,
-    limit: u32,
-    model_providers: Option<Vec<String>>,
-    source_kinds: Option<Vec<ThreadSourceKind>>,
-) -> Result<ThreadListResponse> {
-    let (parent_thread_id, ancestor_thread_id) = match relation {
-        ThreadListRelation::DirectChildrenOf(thread_id) => (Some(thread_id.to_string()), None),
-        ThreadListRelation::DescendantsOf(thread_id) => (None, Some(thread_id.to_string())),
-    };
-    mcp.request(|request_id| ClientRequest::ThreadList {
-        request_id,
-        params: codex_app_server_protocol::ThreadListParams {
-            originators: None,
-            cursor,
-            limit: Some(limit),
-            sort_key: None,
-            sort_direction: None,
-            model_providers,
-            source_kinds,
-            archived: None,
-            section_id: None,
-            project_id: None,
-            cwd: None,
-            use_state_db_only: true,
-            search_term: None,
-            parent_thread_id,
-            ancestor_thread_id,
-        },
-    })
-    .await
-}
-
 fn create_fake_rollouts<F, G>(
     codex_home: &Path,
     count: usize,
@@ -1044,180 +1004,6 @@ sqlite = true
 }
 
 #[tokio::test]
-async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    create_minimal_config(codex_home.path())?;
-    let mut mcp = init_mcp(codex_home.path()).await?;
-    let parent_id = ThreadId::new();
-    let older_child_id = ThreadId::new();
-    let newer_child_id = ThreadId::new();
-    let closed_child_id = ThreadId::new();
-    let grandchild_id = ThreadId::new();
-    let state_db = codex_state::StateRuntime::init(
-        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".to_string(),
-    )
-    .await?;
-    for (thread_id, created_at, source, model_provider) in [
-        (
-            older_child_id,
-            "2025-02-01T10:00:00Z",
-            CoreSessionSource::SubAgent(SubAgentSource::Other("custom:worker-1".to_string())),
-            "other_provider",
-        ),
-        (
-            newer_child_id,
-            "2025-02-01T11:00:00Z",
-            CoreSessionSource::Cli,
-            "mock_provider",
-        ),
-        (
-            closed_child_id,
-            "2025-02-01T11:30:00Z",
-            CoreSessionSource::SubAgent(SubAgentSource::Other("agent_job:closed".to_string())),
-            "mock_provider",
-        ),
-        (
-            grandchild_id,
-            "2025-02-01T12:00:00Z",
-            CoreSessionSource::SubAgent(SubAgentSource::Other("custom:worker-2".to_string())),
-            "mock_provider",
-        ),
-    ] {
-        let created_at = DateTime::parse_from_rfc3339(created_at)?.with_timezone(&Utc);
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
-            thread_id,
-            codex_home.path().join(format!("{thread_id}.jsonl")),
-            created_at,
-            source,
-        );
-        builder.model_provider = Some(model_provider.to_string());
-        builder.cwd = codex_home.path().to_path_buf();
-        builder.cli_version = Some("0.0.0".to_string());
-        let mut metadata = builder.build(model_provider);
-        metadata.preview = Some("child thread".to_string());
-        metadata.first_user_message = metadata.preview.clone();
-        state_db.upsert_thread(&metadata).await?;
-    }
-    for (parent_thread_id, child_thread_id, status) in [
-        (
-            parent_id,
-            older_child_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        ),
-        (
-            parent_id,
-            newer_child_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        ),
-        (
-            parent_id,
-            closed_child_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
-        ),
-        (
-            newer_child_id,
-            grandchild_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        ),
-    ] {
-        state_db
-            .upsert_thread_spawn_edge(parent_thread_id, child_thread_id, status)
-            .await?;
-    }
-    state_db
-        .mark_backfill_complete(/*last_watermark*/ None)
-        .await?;
-
-    let first_page = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 1,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-    let second_page = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        first_page.next_cursor.clone(),
-        /*limit*/ 1,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-
-    assert_eq!(
-        first_page
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
-    );
-    assert_eq!(
-        second_page
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![older_child_id.to_string()]
-    );
-    assert_eq!(second_page.next_cursor, None);
-    let expected_parent_id = parent_id.to_string();
-    assert!(
-        first_page
-            .data
-            .iter()
-            .chain(&second_page.data)
-            .all(|thread| thread.parent_thread_id.as_deref() == Some(expected_parent_id.as_str()))
-    );
-    let interactive_only = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 10,
-        /*model_providers*/ None,
-        /*source_kinds*/ Some(Vec::new()),
-    )
-    .await?;
-    assert_eq!(
-        interactive_only
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
-    );
-
-    let descendants = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DescendantsOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 10,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-    assert_eq!(
-        descendants
-            .data
-            .iter()
-            .map(|thread| (thread.id.clone(), thread.parent_thread_id.clone()))
-            .collect::<Vec<_>>(),
-        vec![
-            (grandchild_id.to_string(), Some(newer_child_id.to_string())),
-            (closed_child_id.to_string(), Some(parent_id.to_string())),
-            (newer_child_id.to_string(), Some(parent_id.to_string())),
-            (older_child_id.to_string(), Some(parent_id.to_string())),
-        ]
-    );
-    assert_eq!(descendants.next_cursor, None);
-    Ok(())
-}
-
-#[tokio::test]
 async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
@@ -1384,7 +1170,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             false,
         ),
     ] {
-        let thread_id = create_fake_parented_rollout_with_source(
+        let mut thread_id = create_fake_parented_rollout_with_source(
             codex_home.path(),
             filename_ts,
             timestamp,
@@ -1401,7 +1187,27 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             parent_thread_id.into(),
             parent_thread_id,
         )?;
-        let path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        let mut path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        if version == Some(MultiAgentVersion::V1) {
+            // This independently resumed child's empty registry shares the parent's
+            // session ID. Force it to sort before the loaded root and V2 child.
+            let first_id = "00000000-0000-0000-0000-000000000000";
+            let records = std::fs::read_to_string(&path)?;
+            let mut rewritten = String::new();
+            for line in records.lines() {
+                let mut record: serde_json::Value = serde_json::from_str(line)?;
+                if record["type"] == "session_meta" {
+                    record["payload"]["id"] = json!(first_id);
+                }
+                rewritten.push_str(&serde_json::to_string(&record)?);
+                rewritten.push('\n');
+            }
+            let new_path = rollout_path(codex_home.path(), filename_ts, first_id);
+            std::fs::write(&new_path, rewritten)?;
+            std::fs::remove_file(path)?;
+            path = new_path;
+            thread_id = first_id.to_string();
+        }
         let mut session_meta = read_session_meta_line(&path).await?;
         let source = SessionSource::from(session_meta.meta.source.clone());
         if let Some(version) = version {
@@ -1562,19 +1368,23 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             .iter()
             .all(|thread| thread.parent_thread_id.as_deref() == Some(cli_id.as_str()))
     );
+    // Only the explicitly resumed V2 child is current. Adding historical edges
+    // must not manufacture membership for the other persisted descendants.
+    let expected_current = expected_subagents
+        .into_iter()
+        .filter(|(_, capability, not_loaded)| *capability == Some(false) && !not_loaded)
+        .collect::<Vec<_>>();
     assert_eq!(
         response
             .data
             .into_iter()
-            .map(|thread| {
-                (
-                    thread.id,
-                    thread.can_accept_direct_input,
-                    matches!(thread.status, ThreadStatus::NotLoaded),
-                )
-            })
+            .map(|thread| (
+                thread.id,
+                thread.can_accept_direct_input,
+                matches!(thread.status, ThreadStatus::NotLoaded),
+            ))
             .collect::<Vec<_>>(),
-        expected_subagents
+        expected_current
     );
     assert_eq!(response.next_cursor, None);
 

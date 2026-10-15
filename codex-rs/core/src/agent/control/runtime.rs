@@ -196,7 +196,7 @@ pub(crate) struct LocalAgentRuntime {
     /// Retains the root's opt-in instruction provider even when the root is unloaded.
     pub(super) shared_thread_instructions_provider:
         Arc<OnceLock<Arc<dyn ThreadInstructionsProvider>>>,
-    pub(super) registry: Arc<AgentRegistry>,
+    pub(in crate::agent) registry: Arc<AgentRegistry>,
     pub(super) mailboxes: Arc<super::mailbox::Mailboxes>,
     /// Shared loaded-worker accounting for both multi-agent protocol versions.
     pub(super) agent_residency: Arc<AgentResidency>,

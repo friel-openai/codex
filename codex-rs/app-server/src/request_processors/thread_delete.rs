@@ -24,7 +24,11 @@ impl ThreadRequestProcessor {
                     .await;
                 Ok(None)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.send_thread_deleted_notifications(deleted_thread_ids)
+                    .await;
+                Err(error)
+            }
         }
     }
 
@@ -36,29 +40,98 @@ impl ThreadRequestProcessor {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
 
-        let thread_ids = self.state_db_spawn_subtree_thread_ids(thread_id).await?;
+        let current_agent_membership = self
+            .thread_manager
+            .prepare_current_agent_membership_eviction(thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to prepare thread subtree {thread_id} for delete: {err}"
+                ))
+            })?;
+        let thread_ids = current_agent_membership.candidate_thread_ids().to_vec();
+        let captured_thread_ids =
+            current_agent_membership.current_ids_with_current_only_descendants(&thread_ids);
 
         self.validate_root_thread_delete(thread_id, thread_ids.len() > 1)
             .await?;
-        for thread_id_to_delete in thread_ids.iter().copied() {
-            self.prepare_thread_for_delete(thread_id_to_delete).await?;
+        for thread_id_to_delete in captured_thread_ids.iter().copied() {
+            let identity_preserved = current_agent_membership
+                .unload_candidate_runtime_preserving_identity(thread_id_to_delete)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to prepare thread {thread_id_to_delete} for delete: {err}"
+                    ))
+                })?;
+            if identity_preserved {
+                self.finalize_thread_teardown(thread_id_to_delete).await;
+                if let Some(log_db) = self.log_db.as_ref() {
+                    log_db.flush().await;
+                }
+            } else {
+                self.prepare_thread_for_delete(thread_id_to_delete).await?;
+            }
         }
 
+        let candidate_thread_id_set = thread_ids.iter().copied().collect::<HashSet<_>>();
         let mut delete_order: Vec<_> = thread_ids.iter().skip(1).rev().copied().collect();
         delete_order.push(thread_id);
+        // Missing rollouts can still own host data. Include every captured identity, but append
+        // current-only descendants so they do not become independent partial successes before
+        // their persisted ancestors are deleted.
+        delete_order.extend(
+            captured_thread_ids
+                .iter()
+                .filter(|thread_id| !candidate_thread_id_set.contains(thread_id))
+                .copied(),
+        );
 
-        self.thread_store
-            .delete_threads(StoreDeleteThreadsParams {
-                thread_ids: delete_order.clone(),
+        let delete_outcome = self
+            .thread_store
+            .delete_threads_with_outcome(StoreDeleteThreadsParams {
+                thread_ids: delete_order,
             })
             .await
             .map_err(thread_store_delete_error)?;
 
+        let reconciliation_seeds = if delete_outcome.failure.is_none() {
+            thread_ids.as_slice()
+        } else {
+            delete_outcome.deleted_thread_ids.as_slice()
+        };
+        let reconciled_thread_ids = current_agent_membership
+            .current_ids_with_current_only_descendants(reconciliation_seeds);
+
+        if let Err(err) = current_agent_membership
+            .evict_exact(&reconciled_thread_ids)
+            .await
+        {
+            warn!(
+                "deleted thread {thread_id} and retired its current identities, but runtime shutdown reported an error: {err}"
+            );
+        }
+
         deleted_thread_ids.extend(
-            delete_order
-                .into_iter()
-                .map(|thread_id| thread_id.to_string()),
+            reconciled_thread_ids
+                .iter()
+                .filter(|thread_id| !candidate_thread_id_set.contains(thread_id))
+                .map(ToString::to_string),
         );
+        let reconciled_thread_ids = reconciled_thread_ids.into_iter().collect::<HashSet<_>>();
+        deleted_thread_ids.extend(
+            thread_ids[1..]
+                .iter()
+                .rev()
+                .chain(thread_ids.first())
+                .filter(|thread_id| reconciled_thread_ids.contains(thread_id))
+                .map(ToString::to_string),
+        );
+
+        if let Some(failure) = delete_outcome.failure {
+            return Err(thread_store_delete_error(failure.error));
+        }
+
         Ok(ThreadDeleteResponse {})
     }
 
