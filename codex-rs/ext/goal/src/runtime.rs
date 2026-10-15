@@ -34,6 +34,8 @@ pub(crate) struct GoalRuntimeConfig {
     pub(crate) enabled: bool,
     pub(crate) tools_available_for_thread: bool,
     pub(crate) tools_visible_for_thread: bool,
+    /// Internal agents must not resume goals, even with persistent state.
+    pub(crate) resume_available_for_thread: bool,
     pub(crate) root_accounting_state: Option<Arc<GoalAccountingState>>,
 }
 
@@ -63,6 +65,7 @@ struct GoalRuntimeInner {
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     tools_visible_for_thread: bool,
+    resume_available_for_thread: bool,
     goal_state_lock: Semaphore,
 }
 
@@ -117,6 +120,7 @@ impl GoalRuntimeHandle {
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 tools_visible_for_thread: config.tools_visible_for_thread,
+                resume_available_for_thread: config.resume_available_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
             }),
         }
@@ -136,6 +140,10 @@ impl GoalRuntimeHandle {
 
     pub(crate) fn tools_available(&self) -> bool {
         self.is_enabled() && self.inner.tools_available_for_thread
+    }
+
+    pub(crate) fn resume_available(&self) -> bool {
+        self.tools_available() && self.inner.resume_available_for_thread
     }
 
     pub(crate) fn thread_id(&self) -> ThreadId {
