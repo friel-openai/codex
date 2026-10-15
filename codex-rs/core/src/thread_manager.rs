@@ -1753,7 +1753,6 @@ impl ThreadManager {
         &self,
         rollout_path: PathBuf,
     ) -> CodexResult<InitialHistory> {
-        let requested_rollout_path = rollout_path.clone();
         let stored_thread = self
             .state
             .thread_store
@@ -1764,7 +1763,7 @@ impl ThreadManager {
             })
             .await
             .map_err(thread_store_rollout_read_error)?;
-        stored_thread_to_initial_history(stored_thread, Some(requested_rollout_path))
+        stored_thread_to_initial_history(stored_thread, None)
     }
 
     /// Fork an existing thread from already-loaded store history.

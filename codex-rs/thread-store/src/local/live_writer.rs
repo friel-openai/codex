@@ -130,6 +130,37 @@ pub(super) async fn resume_thread(
         && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
     #[cfg(test)]
     selection_tests::pause_before_history_access(params.thread_id).await;
+    let history_mode = if !supplied_empty_placeholder {
+        let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!("failed to resume local thread recorder: {error}"),
+            })?;
+        if let Some(history) = params.history.as_deref().filter(|history| {
+            history
+                .iter()
+                .any(|item| matches!(item, RolloutItem::SessionMeta(_)))
+        }) && session_meta.meta.history_mode
+            != canonical_history_mode_from_rollout_items(history)
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "thread {} history format changed before resume; reload the thread",
+                    params.thread_id
+                ),
+            });
+        }
+        session_meta.meta.history_mode
+    } else {
+        canonical_history_mode_from_rollout_items(
+            params
+                .history
+                .as_deref()
+                .expect("supplied placeholder history"),
+        )
+    };
+    #[cfg(test)]
+    selection_tests::pause_before_writer_lock(params.thread_id).await;
     let (rollout_path, mut history_access) = if !supplied_empty_placeholder {
         super::model_context::prepare_history_access(store, params.thread_id, rollout_path).await?
     } else {
@@ -185,7 +216,21 @@ pub(super) async fn resume_thread(
             .items,
         ),
     };
-    let history_mode = canonical_history_mode_from_rollout_items(&history);
+    // Migration can replace the same filename while resume waits for writer ownership.
+    // Path selection alone does not establish that the supplied history still matches its format.
+    if !supplied_empty_placeholder {
+        let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+            .await
+            .map_err(thread_store_io_error)?;
+        if session_meta.meta.history_mode != history_mode {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "thread {} history format changed before resume; reload the thread",
+                    params.thread_id
+                ),
+            });
+        }
+    }
     super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
     let cwd = params
         .metadata
@@ -230,15 +275,22 @@ pub(super) async fn resume_thread(
         };
     let rollout_id = match codex_rollout::rollout_id_from_path(rollout_path.as_path()) {
         Some(rollout_id) => rollout_id,
-        None => super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
-            rollout_path.as_path(),
-            params.thread_id,
-            noncanonical_session_meta
+        None => {
+            let authenticated_thread_id = noncanonical_session_meta
                 .as_ref()
-                .expect("noncanonical rollout metadata is loaded")
-                .meta
-                .id,
-        )?,
+                .map(|metadata| metadata.meta.id)
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "noncanonical rollout metadata is missing for {}",
+                        rollout_path.display()
+                    ),
+                })?;
+            super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+                rollout_path.as_path(),
+                params.thread_id,
+                authenticated_thread_id,
+            )?
+        }
     };
     let segmented_legacy_projection_complete = if segmented_rollout {
         Some(if store.state_db().await.is_none() {
@@ -281,24 +333,14 @@ pub(super) async fn require_selected_rollout_path(
     thread_id: ThreadId,
     expected: &std::path::Path,
 ) -> ThreadStoreResult<()> {
-    if let Some(selected) = selected_rollout_path(store, thread_id).await? {
-        let selected = codex_rollout::existing_rollout_path(&selected)
-            .await
-            .unwrap_or(selected);
-        let selected = tokio::fs::canonicalize(&selected).await.unwrap_or(selected);
-        let expected = codex_rollout::existing_rollout_path(expected)
-            .await
-            .unwrap_or_else(|| expected.to_path_buf());
-        let expected = tokio::fs::canonicalize(&expected).await.unwrap_or(expected);
-        if codex_rollout::plain_rollout_path(&expected)
-            != codex_rollout::plain_rollout_path(&selected)
-        {
-            return Err(ThreadStoreError::Conflict {
-                message: format!(
-                    "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
-                ),
-            });
-        }
+    if let Some(selected) = selected_rollout_path(store, thread_id).await?
+        && !codex_rollout::rollout_paths_match(expected, &selected).await
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
+            ),
+        });
     }
     Ok(())
 }
