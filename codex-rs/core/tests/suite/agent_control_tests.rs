@@ -434,6 +434,13 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         fork.session_configured.session_id,
         SessionId::from(fork.thread_id)
     );
+    let legacy_fork = manager.spawn_legacy_subagent(root_id, options()).await?;
+    assert_eq!(
+        legacy_fork.session_configured.session_id,
+        SessionId::from(legacy_fork.thread_id)
+    );
+    assert_ne!(legacy_fork.thread_id, root_id);
+    assert_ne!(legacy_fork.thread_id, fork.thread_id);
     let warm = manager
         .start_thread(StartThreadOptions {
             initial_history: history.clone(),
@@ -443,13 +450,26 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
     assert!(Arc::ptr_eq(&warm.thread, &test.codex));
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
-        vec![root_id, fork.thread_id]
+        vec![root_id, fork.thread_id, legacy_fork.thread_id]
     );
     internal.thread.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
+    // Forking may migrate the parent, so cold resume needs its current history format.
+    let context = test
+        .thread_store
+        .load_latest_model_context(codex_thread_store::LoadThreadHistoryParams {
+            thread_id: root_id,
+            include_archived: false,
+        })
+        .await?;
     let cold = manager
         .start_thread(StartThreadOptions {
-            initial_history: history,
+            initial_history: InitialHistory::Resumed(ResumedHistory {
+                history_revision: context.revision,
+                conversation_id: root_id,
+                history: Arc::new(context.items),
+                rollout_path: test.codex.rollout_path(),
+            }),
             ..options()
         })
         .await?;
@@ -457,9 +477,10 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
     assert_eq!(cold.thread_id, root_id);
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
-        vec![root_id, fork.thread_id, root_id]
+        vec![root_id, fork.thread_id, legacy_fork.thread_id, root_id]
     );
     cold.thread.shutdown_and_wait().await?;
+    legacy_fork.thread.shutdown_and_wait().await?;
     fork.thread.shutdown_and_wait().await?;
     Ok(())
 }
