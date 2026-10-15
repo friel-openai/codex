@@ -446,6 +446,7 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
         .await
         .0;
     let mut items = crate::context_manager::updates::merge_world_state_updates(updates);
+    let prefix_len = items.len();
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));
     items.push(user_msg("second question"));
@@ -455,12 +456,11 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
 
     let truncated =
         truncate_rollout_before_nth_user_message_from_start(rollout_items, /*n_from_start*/ 1);
-    let expected: Vec<RolloutItem> = vec![
-        response_item(items[0].clone()),
-        response_item(items[1].clone()),
-        response_item(items[2].clone()),
-        response_item(items[3].clone()),
-    ];
+    let expected: Vec<RolloutItem> = items[..prefix_len + 2]
+        .iter()
+        .cloned()
+        .map(response_item)
+        .collect();
 
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),

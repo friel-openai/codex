@@ -21,6 +21,7 @@ use crate::config::ConfigOverrides;
 use crate::config::RuntimeConfigRefresh;
 use crate::context::ContextualUserFragment;
 use crate::context::DeveloperInstructions;
+use crate::context::GuardianContextMode;
 use crate::context::TurnAborted;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::ThreadEnvironments;
@@ -872,6 +873,37 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
 
 pub(super) fn raw_history_items(history: &ContextManager) -> Vec<ResponseItem> {
     history.raw_items().cloned().collect()
+}
+
+fn assert_contains_certified_segment_state_checkpoint(items: &[RolloutItem]) -> &CompactedItem {
+    let (checkpoint_index, compacted) = items
+        .iter()
+        .enumerate()
+        .find_map(|(index, item)| match item {
+            RolloutItem::Compacted(compacted) if compacted.segment_state_checkpoint.is_some() => {
+                Some((index, compacted))
+            }
+            _ => None,
+        })
+        .expect("fork rollout should contain a local state checkpoint");
+    let descriptor = compacted
+        .segment_state_checkpoint
+        .as_ref()
+        .expect("marked checkpoint descriptor");
+    let checkpoint_len =
+        3 + usize::from(matches!(
+            descriptor.world_state,
+            codex_protocol::protocol::SegmentStateCheckpointDisposition::Established
+        )) + usize::from(matches!(
+            descriptor.reference_context,
+            codex_protocol::protocol::SegmentStateCheckpointDisposition::Established
+        ));
+    let checkpoint_items = items
+        .get(checkpoint_index..checkpoint_index + checkpoint_len)
+        .expect("fork rollout should contain the complete checkpoint");
+    codex_rollout::validate_certified_segment_state_checkpoint(checkpoint_items)
+        .expect("fork-local records should form a certified checkpoint");
+    compacted
 }
 
 fn raw_envelopes(items: &[ResponseItemEnvelope]) -> Vec<ResponseItem> {
@@ -2830,6 +2862,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     })];
 
     let reconstructed = session
@@ -3801,6 +3834,18 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         },
         model_context_window: Some(2_000),
     };
+    let rate_limits = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("Codex".to_string()),
+        normal_model_slug: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
 
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
@@ -3811,7 +3856,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
-            rate_limits: None,
+            rate_limits: Some(rate_limits.clone()),
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
@@ -3837,8 +3882,9 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         .await
         .expect("record initial history");
 
-    let actual = session.state.lock().await.token_info();
-    assert_eq!(actual, Some(info2));
+    let state = session.state.lock().await;
+    assert_eq!(state.token_info(), Some(info2));
+    assert_eq!(state.latest_rate_limits, Some(rate_limits));
 }
 
 #[test]
@@ -3868,6 +3914,7 @@ fn latest_token_usage_record_stops_at_compaction_checkpoint() {
             compaction_response_id: None,
             latest_token_usage_record,
             resume_metadata: None,
+            segment_state_checkpoint: None,
         })
     };
 
@@ -3884,6 +3931,153 @@ fn latest_token_usage_record_stops_at_compaction_checkpoint() {
             checkpoint(None),
         ]),
         None
+    );
+}
+
+#[tokio::test]
+async fn certified_empty_token_snapshot_matches_full_and_bounded_restore() {
+    let (session, _) = make_session_and_context().await;
+    let mut checkpoint = session
+        .current_segment_state_checkpoint()
+        .await
+        .into_items();
+    let Some(RolloutItem::Compacted(compacted)) = checkpoint.first_mut() else {
+        panic!("certified checkpoint begins with compaction");
+    };
+    compacted.latest_token_usage_record = None;
+    let Some(RolloutItem::EventMsg(EventMsg::TokenCount(token_count))) = checkpoint.last_mut()
+    else {
+        panic!("certified checkpoint ends with its complete token snapshot");
+    };
+    let empty_tokens = TokenCountEvent {
+        info: None,
+        rate_limits: None,
+    };
+    *token_count = empty_tokens.clone();
+    codex_rollout::validate_certified_segment_state_checkpoint(&checkpoint)
+        .expect("explicit empty token state is a valid certified snapshot");
+
+    let old_usage = TokenUsage {
+        input_tokens: 11,
+        total_tokens: 11,
+        ..Default::default()
+    };
+    let old_record = TokenUsageRecord {
+        thread_id: session.thread_id(),
+        turn_id: "old-turn".to_string(),
+        session_id: SessionId::from(session.thread_id()),
+        root_turn_id: "old-turn".to_string(),
+        response_id: "old-response".to_string(),
+        usage: old_usage.clone(),
+        turn_token_usage: old_usage.clone(),
+        thread_token_usage: old_usage.clone(),
+    };
+    let mut full = vec![
+        RolloutItem::TokenUsageRecord(old_record),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: Some(TokenUsageInfo {
+                total_token_usage: old_usage.clone(),
+                last_token_usage: old_usage,
+                model_context_window: Some(1_024),
+            }),
+            rate_limits: Some(RateLimitSnapshot {
+                limit_id: Some("old-limit".to_string()),
+                limit_name: Some("Old limit".to_string()),
+                normal_model_slug: None,
+                primary: None,
+                secondary: None,
+                credits: None,
+                individual_limit: None,
+                spend_control_reached: None,
+                plan_type: None,
+                rate_limit_reached_type: None,
+            }),
+        })),
+    ];
+    full.extend(checkpoint.iter().cloned());
+
+    let bounded_state = (
+        Session::restored_token_count_from_rollout(&checkpoint),
+        Session::last_token_usage_record_from_rollout(&checkpoint),
+    );
+    assert_eq!(
+        serde_json::to_value(&bounded_state).expect("serialize bounded token state"),
+        serde_json::to_value((Some(empty_tokens), None::<TokenUsageRecord>))
+            .expect("serialize empty token state")
+    );
+    assert_eq!(
+        serde_json::to_value((
+            Session::restored_token_count_from_rollout(&full),
+            Session::last_token_usage_record_from_rollout(&full),
+        ))
+        .expect("serialize full token state"),
+        serde_json::to_value(bounded_state).expect("serialize bounded token state")
+    );
+}
+
+#[test]
+fn ordinary_sparse_token_events_match_full_and_bounded_restore() {
+    let info = TokenUsageInfo {
+        total_token_usage: TokenUsage {
+            input_tokens: 11,
+            total_tokens: 11,
+            ..Default::default()
+        },
+        last_token_usage: TokenUsage::default(),
+        model_context_window: Some(2_048),
+    };
+    let rate_limits = RateLimitSnapshot {
+        limit_id: Some("current-limit".to_string()),
+        limit_name: None,
+        normal_model_slug: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let mut obsolete_info = info.clone();
+    obsolete_info.model_context_window = Some(1_024);
+    let mut full = vec![RolloutItem::EventMsg(EventMsg::TokenCount(
+        TokenCountEvent {
+            info: Some(obsolete_info),
+            rate_limits: Some(RateLimitSnapshot {
+                limit_id: Some("obsolete-limit".to_string()),
+                ..rate_limits.clone()
+            }),
+        },
+    ))];
+    let bounded = vec![
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: Some(info.clone()),
+            rate_limits: None,
+        })),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: Some(rate_limits.clone()),
+        })),
+        RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        })),
+    ];
+    full.extend(bounded.iter().cloned());
+
+    let bounded_state = Session::restored_token_count_from_rollout(&bounded);
+    assert_eq!(
+        serde_json::to_value(&bounded_state).expect("serialize bounded token state"),
+        serde_json::to_value(Some(TokenCountEvent {
+            info: Some(info),
+            rate_limits: Some(rate_limits),
+        }))
+        .expect("serialize expected token state")
+    );
+    assert_eq!(
+        serde_json::to_value(Session::restored_token_count_from_rollout(&full))
+            .expect("serialize full token state"),
+        serde_json::to_value(bounded_state).expect("serialize bounded token state")
     );
 }
 
@@ -4438,7 +4632,8 @@ disabled_tools = [
 
 #[tokio::test]
 async fn record_initial_history_reconstructs_forked_transcript() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
 
     session
@@ -4456,7 +4651,7 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 #[tokio::test]
 async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messages() {
     let (mut session, _turn_context) = make_session_and_context().await;
-    attach_thread_persistence(&mut session).await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
 
     for index in 0..6 {
         session
@@ -4499,6 +4694,29 @@ async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messag
         ]))
         .await
         .expect("reconstruct complete fork model context");
+    session
+        .flush_rollout()
+        .await
+        .expect("flush fork checkpoint");
+
+    let persisted_items = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("load fork checkpoint")
+        .0;
+    let checkpoint = assert_contains_certified_segment_state_checkpoint(&persisted_items);
+    assert_eq!(
+        checkpoint
+            .replacement_history
+            .as_ref()
+            .expect("fork checkpoint replacement history")
+            .iter()
+            .filter(
+                |item| matches!(item.item, ResponseItem::Message { ref role, .. } if role == "user")
+            )
+            .count(),
+        6,
+        "the local checkpoint should contain the complete referenced model context"
+    );
 
     let history = session.clone_history().await;
     let user_messages = history
@@ -4532,10 +4750,30 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
 
     let source_turn = Arc::new(source_turn);
     let world_state = build_world_state_from_turn_context(&source, &source_turn).await;
+    let authoritative_attribution = McpAttribution {
+        status: McpAttributionStatus::Complete,
+        error_reason: None,
+        sources: vec![McpAttributionSource {
+            connector_id: None,
+            plugin_id: None,
+            server_name: "parent-server".to_owned(),
+            tool_name: "search".to_owned(),
+            first_turn_id: "parent-tool-turn".to_owned(),
+        }],
+    };
+    source
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_snapshot(&authoritative_attribution);
+    child
+        .services
+        .executed_tool_calls
+        .restore_mcp_attribution_from_rollout_items(&[]);
     let source_response_items = Arc::new(vec![ResponseItemEnvelope {
         item: user_message("authoritative parent message"),
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
+            mcp_attribution: Some(McpAttribution::default()),
             ..Default::default()
         }),
     }]);
@@ -4580,6 +4818,60 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         last_token_usage: TokenUsage::default(),
         model_context_window: Some(1_024),
     };
+    let authoritative_turn_id = "authoritative-parent-turn".to_string();
+    let authoritative_turn_attribution = codex_history::TurnAttribution {
+        turn_id: authoritative_turn_id.clone(),
+        turn_trigger: Some("automation".to_owned()),
+        parent_turn_id: Some("parent-request-turn".to_owned()),
+        initiating_agent_path: Some(
+            codex_protocol::AgentPath::try_from("/root/requester").expect("requester path"),
+        ),
+        root_turn_id: Some("root-request-turn".to_owned()),
+    };
+    let authoritative_usage_record = TokenUsageRecord {
+        thread_id: source.thread_id(),
+        turn_id: authoritative_turn_id.clone(),
+        session_id: SessionId::from(source.thread_id()),
+        root_turn_id: authoritative_turn_id.clone(),
+        response_id: "authoritative-parent-response".to_string(),
+        usage: authoritative_tokens.last_token_usage.clone(),
+        turn_token_usage: authoritative_tokens.last_token_usage.clone(),
+        thread_token_usage: authoritative_tokens.total_token_usage.clone(),
+    };
+    let stale_turn_id = "stale-rollout-turn".to_string();
+    let stale_usage_record = TokenUsageRecord {
+        turn_id: stale_turn_id.clone(),
+        root_turn_id: stale_turn_id.clone(),
+        response_id: "stale-rollout-response".to_string(),
+        usage: stale_tokens.last_token_usage.clone(),
+        turn_token_usage: stale_tokens.last_token_usage.clone(),
+        thread_token_usage: stale_tokens.total_token_usage.clone(),
+        ..authoritative_usage_record.clone()
+    };
+    let authoritative_rate_limits = RateLimitSnapshot {
+        limit_id: Some("authoritative-parent-limit".to_string()),
+        limit_name: Some("Authoritative parent limit".to_string()),
+        normal_model_slug: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let stale_rate_limits = RateLimitSnapshot {
+        limit_id: Some("stale-rollout-limit".to_string()),
+        limit_name: Some("Stale rollout limit".to_string()),
+        normal_model_slug: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
     let window_ids = AutoCompactWindowIds {
         first_window_id: Uuid::now_v7(),
         previous_window_id: Some(Uuid::now_v7()),
@@ -4592,68 +4884,179 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             Arc::clone(&source_response_items),
             Some(reference_context_item.clone()),
         );
-        state.replace_shared_history(
-            Arc::clone(&source_response_items),
-            Some(reference_context_item.clone()),
-        );
         state.set_token_info(Some(authoritative_tokens.clone()));
+        state.last_started_turn_id = Some(authoritative_turn_id.clone());
+        state.turn_attribution = Some(authoritative_turn_attribution.clone());
+        state.latest_token_usage_record = Some(authoritative_usage_record.clone());
+        state.set_rate_limits(authoritative_rate_limits.clone());
         state
             .history
             .set_world_state_baseline(world_state.snapshot());
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
         state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
     }
+    // Pause between capture and recheck while changing only turn attribution.
+    let state_guard = source.state.lock().await;
+    let mut capture = Box::pin(tokio::task::unconstrained(
+        source.capture_fork_model_state(&source_response_items),
+    ));
+    assert!(futures::poll!(capture.as_mut()).is_pending());
+    let active_turn_guard = source.active_turn.lock().await;
+    drop(state_guard);
+    assert!(futures::poll!(capture.as_mut()).is_pending());
+    source.state.lock().await.turn_attribution = Some(codex_history::TurnAttribution {
+        turn_trigger: Some("changed-during-capture".to_owned()),
+        ..authoritative_turn_attribution.clone()
+    });
+    drop(active_turn_guard);
+    assert!(capture.await.is_none());
+    source.state.lock().await.turn_attribution = Some(authoritative_turn_attribution.clone());
     let source_model_state = source
         .capture_fork_model_state(&source_response_items)
         .await
         .expect("authoritative idle parent model state");
+    assert_eq!(
+        source_model_state.turn_attribution.as_ref(),
+        Some(&authoritative_turn_attribution)
+    );
     child
         .record_initial_history_with_fork_startup_items(
             InitialHistory::Forked(Vec::new()),
             ForkStartupItems::with_model_history_override(
-                vec![RolloutItem::EventMsg(EventMsg::TokenCount(
-                    TokenCountEvent {
+                vec![
+                    RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                        turn_attribution: None,
+                        turn_id: stale_turn_id,
+                        root_turn_id: None,
+                        trace_id: None,
+                        started_at: None,
+                        model_context_window: None,
+                        collaboration_mode_kind: Default::default(),
+                    })),
+                    RolloutItem::TokenUsageRecord(stale_usage_record),
+                    RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
                         info: Some(stale_tokens),
-                        rate_limits: None,
-                    },
-                ))],
+                        rate_limits: Some(stale_rate_limits),
+                    })),
+                ],
                 Some(Arc::clone(&source_response_items)),
                 Some(source_model_state),
             ),
         )
         .await?;
 
-    let mut child_state = child.state.lock().await;
-    assert!(Arc::ptr_eq(
-        &child_state.history.shared_annotated_items(),
-        &source_response_items
-    ));
-    assert!(
-        child_state.history.shared_annotated_items()[0]
+    assert_eq!(
+        child
+            .services
+            .executed_tool_calls
+            .mcp_attribution_snapshot(),
+        authoritative_attribution
+    );
+    assert_eq!(
+        source_response_items[0]
             .metadata
             .as_ref()
-            .is_some_and(|metadata| metadata.client_authored)
+            .and_then(|metadata| metadata.mcp_attribution.as_ref()),
+        Some(&McpAttribution::default()),
+        "checkpoint publication must not mutate the shared parent envelopes"
+    );
+    {
+        let mut child_state = child.state.lock().await;
+        assert!(Arc::ptr_eq(
+            &child_state.history.shared_annotated_items(),
+            &source_response_items
+        ));
+        assert!(
+            child_state.history.shared_annotated_items()[0]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.client_authored)
+        );
+        assert_eq!(
+            child_state.reference_context_item(),
+            Some(reference_context_item)
+        );
+        assert_eq!(
+            child_state.previous_turn_settings(),
+            Some(previous_turn_settings.clone())
+        );
+        assert_eq!(
+            child_state.last_started_turn_id.as_ref(),
+            Some(&authoritative_turn_id)
+        );
+        assert_eq!(
+            child_state.turn_attribution.as_ref(),
+            Some(&authoritative_turn_attribution)
+        );
+        assert_eq!(
+            child_state.latest_token_usage_record.as_ref(),
+            Some(&authoritative_usage_record)
+        );
+        assert_eq!(child_state.token_info(), Some(authoritative_tokens));
+        assert_eq!(
+            child_state.token_info_and_rate_limits().1,
+            Some(authoritative_rate_limits.clone())
+        );
+        assert_eq!(child_state.auto_compact_window_number(), 7);
+        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+        assert_eq!(child_state.history.history_version(), 1);
+        assert!(
+            child_state
+                .history
+                .update_world_state(&world_state)
+                .1
+                .is_none(),
+            "an unchanged parent world-state baseline must not be reintroduced"
+        );
+    }
+
+    child.flush_rollout().await?;
+    let child_rollout_path = child
+        .current_rollout_path()
+        .await?
+        .expect("prepared fork should have a rollout path");
+    let child_rollout_items = RolloutRecorder::load_rollout_items(&child_rollout_path)
+        .await?
+        .0;
+    let checkpoint = assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
+    assert_eq!(
+        checkpoint
+            .replacement_history
+            .as_ref()
+            .and_then(|items| items.last())
+            .and_then(|item| item.metadata.as_ref())
+            .and_then(|metadata| metadata.mcp_attribution.as_ref()),
+        Some(&authoritative_attribution)
+    );
+    let resume_metadata = checkpoint
+        .resume_metadata
+        .as_ref()
+        .expect("fork checkpoint contains authoritative resume metadata");
+    assert_eq!(
+        resume_metadata.last_started_turn_id.as_ref(),
+        Some(&authoritative_turn_id)
     );
     assert_eq!(
-        child_state.reference_context_item(),
-        Some(reference_context_item)
+        resume_metadata.turn_attribution.as_ref(),
+        Some(&authoritative_turn_attribution)
     );
     assert_eq!(
-        child_state.previous_turn_settings(),
-        Some(previous_turn_settings)
+        resume_metadata.previous_turn_settings.as_ref(),
+        Some(&previous_turn_settings)
     );
-    assert_eq!(child_state.token_info(), Some(authoritative_tokens));
-    assert_eq!(child_state.auto_compact_window_number(), 7);
-    assert_eq!(child_state.auto_compact_window_ids(), window_ids);
-    assert_eq!(child_state.history.history_version(), 1);
-    assert!(
-        child_state
-            .history
-            .update_world_state(&world_state)
-            .1
-            .is_none(),
-        "an unchanged parent world-state baseline must not be reintroduced"
+    assert_eq!(
+        checkpoint.latest_token_usage_record.as_ref(),
+        Some(&authoritative_usage_record)
     );
+    assert!(child_rollout_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+                rate_limits: Some(rate_limits),
+                ..
+            })) if rate_limits == &authoritative_rate_limits
+        )
+    }));
 
     Ok(())
 }
@@ -4876,6 +5279,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
     let child_rollout_items = RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
         .await?
         .0;
+    assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
     assert_eq!(
         child_rollout_items
             .iter()
@@ -4982,6 +5386,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
                 items: vec![
                     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                         turn_id: turn_id.clone(),
+                        turn_attribution: None,
                         root_turn_id: None,
                         trace_id: None,
                         started_at: Some(index),
@@ -5005,6 +5410,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
                     RolloutItem::ResponseItem(user_message(&message).into()),
                     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                         turn_id,
+                        root_turn_id: None,
                         last_agent_message: None,
                         error: None,
                         started_at: Some(index),
@@ -5496,7 +5902,8 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
 #[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
@@ -6113,19 +6520,87 @@ pub(super) async fn attach_thread_persistence(session: &mut Session) -> PathBuf 
     rollout_path
 }
 
+async fn record_legacy_guardian_checkpoint(
+    session: &Session,
+    turn_context: &TurnContext,
+) -> codex_history::GuardianHistoryCheckpoint {
+    let checkpoint =
+        codex_history::GuardianHistoryCheckpoint(raw_history_items(&session.clone_history().await));
+    // An untagged encrypted checkpoint keeps review on the saved legacy transcript until a
+    // compatible compaction promotes it. A fresh thread would already use parent context.
+    session
+        .record_conversation_items(
+            turn_context,
+            turn_context.model_info(),
+            &[ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "legacy encrypted checkpoint".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }],
+        )
+        .await;
+    let mut state = session.state.lock().await;
+    let retained_context = state.history.retained_context().clone();
+    state.history.restore_review_context(
+        Some(&retained_context),
+        Some(&checkpoint),
+        /*reviewer_compaction_hash*/ None,
+    );
+    assert_eq!(
+        GuardianContextMode::from_history(state.history.conversation_history_snapshot().as_ref()),
+        GuardianContextMode::Legacy
+    );
+    checkpoint
+}
+
 #[tokio::test]
 async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
-    let (mut session, turn_context, _) = make_session_and_context_with_rx().await;
+    let (mut session, turn_context, _) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config
+                .features
+                .enable(Feature::GuardianThreadContext)
+                .expect("enable thread-owned Guardian context");
+        },
+    )
+    .await;
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
     let expected_world_state = world_state.snapshot();
     let session = Arc::get_mut(&mut session).expect("session should have one owner");
     let stable_path = attach_thread_persistence(session).await;
     session
-        .persist_rollout_items(&[
-            RolloutItem::ResponseItem(user_message("before compaction").into()),
-            RolloutItem::ResponseItem(assistant_message("before compaction answer").into()),
-        ])
+        .record_retained_context(codex_history::RetainedContextEvent::VerifiedAnswer {
+            answer: codex_history::VerifiedAnswer {
+                turn_id: "retained-turn".to_owned(),
+                call_id: "ask-before-compaction".to_owned(),
+                questions: vec![codex_history::VerifiedQuestionAnswer {
+                    question: "Publish?".to_owned(),
+                    answer: "Only privately.".to_owned(),
+                }],
+            },
+            acceptance_order: Some(1),
+        })
         .await;
+    session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            turn_context.model_info(),
+            &[
+                user_message("before compaction"),
+                assistant_message("before compaction answer"),
+            ],
+        )
+        .await;
+    let guardian_checkpoint = record_legacy_guardian_checkpoint(session, &turn_context).await;
+    let expected_retained_context = session
+        .state
+        .lock()
+        .await
+        .history
+        .retained_context()
+        .clone();
     session
         .flush_rollout()
         .await
@@ -6140,24 +6615,29 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
             _ => None,
         })
         .expect("pre-compaction segment id");
-    let replacement_history = vec![ResponseItemEnvelope::new(user_message("compacted summary"))];
-    let (window_number, window_ids) = {
-        let mut state = session.state.lock().await;
-        state.start_new_context_window()
-    };
+    let replacement_history = vec![
+        ResponseItemEnvelope::new(user_message("compacted summary")),
+        ResponseItemEnvelope::new(ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "encrypted compacted history".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }),
+    ];
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
 
     session
         .replace_compacted_history(
+            &turn_context,
             replacement_history.clone(),
-            Some(turn_context.to_turn_context_item()),
-            Some(world_state),
+            turn_context.to_turn_context_item(),
+            world_state.render_full().0,
             CompactedHistoryMetadata {
+                input_goal_ids: Default::default(),
                 message: "compacted summary".to_string(),
-                window_number,
-                window_ids,
                 compaction_response_id: None,
-                compaction_model_hash: None,
+                compaction_model_hash: Some("test-compaction-model-hash".to_string()),
                 reviewer_compaction_hash: None,
+                prepared_window_advance,
             },
         )
         .await
@@ -6183,6 +6663,11 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
             .expect("load replacement rollout");
     assert_eq!(replacement_thread_id, Some(session.thread_id));
     assert_eq!(parse_errors, 0);
+    let persisted_guardian = replacement_items.iter().rev().find_map(|item| match item {
+        RolloutItem::Compacted(item) => item.guardian_history.clone(),
+        _ => None,
+    });
+    assert_eq!(persisted_guardian, Some(guardian_checkpoint.clone()));
     assert!(replacement_items.iter().any(|item| {
         matches!(
             item,
@@ -6192,11 +6677,39 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
                     && reference.segment_id == Some(old_segment_id)
         )
     }));
+    let persisted_compacted = replacement_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("persisted certified compaction");
+    assert_eq!(
+        persisted_compacted.retained_context.as_ref(),
+        Some(&expected_retained_context)
+    );
+    assert!(
+        persisted_compacted
+            .replacement_history
+            .as_ref()
+            .expect("persisted replacement history")
+            .iter()
+            .any(|envelope| {
+                matches!(envelope.item, ResponseItem::Compaction { .. })
+                    && envelope
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.compaction_model_hash.as_deref())
+                        // The producing model hash is independent of Guardian review mode.
+                        == Some("test-compaction-model-hash")
+            })
+    );
     assert!(replacement_items.iter().any(|item| {
         matches!(
             item,
             RolloutItem::Compacted(CompactedItem {
                 replacement_history: Some(history),
+                segment_state_checkpoint: Some(_),
                 ..
             }) if strip_response_item_ids(
                 &history.iter().map(|item| item.item.clone()).collect::<Vec<_>>()
@@ -6208,6 +6721,32 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
             )
         )
     }));
+    assert!(replacement_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings))
+                if settings.thread_settings.environments.is_some()
+                    && settings.thread_settings.workspace_roots.is_some()
+                    && settings.thread_settings.profile_workspace_roots.is_some()
+                    && settings.thread_settings.windows_sandbox_level.is_some()
+        )
+    }));
+    assert!(
+        replacement_items
+            .iter()
+            .any(|item| { matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(_))) })
+    );
+    let persisted_token_state = replacement_items.iter().rev().find_map(|item| match item {
+        RolloutItem::EventMsg(EventMsg::TokenCount(event)) => {
+            Some((event.info.clone(), event.rate_limits.clone()))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        persisted_token_state,
+        Some(session.state.lock().await.token_info_and_rate_limits()),
+        "the certified checkpoint must contain replacement-history token state"
+    );
 
     let materialized =
         codex_rollout::materialize_rollout_items(codex_home.as_path(), current_path.as_path())
@@ -6234,6 +6773,254 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
     assert_eq!(
         reconstructed.world_state_baseline,
         Some(expected_world_state)
+    );
+    assert_eq!(reconstructed.retained_context, expected_retained_context);
+}
+
+#[tokio::test]
+async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
+    let (mut session, turn_context, _) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let session = Arc::get_mut(&mut session).expect("session should have one owner");
+    let store = attach_in_memory_thread_store(session).await;
+    session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            turn_context.model_info(),
+            &[user_message("history before failed compaction")],
+        )
+        .await;
+    record_legacy_guardian_checkpoint(session, &turn_context).await;
+    session
+        .flush_rollout()
+        .await
+        .expect("flush initial history");
+    let model = turn_context.model_info().slug.clone();
+    let effort = codex_protocol::openai_models::ReasoningEffort::High;
+    session.state.lock().await.reasoning_effort_pin = ReasoningEffortPin::Active {
+        model: model.clone(),
+        effort: effort.clone(),
+    };
+    let (_, history_reset) = session.history_reset().await;
+    session.state.lock().await.turn_attribution = Some(codex_history::TurnAttribution {
+        turn_id: turn_context.sub_id.clone(),
+        turn_trigger: Some("failed-checkpoint-control".into()),
+        parent_turn_id: Some("parent-before-failure".into()),
+        root_turn_id: Some("root-before-failure".into()),
+        initiating_agent_path: Some(AgentPath::root()),
+    });
+    let state_before_compaction = session.state.lock().await.checkpoint_mutation_snapshot();
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
+
+    let error = session
+        .replace_compacted_history(
+            &turn_context,
+            vec![ResponseItemEnvelope::new(ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "replacement that must be restored".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            })],
+            turn_context.to_turn_context_item(),
+            WorldStateSnapshot::default(),
+            CompactedHistoryMetadata {
+                input_goal_ids: Default::default(),
+                message: "failed compaction".to_string(),
+                compaction_response_id: None,
+                compaction_model_hash: Some("test-compaction-model-hash".to_string()),
+                reviewer_compaction_hash: Some("test-compaction-model-hash".to_string()),
+                prepared_window_advance,
+            },
+        )
+        .await
+        .expect_err("unsupported checkpoint persistence must not commit");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to persist compacted history without changing durable history")
+    );
+    assert!(
+        session
+            .state
+            .lock()
+            .await
+            .has_same_checkpoint_mutation_state(&state_before_compaction),
+        "NotCommitted must restore history, token state, settings, and window identity"
+    );
+    assert!(
+        !history_reset.is_cancelled(),
+        "NotCommitted must not cancel reviews bound to the original history"
+    );
+    assert_eq!(
+        session.state.lock().await.reasoning_effort_pin.get(&model),
+        Some(effort),
+        "NotCommitted must retain the active request effort"
+    );
+    assert_eq!(
+        GuardianContextMode::from_history(
+            session
+                .clone_history()
+                .await
+                .conversation_history_snapshot()
+                .as_ref()
+        ),
+        GuardianContextMode::Legacy
+    );
+    assert!(!session.persistence_restart_required());
+
+    session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            turn_context.model_info(),
+            &[user_message("continued after failed compaction")],
+        )
+        .await;
+    session
+        .flush_rollout()
+        .await
+        .expect("flush continuation after restored checkpoint state");
+    assert!(session.clone_history().await.raw_items().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { content, .. }
+                if content.iter().any(|content| matches!(
+                    content,
+                    ContentItem::InputText { text }
+                        if text == "continued after failed compaction"
+                ))
+        )
+    }));
+    let persisted = codex_thread_store::ThreadStore::load_history(
+        store.as_ref(),
+        codex_thread_store::LoadThreadHistoryParams {
+            thread_id: session.thread_id,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect("load persisted continuation after failed compaction");
+    assert!(persisted.items.iter().any(|item| matches!(
+        item,
+        RolloutItem::ResponseItem(ResponseItemEnvelope {
+            item: ResponseItem::Message { content, .. },
+            ..
+        }) if content.iter().any(|content| matches!(
+            content,
+            ContentItem::InputText { text } if text == "continued after failed compaction"
+        ))
+    )));
+}
+
+#[tokio::test]
+async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effort_pin() {
+    let (mut session, turn_context, _) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let session = Arc::get_mut(&mut session).expect("session should have one owner");
+    let rollout_path = attach_thread_persistence(session).await;
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[user_message("before Guardian promotion")],
+        )
+        .await;
+    record_legacy_guardian_checkpoint(session, &turn_context).await;
+    session
+        .flush_rollout()
+        .await
+        .expect("flush legacy checkpoint");
+    let model = turn_context.model_info().slug.clone();
+    let effort = codex_protocol::openai_models::ReasoningEffort::High;
+    session.state.lock().await.reasoning_effort_pin = ReasoningEffortPin::Active {
+        model: model.clone(),
+        effort: effort.clone(),
+    };
+    let (_, history_reset) = session.history_reset().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
+    let admission = session.checkpoint_admission_lock.lock().await;
+    let mut checkpoint = Box::pin(tokio::task::unconstrained(
+        session.replace_compacted_history(
+            &turn_context,
+            vec![ResponseItemEnvelope::new(ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "compatible encrypted checkpoint".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            })],
+            turn_context.to_turn_context_item(),
+            WorldStateSnapshot::default(),
+            CompactedHistoryMetadata {
+                input_goal_ids: Default::default(),
+                message: "compatible checkpoint".to_string(),
+                compaction_response_id: None,
+                compaction_model_hash: Some("test-compaction-model-hash".to_string()),
+                reviewer_compaction_hash: Some("test-compaction-model-hash".to_string()),
+                prepared_window_advance,
+            },
+        ),
+    ));
+    assert!(futures::poll!(checkpoint.as_mut()).is_pending());
+    assert!(!history_reset.is_cancelled());
+    assert_eq!(
+        session.state.lock().await.reasoning_effort_pin.get(&model),
+        Some(effort)
+    );
+    drop(admission);
+    checkpoint.await.expect("commit compatible checkpoint");
+
+    assert!(history_reset.is_cancelled());
+    assert!(matches!(
+        session.state.lock().await.reasoning_effort_pin,
+        ReasoningEffortPin::Compacted
+    ));
+    assert_eq!(
+        GuardianContextMode::from_history(
+            session
+                .clone_history()
+                .await
+                .conversation_history_snapshot()
+                .as_ref()
+        ),
+        GuardianContextMode::ThreadOwned
+    );
+    assert!(!session.persistence_restart_required());
+    let (_, new_history_reset) = session.history_reset().await;
+    assert!(!new_history_reset.is_cancelled());
+
+    let (items, thread_id, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read committed checkpoint");
+    assert_eq!((thread_id, parse_errors), (Some(session.thread_id), 0));
+    let compacted = items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("persisted compaction");
+    assert!(compacted.segment_state_checkpoint.is_some());
+    assert!(compacted.guardian_history.is_none());
+    assert!(
+        compacted
+            .replacement_history
+            .as_ref()
+            .expect("persisted model history")
+            .iter()
+            .any(|item| {
+                matches!(&item.item, ResponseItem::Compaction { encrypted_content, .. }
+                    if encrypted_content == "compatible encrypted checkpoint")
+                    && item
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.compaction_model_hash.as_deref())
+                        == Some("test-compaction-model-hash")
+            })
     );
 }
 
@@ -7183,7 +7970,7 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
 }
 
 #[tokio::test]
-async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
+async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     let (mut session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -7197,6 +7984,14 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
     .await;
     let rollout_path =
         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let active_environments = session.services.turn_environments.selections();
+    let accepted_cwd = session
+        .get_config()
+        .await
+        .cwd
+        .join("accepted-checkpoint-environment");
+    std::fs::create_dir_all(accepted_cwd.as_path()).expect("create accepted environment");
+    let accepted_environments = vec![local(accepted_cwd.clone())];
     let refresh_guard = session
         .managed_network_proxy_refresh_lock
         .acquire()
@@ -7211,27 +8006,47 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
                 ..Default::default()
             },
             permission_profile: Some(PermissionProfile::read_only()),
+            environments: Some(TurnEnvironmentSelections::new(
+                accepted_cwd,
+                accepted_environments.clone(),
+            )),
             ..Default::default()
         },
     )));
     // Pause after committing settings but before their accepted snapshot is persisted.
     assert!(futures::poll!(update.as_mut()).is_pending());
     let committed = session.thread_settings_snapshot().await;
+    assert_eq!(
+        committed
+            .environments
+            .as_ref()
+            .expect("accepted environment settings")
+            .environments,
+        codex_protocol::protocol::PersistedEnvironmentSelections::from(
+            TurnEnvironmentSelections::new(committed.cwd.clone(), accepted_environments.clone())
+        )
+        .environments
+    );
+    assert_eq!(
+        session.services.turn_environments.selections(),
+        active_environments
+    );
+    assert_ne!(accepted_environments, active_environments);
     let history_before = session.clone_history().await;
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     let mut checkpoint = Box::pin(tokio::task::unconstrained(
         session.replace_compacted_history(
+            &turn_context,
             vec![ResponseItemEnvelope::new(user_message("compacted history"))],
             turn_context.to_turn_context_item(),
             WorldStateSnapshot::default(),
             CompactedHistoryMetadata {
                 input_goal_ids: Default::default(),
                 message: "summary".to_string(),
-                window_number,
-                window_ids,
                 compaction_response_id: None,
                 compaction_model_hash: None,
                 reviewer_compaction_hash: None,
+                prepared_window_advance,
             },
         ),
     ));
@@ -7274,7 +8089,9 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
         .collect::<Vec<_>>();
     assert_eq!(live_snapshots, vec![committed.clone()]);
 
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+    // Compaction freezes the segment containing the accepted settings event.
+    let codex_home = session.get_config().await.codex_home.clone();
+    let items = codex_rollout::materialize_rollout_items(&codex_home, &rollout_path)
         .await
         .expect("read persisted settings");
     let snapshots = items
@@ -7299,6 +8116,7 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
 #[tokio::test]
 async fn mcp_attribution_checkpoints_cover_batch_prefixes_compaction_and_restore() {
     let (mut session, turn_context) = make_session_and_context().await;
+    let turn_context = Arc::new(turn_context);
     session.services.executed_tool_calls =
         crate::state::ExecutedToolCalls::new(&turn_context.config.features, &InitialHistory::New);
     let rollout_path = attach_thread_persistence(&mut session).await;
@@ -7352,23 +8170,24 @@ async fn mcp_attribution_checkpoints_cover_batch_prefixes_compaction_and_restore
         vec![Some(expected.clone()), Some(expected.clone())]
     );
 
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     session
         .replace_compacted_history(
+            &turn_context,
             vec![ResponseItemEnvelope::new(user_message("compacted history"))],
             turn_context.to_turn_context_item(),
             WorldStateSnapshot::default(),
             CompactedHistoryMetadata {
                 input_goal_ids: Default::default(),
                 message: "summary".to_string(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
                 compaction_response_id: None,
                 compaction_model_hash: None,
                 reviewer_compaction_hash: None,
             },
         )
-        .await;
+        .await
+        .expect("persist compacted attribution");
     session
         .flush_rollout()
         .await
@@ -7455,8 +8274,10 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
     submissions.await;
 }
 
+#[test_case(false; "cleared previous turn settings")]
+#[test_case(true; "established previous turn settings")]
 #[tokio::test]
-async fn compaction_persists_resume_metadata_and_companion_records() {
+async fn compaction_persists_resume_metadata_and_companion_records(with_previous_settings: bool) {
     let (mut session, turn_context) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
     let turn_context = Arc::new(turn_context);
@@ -7474,14 +8295,14 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     );
     let turn_context_baseline = turn_context.to_turn_context_item();
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
-    let previous_turn_settings = PreviousTurnSettings {
+    let previous_turn_settings = with_previous_settings.then(|| PreviousTurnSettings {
         model: "previous-model".to_string(),
         comp_hash: Some("comp-hash".to_string()),
         cyber_access_program: None,
         realtime_active: Some(true),
-    };
+    });
     session
-        .set_previous_turn_settings(Some(previous_turn_settings.clone()))
+        .set_previous_turn_settings(previous_turn_settings.clone())
         .await;
 
     session.multi_agent_version = std::sync::OnceLock::from(MultiAgentVersion::V2);
@@ -7497,7 +8318,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
             ),
             root_turn_id: turn_context_baseline.root_turn_id.clone(),
         }),
-        previous_turn_settings: Some(previous_turn_settings),
+        previous_turn_settings,
     };
     let expected_settings = codex_protocol::protocol::ThreadSettingsAppliedEvent {
         thread_id: Some(session.thread_id()),
@@ -7533,30 +8354,34 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         .last()
         .cloned()
         .expect("accepted goal");
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     session
         .replace_compacted_history(
+            &turn_context,
             vec![ResponseItemEnvelope::new(user_message("compacted context"))],
             turn_context_baseline.clone(),
             world_state.render_full().0,
             CompactedHistoryMetadata {
                 input_goal_ids,
                 message: String::new(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
                 compaction_response_id: None,
                 compaction_model_hash: None,
                 reviewer_compaction_hash: None,
             },
         )
-        .await;
+        .await
+        .expect("persist certified checkpoint");
     let live_history = session.clone_history().await.annotated_items().to_vec();
     assert_eq!(&live_history[1..], &[accepted_goal]);
 
     session.flush_rollout().await.expect("flush checkpoints");
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
-        .await
-        .expect("read checkpoints");
+    let items = codex_rollout::materialize_rollout_items(
+        &session.get_config().await.codex_home,
+        &rollout_path,
+    )
+    .await
+    .expect("read checkpoints across rotated segments");
     let compaction_items = items
         .into_iter()
         .skip_while(|item| !matches!(item, RolloutItem::Compacted(_)))
@@ -7566,6 +8391,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         RolloutItem::WorldState(saved_world_state),
         RolloutItem::TurnContext(saved_turn_context),
         RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(saved_settings)),
+        RolloutItem::EventMsg(EventMsg::TokenCount(_)),
     ] = compaction_items.as_slice()
     else {
         panic!("unexpected compaction records: {compaction_items:#?}");
@@ -7573,13 +8399,35 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     assert_eq!(compacted.replacement_history, Some(live_history));
     assert_eq!(compacted.resume_metadata.as_ref(), Some(&expected));
     assert_eq!(
+        compacted
+            .segment_state_checkpoint
+            .as_ref()
+            .expect("certified checkpoint descriptor")
+            .previous_turn_settings,
+        expected.previous_turn_settings.as_ref().map(|settings| {
+            codex_protocol::protocol::SegmentPreviousTurnSettings {
+                model: settings.model.clone(),
+                cyber_access_program: settings.cyber_access_program,
+                comp_hash: settings.comp_hash.clone(),
+                realtime_active: settings.realtime_active,
+            }
+        })
+    );
+    assert_eq!(
         saved_world_state,
         &WorldStateItem::full(world_state.render_full().0.into_object())
     );
     assert_eq!(saved_turn_context, &turn_context_baseline);
     assert_eq!(saved_settings, &expected_settings);
+    let incomplete = vec![RolloutItem::Compacted(compacted.clone())];
+    assert!(codex_rollout::validated_segment_state_checkpoint(compacted, &[]).is_none());
+    let incomplete_reconstruction = session
+        .reconstruct_history_from_rollout(&turn_context, &incomplete)
+        .await;
+    assert_eq!(incomplete_reconstruction.turn_attribution, None);
+    assert_eq!(incomplete_reconstruction.reference_context_item, None);
     for same_turn_input in [false, true] {
-        let mut rollback_items = vec![RolloutItem::Compacted(compacted.clone())];
+        let mut rollback_items = compaction_items.clone();
         if same_turn_input {
             rollback_items.push(RolloutItem::ResponseItem(
                 user_message("steered work").into(),
@@ -7597,13 +8445,22 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     // Settings invalidate continuation eligibility; standalone compaction replaces its ID.
     // Neither changes the regular work whose attribution the checkpoint preserves.
     for last_started_turn_id in [None, Some("compact-turn".to_string())] {
-        let mut checkpoint = compacted.clone();
+        let mut items = compaction_items.clone();
+        let RolloutItem::Compacted(checkpoint) = &mut items[0] else {
+            unreachable!("certified compaction");
+        };
         checkpoint
             .resume_metadata
             .as_mut()
             .expect("resume metadata")
             .last_started_turn_id = last_started_turn_id.clone();
-        let mut items = vec![RolloutItem::Compacted(checkpoint)];
+        let RolloutItem::TurnContext(reference) = &mut items[2] else {
+            unreachable!("reference companion");
+        };
+        if let Some(turn_id) = &last_started_turn_id {
+            reference.turn_id = Some(turn_id.clone());
+        }
+        let expected_reference = reference.clone();
         if let Some(turn_id) = last_started_turn_id {
             items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
                 TurnCompleteEvent {
@@ -7622,7 +8479,10 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
             .reconstruct_history_from_rollout(&turn_context, &items)
             .await;
         assert_eq!(reconstructed.turn_attribution, expected.turn_attribution);
-        assert_eq!(reconstructed.reference_context_item, None);
+        assert_eq!(
+            reconstructed.reference_context_item,
+            Some(expected_reference)
+        );
         items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
             codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
         )));
@@ -8406,6 +9266,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
+        checkpoint_admission_lock: Arc::new(Mutex::new(())),
+        persistence_repair_lock: Default::default(),
+        repaired_persistence: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
@@ -9691,6 +10554,81 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
 }
 
 #[tokio::test]
+async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let original_personality = session.thread_config_snapshot().await.personality;
+    let admission = Arc::clone(&session.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
+    let (tx_sub, rx_sub) = async_channel::bounded(1);
+    tx_sub
+        .send(Submission {
+            id: "settings-after-checkpoint".to_string(),
+            turn_extension_init: None,
+            op: Op::ThreadSettings {
+                thread_settings: ThreadSettingsOverrides {
+                    personality: Some(Personality::Friendly),
+                    ..Default::default()
+                },
+                reply: None,
+            },
+            trace: None,
+            parent_turn_id: None,
+            root_turn_id: None,
+            residency_guard: None,
+        })
+        .await
+        .expect("submit settings");
+    let mut submissions = Box::pin(tokio::task::unconstrained(submission_loop(
+        Arc::clone(&session),
+        Arc::clone(&turn_context.config),
+        rx_sub,
+    )));
+
+    assert!(
+        futures::poll!(submissions.as_mut()).is_pending(),
+        "settings update must wait for checkpoint classification"
+    );
+    assert_eq!(
+        session.thread_config_snapshot().await.personality,
+        original_personality
+    );
+    session
+        .persistence_restart_required
+        .store(true, Ordering::Release);
+    drop(admission);
+    assert!(futures::poll!(submissions.as_mut()).is_pending());
+    drop(tx_sub);
+    submissions.await;
+
+    assert_eq!(
+        session.thread_config_snapshot().await.personality,
+        original_personality,
+        "rejected settings must not mutate the session"
+    );
+    let mut saw_restart_error = false;
+    let deadline = tokio::time::Instant::now() + StdDuration::from_millis(250);
+    while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        match event.msg {
+            EventMsg::Error(error)
+                if error.codex_error_info == Some(CodexErrorInfo::Other)
+                    && error.message.contains("restart this thread") =>
+            {
+                saw_restart_error = true;
+            }
+            EventMsg::ThreadSettingsApplied(_) => {
+                panic!("rejected settings must not emit ThreadSettingsApplied")
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_restart_error,
+        "settings rejection must explain the restart requirement"
+    );
+}
+
+#[tokio::test]
 async fn turn_environments_set_primary_environment() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
     let selected_cwd =
@@ -10729,6 +11667,9 @@ where
         realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
+        checkpoint_admission_lock: Arc::new(Mutex::new(())),
+        persistence_repair_lock: Default::default(),
+        repaired_persistence: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
@@ -12855,13 +13796,14 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
             .await
             .unwrap(),
     );
-    let (initial_a, expected_snapshot) = crate::compact::build_compaction_replacement_history(
-        &session,
-        &step_a,
-        &world_a,
-        Vec::new(),
-    )
-    .await;
+    let (initial_a, expected_snapshot, prepared_window_advance) =
+        crate::compact::build_compaction_replacement_history(
+            &session,
+            &step_a,
+            &world_a,
+            Vec::new(),
+        )
+        .await;
 
     let mut selected_b = step_a.settings.selected().clone();
     selected_b.collaboration_mode.settings.model = "model-b".to_string();
@@ -12895,20 +13837,20 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .0;
     let initial_b = crate::context_manager::updates::merge_world_state_updates(initial_b);
     let turn_contributions_b = session.build_turn_context_contribution_items(&step_b).await;
-    let (restored_a, restored_snapshot) = crate::compact::build_compaction_replacement_history(
-        &session,
-        &step_a,
-        &world_a,
-        Vec::new(),
-    )
-    .await;
-
-    assert_eq!(restored_a, initial_a);
-    assert_eq!(restored_snapshot, expected_snapshot);
+    let (restored_a, restored_snapshot) = session
+        .build_initial_context_with_world_state_for_auto_compact_window(
+            &step_a,
+            &world_a,
+            &prepared_window_advance,
+        )
+        .await;
+    let restored_a = crate::context_manager::updates::merge_world_state_updates(restored_a);
     let initial_a = initial_a
         .into_iter()
         .map(|item| item.item)
         .collect::<Vec<_>>();
+    assert_eq!(restored_a, initial_a);
+    assert_eq!(restored_snapshot, expected_snapshot);
     let a_text = developer_input_texts(&initial_a).join("\n");
     let b_text = developer_input_texts(&initial_b).join("\n");
     assert!(a_text.contains("A instructions"));
@@ -14744,6 +15686,7 @@ async fn sample_rollout(
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     }));
 
     let user2 = user_message("second user");
@@ -14779,6 +15722,7 @@ async fn sample_rollout(
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     }));
 
     let user3 = user_message("third user");

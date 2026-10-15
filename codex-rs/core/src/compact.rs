@@ -24,7 +24,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
-use crate::state::AutoCompactWindowIds;
+use crate::state::PreparedAutoCompactWindowAdvance;
 use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
@@ -99,11 +99,11 @@ pub(crate) const UNIFIED_EXEC_PROCESS_WARNING_PREFIX: &str =
 pub(crate) struct CompactedHistoryMetadata {
     pub(crate) input_goal_ids: HashSet<ResponseItemId>,
     pub(crate) message: String,
-    pub(crate) window_number: u64,
-    pub(crate) window_ids: AutoCompactWindowIds,
     pub(crate) compaction_response_id: Option<String>,
     pub(crate) compaction_model_hash: Option<String>,
     pub(crate) reviewer_compaction_hash: Option<String>,
+    /// The nonmutating window transition used while rendering the replacement history.
+    pub(crate) prepared_window_advance: PreparedAutoCompactWindowAdvance,
 }
 
 /// Renders the window prefix and ordinary context with their comparison baseline.
@@ -112,15 +112,25 @@ pub(crate) async fn build_compaction_replacement_history(
     step_context: &StepContext,
     world_state: &WorldState,
     compacted_history: Vec<ResponseItemEnvelope>,
-) -> (Vec<ResponseItemEnvelope>, WorldStateSnapshot) {
+) -> (
+    Vec<ResponseItemEnvelope>,
+    WorldStateSnapshot,
+    PreparedAutoCompactWindowAdvance,
+) {
+    let prepared_window_advance = sess.prepare_auto_compact_window_advance().await;
     let (updates, snapshot) = sess
-        .build_initial_context_with_world_state(step_context, world_state)
+        .build_initial_context_with_world_state_for_auto_compact_window(
+            step_context,
+            world_state,
+            &prepared_window_advance,
+        )
         .await;
     let (prefix, context) = split_prefix_updates(updates);
     let context = merge_world_state_updates(context);
     (
         assemble_compaction_history(compacted_history, prefix, context),
         snapshot,
+        prepared_window_advance,
     )
 }
 
@@ -459,32 +469,29 @@ async fn run_compact_task_inner_impl(
     if let Some(agent_path) = agent_path.as_ref() {
         retain_subagent_assignment_and_recent_messages(history_items, &mut new_history, agent_path);
     }
-    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
-
-    let (new_history, world_state_baseline) = build_compaction_replacement_history(
-        sess.as_ref(),
-        &replacement_step_context,
-        &world_state,
-        new_history,
-    )
-    .await;
+    let (new_history, world_state_baseline, prepared_window_advance) =
+        build_compaction_replacement_history(
+            sess.as_ref(),
+            &replacement_step_context,
+            &world_state,
+            new_history,
+        )
+        .await;
     sess.replace_compacted_history(
+        &replacement_step_context.turn,
         new_history,
         replacement_step_context.to_turn_context_item(),
         world_state_baseline,
         CompactedHistoryMetadata {
             input_goal_ids,
             message: summary_text,
-            window_number,
-            window_ids,
             compaction_response_id: Some(compaction_response.response_id),
             compaction_model_hash: turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash: None,
+            prepared_window_advance,
         },
     )
     .await?;
-    sess.recompute_token_usage(&replacement_step_context.turn)
-        .await;
 
     if reporting.defers_lifecycle() {
         sess.emit_turn_item_started(&turn_context, &compaction_item)
