@@ -163,6 +163,7 @@ impl Config {
         }
         if !matches!(scope, RuntimeConfigRefresh::Mcp) {
             config.tool_suggest = resolve_tool_suggest_config_from_layer_stack(&layers);
+            config.custom_models = incoming.custom_models.clone();
         }
         config.config_layer_stack = layers;
         if enterprise_retired {

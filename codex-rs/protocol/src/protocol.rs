@@ -3357,6 +3357,14 @@ pub struct TurnContextItem {
     pub cyber_access_program: Option<CyberAccessProgram>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
+    /// Concrete service tier used for this turn, if one was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service_tier: Option<String>,
+    /// Stable custom-model routing profile selected for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_profile: Option<String>,
     /// Legacy placeholder written as `Some(ReasoningSummaryConfig::None)` for older readers.
     /// Optional so newer readers also accept its future removal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6233,10 +6241,12 @@ mod tests {
             realtime_active: None,
             cyber_access_program: None,
             effort: None,
+            service_tier: Some("priority".to_string()),
+            model_profile: Some("balanced".to_string()),
             summary: Some(ReasoningSummaryConfig::None),
         };
 
-        let value = serde_json::to_value(item)?;
+        let value = serde_json::to_value(&item)?;
         assert_eq!(
             value["file_system_sandbox_policy"],
             json!({
@@ -6253,6 +6263,9 @@ mod tests {
         let legacy_summary: ReasoningSummaryConfig =
             serde_json::from_value(value["summary"].clone())?;
         assert_eq!(legacy_summary, ReasoningSummaryConfig::None);
+        assert_eq!(value["service_tier"], json!("priority"));
+        assert_eq!(value["model_profile"], json!("balanced"));
+        assert_eq!(serde_json::from_value::<TurnContextItem>(value)?, item);
         Ok(())
     }
 

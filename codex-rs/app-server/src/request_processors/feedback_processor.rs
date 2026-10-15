@@ -776,6 +776,8 @@ mod tests {
                     realtime_active: None,
                     cyber_access_program: None,
                     effort: effort.clone(),
+                    service_tier: None,
+                    model_profile: None,
                     summary: Some(ReasoningSummary::Auto),
                 }),
             }
