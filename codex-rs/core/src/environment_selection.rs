@@ -1992,6 +1992,7 @@ url = "ws://127.0.0.1:8765"
                 temporary_directories: Some(expected_temporary_directories.as_slice()),
             }
         );
+        assert_eq!(attached.all_selections(), attached.to_selections());
         assert_eq!(
             next_starting
                 .refresh_readiness()

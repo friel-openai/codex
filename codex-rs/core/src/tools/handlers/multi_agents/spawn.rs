@@ -134,6 +134,7 @@ async fn handle_spawn_agent(
                 environments: Some(step_context.environments.clone()),
                 multi_agent_v2_usage_hints: None,
                 cyber_access_program: turn.cyber_access_program,
+                initial_task_message: Some(prompt.clone()),
             },
         })
         .await
