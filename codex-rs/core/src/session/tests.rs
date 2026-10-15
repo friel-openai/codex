@@ -6727,6 +6727,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         /*reserved_thread_id*/ None,
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         crate::passthrough_image_store(),
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -6973,6 +6974,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
+        mcp_tool_snapshot: Mutex::new(None),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),
@@ -7282,6 +7284,7 @@ async fn make_session_with_config_and_rx(
         /*reserved_thread_id*/ None,
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         crate::passthrough_image_store(),
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -7415,6 +7418,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         /*reserved_thread_id*/ None,
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         crate::passthrough_image_store(),
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -9241,6 +9245,7 @@ where
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
+        mcp_tool_snapshot: Mutex::new(None),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),

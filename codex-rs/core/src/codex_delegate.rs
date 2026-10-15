@@ -135,6 +135,7 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_environments: Some(parent_environments.clone()),
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
+        inherited_thread_state: Default::default(),
         parent_trace: None,
         environment_requests: parent_environments
             .to_selections()
