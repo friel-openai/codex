@@ -2518,6 +2518,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "codex-agent-message-board-extension",
  "codex-api",
  "codex-app-server",
  "codex-app-server-client",
