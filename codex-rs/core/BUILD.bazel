@@ -33,7 +33,11 @@ codex_rust_crate(
     },
     test_data_extra = [
         "config.schema.json",
-    ] + glob(["src/**/snapshots/**"]) + [
+    ] + glob([
+        "src/**/snapshots/**",
+        "src/tools/fixtures/**",
+        "tests/fixtures/**",
+    ]) + [
     ],
     test_shard_counts = {
         "core-all-test": 16,
