@@ -663,6 +663,9 @@ impl App {
         }
         if pending_profile_on_unavailable_thread && !is_replay_only && session_verified {
             self.pending_server_profiles.remove(&thread_id);
+            self.agents_overview
+                .requested_permission_profiles
+                .remove(&thread_id);
         }
         // Refreshing can merge restored turns into the store, so recap progress must be read only
         // after the refresh while the activated thread channel is still retained.
@@ -832,6 +835,7 @@ impl App {
         self.pending_realtime_transcript_replay.clear();
         self.realtime_replay_order.clear();
         self.pending_server_profiles.clear();
+        self.agents_overview.requested_permission_profiles.clear();
         self.agents_overview.activity.clear();
         self.pending_thread_approval_labels.clear();
         self.agent_navigation.clear();

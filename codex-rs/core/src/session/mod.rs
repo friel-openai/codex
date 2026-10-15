@@ -303,6 +303,7 @@ use self::turn::agent_message_text;
 use self::turn::collect_explicit_app_ids_from_skill_items;
 use self::turn::realtime_text_for_event;
 use self::turn_context::TurnContext;
+pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
@@ -1747,11 +1748,25 @@ impl Session {
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
 
-                // Checkpoint effective settings even when no turn follows the resume.
-                self.persist_rollout_items(&[RolloutItem::EventMsg(
-                    thread_settings::applied_event(self).await,
-                )])
-                .await;
+                // Resume can run for every background goal check-in without starting a turn.
+                // Preserve changed settings and ownership upgrades, but do not append another
+                // identical checkpoint. Explicit settings requests still emit confirmations.
+                let settings = thread_settings::applied_event(self).await;
+                let previous_settings = logical_rollout_items.iter().rev().find_map(|item| {
+                    if let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = item {
+                        Some(event)
+                    } else {
+                        None
+                    }
+                });
+                let unchanged = matches!(
+                    &settings,
+                    EventMsg::ThreadSettingsApplied(current) if Some(current) == previous_settings
+                );
+                if !unchanged {
+                    self.persist_rollout_items(&[RolloutItem::EventMsg(settings)])
+                        .await;
+                }
 
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write model-visible context.
@@ -3985,6 +4000,7 @@ impl Session {
             required_mcp_servers: required_servers.to_vec(),
             tool_router,
             loaded_agents_md,
+            context_transition: Default::default(),
         }))
     }
 
@@ -4804,8 +4820,9 @@ impl Session {
         if only_world_state_changed {
             return Ok(());
         }
-        // Persist one `TurnContextItem` per real user turn so resume/lazy replay can recover the
-        // latest durable baseline even when this turn emitted no model-visible context diffs.
+        // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
+        // durable baseline. This normally records one item per user turn; a tool that changes the
+        // active context may record another item before the next model step in that turn.
         self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
             .await;
 
