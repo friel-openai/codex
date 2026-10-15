@@ -2969,7 +2969,7 @@
           "type": "boolean"
         },
         "enable_thread_adoption": {
-          "description": "Expose same-thread adoption and subagent promotion only when explicitly enabled.",
+          "description": "Expose same-thread adoption and subagent promotion unless explicitly disabled.",
           "type": "boolean"
         },
         "enabled": {
