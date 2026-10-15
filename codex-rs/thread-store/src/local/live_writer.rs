@@ -437,17 +437,6 @@ async fn build_segmented_legacy_history_projection(
     }
 
     let lineage = segmented_legacy_rollout_paths(store, thread_id, rollout_path).await?;
-    for segment in &lineage {
-        if segment
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".jsonl.zst"))
-        {
-            return Err(ThreadStoreError::Unsupported {
-                operation: "compressed_legacy_history_projection",
-            });
-        }
-    }
 
     let rollout_id = super::thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
         rollout_path,
@@ -455,10 +444,9 @@ async fn build_segmented_legacy_history_projection(
         ThreadHistoryMode::Legacy,
     )?;
     let projection = super::thread_history::projection_state(store, rollout_id).await?;
-    let active_rollout_len = tokio::fs::metadata(rollout_path)
+    let active_rollout_len = legacy_rollout_jsonl_len(rollout_path)
         .await
-        .map_err(thread_store_io_error)?
-        .len();
+        .map_err(thread_store_io_error)?;
     if projection
         .is_some_and(|state| state.next_ordinal > 0 && state.next_byte_offset == active_rollout_len)
     {
@@ -525,6 +513,20 @@ async fn build_segmented_legacy_history_projection(
         return Err(error);
     }
     Ok(builder)
+}
+
+/// Projection offsets address JSONL bytes, including for a compressed active rollout.
+pub(super) async fn legacy_rollout_jsonl_len(path: &std::path::Path) -> std::io::Result<u64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // A pledged frame size is only a lower bound when zstd frames are concatenated.
+        // The existing reader decodes every frame without replacing the durable rollout.
+        codex_rollout::open_rollout_seekable_reader(&path)?
+            .metadata()
+            .map(|metadata| metadata.len())
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 async fn segmented_legacy_rollout_paths(
@@ -653,9 +655,18 @@ async fn stream_segmented_legacy_history_builder(
     let mut builder = ThreadHistoryBuilder::new();
     builder.handle_rollout_item_with_changes(&canonical_session_meta);
     for rollout_path in lineage {
-        let file = tokio::fs::File::open(rollout_path)
-            .await
-            .map_err(thread_store_io_error)?;
+        // The reducer needs complete history even when SQLite is current. Decode immutable
+        // compressed segments without replacing their files, and bound reads in JSONL bytes.
+        let rollout_path_for_reader = rollout_path.clone();
+        let file = tokio::task::spawn_blocking(move || {
+            codex_rollout::open_rollout_seekable_reader(&rollout_path_for_reader)
+        })
+        .await
+        .map_err(|error| ThreadStoreError::Internal {
+            message: format!("failed to join segmented legacy history reader: {error}"),
+        })?
+        .map(tokio::fs::File::from_std)
+        .map_err(thread_store_io_error)?;
         let read_limit = file.metadata().await.map_err(thread_store_io_error)?.len();
         let mut reader = BufReader::new(file.take(read_limit));
         let mut line_bytes = Vec::new();

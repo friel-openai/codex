@@ -213,8 +213,9 @@ impl RolloutReferenceIndex {
 }
 
 /// Immutable snapshot references protect the snapshot path, not the mutable rollout that supplied
-/// its bytes. The snapshot lives outside the active and archived roots maintained by compression
-/// and thread deletion, so indexing its source rollout ID would incorrectly pin that mutable file.
+/// its bytes. The snapshot lives outside mutable thread discovery and deletion roots, so indexing
+/// its source rollout ID would incorrectly pin that mutable file. Compression may replace either
+/// snapshot representation without changing which logical segment the reference protects.
 fn references_detached_segment(codex_home: &Path, reference: &RolloutReferenceItem) -> bool {
     let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id) else {
         return false;
