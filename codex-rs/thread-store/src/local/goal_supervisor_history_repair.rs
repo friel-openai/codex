@@ -764,7 +764,9 @@ fn parse_complete_jsonl(source: &[u8]) -> ThreadStoreResult<Vec<ParsedLine<'_>>>
         }
         // Legacy rollout readers skip records that the current protocol cannot decode. Keep that
         // compatibility contract here and retain every rejected byte in the same physical span.
-        let rollout_line = serde_json::from_slice::<RolloutLine>(content).ok();
+        let rollout_line = codex_rollout::RolloutRecorder::parse_rollout_line_bytes(content)
+            .ok()
+            .flatten();
         parsed.push(ParsedLine {
             raw_line,
             newline_terminated,

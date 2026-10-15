@@ -39,6 +39,7 @@ fn compacted() -> CompactedItem {
             internal_chat_message_metadata_passthrough: None,
         })]),
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         compaction_response_id: None,
@@ -164,6 +165,50 @@ fn cleared_checkpoint_has_canonical_order_and_descriptor() {
             .cyber_access_program,
         None,
     );
+}
+
+#[test]
+fn checkpoint_without_previous_cyber_access_program_roundtrips() {
+    let legacy_settings = json!({
+        "model": "legacy-model",
+        "comp_hash": "legacy-hash",
+        "realtime_active": true,
+    });
+    let previous_turn_settings: SegmentPreviousTurnSettings =
+        serde_json::from_value(legacy_settings.clone()).expect("decode legacy previous settings");
+    assert_eq!(
+        previous_turn_settings,
+        SegmentPreviousTurnSettings {
+            model: "legacy-model".to_string(),
+            comp_hash: Some("legacy-hash".to_string()),
+            realtime_active: Some(true),
+            cyber_access_program: None,
+        }
+    );
+    let checkpoint = CertifiedSegmentStateCheckpoint::new(
+        compacted(),
+        Some(previous_turn_settings),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        thread_settings(),
+        token_count(),
+    )
+    .expect("valid legacy checkpoint");
+    let mut items = checkpoint.into_items();
+    let RolloutItem::Compacted(compacted) = &mut items[0] else {
+        panic!("checkpoint compaction");
+    };
+    let encoded = serde_json::to_value(&*compacted).expect("serialize checkpoint");
+    assert_eq!(
+        encoded["segment_state_checkpoint"]["previous_turn_settings"],
+        legacy_settings
+    );
+    *compacted = serde_json::from_value(encoded.clone()).expect("decode legacy checkpoint");
+    assert_eq!(
+        serde_json::to_value(&*compacted).expect("serialize decoded checkpoint"),
+        encoded
+    );
+    validate_certified_segment_state_checkpoint(&items).expect("legacy checkpoint remains valid");
 }
 
 #[test]

@@ -130,7 +130,10 @@ impl ToolExecutor<ToolInvocation> for AdoptHandler {
         create_adopt_agent_tool(self.hide_agent_metadata)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             handle_agent_start(invocation, AgentStartOperation::Adopt)
                 .await
@@ -323,6 +326,10 @@ async fn handle_agent_start(
             });
         (spawned_agent, agent_snapshot)
     } else {
+        step_context
+            .environments
+            .to_spawn_selections()
+            .map_err(collab_spawn_error)?;
         let (spawned_agent, agent_snapshot) = session
             .services
             .agent_control

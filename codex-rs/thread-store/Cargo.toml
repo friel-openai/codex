@@ -18,8 +18,10 @@ chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
 codex-extension-items = { workspace = true }
 codex-git-utils = { workspace = true }
+codex-guardian-context = { workspace = true }
 codex-install-context = { workspace = true }
 codex-otel = { workspace = true }
+codex-prompts = { workspace = true }
 codex-protocol = { workspace = true }
 codex-rollout = { workspace = true }
 codex-state = { workspace = true }
@@ -29,6 +31,7 @@ codex-utils-path-uri = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
 pulldown-cmark = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
 sha2 = { workspace = true }
@@ -44,5 +47,5 @@ zstd = { workspace = true }
 codex-history = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 uuid = { workspace = true }

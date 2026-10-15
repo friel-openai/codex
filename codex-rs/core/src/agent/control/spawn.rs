@@ -695,6 +695,9 @@ impl LocalAgentControl {
         };
         let mut options = options;
         if options.environments.is_none() {
+            if let Some(environments) = &inheritance.environments {
+                environments.to_spawn_selections()?;
+            }
             options.environments = inheritance.environments.clone();
         }
         let (session_source, mut agent_metadata) = match session_source {
@@ -1046,6 +1049,7 @@ impl LocalAgentControl {
             .then_some(ThreadHistoryMode::Paginated);
 
         let mut supervisor_continuity_history = None;
+        let mut supervisor_model_history = None;
         let (
             selected_capability_roots,
             mut forked_rollout_items,
@@ -1061,7 +1065,13 @@ impl LocalAgentControl {
                     .as_any()
                     .is::<codex_thread_store::LocalThreadStore>() =>
             {
-                let (reference_history, logical_history, source_reservation, end_ordinal) = state
+                let (
+                    reference_history,
+                    logical_history,
+                    model_history,
+                    source_reservation,
+                    end_ordinal,
+                ) = state
                     .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
                     .await?;
                 let selected_capability_roots = logical_history
@@ -1075,6 +1085,7 @@ impl LocalAgentControl {
                     .unwrap_or_default();
                 if is_goal_supervisor_helper {
                     supervisor_continuity_history = Some(logical_history.clone());
+                    supervisor_model_history = Some(model_history);
                 }
                 let reference_rollout_items = reference_history.get_rollout_items().to_vec();
                 (
@@ -1111,6 +1122,7 @@ impl LocalAgentControl {
                     .unwrap_or_default();
                 if is_goal_supervisor_helper {
                     supervisor_continuity_history = Some(parent_history.clone());
+                    supervisor_model_history = Some(parent_history.clone());
                 }
                 (selected_capability_roots, parent_history, None, None, None)
             }
@@ -1270,6 +1282,7 @@ impl LocalAgentControl {
                         // Parent-local review evidence must not become the child's authorization.
                         // Root user authorization is collected separately by the host.
                         compacted.guardian_history = None;
+                        compacted.retained_context_replay = None;
                         // Only V2 fetches root authorization live. Its local scope starts
                         // known-empty; V1 must remain incomplete when inherited authorization has
                         // been stripped.
@@ -1360,11 +1373,12 @@ impl LocalAgentControl {
                 forked_rollout_items.push(RolloutItem::ResponseItem(assignment.into()));
             }
         }
-        if is_goal_supervisor_helper {
+        let mut supervisor_suffix = Vec::new();
+        if let Some(supervisor_model_history) = supervisor_model_history.as_mut() {
             if let Some(role_prompt) =
                 crate::session::load_agent_role_prompt(&config, &session_source).await
             {
-                forked_rollout_items.push(RolloutItem::ResponseItem(
+                supervisor_suffix.push(RolloutItem::ResponseItem(
                     role_prompt_item(role_prompt).into(),
                 ));
             }
@@ -1376,7 +1390,7 @@ impl LocalAgentControl {
             {
                 let goal_id = parent_goal.goal_id.clone();
                 let parent_goal = crate::goal_supervisor::protocol_goal_from_state(parent_goal);
-                forked_rollout_items.push(
+                supervisor_suffix.push(
                     crate::goal_supervisor::supervisor_continuity_context_item(
                         &parent_thread.session,
                         &goal_id,
@@ -1386,10 +1400,12 @@ impl LocalAgentControl {
                     .await,
                 );
             }
-            forked_rollout_items.extend(
+            supervisor_suffix.extend(
                 self.supervisor_boot_context_items(state, parent_thread_id)
                     .await,
             );
+            forked_rollout_items.extend(supervisor_suffix.iter().cloned());
+            supervisor_model_history.append(&mut supervisor_suffix);
         }
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);
@@ -1406,6 +1422,14 @@ impl LocalAgentControl {
             )
             .build();
 
+        let fork_startup_items = match supervisor_model_history {
+            Some(model_history) => ForkStartupItems::with_model_history_override_and_tail(
+                model_history,
+                deferred_child_tail_items,
+            ),
+            None => ForkStartupItems::new(Vec::new(), deferred_child_tail_items),
+        }
+        .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive);
         let fork_context = fork_context_started_at.elapsed();
         let child_create_started_at = Instant::now();
         let result = state
@@ -1424,8 +1448,7 @@ impl LocalAgentControl {
                 /*environments*/ None,
                 inherited_thread_state,
                 thread_extension_init,
-                ForkStartupItems::new(Vec::new(), deferred_child_tail_items)
-                    .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
+                fork_startup_items,
             )
             .await
             .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup));

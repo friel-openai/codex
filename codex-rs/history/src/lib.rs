@@ -30,6 +30,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutReferenceItem;
@@ -262,10 +263,15 @@ impl JsonSchema for RolloutItem {
     }
 }
 
+mod checkpoint_review;
 mod guardian_history;
 mod reconciled_retained_context;
 mod retained_context;
+mod review_input;
 mod sender_user_messages;
+mod truncation;
+mod user_authorization;
+mod user_message_input;
 
 pub use sender_user_messages::SenderUserMessages;
 
@@ -281,10 +287,48 @@ pub use retained_context::RetainedSourceRole;
 pub use retained_context::RetainedUserMessage;
 pub use retained_context::VerifiedAnswer;
 pub use retained_context::VerifiedQuestionAnswer;
+pub use review_input::ReviewInputRecord;
+pub use review_input::ReviewTranscriptApplicability;
+pub use truncation::truncate_text;
+pub use user_authorization::MAX_RETAINED_USER_MESSAGE_TOKENS;
+pub use user_authorization::RetainedMessageSource;
+pub use user_authorization::UserMessageSource;
+pub use user_authorization::is_api_message;
+pub use user_authorization::is_user_authorization_message;
+pub use user_authorization::record_retained_message;
+pub use user_authorization::record_user_authorization;
+pub use user_message_input::user_message_input;
 mod rollout_payload;
 
+pub use checkpoint_review::checkpoint_requires_parent_context;
 pub use guardian_history::GuardianHistoryCheckpoint;
 pub use guardian_history::GuardianRetainedOmissions;
+
+/// Bounded results of migration replay under each distinct retained-context policy.
+/// A worker may later resume as a root, so migration must preserve both adoption histories.
+/// Legacy never adopts inherited instructions, regardless of whether the session is a root.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RetainedContextReplay {
+    pub legacy: RetainedContext,
+    pub thread_owned_worker: RetainedContext,
+    pub thread_owned_root: RetainedContext,
+    /// Finite prefix of the immutable transcript-only migration input segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_input: Option<HistoryPosition>,
+    /// Validated input prefix hydrated before reconstruction; never serialized into a checkpoint.
+    #[serde(skip)]
+    pub resolved_review_input: Option<Arc<Vec<ReviewInputRecord>>>,
+}
+
+impl PartialEq for RetainedContextReplay {
+    fn eq(&self, other: &Self) -> bool {
+        // Resolution caches derive from the immutable reference and do not change source equality.
+        self.legacy == other.legacy
+            && self.thread_owned_worker == other.thread_owned_worker
+            && self.thread_owned_root == other.thread_owned_root
+            && self.review_input == other.review_input
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
@@ -292,6 +336,11 @@ pub struct CompactedItem {
     pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
     pub guardian_history: Option<GuardianHistoryCheckpoint>,
     pub retained_context: Option<RetainedContext>,
+    /// Mode- and adoption-specific states for migration checkpoints replacing rollback records.
+    /// The ordinary field keeps the current source's ThreadOwned state for older readers;
+    /// older Legacy reviewers ignore it and continue using `guardian_history`.
+    /// Ordinary compaction writes the installed state and does not copy these alternatives.
+    pub retained_context_replay: Option<RetainedContextReplay>,
     pub mcp_resource_origins: Option<McpResourceOriginCheckpoint>,
     pub window_number: Option<u64>,
     pub first_window_id: Option<String>,
@@ -364,8 +413,12 @@ impl From<CompactedItem> for ResponseItem {
 
 /// One persisted rollout JSONL record.
 ///
-/// This intentionally does not implement Deserialize: JSONL readers must use
-/// codex_rollout's canonical parser so nested decimal values survive the flattened envelope.
+/// This type intentionally does not implement [`Deserialize`]. With
+/// `serde_json/arbitrary_precision`, Serde's buffering for the flattened `item` field can present
+/// decimal payload values as private number maps, which then fail with errors such as
+/// `invalid type: map, expected f64`. JSONL readers must use codex_rollout's canonical
+/// compatibility decoder, which removes the record envelope before decoding `item`.
+/// Do not add a derived or manual `Deserialize` implementation here.
 #[derive(Serialize, Clone, JsonSchema)]
 pub struct RolloutLine {
     pub timestamp: String,
