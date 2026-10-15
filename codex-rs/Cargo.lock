@@ -2379,6 +2379,7 @@ dependencies = [
  "codex-windows-sandbox",
  "dotenvy",
  "pathdiff",
+ "libc",
  "pretty_assertions",
  "tempfile",
  "tokio",
