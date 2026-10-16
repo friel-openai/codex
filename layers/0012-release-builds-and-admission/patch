@@ -2117,10 +2117,10 @@ index 0000000000000000000000000000000000000000..b53e4c0a736b91cf11a0e6edb8fb6826
 +    main()
 diff --git a/scripts/frodex_package_smoke.py b/scripts/frodex_package_smoke.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..42fc3ad0faeaae62aa282a935e67f713829de59c
+index 0000000000000000000000000000000000000000..bb1dc28bf8e05e0ba9f747fdaeadaf74538df4c5
 --- /dev/null
 +++ b/scripts/frodex_package_smoke.py
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,264 @@
 +#!/usr/bin/env python3
 +"""Exercise a staged package's daemon installation without credentials or inference."""
 +
@@ -2238,7 +2238,6 @@ index 0000000000000000000000000000000000000000..42fc3ad0faeaae62aa282a935e67f713
 +    try:
 +        resources = {
 +            "codex-path/rg": "ripgrep ",
-+            "codex-resources/zsh/bin/zsh": "zsh ",
 +        }
 +        if metadata["target"].endswith("-linux-gnu"):
 +            resources["codex-resources/bwrap"] = "bubblewrap "
@@ -2978,7 +2977,7 @@ index 0000000000000000000000000000000000000000..c9f7535824cfc14c837f6db89cac400a
 +    raise SystemExit(main())
 diff --git a/scripts/test_frodex_admission.py b/scripts/test_frodex_admission.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffbe7df651620560705fd89be9f82e10d7c7d80f
+index 0000000000000000000000000000000000000000..390152dd53ad4af1b343d4055b6c382cc109251e
 --- /dev/null
 +++ b/scripts/test_frodex_admission.py
 @@ -0,0 +1,887 @@
@@ -3106,7 +3105,7 @@ index 0000000000000000000000000000000000000000..ffbe7df651620560705fd89be9f82e10
 +            pair, (destination / "bin/codex", destination / "bin/codex-code-mode-host")
 +        )
 +        self.assertTrue((destination / "codex-resources/bwrap").is_file())
-+        self.assertTrue((destination / "codex-resources/zsh/bin/zsh").is_file())
++        self.assertFalse((destination / "codex-resources/zsh").exists())
 +        self.assertTrue((destination / "codex-path/rg").is_file())
 +
 +    def test_legacy_manifest_still_extracts_immutable_flat_package(self) -> None:
@@ -4205,22 +4204,98 @@ index 0000000000000000000000000000000000000000..d80f1fe43eb7364322ab0125fdeb9bb7
 +    unittest.main()
 diff --git a/scripts/test_frodex_package_smoke.py b/scripts/test_frodex_package_smoke.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4738bf5ede5ea4920da28f7a881c727269dd58f
+index 0000000000000000000000000000000000000000..2cdc170024006a9baef177ee8725f7b5d4c2e1f2
 --- /dev/null
 +++ b/scripts/test_frodex_package_smoke.py
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,180 @@
 +#!/usr/bin/env python3
-+"""Check the packaged daemon fixture's advertised and protected socket identity."""
++"""Check packaged resources and the daemon fixture's socket identity."""
 +
 +import hashlib
++import json
 +import os
 +from pathlib import Path
 +import socket
++import subprocess
 +import tempfile
 +import unittest
 +from unittest.mock import patch
 +
 +import frodex_package_smoke as smoke
++
++
++class PackageSmokeResourceTests(unittest.TestCase):
++    """Resource checks must use only binaries included in the target package."""
++
++    def test_resource_checks_match_package_targets(self):
++        with tempfile.TemporaryDirectory(
++            prefix="fdx-resource-test-", dir="/tmp"
++        ) as temporary:
++            root = Path(temporary)
++            for target, resources in (
++                (
++                    "x86_64-unknown-linux-gnu",
++                    {
++                        "codex-path/rg": "ripgrep 1",
++                        "codex-resources/bwrap": "bubblewrap 1",
++                    },
++                ),
++                ("aarch64-apple-darwin", {"codex-path/rg": "ripgrep 1"}),
++            ):
++                with self.subTest(target=target):
++                    package = root / target
++                    package.mkdir()
++                    (package / "codex-package.json").write_text(
++                        json.dumps({"version": "1.2.3+frodex.0", "target": target})
++                    )
++                    for name in resources:
++                        resource = package / name
++                        resource.parent.mkdir(parents=True, exist_ok=True)
++                        resource.write_text("fixture")
++
++                    def run_resource(argv, **kwargs):
++                        self.assertEqual(argv[1:], ["--version"])
++                        resource = Path(argv[0])
++                        name = resource.relative_to(package).as_posix()
++                        self.assertIn(name, resources)
++                        self.assertTrue(resource.is_file())
++                        return subprocess.CompletedProcess(
++                            argv, 0, resources[name], ""
++                        )
++
++                    def stop_before_bootstrap(codex, command, env, home):
++                        if command == "bootstrap":
++                            raise RuntimeError("resource checks complete")
++                        self.assertEqual(command, "stop")
++                        return {"status": "notRunning"}
++
++                    with (
++                        patch.object(
++                            smoke.subprocess, "run", side_effect=run_resource
++                        ) as run,
++                        patch.object(
++                            smoke, "daemon_command", side_effect=stop_before_bootstrap
++                        ) as daemon,
++                        patch.object(
++                            smoke,
++                            "daemon_socket_paths",
++                            return_value=(root / "rendezvous", root / "protected-socket"),
++                        ),
++                        self.assertRaisesRegex(RuntimeError, "resource checks complete"),
++                    ):
++                        smoke.smoke(package, "1.2.3+frodex.0")
++                    self.assertEqual(
++                        [
++                            Path(call.args[0][0]).relative_to(package).as_posix()
++                            for call in run.call_args_list
++                        ],
++                        list(resources),
++                    )
++                    self.assertEqual(
++                        [call.args[1] for call in daemon.call_args_list],
++                        ["bootstrap", "stop", "stop"],
++                    )
++                    self.assertFalse(daemon.call_args_list[0].args[3].parent.exists())
 +
 +
 +class PackageSmokeSocketTests(unittest.TestCase):
