@@ -115,7 +115,7 @@ pub(super) async fn run_main_inner(
     let embedded_network_policy =
         codex_app_server_client::EmbeddedNetworkPolicy::load(&launch_loader_overrides).await;
     let workload_identity_selected = is_workload_identity_selected();
-    let internal_side_session = cli.side_session_id.is_some();
+    let internal_side_session = cli.side_session_id.is_some() || cli.fork_handoff_socket.is_some();
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         let validation_target = app_server_target_for_launch(
