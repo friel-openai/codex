@@ -84,6 +84,15 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
         return None;
     }
 
+    // A child's inherited root hints do not authorize recursive subdivision. Keep the tools
+    // available for explicitly scoped parent or user delegation, including after resume.
+    if matches!(
+        turn_context.session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+    ) {
+        return Some(MultiAgentMode::ExplicitRequestOnly);
+    }
+
     let multi_agent_messages =
         ResolvedModelMessages::from_model(&settings.model_info).multi_agent();
     let hint = turn_context
@@ -104,8 +113,7 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
     };
 
     match &turn_context.session_source {
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-        | SessionSource::Cli
+        SessionSource::Cli
         | SessionSource::VSCode
         | SessionSource::Exec
         | SessionSource::Mcp
