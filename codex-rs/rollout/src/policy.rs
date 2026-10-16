@@ -27,7 +27,8 @@ pub fn persisted_rollout_item(
         RolloutItem::ResponseItem(response_item) => {
             should_persist_response_item(&response_item.item).then_some(Cow::Borrowed(item))
         }
-        RolloutItem::InterAgentCommunication(_)
+        RolloutItem::RolloutReference(_)
+        | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. } => Some(Cow::Borrowed(item)),
         RolloutItem::EventMsg(ev) => {
             persisted_event_msg(ev, history_mode).map(|event| match event {
