@@ -196,12 +196,11 @@ pub(super) async fn load_from_rollout_path(
     })
 }
 
-/// Uses an indexed active checkpoint without traversing immutable same-thread predecessors.
+/// Uses a certified active checkpoint without traversing immutable same-thread predecessors.
 ///
-/// The SQLite projection proves that the active file was fully indexed. A completed
-/// `ModelContextScan` then proves the active segment contains all checkpoint and turn metadata
-/// needed for resume. Any unprojected, inherited, incomplete, or concurrently replaced rollout
-/// preserves the existing complete-lineage implementation.
+/// A completed `ModelContextScan` proves the active segment contains all checkpoint and turn
+/// metadata needed for resume, independently of SQLite. An incomplete or concurrently replaced
+/// rollout preserves the existing complete-lineage implementation.
 pub(super) async fn scan_projected_active_model_context(
     _store: &LocalThreadStore,
     _rollout_id: codex_protocol::RolloutId,
@@ -272,6 +271,8 @@ pub(super) async fn scan_projected_active_model_context(
 }
 
 pub(super) struct ActiveModelContextScan {
+    /// Logical JSONL length when scanned from a file, never the compressed byte count.
+    pub(super) source_end_byte_offset: Option<u64>,
     pub(super) items: Vec<RolloutItem>,
     pub(super) suffix_lines: Vec<RolloutLine>,
     pub(super) segment_checkpoint: bool,
@@ -303,6 +304,7 @@ fn scan_loaded_active_model_context(
             items.insert(0, RolloutItem::SessionMeta(session_meta));
             suffix_lines.reverse();
             return Some(ActiveModelContextScan {
+                source_end_byte_offset: None,
                 items,
                 suffix_lines,
                 segment_checkpoint,
@@ -331,6 +333,7 @@ fn scan_projected_active_model_context_blocking_with_limit(
     max_scan_bytes: u64,
 ) -> io::Result<Option<ActiveModelContextScan>> {
     let file = File::open(path)?;
+    let source_end_byte_offset = file.metadata()?.len();
     let mut scanner = ReverseJsonlScanner::new(file)?
         .with_max_record_bytes(MAX_INTERACTIVE_MODEL_CONTEXT_RECORD_BYTES);
     let mut scan = ModelContextScan::default();
@@ -375,6 +378,7 @@ fn scan_projected_active_model_context_blocking_with_limit(
             items.insert(0, RolloutItem::SessionMeta(session_meta));
             suffix_lines.reverse();
             return Ok(Some(ActiveModelContextScan {
+                source_end_byte_offset: Some(source_end_byte_offset),
                 items,
                 suffix_lines,
                 segment_checkpoint,
@@ -436,7 +440,12 @@ fn scan_compressed_active_model_context_blocking_with_limit(
             lines.push(line);
         }
     }
-    Ok(scan_loaded_active_model_context(lines, session_meta))
+    Ok(
+        scan_loaded_active_model_context(lines, session_meta).map(|mut scan| {
+            scan.source_end_byte_offset = Some(decoded_bytes);
+            scan
+        }),
+    )
 }
 
 fn interactive_model_context_too_large() -> io::Error {
@@ -504,6 +513,27 @@ pub(super) async fn scan_plain_active_model_context_snapshot(
     .await
     .map_err(|err| ThreadStoreError::Internal {
         message: format!("failed to join active model context scan: {err}"),
+    })?;
+    active_model_context_scan_or_fallback(result)
+}
+
+/// Certifies one physical segment without resolving its historical predecessors.
+/// Compressed input must be decoded through its end: a later rollback can invalidate an earlier
+/// checkpoint. The decoder uses the same byte and record limits as the plain reverse scan.
+pub(super) async fn scan_active_model_context_snapshot(
+    path: &Path,
+    session_meta: SessionMetaLine,
+) -> ThreadStoreResult<Option<ActiveModelContextScan>> {
+    if codex_rollout::plain_rollout_path(path) == path {
+        return scan_plain_active_model_context_snapshot(path, session_meta).await;
+    }
+    let path = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        scan_compressed_active_model_context_blocking(&path, session_meta)
+    })
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to join compressed active model context scan: {err}"),
     })?;
     active_model_context_scan_or_fallback(result)
 }
