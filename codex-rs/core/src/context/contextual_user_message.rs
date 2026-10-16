@@ -1,3 +1,4 @@
+pub(crate) use codex_history::is_user_authorization_message;
 use codex_protocol::items::HookPromptItem;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
@@ -46,39 +47,6 @@ pub(crate) fn is_guardian_context_message(item: &ResponseItem) -> bool {
                     .is_some_and(|kinds| !kinds.is_empty() && kinds.len() == content.len()
                         && kinds.iter().all(|kind| kind.0 == GuardianRetainedInstructions::KIND)))
             && UserGoalUpdate::message_text(item).is_none())
-}
-
-/// Uses host annotations rather than text markers to identify user authorization changes.
-pub(crate) fn is_user_authorization_message(item: &ResponseItem) -> bool {
-    let ResponseItem::Message {
-        role,
-        content,
-        internal_chat_message_metadata_passthrough,
-        ..
-    } = item
-    else {
-        return false;
-    };
-    role == "user"
-        && internal_chat_message_metadata_passthrough
-            .as_ref()
-            .and_then(|metadata| metadata.content_item_kinds.as_ref())
-            .is_none_or(|kinds| {
-                // Unknown, incomplete, and legacy messages remain conservative.
-                kinds.is_empty()
-                    || kinds.len() != content.len()
-                    || kinds.iter().any(|kind| {
-                        kind.0.starts_with("user.")
-                            || matches!(
-                                kind.0.as_str(),
-                                "" | "unknown"
-                                    // Media preparation can replace real user input.
-                                    | "images.preparation_error"
-                                    | "images.unsupported"
-                                    | "audio.unsupported"
-                            )
-                    })
-            })
 }
 
 fn is_standard_contextual_user_text(text: &str) -> bool {

@@ -47,8 +47,9 @@ pub(super) struct MeasuredSingleRollout {
 pub(super) async fn measure_single_rollout(
     path: &Path,
     kind: RolloutMigrationKind,
+    session_source: &codex_protocol::protocol::SessionSource,
 ) -> ThreadStoreResult<MeasuredSingleRollout> {
-    let canonical_session_meta = canonical_session_meta(path).await?;
+    let canonical_session_meta = super::session_metadata::canonical_session_meta(path).await?;
     let RolloutItem::SessionMeta(session_meta) = &canonical_session_meta.item else {
         return Err(migration_error("canonical session metadata is missing"));
     };
@@ -56,7 +57,7 @@ pub(super) async fn measure_single_rollout(
     let rollout_id =
         codex_rollout::rollout_id_from_path(codex_rollout::plain_rollout_path(path).as_path())
             .unwrap_or(thread_id);
-    let rollback_plan = build_rollback_plan(path).await?;
+    let rollback_plan = build_rollback_plan(path, session_source).await?;
     let (source_byte_count, source_sha256) = hash_file(path).await?;
     let source_record_count = u64::try_from(rollback_plan.record_count())
         .map_err(|_| migration_error("source record count does not fit u64"))?;
@@ -243,29 +244,15 @@ where
     Ok(canonicalizer.next_ordinal())
 }
 
-async fn canonical_session_meta(path: &Path) -> ThreadStoreResult<RolloutLine> {
-    let mut reader = codex_rollout::open_rollout_line_reader(path)
-        .await
-        .map_err(migration_error)?;
-    while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
-        if raw.len() > MAX_ROLLOUT_LINE_BYTES {
-            continue;
-        }
-        let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
-            continue;
-        };
-        if matches!(line.item, RolloutItem::SessionMeta(_)) {
-            return Ok(line);
-        }
-    }
-    Err(migration_error("rollout contains no session metadata"))
-}
-
-async fn build_rollback_plan(path: &Path) -> ThreadStoreResult<RollbackPlan> {
+async fn build_rollback_plan(
+    path: &Path,
+    session_source: &codex_protocol::protocol::SessionSource,
+) -> ThreadStoreResult<RollbackPlan> {
     let mut reader = codex_rollout::open_rollout_line_reader(path)
         .await
         .map_err(migration_error)?;
     let mut planner = RollbackPlanner::new();
+    planner.set_source(session_source);
     while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
         if raw.len() > MAX_ROLLOUT_LINE_BYTES {
             continue;

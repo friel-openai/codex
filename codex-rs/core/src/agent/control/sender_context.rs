@@ -97,10 +97,11 @@ impl LocalAgentRuntime {
                                 fragment.from_storage = true;
                                 ContextManager::reconstruct_rollout(
                                     &stored.items,
-                                    meta.history_mode,
+                                    &meta.source,
                                     ContextManager::new(),
                                     // Tool bodies are not sender authorization evidence.
                                     TruncationPolicy::Bytes(0),
+                                    /*restore_review_input*/ false,
                                 )
                                 .retained_context
                             })
