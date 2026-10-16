@@ -81,8 +81,10 @@ async fn empty_goal_continuations_block_after_three_without_activity(
     }
     let server = create_mock_responses_server_sequence(scripts).await;
     let codex_home = TempDir::new()?;
+    // The legacy continuation breaker owns these turns, not a native supervisor child.
     let mut config = MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
+        .disable_feature(Feature::GoalSupervisor)
         .enable_feature(Feature::Goals);
     if recovery == Some("interrupt") {
         config = config
