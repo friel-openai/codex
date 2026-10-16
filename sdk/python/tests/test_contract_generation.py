@@ -70,7 +70,7 @@ def test_schema_refresh_only_updates_python_for_repository_schemas(monkeypatch, 
     runpy.run_path(str(script), run_name="__main__")
 
     assert [args[0] for args, _kwargs in calls] == (
-        ["cargo", "uv"] if mode == "repository" else ["cargo"]
+        ["just", "uv"] if mode == "repository" else ["just"]
     )
     assert all(kwargs["check"] for _args, kwargs in calls)
     if mode == "repository":
@@ -93,4 +93,4 @@ def test_schema_generation_failure_does_not_update_python(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(subprocess.CalledProcessError):
         runpy.run_path(str(script), run_name="__main__")
-    assert calls == ["cargo"]
+    assert calls == ["just"]
