@@ -1,5 +1,8 @@
-//! Shared cross-process ownership for local thread writers and rollout publication.
-//! Thread lock-file creation and removal uses the existing home coordination lock.
+//! Cross-process ownership of mutable rollout files.
+//!
+//! Compression and thread-store use the same coordination lock when opening or removing a
+//! per-thread lock file. Without that coordination, unlinking a released file could let two
+//! processes lock different inodes for the same thread.
 
 use std::fs;
 use std::fs::File;
@@ -56,10 +59,13 @@ impl WriterLockCoordinator {
             .truncate(false)
             .open(&path)
             .map_err(|err| {
-                io::Error::other(format!(
-                    "failed to open thread writer lock {}: {err}",
-                    path.display()
-                ))
+                io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to open thread writer lock {}: {err}",
+                        path.display()
+                    ),
+                )
             })?;
 
         match file.try_lock() {
@@ -71,10 +77,13 @@ impl WriterLockCoordinator {
                 ));
             }
             Err(std::fs::TryLockError::Error(err)) => {
-                return Err(io::Error::other(format!(
-                    "failed to acquire thread writer lock {}: {err}",
-                    path.display()
-                )));
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to acquire thread writer lock {}: {err}",
+                        path.display()
+                    ),
+                ));
             }
         }
 
@@ -106,17 +115,39 @@ impl WriterLockCoordinator {
     }
 
     fn lock_coordination(&self) -> io::Result<File> {
-        fs::create_dir_all(&self.directory)?;
+        fs::create_dir_all(&self.directory).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to create thread writer lock directory {}: {err}",
+                    self.directory.display()
+                ),
+            )
+        })?;
+        let path = self.directory.join(COORDINATION_LOCK_FILE);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.directory.join(COORDINATION_LOCK_FILE))?;
+            .open(&path)
+            .map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to open thread writer coordination lock {}: {err}",
+                        path.display()
+                    ),
+                )
+            })?;
         file.lock().map_err(|err| {
-            io::Error::other(format!(
-                "failed to acquire thread writer coordination lock: {err}"
-            ))
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to acquire thread writer coordination lock {}: {err}",
+                    path.display()
+                ),
+            )
         })?;
         Ok(file)
     }

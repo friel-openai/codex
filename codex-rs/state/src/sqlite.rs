@@ -54,7 +54,7 @@ pub(crate) enum StateMigrationStep {
 
 fn ensure_transactional_migrations(migrator: &Migrator) -> anyhow::Result<()> {
     if migrator.no_tx || migrator.migrations.iter().any(|migration| migration.no_tx) {
-        anyhow::bail!("state migrations must all support the startup transaction");
+        anyhow::bail!("database schema migrations must all support the startup transaction");
     }
     Ok(())
 }
@@ -69,7 +69,7 @@ fn is_sqlite_writer_contention(error: &sqlx::Error) -> bool {
         .is_some_and(|code| matches!(code & 0xff, 5 | 6))
 }
 
-async fn begin_state_migration_transaction<F>(
+async fn begin_runtime_migration_transaction<F>(
     pool: &SqlitePool,
     mut on_contention: F,
 ) -> anyhow::Result<Transaction<'static, Sqlite>>
@@ -100,7 +100,7 @@ where
 {
     ensure_transactional_migrations(migrator)?;
 
-    let mut transaction = begin_state_migration_transaction(pool, on_contention).await?;
+    let mut transaction = begin_runtime_migration_transaction(pool, on_contention).await?;
     let migration_result = async {
         repair_frodex_goal_supervisor_state_migration(&mut transaction).await?;
         after_step(StateMigrationStep::GoalSupervisorCompatibility)?;
@@ -442,10 +442,15 @@ impl SqliteConfig {
         let path = spec.path(self.home());
         let started = Instant::now();
         let pool_result = loop {
-            match self.open_read_write_pool_with_spec(&path, Some(spec), telemetry_override).await {
+            match self
+                .open_read_write_pool_with_spec(&path, Some(spec), telemetry_override)
+                .await
+            {
                 Err(error)
-                    if matches!(spec.kind, DbKind::State)
-                        && error.downcast_ref::<sqlx::Error>().is_some_and(is_sqlite_writer_contention) =>
+                    if matches!(spec.kind, DbKind::State | DbKind::ThreadHistory)
+                        && error
+                            .downcast_ref::<sqlx::Error>()
+                            .is_some_and(is_sqlite_writer_contention) =>
                 {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
@@ -466,6 +471,16 @@ impl SqliteConfig {
         let migrate_result = async {
             if matches!(spec.kind, DbKind::State) {
                 migrate_state_database(&pool, migrator).await
+            } else if matches!(spec.kind, DbKind::ThreadHistory) {
+                // Read applied versions only after reserving SQLite's writer. Otherwise two
+                // app-servers can both decide migration 1 must create thread_turns.
+                ensure_transactional_migrations(migrator)?;
+                let mut transaction = begin_runtime_migration_transaction(&pool, || {}).await?;
+                migrator
+                    .run_direct(/*target*/ None, &mut *transaction, /*skip*/ false)
+                    .await?;
+                transaction.commit().await?;
+                Ok(())
             } else {
                 migrator.run(&pool).await.map_err(anyhow::Error::from)
             }
@@ -619,3 +634,7 @@ impl SqliteConfig {
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "thread_history_migration_tests.rs"]
+mod thread_history_migration_tests;

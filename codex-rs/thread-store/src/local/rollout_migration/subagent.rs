@@ -11,6 +11,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
+use codex_protocol::protocol::EventMsg;
 use codex_rollout::ModelContextScan;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
@@ -40,6 +41,14 @@ pub(super) async fn select_bounded_context(
             let Ok(Some(line)) = line_parser::parse_legacy_rollout_value(value) else {
                 continue;
             };
+            if matches!(
+                line.item,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
+            ) {
+                // RollbackPlanner must preserve retained admission before deleting the suffix.
+                // The bounded-copy writer does not interpret rollback records.
+                return Ok(None);
+            }
             if scan.push(line.item).is_complete() {
                 let mut items = scan.finish();
                 items.retain(|item| !matches!(item, RolloutItem::SessionMeta(_)));
