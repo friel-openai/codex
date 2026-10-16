@@ -80,6 +80,8 @@ async fn retained_tool_output_survives_compaction_and_resume() -> Result<()> {
             matches!(event, EventMsg::TurnComplete(_))
         })
         .await;
+        let saved_environments = test.codex.environment_selections().await;
+        assert!(!saved_environments.is_empty());
         let resumed = test_codex()
             .with_model("gpt-6-astra")
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
@@ -89,6 +91,11 @@ async fn retained_tool_output_survives_compaction_and_resume() -> Result<()> {
             })
             .restart_with_auto_env(&server, &test)
             .await?;
+        // Cold resume restores the saved selection, not the restart fixture's new environment.
+        assert_eq!(
+            resumed.codex.environment_selections().await,
+            saved_environments
+        );
         resumed
             .submit_text_turn("What request are you working on?")
             .await?;
