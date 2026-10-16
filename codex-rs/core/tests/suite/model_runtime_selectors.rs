@@ -438,6 +438,10 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> 
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
             config.model = Some(ROOT_MODEL.to_string());
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("let the remote catalog choose the version for this fixture");
         });
     let test = builder.build(&server).await?;
     assert_eq!(
