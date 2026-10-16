@@ -34,7 +34,7 @@ async fn incompatible_daemon_falls_back_for_explicit_features() -> Result<()> {
                 };
                 let response = match request.method.as_str() {
                     "initialize" => {
-                        json!({"id": request.id, "result": {"userAgent": "daemon-test/0.0.0"}})
+                        json!({"id": request.id, "result": {"userAgent": format!("codex/{}", env!("CARGO_PKG_VERSION"))}})
                     }
                     "config/read" => {
                         json!({"id": request.id, "result": {"config": {}, "layers": []}})

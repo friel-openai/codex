@@ -257,6 +257,8 @@ mod web_search;
 mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
+#[cfg(not(target_os = "windows"))]
+mod workspace_cwd;
 mod workspace_roots;
 mod worktree_trust;
 
