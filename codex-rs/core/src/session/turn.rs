@@ -199,6 +199,11 @@ pub(crate) async fn run_turn(
         .is_none();
     let auto_summarization_enabled =
         auto_compaction_enabled && !turn_context.config.features.enabled(Feature::TokenBudget);
+    if sess.persistence_restart_required() {
+        return Err(CodexErr::Fatal(
+            "thread persistence requires a restart before another turn can begin".to_string(),
+        ));
+    }
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }

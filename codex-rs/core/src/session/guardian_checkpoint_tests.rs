@@ -6,9 +6,11 @@ use codex_history::InitialHistory;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use test_case::test_case;
 
 #[test_case(GuardianContextMode::Legacy, ThreadHistoryMode::Legacy; "legacy_context_legacy_storage")]
@@ -35,6 +37,9 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
     let world_state = WorldStateSnapshot::from(baseline.as_object().unwrap());
     {
         let mut state = session.state.lock().await;
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
+        state.session_configuration.thread_source =
+            Some(ThreadSource::Feature("system".to_string()));
         state.history = ContextManager::for_session(
             &SessionSource::default(),
             &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
@@ -103,13 +108,22 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
         .await;
     // Replay into a fresh session so preserved live state cannot mask missing checkpoint data.
     let (fork, _) = make_session_and_context().await;
-    fork.state.lock().await.session_configuration.history_mode = history_mode;
-    fork.state.lock().await.history = ContextManager::for_session(
-        &SessionSource::default(),
-        &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
-    );
+    {
+        let mut state = fork.state.lock().await;
+        state.session_configuration.history_mode = history_mode;
+        // Only system-ephemeral startup is allowed to replay without a durable writer.
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
+        state.session_configuration.thread_source =
+            Some(ThreadSource::Feature("system".to_string()));
+        state.history = ContextManager::for_session(
+            &SessionSource::default(),
+            &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
+        );
+    }
     fork.record_initial_history(InitialHistory::Forked(items))
-        .await;
+        .await
+        .expect("guardian checkpoint history must replay successfully");
+    assert!(fork.live_thread().is_none());
     let restored = fork.clone_history().await;
     assert_eq!(restored.annotated_items(), expected.annotated_items());
     assert_eq!(restored.retained_context(), expected.retained_context());
