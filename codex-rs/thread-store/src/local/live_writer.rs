@@ -67,9 +67,11 @@ pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
 ) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
-    let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
+    // Keep the duplicate-writer error ahead of history inspection.
     store.ensure_live_recorder_absent(params.thread_id).await?;
-    let writer_lock = store.acquire_writer_lock(params.thread_id)?;
+    if let Some(history) = params.history.as_deref() {
+        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(history)?;
+    }
     let has_requested_path = params.rollout_path.is_some();
     let has_supplied_history = params.history.is_some();
     let rollout_path = match params.rollout_path {
@@ -120,19 +122,62 @@ pub(super) async fn resume_thread(
             });
         }
     }
+    let supplied_empty_placeholder = has_supplied_history
+        && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
+    let (rollout_path, mut history_access) = if !supplied_empty_placeholder {
+        super::model_context::prepare_history_access(store, params.thread_id, rollout_path).await?
+    } else {
+        (
+            rollout_path,
+            super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess::clean(),
+        )
+    };
+    let _live_writer_guard = if history_access.is_reserved() {
+        None
+    } else {
+        Some(store.live_writer_locks.lock(params.thread_id).await)
+    };
+    store.ensure_live_recorder_absent(params.thread_id).await?;
+    let writer_lock = if history_access.is_reserved() {
+        history_access
+            .take_writer_lock(params.thread_id)
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: format!(
+                    "goal-supervisor repair did not retain writer ownership for thread {}",
+                    params.thread_id
+                ),
+            })?
+    } else {
+        store.acquire_writer_lock(params.thread_id)?
+    };
+    // Repair may have waited for a concurrent rotation. Validate selection again while owned.
+    if let Some(selected_path) = selected_rollout_path(store, params.thread_id).await? {
+        let selected_path = codex_rollout::existing_rollout_path(&selected_path)
+            .await
+            .unwrap_or(selected_path);
+        let selected_path = tokio::fs::canonicalize(&selected_path)
+            .await
+            .unwrap_or(selected_path);
+        if codex_rollout::plain_rollout_path(&rollout_path)
+            != codex_rollout::plain_rollout_path(&selected_path)
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "rollout path does not select the current rollout for thread {}",
+                    params.thread_id
+                ),
+            });
+        }
+    }
     let history = match params.history {
         Some(history)
             if !matches!(
                 history.first(),
                 Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == params.thread_id
-            ) =>
-        {
-            history
-        }
+            ) => history,
         Some(history)
             if params.history_revision.is_some()
-                && params.history_revision
-                    == super::history_revision::read(&rollout_path).await =>
+                && params.history_revision == super::history_revision::read(&rollout_path).await =>
         {
             history
         }
