@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/side.rs
+assertion_line: 615
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"› Ask a follow-up question                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project              Standalone side conversation  "

@@ -196,7 +196,7 @@ async fn turn_start_failure_is_shown_without_exiting() -> Result<()> {
 
 #[tokio::test]
 async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result<()> {
-    let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
     let checkout = tempfile::tempdir()?;
     app.config.cwd = AbsolutePathBuf::from_absolute_path(checkout.path())?;
     for args in [
@@ -284,7 +284,14 @@ async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result
             parent_thread_id: thread_id,
             user_message: Some("Do not fork this stopped thread".into()),
         },
-        AppEvent::ForkCurrentSession { name: None },
+        AppEvent::StartPlacedSide {
+            parent_thread_id: thread_id,
+            placement: crate::app_event::ForkPanePlacement::Right,
+        },
+        AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        },
         AppEvent::StartManagedWorktree {
             mode: crate::app_event::ManagedWorktreeMode::Fork,
             name: None,
@@ -292,7 +299,17 @@ async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result
         AppEvent::OpenAgentPicker,
         AppEvent::SelectAgentThread(thread_id),
     ] {
+        let placed_side = matches!(&event, AppEvent::StartPlacedSide { .. });
+        if placed_side {
+            while app_event_rx.try_recv().is_ok() {}
+        }
         app.handle_event(&mut tui, &mut app_server, event).await?;
+        if placed_side {
+            assert!(matches!(
+                app_event_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
     }
 
     assert!(!app.config.codex_home.join("worktrees").exists());

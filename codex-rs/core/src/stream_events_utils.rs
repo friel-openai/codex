@@ -15,6 +15,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::call_trace;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolRouter;
 use codex_memories_read::citations::parse_memory_citation;
@@ -28,6 +29,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout::state_db;
+use codex_tools::ToolName;
 use codex_utils_stream_parser::strip_proposed_plan_blocks;
 use futures::Future;
 use tracing::debug;
@@ -223,6 +225,7 @@ pub(crate) type InFlightFuture<'f> =
 pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<String>,
     pub needs_follow_up: bool,
+    pub tool_name: Option<ToolName>,
     pub tool_future: Option<InFlightFuture<'static>>,
 }
 
@@ -347,11 +350,20 @@ pub(crate) async fn handle_output_item_done(
                 .await;
 
             let cancellation_token = ctx.cancellation_token.child_token();
-            let tool_future: InFlightFuture<'static> = Box::pin(
-                ctx.tool_runtime
-                    .clone()
-                    .handle_tool_call(call, cancellation_token),
-            );
+            output.tool_name = Some(call.tool_name.clone());
+            let tool_runtime = ctx.tool_runtime.clone();
+            let tool_future: InFlightFuture<'static> = if is_set_workspace_cwd_tool(&call.tool_name)
+            {
+                // handle_tool_call starts dispatch immediately. Workspace changes must wait
+                // until the complete response has been checked for sibling tool calls.
+                Box::pin(async move {
+                    tool_runtime
+                        .handle_tool_call(call, cancellation_token)
+                        .await
+                })
+            } else {
+                Box::pin(tool_runtime.handle_tool_call(call, cancellation_token))
+            };
 
             output.needs_follow_up = true;
             output.tool_future = Some(tool_future);
