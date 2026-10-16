@@ -35,10 +35,30 @@ pub(super) fn logical_lines(lines: &[HyperlinkLine]) -> Vec<LogicalLine> {
         match previous {
             Some(previous) => previous.append(line, source),
             None => {
+                let alignment_prefix = source
+                    .user_message
+                    .as_ref()
+                    .map_or(/*default*/ 0, |layout| layout.alignment_prefix_bytes);
+                let continuation_bytes = source
+                    .continuation_indent
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum();
+                let mut subsequent_indent = slice_line(
+                    &source.continuation_indent,
+                    alignment_prefix..continuation_bytes,
+                );
+                if let Some(user_message) = &source.user_message {
+                    // Fresh bubble rows color the gutter, but not the removed alignment padding.
+                    for span in &mut subsequent_indent.spans {
+                        span.style = user_message.style.patch(span.style);
+                    }
+                }
                 let mut entry = LogicalLine {
                     line: HyperlinkLine::new(Line::default().style(line.line.style)),
-                    initial_indent: slice_line(&line.line, 0..source.prefix_bytes),
-                    subsequent_indent: source.continuation_indent.clone(),
+                    initial_indent: slice_line(&line.line, alignment_prefix..source.prefix_bytes),
+                    subsequent_indent,
                     wrap_policy: source.wrap_policy,
                     right_reserve: source.right_reserve,
                     origin: source.clone(),
