@@ -30,7 +30,7 @@ futures = { workspace = true }
 libc = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true, features = ["raw_value"] }
+serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 sqlx-macros = { workspace = true }
@@ -41,6 +41,7 @@ tracing = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+codex-history = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

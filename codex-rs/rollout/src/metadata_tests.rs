@@ -416,6 +416,7 @@ async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
             segment_state_checkpoint: None,
         })
     })) {
@@ -476,6 +477,7 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                resume_metadata: None,
                 segment_state_checkpoint: None,
             }),
         },
@@ -533,6 +535,7 @@ fn builder_from_items_falls_back_to_filename() {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     })];
 
     let builder = builder_from_items(items.as_slice(), path.as_path()).expect("builder");
