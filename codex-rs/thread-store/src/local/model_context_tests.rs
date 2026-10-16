@@ -1212,7 +1212,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
     append_items(path.as_path(), [user_message("later message")]);
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
     let lineage = store
-        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
+        .resolve_rollout_lineage(thread_id)
         .await
         .expect("resolve source lineage");
     let session_meta = codex_rollout::read_session_meta_line(path.as_path())
@@ -1311,7 +1311,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
         );
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let lineage = store
-            .resolve_rollout_lineage(child_id, /*initial_path*/ None)
+            .resolve_rollout_lineage(child_id)
             .await
             .expect("resolve source lineage");
         // Explicit metadata resolves the runtime, including None, without reading predecessors.
