@@ -433,6 +433,56 @@ fn highlighting_reveals_prompt_body_when_only_padding_is_visible() {
 }
 
 #[test]
+fn transcript_overlay_highlights_only_user_messages_after_cell_changes() {
+    let prompt: Arc<dyn HistoryCell> = Arc::new(history_cell::new_user_prompt(
+        "user prompt".into(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let activity: Arc<dyn HistoryCell> = Arc::new(history_cell::PlainHistoryCell::new(vec![
+        "agent activity".into(),
+    ]));
+    let mut overlay = transcript_overlay(vec![Arc::clone(&prompt), Arc::clone(&activity)]);
+    let area = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 20,
+    );
+    let highlighted_text = |overlay: &mut TranscriptOverlay| {
+        let mut buffer = Buffer::empty(area);
+        overlay.render(area, &mut buffer);
+        buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>()
+    };
+    let mut snapshots = Vec::new();
+
+    overlay.set_highlight_cell(Some(0));
+    snapshots.push(format!("user: {:?}", highlighted_text(&mut overlay)));
+    overlay.set_highlight_cell(Some(1));
+    snapshots.push(format!("activity: {:?}", highlighted_text(&mut overlay)));
+    overlay.prepend(vec![Arc::clone(&activity)]);
+    snapshots.push(format!("prepended: {:?}", highlighted_text(&mut overlay)));
+    overlay.replace_cells(vec![Arc::clone(&activity), Arc::clone(&activity), prompt]);
+    snapshots.push(format!("replaced: {:?}", highlighted_text(&mut overlay)));
+    overlay.consolidate_cells(1..3, activity);
+    snapshots.push(format!(
+        "consolidated: {:?}",
+        highlighted_text(&mut overlay)
+    ));
+
+    assert_snapshot!(snapshots.join("\n"), @r#"
+    user: "user prompt"
+    activity: ""
+    prepended: ""
+    replaced: "user prompt"
+    consolidated: ""
+    "#);
+}
+
+#[test]
 fn transcript_overlay_snapshots_paginated_history_states() {
     let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
         lines: vec![Line::from("recent transcript")],
