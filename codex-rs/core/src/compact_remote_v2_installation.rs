@@ -193,7 +193,7 @@ async fn build_and_install_compaction(
         sess.record_rollout_budget_usage(token_usage).await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
     }
-    let (compacted_history, retained_images) = build_v2_compacted_history(
+    let (mut compacted_history, retained_images) = build_v2_compacted_history(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
@@ -204,6 +204,24 @@ async fn build_and_install_compaction(
             RetainedImageBudget::Disabled
         },
     );
+    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
+        let previous_history = sess.clone_history().await;
+        let previous_items = previous_history.annotated_items();
+        let previous_items = if let Some((prefix, ..)) = prefix.as_ref() {
+            // Prefix installation appends the live suffix separately.
+            let Some(items) = previous_items.get(..prefix.len) else {
+                return Ok(false);
+            };
+            items
+        } else {
+            previous_items
+        };
+        retain_subagent_assignment_and_recent_messages(
+            previous_items,
+            &mut compacted_history,
+            &agent_path,
+        );
+    }
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
     let installing_prefix = prefix.is_some();
     let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
