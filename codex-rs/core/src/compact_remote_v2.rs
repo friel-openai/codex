@@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::CompactionReporting;
 use crate::compact::compaction_status_from_result;
+use crate::compact::retain_subagent_assignment_and_recent_messages;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
@@ -783,6 +784,7 @@ fn truncate_message_text_to_token_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::AgentPath;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ContentItemKind;
     use codex_protocol::models::InternalChatMessageMetadataPassthrough;
@@ -899,6 +901,64 @@ mod tests {
             raw(history),
             vec![message("user", "user", /*phase*/ None), hook, output]
         );
+    }
+
+    #[test]
+    fn v2_compaction_restores_subagent_assignment_after_retention_budget() {
+        let agent_path = AgentPath::try_from("/root/release_build").expect("valid agent path");
+        let assignment = ResponseItemEnvelope {
+            item: ResponseItem::AgentMessage {
+                id: None,
+                author: "/root".to_string(),
+                recipient: agent_path.to_string(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "Build the approved release candidate".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+            metadata: Some(CodexHarnessMetadata {
+                client_authored: true,
+                history_truncation_token_limit: Some(37),
+                ..Default::default()
+            }),
+        };
+        let previous_history = vec![
+            assignment.clone(),
+            ResponseItemEnvelope::new(message(
+                "user",
+                &"new context ".repeat(RETAINED_MESSAGE_TOKEN_BUDGET),
+                /*phase*/ None,
+            )),
+        ];
+        let output = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "new".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let (mut history, _) = build_v2_compacted_history(
+            previous_history
+                .iter()
+                .map(|item| item.item.clone())
+                .collect(),
+            previous_history
+                .iter()
+                .map(|item| item.metadata.clone())
+                .collect(),
+            output.clone(),
+            &Features::with_defaults(),
+            RetainedImageBudget::Disabled,
+        );
+        assert!(!history.iter().any(|item| item == &assignment));
+
+        retain_subagent_assignment_and_recent_messages(
+            &previous_history,
+            &mut history,
+            &agent_path,
+        );
+
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[1], assignment);
+        assert_eq!(history[2], ResponseItemEnvelope::new(output));
     }
 
     #[test]
