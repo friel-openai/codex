@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "codex-cli"
-version = "0.162.1"
+version = "0.163.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -2517,6 +2517,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "codex-agent-message-board-extension",
  "codex-api",
  "codex-app-server",
  "codex-app-server-client",
