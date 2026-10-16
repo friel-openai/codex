@@ -357,10 +357,10 @@ index 0000000000000000000000000000000000000000..5b2dfa991aa276fa100e94746f3f4d2e
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/fork/section.rs b/codex-rs/core/src/independent_thread/fork/section.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..553c16b3e3f8c66729c2179cb8749cd6186d7759
+index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826fc471118
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/section.rs
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,330 @@
 +//! Optional Desktop sidebar placement through tools advertised by the client.
 +//!
 +//! Desktop owns section membership and host routing. Native thread-store sections
@@ -583,6 +583,7 @@ index 0000000000000000000000000000000000000000..553c16b3e3f8c66729c2179cb8749cd6
 +        call_id.clone(),
 +        tool,
 +        arguments,
++        invocation.cancellation_token.clone(),
 +    );
 +    tokio::pin!(future);
 +    let response = tokio::select! {
@@ -1275,10 +1276,10 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +}
 diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3be7b514988ff51928c8a1c242c4b8b4efdb2da6
+index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca92461a320ded
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/tests.rs
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,524 @@
 +//! Deterministic tests of the tool's persisted history and independent lifecycle.
 +
 +use super::*;
@@ -1791,6 +1792,8 @@ index 0000000000000000000000000000000000000000..3be7b514988ff51928c8a1c242c4b8b4
 +    RolloutItem::ResponseItem(
 +        ResponseItem::Message {
 +            id: None,
++            status: None,
++            encrypted_content: None,
 +            role: "user".to_string(),
 +            content: vec![ContentItem::InputText {
 +                text: text.to_string(),
@@ -1833,10 +1836,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 1cba0c82a463624809c62e4b6b571fbf934173b4..ece7f6531da6afdc88e2dc59b61ba25709376470 100644
+index e11a56fe751cc755f2b392563d52804ec84dc602..1fc944899b02cd88f613b01d13836e30e5cf1404 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1137,6 +1137,11 @@ impl ThreadManager {
+@@ -1159,6 +1159,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1849,10 +1852,10 @@ index 1cba0c82a463624809c62e4b6b571fbf934173b4..ece7f6531da6afdc88e2dc59b61ba257
          let thread = self.state.get_thread(thread_id).await?;
          if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
 diff --git a/codex-rs/core/src/tools/handlers/dynamic.rs b/codex-rs/core/src/tools/handlers/dynamic.rs
-index f658d6742b158fbc5abbf6a8e1a78dba890466e1..74a5697ee526d7587f9e798e43703e0a871bfccf 100644
+index 9e78325058546a3924b12fa8c9de938d6421fbcf..004cf7ecd093a3c64f35f49359ecee750e4ddd6f 100644
 --- a/codex-rs/core/src/tools/handlers/dynamic.rs
 +++ b/codex-rs/core/src/tools/handlers/dynamic.rs
-@@ -175,7 +175,7 @@ impl CoreToolRuntime for DynamicToolHandler {
+@@ -183,7 +183,7 @@ impl CoreToolRuntime for DynamicToolHandler {
      clippy::await_holding_invalid_type,
      reason = "active turn checks and dynamic tool response registration must remain atomic"
  )]
@@ -1861,15 +1864,6 @@ index f658d6742b158fbc5abbf6a8e1a78dba890466e1..74a5697ee526d7587f9e798e43703e0a
      session: &Session,
      turn_context: &TurnContext,
      call_id: String,
-@@ -193,7 +193,7 @@ async fn request_dynamic_tool(
-                 let mut ts = at.turn_state.lock().await;
-                 ts.insert_pending_dynamic_tool(call_id.clone(), tx_response)
-             }
--            None => None,
-+            None => return None,
-         }
-     };
-     if prev_entry.is_some() {
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
 index 2df4586f7affd2afe8275a9fa52e6bc6d8f2f6fc..dce0710272114791e0fa772081f1b447292bc692 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
@@ -1951,7 +1945,7 @@ index 4cadd93adc5c6cb21ab2162678a8ad430e527e14..0dd9f21339dfaf97b13b1af53c0b593a
      }
  }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index bc879c11019a22d58e42146c7e3bfe8c29f76a3f..474b2e0c32677a00ce564012cd737f4b50af4bde 100644
+index 67ce64ce02b6d454788f5a7c368c1c1009b61348..fac30acdc23d5482b71ad296a90f0c7109d54489 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
 @@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -1963,7 +1957,7 @@ index bc879c11019a22d58e42146c7e3bfe8c29f76a3f..474b2e0c32677a00ce564012cd737f4b
  use codex_protocol::protocol::TurnCompleteEvent;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentSelections;
-@@ -1667,6 +1669,182 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
+@@ -1679,6 +1681,182 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
      assert_nth_user_message_ignores_contextual_user_items(/*use_completed_user_items*/ false).await
  }
 

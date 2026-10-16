@@ -1,8 +1,17 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index d294afa10ced8a59e3f8bea44f702ace60828b92..0b534d334ddd54a50ff38303d6634dd7000fa446 100644
+index c1486848eac38cc5a091649775204fef184917d8..25834c149df23a0090e2d0a4797f88662ff2d173 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2518,6 +2518,7 @@ dependencies = [
+@@ -2508,7 +2508,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cli"
+-version = "0.162.1"
++version = "0.163.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2517,6 +2517,7 @@ dependencies = [
   "chrono",
   "clap",
   "clap_complete",
@@ -23,7 +32,7 @@ index 608921c370a184c0c465e5cf079be947f0a9664a..58510aeb3972b0e1e3d830f6af53b674
  codex-app-server-daemon = { workspace = true }
  codex-app-server-protocol = { workspace = true }
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index b9de518ef9cfd0ddcaa2008347d31b56bdc7c411..6dd8cbd6602706fad26df089e168f1a6bf5ce68c 100644
+index 7a13505814c6fc3cf5d92fba3bc57d5502119057..1d1eb475aaad7a3d28c073e8e181e7bdea2fff58 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -75,6 +75,7 @@ mod mcp_cmd;
@@ -59,7 +68,7 @@ index b9de518ef9cfd0ddcaa2008347d31b56bdc7c411..6dd8cbd6602706fad26df089e168f1a6
          Some(Subcommand::Unarchive(cmd)) => {
              let output = run_session_archive_cli_command(
                  codex_tui::SessionArchiveAction::Unarchive,
-@@ -2281,6 +2293,7 @@ fn unsupported_subcommand_name_for_strict_config(
+@@ -2280,6 +2292,7 @@ fn unsupported_subcommand_name_for_strict_config(
          Some(Subcommand::Mcp(_)) => Some("mcp"),
          Some(Subcommand::Plugin(_)) => Some("plugin"),
          Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
@@ -311,7 +320,7 @@ index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e
 
  impl DeleteThreadFailure {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index f5a3920dc3fe3da90a9077efcbc564ff7f08842c..ba5bc09950664b740ade670c6aa1d5a04b774f68 100644
+index 880891373566e83b3d1805c045d6bdb119d123d9..4f17da190938c2a5db8f2183dc68dc7086ac7a78 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -17,6 +17,7 @@ mod paginated_fork;

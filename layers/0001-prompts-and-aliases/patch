@@ -23,10 +23,10 @@ index ed43d8aaed8bdbf4124a6d20c52c14ace21504af..43c226f071528daa84702b07e80efa2f
              description: Some("desc".to_string()),
              default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 3e5cc07e6ca62ffa13e2a104a5f815a0d4fa40f0..884e8ef08dbc0da9e220be29921594bd4d392e0c 100644
+index 8c8c66ea1dc45669a3f52e3e0d3f10e633267167..eb9eed40e03b0cce88f13e518bf914cf507a8c9f 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -328,6 +328,10 @@ pub struct ConfigToml {
+@@ -331,6 +331,10 @@ pub struct ConfigToml {
      #[serde(default, deserialize_with = "deserialize_model_providers")]
      pub model_providers: HashMap<String, ModelProviderInfo>,
 
@@ -37,7 +37,7 @@ index 3e5cc07e6ca62ffa13e2a104a5f815a0d4fa40f0..884e8ef08dbc0da9e220be29921594bd
      /// Maximum total bytes of project instruction content across all selected environments.
      #[serde(default = "default_project_doc_max_bytes")]
      pub project_doc_max_bytes: Option<usize>,
-@@ -978,6 +982,19 @@ pub fn validate_model_providers(
+@@ -983,6 +987,19 @@ pub fn validate_model_providers(
      Ok(())
  }
 
@@ -58,10 +58,10 @@ index 3e5cc07e6ca62ffa13e2a104a5f815a0d4fa40f0..884e8ef08dbc0da9e220be29921594bd
      deserializer: D,
  ) -> Result<HashMap<String, ModelProviderInfo>, D::Error>
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 5864a5df77c600b6dfc9884d971040074fb6b644..44eb3ae8b4bae331ad11b6dd401bfde1a46f60d4 100644
+index 4aba1bab6cd2cbcc179a5de802731f2775c6bc88..bbacbd00326a0cb358b583f21eacb2022c9f863b 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -727,6 +727,9 @@
+@@ -744,6 +744,9 @@
              "agent_message_board": {
                "type": "boolean"
              },
@@ -71,7 +71,7 @@ index 5864a5df77c600b6dfc9884d971040074fb6b644..44eb3ae8b4bae331ad11b6dd401bfde1
              "analytics_plan_history": {
                "type": "boolean"
              },
-@@ -1504,6 +1507,34 @@
+@@ -1548,6 +1551,34 @@
        ],
        "type": "string"
      },
@@ -106,7 +106,7 @@ index 5864a5df77c600b6dfc9884d971040074fb6b644..44eb3ae8b4bae331ad11b6dd401bfde1
      "ExperimentalRequestUserInput": {
        "additionalProperties": false,
        "properties": {
-@@ -6874,6 +6905,14 @@
+@@ -7003,6 +7034,14 @@
      "computer_use": {
        "$ref": "#/definitions/ComputerUseConfigToml"
      },
@@ -121,7 +121,7 @@ index 5864a5df77c600b6dfc9884d971040074fb6b644..44eb3ae8b4bae331ad11b6dd401bfde1
      "daybreak": {
        "description": "Default Daybreak preference for new threads and non-interactive turns.",
        "type": "boolean"
-@@ -6943,6 +6982,9 @@
+@@ -7072,6 +7111,9 @@
          "agent_message_board": {
            "type": "boolean"
          },
@@ -131,7 +131,7 @@ index 5864a5df77c600b6dfc9884d971040074fb6b644..44eb3ae8b4bae331ad11b6dd401bfde1
          "analytics_plan_history": {
            "type": "boolean"
          },
-@@ -7965,4 +8007,4 @@
+@@ -8123,4 +8165,4 @@
    },
    "title": "ConfigToml",
    "type": "object"
@@ -189,24 +189,22 @@ index 0000000000000000000000000000000000000000..9eb78d33e02863b07a748782017ea931
 +- Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
 +- When you receive messages from other agents, verify their claims before relying on them.
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
-index 6827a8597167f7f27ce418d56dff175486b02a24..68bfc4f381779da71312ccf3a84a9dee16e944f1 100644
+index 2ad575051e6ef05b368642a8696a376b5c1d3cf5..31f9535997f6d72520a08e1b38fc6240f38a3eb8 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
 +++ b/codex-rs/core/src/agent/control/residency_tests.rs
-@@ -181,8 +181,8 @@ async fn spawn_v2_subagent(
-             /*metrics_service_name*/ None,
-             /*inherited_environments*/ None,
+@@ -181,6 +181,7 @@ async fn spawn_v2_subagent(
+             Some(parent_thread_id),
              /*inherited_exec_policy*/ None,
--            /*environments*/ None,
              Default::default(),
 +            /*environments*/ None,
          )
          .await
          .expect("spawn v2 subagent")
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 0c2545ba9095c949d1291e92efae95e2f96e70e4..e0c4d82ac59e262338f34034f0e2f67f3ed18246 100644
+index 825b372b310f9584d8399e6b4e2e2c040f3911a1..4e0a6aec147fb2bad682e91bf51dc6c7f717c5b8 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -891,7 +891,7 @@ impl ModelClient {
+@@ -958,7 +958,7 @@ impl ModelClient {
                  .with_telemetry(Some(request_telemetry));
 
          let payload = ApiMemorySummarizeInput {
@@ -215,7 +213,7 @@ index 0c2545ba9095c949d1291e92efae95e2f96e70e4..e0c4d82ac59e262338f34034f0e2f67f
              raw_memories,
              reasoning: effort
                  .map(|effort| model_info.resolve_reasoning_effort(effort))
-@@ -1121,7 +1121,7 @@ impl ModelClient {
+@@ -1199,7 +1199,7 @@ impl ModelClient {
          }
          let client_metadata = responses_metadata.client_metadata(include_internal);
          let request = ResponsesApiRequest {
@@ -225,10 +223,10 @@ index 0c2545ba9095c949d1291e92efae95e2f96e70e4..e0c4d82ac59e262338f34034f0e2f67f
              tools,
              tool_choice: "auto".to_string(),
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index a0115e18619187c211e901dcfb03f2b0220b01a8..71a77532d1e14840d9507734f9ce8b5664bcf166 100644
+index 14267012daa6dc64ffd04dfc3acc7f77c4b9da9c..52aa7cc75b65a9db724a1adc29afc96175f0dfa9 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -41,6 +41,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
+@@ -43,6 +43,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
  use codex_model_provider_info::ModelProviderInfo;
  use codex_model_provider_info::WireApi;
  use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -236,7 +234,7 @@ index a0115e18619187c211e901dcfb03f2b0220b01a8..71a77532d1e14840d9507734f9ce8b56
  use codex_models_manager::manager::SharedModelsManager;
  use codex_otel::SessionTelemetry;
  use codex_protocol::ThreadId;
-@@ -85,6 +86,7 @@ use futures::StreamExt;
+@@ -87,6 +88,7 @@ use futures::StreamExt;
  use pretty_assertions::assert_eq;
  use serde_json::json;
  use std::collections::BTreeMap;
@@ -244,7 +242,7 @@ index a0115e18619187c211e901dcfb03f2b0220b01a8..71a77532d1e14840d9507734f9ce8b56
  use std::collections::VecDeque;
  use std::path::PathBuf;
  use std::pin::Pin;
-@@ -336,8 +338,10 @@ impl ModelProvider for SetupRefreshProvider {
+@@ -340,8 +342,10 @@ impl ModelProvider for SetupRefreshProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -256,7 +254,7 @@ index a0115e18619187c211e901dcfb03f2b0220b01a8..71a77532d1e14840d9507734f9ce8b56
      }
  }
 
-@@ -2152,8 +2156,10 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -2230,8 +2234,10 @@ impl ModelProvider for TestRecoveryProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -269,7 +267,7 @@ index a0115e18619187c211e901dcfb03f2b0220b01a8..71a77532d1e14840d9507734f9ce8b56
  }
 
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 806bd8082ff81b2484e8e2c840407b20bf5eda50..02455f7dca47d23b267ecda15c1bb4c491df4465 100644
+index aaf2165a6b35895e3aba1a933d080809c8317bbf..e066cfc7a576b8937ba87c35a4ee0b681ffc2ac2 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -20,6 +20,7 @@ use codex_config::config_toml::AgentRoleToml;
@@ -280,7 +278,7 @@ index 806bd8082ff81b2484e8e2c840407b20bf5eda50..02455f7dca47d23b267ecda15c1bb4c4
  use codex_config::config_toml::ExperimentalRequestUserInput;
  use codex_config::config_toml::ProjectConfig;
  use codex_config::config_toml::RealtimeConfig;
-@@ -9836,6 +9837,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
+@@ -9885,6 +9886,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
      Ok(())
  }
 
@@ -352,10 +350,10 @@ index 806bd8082ff81b2484e8e2c840407b20bf5eda50..02455f7dca47d23b267ecda15c1bb4c4
      let toml = r#"
  model = "o3"
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5efb662d067 100644
+index c5ab36546e189781c8b1f957cf56d8d31ad3d7fe..49e9e1162ddd4310712a11da68bfeef4296dcffc 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -95,6 +95,7 @@ use codex_model_provider_info::ModelProviderInfo;
+@@ -94,6 +94,7 @@ use codex_model_provider_info::ModelProviderInfo;
  use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
  use codex_model_provider_info::built_in_model_providers;
  use codex_model_provider_info::merge_configured_model_providers;
@@ -363,7 +361,7 @@ index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5ef
  use codex_models_manager::ModelsManagerConfig;
  use codex_prompts::ResolvedModelMessages;
  use codex_protocol::config_types::AltScreenMode;
-@@ -1029,6 +1030,9 @@ pub struct Config {
+@@ -1049,6 +1050,9 @@ pub struct Config {
      /// When set, this replaces the bundled catalog for the current process.
      pub model_catalog: Option<ModelsResponse>,
 
@@ -373,7 +371,7 @@ index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5ef
      /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
      pub model_verbosity: Option<Verbosity>,
 
-@@ -1696,6 +1700,7 @@ impl Config {
+@@ -1729,6 +1733,7 @@ impl Config {
              }),
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
@@ -381,7 +379,7 @@ index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5ef
          }
      }
 
-@@ -3832,6 +3837,25 @@ impl Config {
+@@ -3933,6 +3938,25 @@ impl Config {
              merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
                  .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
 
@@ -407,7 +405,7 @@ index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5ef
          let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
              .or(model_provider)
              .or(cfg.model_provider)
-@@ -4377,6 +4401,7 @@ impl Config {
+@@ -4480,6 +4504,7 @@ impl Config {
                  .map(Duration::from_millis)
                  .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
              model_providers,
@@ -416,10 +414,10 @@ index 1eb2cdf83fe8dd52cb06ca9de494b194a1bc0179..ad376029e2d6257b4f892355122cd5ef
              project_doc_fallback_filenames: cfg
                  .project_doc_fallback_filenames
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 836c87ff2ea26103c6a9cd01e853b3308e6b1a61..114d61e5efd1247920a303f53be4806e39a45af8 100644
+index 7417543a61b0f0398a1f0fb70951c4e0a74f6e89..c699d5ed3f562955a6b76aa47c7e26068fc8c68f 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -303,6 +303,75 @@ use self::turn_context::TurnContext;
+@@ -306,6 +306,75 @@ use self::turn_context::TurnContext;
  #[cfg(test)]
  mod rollout_reconstruction_tests;
 
@@ -495,7 +493,7 @@ index 836c87ff2ea26103c6a9cd01e853b3308e6b1a61..114d61e5efd1247920a303f53be4806e
  use crate::exec_policy::ExecPolicyUpdateError;
  use crate::guardian::GuardianReviewSessionManager;
  use crate::mcp::McpEnvironmentScope;
-@@ -363,6 +432,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+@@ -366,6 +435,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
  use codex_protocol::config_types::Settings;
  use codex_protocol::config_types::WindowsSandboxLevel;
  use codex_protocol::mcp::ClientMcpExtensions;
@@ -503,7 +501,7 @@ index 836c87ff2ea26103c6a9cd01e853b3308e6b1a61..114d61e5efd1247920a303f53be4806e
  use codex_protocol::models::LocalImagePreparation;
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ResponseItem;
-@@ -4232,13 +4302,20 @@ impl Session {
+@@ -4454,13 +4524,20 @@ impl Session {
          let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
          let mut separate_developer_sections = Vec::<RenderedFragment>::new();
          let mut context_window_hints = Vec::new();
@@ -595,10 +593,10 @@ index 83b1edd04c7b6e68c8dcfd3d075786c5af884e60..e58d986980e58ece7a02ba21b89cf493
      }
  }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706186499fa 100644
+index a632d019ee90b957b23bc12622cecf6ba00b7ac1..9f5418a7cfe6f70013f4331658d904296c87e5d5 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3279,12 +3279,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
+@@ -3298,12 +3298,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
      let history_before_seed = session.state.lock().await.clone_history();
      assert_eq!(expected, raw_history_items(&history_before_seed));
 
@@ -614,7 +612,7 @@ index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706
      expected.extend(initial_context);
      let history_after_seed = session.clone_history().await;
      assert_eq!(
-@@ -4231,6 +4233,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
+@@ -4270,6 +4272,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
      let mut builder = test_codex().with_config(|config| {
          config.update_plan_enabled = true;
@@ -627,7 +625,7 @@ index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706
          config.permissions.approval_policy =
              codex_config::Constrained::allow_any(AskForApproval::OnRequest);
      });
-@@ -11190,12 +11198,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
+@@ -11152,12 +11160,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
      let (session, turn_context) = make_session_and_context().await;
      let turn_context = Arc::new(turn_context);
      let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -641,7 +639,7 @@ index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706
      assert_eq!(
          strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
          strip_response_item_ids(&strip_metadata_from_items(&initial_context))
-@@ -11246,6 +11254,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+@@ -11210,6 +11218,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
          )
          .await;
 
@@ -649,7 +647,7 @@ index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706
      session
          .record_context_updates_and_set_reference_context_item(&step_context)
          .await
-@@ -11253,7 +11262,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+@@ -11217,7 +11226,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 
      let history = session.clone_history().await;
      let mut expected_history = vec![compacted_summary];
@@ -657,7 +655,7 @@ index edf3eb0f69cd21fc0f08ec9bf107ea1f624b87be..1f0733d723024ee354ae29091bcf3706
      expected_history.extend(initial_context);
      assert_eq!(
          strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
-@@ -13560,3 +13568,119 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
+@@ -13534,3 +13542,119 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
          "rejection must not permit same-name ordinary-auth replacement in this session"
      );
  }
@@ -795,10 +793,10 @@ index 359ca8a0eac6da5c4f545796da4b9325e4606837..c9534723fee0f6b71768e49aa7c598aa
 
  pub fn default_http_client_factory() -> HttpClientFactory {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 995d68b9a633c9f8ee3f230cceed7d186e07bdf2..8f426fe87a2e82acf74623d3b7a0d7b359c5a484 100644
+index d6a8a6122d48e4b0857f7d0342c0a02f9b546dc9..b7bb3139d1b798b4ade9322963c37441e2366501 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -454,6 +454,7 @@ pub fn build_models_manager(
+@@ -458,6 +458,7 @@ pub fn build_models_manager(
      let manager = provider.models_manager(
          config.codex_home.to_path_buf(),
          config.model_catalog.clone(),
@@ -806,7 +804,7 @@ index 995d68b9a633c9f8ee3f230cceed7d186e07bdf2..8f426fe87a2e82acf74623d3b7a0d7b3
      );
      manager.set_api_key_model_discovery_enabled(
          config.features.enabled(Feature::ApiKeyModelDiscovery),
-@@ -759,7 +760,11 @@ impl ThreadManager {
+@@ -782,7 +783,11 @@ impl ThreadManager {
                  thread_id_generator: default_thread_id_generator(),
                  agent_control_factory: None,
                  models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -861,10 +859,10 @@ index 13f0e8d778de54cb870223e614fca2ec58f01175..ddfe0bf44fbe15923eeb9ab5813c1beb
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215b5f140f0 100644
+index 8442310771cd46a21e86b9c61b326560045cc710..977bb5ad89a6de1eef72573e10b261c6426d2c5e 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -1505,10 +1505,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+@@ -1627,10 +1627,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
          let input = body.get("input").and_then(|v| v.as_array()).unwrap();
          let input = normalize_inputs(input);
          assert_eq!(input.len(), 3);
@@ -877,7 +875,7 @@ index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215
          assert_eq!(user_message_received, user_message);
          assert_eq!(
              summary_message, expected_summary,
-@@ -5471,17 +5471,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5593,17 +5593,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
          ev_assistant_message("m1", FIRST_REPLY),
          ev_completed_with_tokens("r1", /*total_tokens*/ 500),
      ]);
@@ -909,7 +907,7 @@ index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215
 
      let mut model_provider = non_openai_model_provider(&server);
      model_provider.stream_max_retries = Some(0);
-@@ -5521,10 +5525,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5643,10 +5647,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
      wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
      let requests = request_log.requests();
@@ -922,7 +920,7 @@ index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215
 
      insta::assert_snapshot!(
          "pre_turn_compaction_context_window_exceeded_shapes",
-@@ -5532,7 +5534,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5654,7 +5656,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
              "Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
              &[(
                  "Local Compaction Request (Incoming User Excluded)",
@@ -931,7 +929,7 @@ index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215
              ),]
          )
      );
-@@ -5718,6 +5720,10 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
+@@ -5840,6 +5842,10 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
              config.model_provider = provider;
              config.model_context_window = Some(100);
              config.model_auto_compact_token_limit = Some(90);
@@ -942,7 +940,7 @@ index b46bc107e97952617b8dd42bfcc2ef6de6476a68..12bc3bbde2cf4bc9d3a73a4242ce1215
          });
      let test = builder.build(&server).await?;
 
-@@ -5744,6 +5750,17 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
+@@ -5866,6 +5872,17 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
      assert_single_instruction_fragment(&requests[0], &expected_fragment);
      assert_single_instruction_fragment(&requests[1], &expected_fragment);
      assert_single_instruction_fragment(&requests[2], &expected_fragment);
@@ -1094,10 +1092,10 @@ index 40b80e6d7d1b719cc61dbcdcb21f5c068eff5408..e9e55030b698268386ee436c70e99bc6
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/rmcp_client.rs b/codex-rs/core/tests/suite/rmcp_client.rs
-index f7631ba14076525fd37a5bbe7a6caf5f278b7315..10c393dd182a69c0edde839e87f34aff59bba965 100644
+index fb0572ae45b493fd2c1f594e954928926bc2521e..cba1fd396e5ce4ece6db015582827376defae036 100644
 --- a/codex-rs/core/tests/suite/rmcp_client.rs
 +++ b/codex-rs/core/tests/suite/rmcp_client.rs
-@@ -3223,6 +3223,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
+@@ -3248,6 +3248,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
          ModelsResponse {
              models: vec![ModelInfo {
                  slug: text_only_model_slug.to_string(),
@@ -1130,10 +1128,10 @@ index 6a04080fdc1ee9c8d0182c7382cbd2f0ed4454ec..7978181768833619748af86827aa061e
          description: Some("Remote model for view_image unsupported-path coverage".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index c68bc3bb748982281b62ce82b664c646e6bb4c7b..bb1f1ded570ed8ccd047c13c65135903a9ade68c 100644
+index 13ff893c1c962ed049f80e6858a130e8bbfbc651..6e5f0d69fe5a30778d05618a503f09596bb63f9d 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -234,6 +234,8 @@ pub enum Feature {
+@@ -239,6 +239,8 @@ pub enum Feature {
      AgentMessageBoard,
      /// Removed compatibility flag retained as a no-op.
      MultiAgentMode,
@@ -1142,7 +1140,7 @@ index c68bc3bb748982281b62ce82b664c646e6bb4c7b..bb1f1ded570ed8ccd047c13c65135903
      /// Removed compatibility flag for the deleted agent-job tools.
      SpawnCsv,
      /// Enable apps.
-@@ -1453,6 +1455,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1514,6 +1516,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Removed,
          default_enabled: false,
      },
@@ -1156,7 +1154,7 @@ index c68bc3bb748982281b62ce82b664c646e6bb4c7b..bb1f1ded570ed8ccd047c13c65135903
          id: Feature::SpawnCsv,
          key: "enable_fanout",
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index 5891dc0c9bcbe6244c9373fd06e4eb07c0362ea4..b30c85d42539e34a1dd9aae7b8742b2bd3716e5e 100644
+index a8a8fca058a776388db1860447a5bf520aae1f5b..208f69c4ebbb67b7e5b2ced32d06b401327e7a90 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
 @@ -508,6 +508,20 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
@@ -1181,7 +1179,7 @@ index 5891dc0c9bcbe6244c9373fd06e4eb07c0362ea4..b30c85d42539e34a1dd9aae7b8742b2b
  fn apps_require_feature_flag_and_chatgpt_auth() {
      let mut features = Features::with_defaults();
 diff --git a/codex-rs/memories/write/src/startup_tests.rs b/codex-rs/memories/write/src/startup_tests.rs
-index f1fb63b88c9637c82ea502354de059bf2c6e6fc8..c98607d04a82170be25bf911ed8cdc8164a593da 100644
+index 1f2cb94f6b0a2902277df343879e4236a81c2e41..8065e5b89f0952e4259032b99cb021e402681577 100644
 --- a/codex-rs/memories/write/src/startup_tests.rs
 +++ b/codex-rs/memories/write/src/startup_tests.rs
 @@ -19,6 +19,7 @@ use codex_model_provider::ProviderAccountResult;
@@ -1200,7 +1198,7 @@ index f1fb63b88c9637c82ea502354de059bf2c6e6fc8..c98607d04a82170be25bf911ed8cdc81
  use std::path::Path;
  use std::path::PathBuf;
  use std::sync::Arc;
-@@ -1192,9 +1194,10 @@ impl ModelProvider for MockMemoryModelProvider {
+@@ -1205,9 +1207,10 @@ impl ModelProvider for MockMemoryModelProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -1213,10 +1211,10 @@ index f1fb63b88c9637c82ea502354de059bf2c6e6fc8..c98607d04a82170be25bf911ed8cdc81
  }
 
 diff --git a/codex-rs/model-provider/src/amazon_bedrock/catalog.rs b/codex-rs/model-provider/src/amazon_bedrock/catalog.rs
-index 2bfb33aa7e9dfb8c2a37fe0dc960c9ee7d2f1b9c..3ed815fb52a46bdb14f9e852b309440273a66ce0 100644
+index f16028630fb28aac1af2dbe626cca4433f663d43..72b3758b15e287ac3ba6febd22f3b58469b1111d 100644
 --- a/codex-rs/model-provider/src/amazon_bedrock/catalog.rs
 +++ b/codex-rs/model-provider/src/amazon_bedrock/catalog.rs
-@@ -138,6 +138,7 @@ fn gpt_5_bedrock_model(
+@@ -143,6 +143,7 @@ fn gpt_5_bedrock_model(
      let mut model = bundled_openai_model(openai_slug);
      model.slug = bedrock_slug.to_string();
      model.display_name = display_name.to_string();
@@ -1224,7 +1222,7 @@ index 2bfb33aa7e9dfb8c2a37fe0dc960c9ee7d2f1b9c..3ed815fb52a46bdb14f9e852b3094402
      model.priority = priority;
      model.context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
      model.max_context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
-@@ -411,4 +412,12 @@ mod tests {
+@@ -419,4 +420,12 @@ mod tests {
              );
          }
      }
@@ -1869,10 +1867,10 @@ index df70ae8012f42f1e71da91f0e6400fda961788de..60853c36745942700b20f8fb093c8d73
          description: None,
          default_reasoning_level: None,
 diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
-index 45654aa8c552bf851c1f54b42b4709fd8370c856..4a9e439ef996c39bb65238cbde1749e2a63b1470 100644
+index 45e3d5c0963048f197afcc4e5cdff3770df54a9b..3000cad1703042302c5c31fc6c0c4a24653ba2c8 100644
 --- a/codex-rs/protocol/src/openai_models.rs
 +++ b/codex-rs/protocol/src/openai_models.rs
-@@ -410,6 +410,11 @@ pub struct ModelInfo {
+@@ -412,6 +412,11 @@ pub struct ModelInfo {
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub guardian: Option<GuardianModelPolicy>,
      pub slug: String,
@@ -1884,7 +1882,7 @@ index 45654aa8c552bf851c1f54b42b4709fd8370c856..4a9e439ef996c39bb65238cbde1749e2
      pub display_name: String,
      pub description: Option<String>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
-@@ -513,6 +518,10 @@ pub struct ModelInfo {
+@@ -515,6 +520,10 @@ pub struct ModelInfo {
  }
 
  impl ModelInfo {
@@ -1895,7 +1893,7 @@ index 45654aa8c552bf851c1f54b42b4709fd8370c856..4a9e439ef996c39bb65238cbde1749e2
      pub fn resolved_context_window(&self) -> Option<i64> {
          self.context_window.or(self.max_context_window)
      }
-@@ -1054,6 +1063,7 @@ mod tests {
+@@ -1069,6 +1078,7 @@ mod tests {
      pub(super) fn test_model(spec: Option<ModelMessages>) -> ModelInfo {
          ModelInfo {
              slug: "test-model".to_string(),
@@ -1904,10 +1902,10 @@ index 45654aa8c552bf851c1f54b42b4709fd8370c856..4a9e439ef996c39bb65238cbde1749e2
              description: None,
              default_reasoning_level: None,
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index a70b8c9817f9838cf60dad144c4cb11c848386b0..1f9e8e9f58afb1183916825587ebfe7b17abd19b 100644
+index 0d53be0050161aa148fa79032f9d63b72c612536..b855d2a6b69eb19c82ddce1af253949a22055fe7 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
-@@ -259,6 +259,7 @@ async fn new_config(
+@@ -261,6 +261,7 @@ async fn new_config(
          explicit_permission_profile_mode: false,
          custom_permission_profiles: Vec::new(),
          approvals_reviewer: ApprovalsReviewer::User,
@@ -1915,7 +1913,7 @@ index a70b8c9817f9838cf60dad144c4cb11c848386b0..1f9e8e9f58afb1183916825587ebfe7b
          enforce_residency: Constrained::allow_any(/*initial_value*/ None),
          hide_agent_reasoning: false,
          show_raw_agent_reasoning: false,
-@@ -321,6 +322,7 @@ async fn new_config(
+@@ -325,6 +326,7 @@ async fn new_config(
          mcp_oauth_callback_url: None,
          mcp_optional_startup_grace: std::time::Duration::from_secs(1),
          model_providers,

@@ -280,7 +280,7 @@ index 2477eb29741b25b0ab3e1aec9553e39be5ecd941..783b34d93c0b771c4515dd81b80ec770
      Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
  03:message/developer:
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index 3586a986c6701d46c3d9c648bb932df5e7af60bf..8c4dbac7878a309823b1ee96062d1b1abc2844ce 100644
+index 15d0aabd1ccae9f0d3f187ac140d18685ba8b723..7c497fb93b9965e4c344b74c8ffee595153dc11c 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -1212,7 +1212,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
@@ -553,7 +553,7 @@ index 47ea800287dab6c3126c9a77b51f50cbbc0cb9c8..a6a7cf85037d930fc0381436c30cbaeb
          "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
      ] {
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd85bf41ca 100644
+index d0926fd6f1e5426028b74b5090e64b63c9c881f5..68756dbd2490c6675228e9bba5e36d779f39a83d 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 @@ -41,6 +41,8 @@ use crate::SortDirection;
@@ -565,7 +565,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
 
  #[tokio::test]
  async fn post_adoption_stock_checkpoint_can_restore_positive_completeness() {
-@@ -1130,7 +1132,7 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
+@@ -1132,7 +1134,7 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
 
  #[tokio::test]
  async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
@@ -574,7 +574,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      let db = history_db(&store).await;
      for (item_id, ordinal) in [
          ("before", 10),
-@@ -1202,6 +1204,7 @@ INSERT INTO thread_realtime_items (
+@@ -1204,6 +1206,7 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime item");
      }
 
@@ -582,7 +582,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      let latest = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -1287,7 +1290,7 @@ INSERT INTO thread_realtime_items (
+@@ -1289,7 +1292,7 @@ INSERT INTO thread_realtime_items (
 
  #[tokio::test]
  async fn timeline_turn_boundaries_page_through_shared_ordinals() {
@@ -591,7 +591,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      let db = history_db(&store).await;
      let error = r#"{"message":"failed","codexErrorInfo":null,"additionalDetails":null}"#;
      for (turn_id, start, end, status, error_json) in [
-@@ -1317,6 +1320,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
+@@ -1319,6 +1322,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
      )
      .await;
 
@@ -599,7 +599,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      let all = store
          .list_timeline(ListTimelineParams {
              thread_id,
-@@ -1476,6 +1480,66 @@ INSERT INTO thread_realtime_items (
+@@ -1478,6 +1482,66 @@ INSERT INTO thread_realtime_items (
          .expect("insert realtime boundary");
      }
 
@@ -666,7 +666,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      let page = store
          .list_timeline(ListTimelineParams {
              thread_id: child_id,
-@@ -1503,7 +1567,850 @@ INSERT INTO thread_realtime_items (
+@@ -1505,7 +1569,850 @@ INSERT INTO thread_realtime_items (
              .iter()
              .map(crate::local::thread_history::realtime::entry_key)
              .collect::<Vec<_>>(),
@@ -1518,7 +1518,7 @@ index c43185e736fa1a80833755f0093354937139f1a6..9b8b11a44aeaacdfd9b8b9339ad411dd
      );
  }
 
-@@ -3779,6 +4686,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+@@ -3799,6 +4706,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
      ))
  }
 

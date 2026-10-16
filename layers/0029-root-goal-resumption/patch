@@ -1,5 +1,5 @@
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
-index b73a67114edfc2732fa699102c343a671af81af5..609fa4c004bff9c88c2ca04dd13221c8daafd569 100644
+index cfcb0a6aa91e0c7933ba01469b0d5e6a38427c1c..1453ba5e7625b5a86ab14ae5d3b90044921783ef 100644
 --- a/codex-rs/ext/goal/src/extension.rs
 +++ b/codex-rs/ext/goal/src/extension.rs
 @@ -41,6 +41,7 @@ use crate::analytics::GoalAnalytics;
@@ -18,7 +18,7 @@ index b73a67114edfc2732fa699102c343a671af81af5..609fa4c004bff9c88c2ca04dd13221c8
                          root_accounting_state,
                      },
                  )
-@@ -571,13 +573,21 @@ where
+@@ -597,13 +599,21 @@ where
                  self.metrics.clone(),
              ),
          ];
@@ -207,7 +207,7 @@ index 0000000000000000000000000000000000000000..b8bcc3480cb7460e4200456cc98e0a2c
 +    }
 +}
 diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
-index a110c6cd24df2f215fc14858c1d1b368f8432646..f6a625ce4ab0ffae3a14132dc343f29bfebcf6ef 100644
+index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b18c92c7a 100644
 --- a/codex-rs/ext/goal/src/runtime.rs
 +++ b/codex-rs/ext/goal/src/runtime.rs
 @@ -34,6 +34,8 @@ pub(crate) struct GoalRuntimeConfig {

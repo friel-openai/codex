@@ -337,17 +337,17 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index b9256c330371cedf7dc888101d9378bad420a7a5..c3201a833085f8e061aa05fedac22da710db8c15 100644
+index 6a085b654117318a6a3c98c51582b4010c54e54e..8901042a93ceaadab84a84321b1fd040348b74ce 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -96,6 +96,7 @@ mod guardian_cached_score;
+@@ -97,6 +97,7 @@ mod guardian_cached_score;
  mod guardian_checkpoint_migration;
  // Uses the same command-approval harness as guardian_review below.
  mod canonical_plugin_connectors;
 +mod child_delegation;
  mod gateway_auth;
+ mod guardian_connector_trust;
  #[cfg(not(target_os = "windows"))]
- mod guardian_context_budget;
 diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
 index 6245636eb8705e5609aae655dceee25d477ea4ea..4b11b5f344b1adadffd417b0bfc4e7d1333807c2 100644
 --- a/codex-rs/core/tests/suite/multi_agent_mode.rs
@@ -1061,6 +1061,423 @@ index 2ffaedb0d6e78643d6fdda3afce90cd96ea31999..cfc175e49989c75111ae304b287985d5
 +09:function_call_output:unsupported call: shell
 +10:message/user:
      second prompt
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
+index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7f636fdde 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
+@@ -6,8 +6,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+
+ ## Window 1
+ -- request 1 (request) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -21,11 +21,32 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -41,8 +62,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+
+ ## Window 2 (after request 2: input diverged at item 08)
+ -- request 3 (request) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -56,11 +77,32 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -78,8 +120,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+
+ ## Window 3 (after request 3: input diverged at item 02)
+ -- request 4 (request) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -93,14 +135,35 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+ 02:message/user:
+     Draft the launch notes.
+ 03:compaction:encrypted=true; chars=23; hash=159cfcb231cc70f0
+-04:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++04:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 05:message/developer:
+     <MULTI_AGENT_ROLE>
+ 06:message/developer:
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
+index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f4a6385e3 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
+@@ -1,13 +1,13 @@
+ ---
+ source: core/tests/suite/scenarios_retained_tool_outputs.rs
+-expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction shares the 64K retention budget with oversized task details, and a cold resume preserves the retained tool content.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
++expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
+ ---
+ Scenario: With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.
+
+ ## Window 1
+ -- request 1 (turn) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -21,11 +21,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -44,8 +65,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+
+ ## Window 2 (after request 3: input diverged at item 10)
+ -- request 4 (compaction) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -59,11 +80,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -82,8 +124,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+
+ ## Window 3 (after request 4: input diverged at item 06)
+ -- request 5 (turn) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -97,11 +139,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -110,6 +173,4 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+     <ENVIRONMENT_CONTEXT>
+ 06:compaction:encrypted=true; chars=31; hash=dc1cfb1784ca88e3
+ 07:message/user:
+-    <ENVIRONMENT_CONTEXT>
+-08:message/user:
+     What request are you working on?
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
+index af3d0a2d315d4029b64debef3bf29ecb1a40b001..43a65968839695b9157f3629c25eb7f6f867a99f 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
+@@ -1,13 +1,13 @@
+ ---
+ source: core/tests/suite/scenarios_retained_tool_outputs.rs
+-expression: "context_snapshot::format_request_history_snapshot(\"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\",\n&requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
++expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
+ ---
+ Scenario: Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.
+
+ ## Window 1
+ -- request 1 (turn) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -21,11 +21,32 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -47,8 +68,8 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+
+ ## Window 2 (after request 4: input diverged at item 06)
+ -- request 5 (turn) --
+-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+-        - namespace/functions; hash=fada4a476a3754dd
++00:additional_tools/developer (4; hash=562141777d035178):
++        - namespace/functions; hash=06d8e4e13b50f565
+           - custom/exec
+           - function/wait
+           - function/request_user_input
+@@ -62,11 +83,32 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+           - function/send_message
+           - function/spawn_agent
+           - function/wait_agent
++        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++          - function/adopt_agent
++          - function/close_agent
++          - function/promote_agent
+ 01:message/developer:
+     <MODEL_INSTRUCTIONS>
+-02:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++02:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 03:message/developer:
+     <MULTI_AGENT_ROLE>
+ 04:message/developer:
+@@ -76,6 +118,4 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+ 06:function_call_output/codex_app.send_message_to_thread:Report your findings without changing files.
+ 07:compaction:encrypted=true; chars=31; hash=dc1cfb1784ca88e3
+ 08:message/user:
+-    <ENVIRONMENT_CONTEXT>
+-09:message/user:
+     What request are you working on?
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap b/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
 index 83139c7dcab5520ca9f586625e7347ff8a830763..cf85a680cb34e3bae654256527472c3cd6087710 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap

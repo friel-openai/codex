@@ -131,7 +131,8 @@
         "session::tests::remote_compaction_v2_retains_only_the_selected_step::fallback_executes",
         "session::tests::interrupting_compaction_fallback_retains_last_known_step_context",
         "session::rollout_reconstruction_tests::reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_completed_turns",
-        "agent::control::tests::spawn_agent_fork_from_paginated_parent_uses_model_context_prefix",
+        "agent::control::tests::spawn_agent_fork_from_paginated_parent_uses_model_context_prefix::parent_in_session_source",
+        "agent::control::tests::spawn_agent_fork_from_paginated_parent_uses_model_context_prefix::parent_in_session_source_and_options",
         "agent::control::tests::full_history_agent_fork_uses_nonlocal_thread_store",
         "agent::control::tests::full_history_fork_copies_paginated_history_base_lineage_across_resume",
         "agent::control::runtime::tests::cloned_guard_reports_its_own_context_before_releasing_membership",
@@ -144,7 +145,8 @@
         "agent::control::residency::tests::residency_slot_reservation_unloads_oldest_idle_v2_agent",
         "agent::control::tests::status_and_subscription_retain_a_cold_terminal_agent",
         "context::world_state::environment::tests::subagent_diffs_add_change_remove_and_escape_xml",
-        "session::tests::failed_compaction_restores_state_and_allows_persisted_continuation",
+        "session::tests::failed_compaction_restores_state_and_allows_persisted_continuation::complete",
+        "session::tests::failed_compaction_restores_state_and_allows_persisted_continuation::prefix",
         "session::tests::compaction_checkpoint_waits_for_accepted_settings_persistence",
         "session::rollout_reconstruction_tests::reconstruct_attribution_ignores_previous_turn_terminal::late_completion",
         "session::rollout_reconstruction_tests::reconstruct_attribution_ignores_previous_turn_terminal::late_abort_before_current_context",
@@ -161,7 +163,29 @@
         "thread_manager::tests::unchanged_resume_does_not_append_settings_but_changed_settings_and_explicit_checkpoints_do",
         "agent::control::tests::goal_supervisor_execution_settings_change_restarts_running_helper",
         "thread_manager::tests::reference_backed_fork_reserves_source_until_child_reference_is_durable",
-        "agent::control::tests::request_restoration_tests::goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume"
+        "agent::control::tests::request_restoration_tests::goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume",
+        "agent::control::tests::cancelled_spawn_after_input_admission_discards_child",
+        "agent::control::tests::cancelled_v2_send_finishes_reload_registration",
+        "agent::control::tests::resume_thread_subagent_restores_stored_metadata",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fork_clears",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fork_inherits",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fork_overrides",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fresh_clears",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fresh_inherits",
+        "agent::control::tests::spawn_agent_disabled_plugins_follow_parent_unless_overridden::fresh_overrides",
+        "compact_remote_v2::installation::tests::prepared_prefix_rejection_respects_caller_intent::account_optional",
+        "compact_remote_v2::installation::tests::prepared_prefix_rejection_respects_caller_intent::account_required",
+        "compact_remote_v2::installation::tests::prepared_prefix_rejection_respects_caller_intent::assignment_and_live_suffix",
+        "compact_remote_v2::installation::tests::prepared_prefix_rejection_respects_caller_intent::replacement_optional",
+        "compact_remote_v2::installation::tests::prepared_prefix_rejection_respects_caller_intent::replacement_required",
+        "compact_remote_v2::tests::collect_background_incomplete_does_not_publish_foreground_usage",
+        "config::tests::persisted_permissions_initialize_proxy_with_expandable_managed_allowlist",
+        "session::async_compaction::tests::cancelled_turn_skips_launch_but_preserves_existing_work::manual_ready_reuse",
+        "session::async_compaction::tests::cancelled_turn_skips_launch_but_preserves_existing_work::optional_ready_adoption",
+        "session::tests::committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effort_pin::complete",
+        "session::tests::committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effort_pin::prefix",
+        "thread_manager::tests::selected_capability_roots_respect_startup_precedence_and_isolation",
+        "tools::handlers::dynamic::tests::response_cancel_race_completes_once"
       ]
     },
     {
@@ -196,8 +220,16 @@
         "server::tests::tool_catalog_cache_does_not_reuse_catalogs_across_credential_policies",
         "rmcp_client::credential_policy_tests::executor_credentials_reject_host_fallback_for_arbitrary_environment_names",
         "connection_pool::tests::pooled_capture_retains_raw_catalog_snapshot_when_connector_tools_are_filtered",
-        "connection_manager::tests::capture_binding_uses_the_ready_clients_own_tools",
-        "connection_manager::catalog_telemetry::tests::tool_definition_json_bytes_skips_disabled_measurement_and_counts_enabled_tools"
+        "connection_manager::tests::capture_binding_preserves_ready_client_catalog_and_shares_prepared_metadata",
+        "connection_manager::catalog_telemetry::tests::tool_definition_json_bytes_skips_disabled_measurement_and_counts_enabled_tools",
+        "binding::tests::sandbox_executable_requires_local_stdio_and_a_full_cli",
+        "connection_manager::tests::later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools",
+        "connection_manager::tests::tool_lists_do_not_block_and_share_codex_apps_startup_reconnect",
+        "elicitation::tests::abandonment_close_joins_elected_actions_and_rejects_retained_router_admission",
+        "elicitation::tests::abandonment_is_ordered_and_exactly_once_when_the_native_waiter_is_dropped",
+        "elicitation::tests::bounded_sources_preserve_backpressure_across_close",
+        "request_router::tests::closing_origin_abandons_pending_elicitation_only_to_origin",
+        "request_router::tests::routed_elicitation_preserves_bounded_backpressure"
       ]
     },
     {
@@ -271,7 +303,8 @@
         "local::segment::tests::immutable_install_missing_source_removes_temporary_file",
         "local::segment::tests::snapshot_install_success_and_conflict_remove_temporary_files",
         "local::segment::tests::immutable_install_copies_source_and_rejects_different_existing_contents",
-        "local::segment::tests::immutable_install_rejects_existing_symlink_without_mutating_its_target"
+        "local::segment::tests::immutable_install_rejects_existing_symlink_without_mutating_its_target",
+        "local::thread_history::read::tests::lineage_reads_page_across_parent_and_child_segments"
       ]
     },
     {
@@ -298,7 +331,11 @@
         "chatwidget::tests::side::slash_btw_without_args_places_blank_side_to_the_right",
         "chatwidget::tests::side::side_alias_placement_flags_emit_placed_side_events",
         "chatwidget::tests::side::side_aliases_are_rejected_during_review_mode",
-        "app::tests::goal_supervisor_spawn_notification_is_hidden_without_thread_started"
+        "app::tests::goal_supervisor_spawn_notification_is_hidden_without_thread_started",
+        "app::app_server_requests::retained_reply_tests::closed_origin_consumes_reply_without_falling_through",
+        "app::app_server_requests::retained_reply_tests::direct_and_buffered_colliding_ids_reply_on_their_origin",
+        "app::tests::handle_start_side_seeds_navigation_before_thread_started",
+        "app::tests::reset_thread_event_state_aborts_listener_tasks"
       ]
     },
     {
@@ -414,7 +451,19 @@
         "suite::pending_input::queued_inter_agent_mail_triggers_follow_up_after_reasoning_item",
         "suite::pending_input::user_input_does_not_preempt_after_reasoning_item",
         "suite::token_budget::new_context_tool_skips_auto_compact_fallback",
-        "suite::agent_control::host_factory_follows_thread_lifecycle"
+        "suite::agent_control::host_factory_follows_thread_lifecycle",
+        "suite::guardian_retry::guardian_stale_approval_replaces_review_and_preserves_earlier_context",
+        "suite::pending_input_persistence::cancelled_spawn_discards_provisional_child::native_v1",
+        "suite::pending_input_persistence::cancelled_spawn_discards_provisional_child::native_v2",
+        "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::preserves_persisted_root_when_executor_reports_none",
+        "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::preserves_persisted_root_when_owner_reports_none",
+        "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::uses_refreshed_executor_root",
+        "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::uses_refreshed_owner_root",
+        "suite::scenarios::astra_async_compaction_keeps_work_added_after_its_snapshot::newer_user",
+        "suite::scenarios::astra_async_compaction_keeps_work_added_after_its_snapshot::only_assistant_and_tools",
+        "suite::scenarios::astra_async_compaction_keeps_work_added_after_its_snapshot::ready_adoption_still_over_budget",
+        "suite::scenarios::astra_async_compaction_keeps_work_added_after_its_snapshot::retained_standalone_output",
+        "suite::scenarios::retained_tool_outputs::retained_tool_output_survives_compaction_and_resume"
       ]
     },
     {
@@ -423,7 +472,8 @@
       "package": "codex-app-server",
       "target": null,
       "tests": [
-        "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up"
+        "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up",
+        "request_processors::thread_fork_handoff::tests::fork_handoff_rejects_prediction_mode_without_rejecting_ephemeral_forks"
       ]
     },
     {
@@ -437,7 +487,19 @@
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::empty_sync_hash_preserves_retained_evidence",
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::ultrafast_sol_preserves_retained_evidence_with_different_parent_hash",
         "suite::v2::guardian_v2::history::guardians_retain_evidence_after_compaction_and_resume::empty_checkpoint_fails_closed",
-        "suite::v2::thread_read::paginated_segmented_history_without_index_returns_latest_five_turns"
+        "suite::v2::thread_read::paginated_segmented_history_without_index_returns_latest_five_turns",
+        "suite::v2::thread_goal_empty_responses::empty_goal_continuations_block_after_three_without_activity::commentary",
+        "suite::v2::thread_goal_empty_responses::empty_goal_continuations_block_after_three_without_activity::draft",
+        "suite::v2::thread_goal_empty_responses::empty_goal_continuations_block_after_three_without_activity::empty",
+        "suite::v2::thread_goal_empty_responses::empty_goal_continuations_block_after_three_without_activity::interrupt",
+        "suite::v2::thread_goal_empty_responses::empty_goal_continuations_block_after_three_without_activity::tool",
+        "suite::v2::thread_resume::cold_resume_permission_overrides_win_over_persisted_profile",
+        "suite::v2::thread_resume::cold_resume_without_active_permission_profile_restores_base_permissions::managed_catalog",
+        "suite::v2::thread_resume::cold_resume_without_active_permission_profile_restores_base_permissions::managed_deny_read",
+        "suite::v2::thread_resume::cold_resume_without_active_permission_profile_restores_base_permissions::managed_modes",
+        "suite::v2::thread_resume::cold_resume_without_active_permission_profile_restores_base_permissions::restore_saved_full_access",
+        "suite::v2::thread_resume::cold_resume_without_active_permission_profile_restores_base_permissions::saved_read_only_wins_before_incompatible_default_validation",
+        "suite::v2::thread_resume::network_tests::cold_resume_restores_live_proxy_grants_and_persists_new_approvals"
       ]
     },
     {
@@ -501,6 +563,24 @@
       "tests": [
         "prune_archived::tests::prune_duration_rejects_implicit_zero_negative_and_overflow_values",
         "prune_archived::tests::prune_requires_period_and_offline_for_apply"
+      ]
+    },
+    {
+      "binary": "codex-goal-extension::accounting",
+      "kind": "test",
+      "package": "codex-goal-extension",
+      "target": "accounting",
+      "tests": [
+        "empty_continuations_require_three_turns_without_activity_or_goal_changes"
+      ]
+    },
+    {
+      "binary": "codex-guardian-context::cache_prefix",
+      "kind": "test",
+      "package": "codex-guardian-context",
+      "target": "cache_prefix",
+      "tests": [
+        "snapshot_split_preserves_evidence_and_prefix_when_assistants_and_reviews_change"
       ]
     }
   ],

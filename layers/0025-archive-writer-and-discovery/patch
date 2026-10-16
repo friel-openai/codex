@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index a7f9e06f924c8c8e0aabfa5a7ac14c17c8feab27..bc9faf48b611728df1e23970897cc52f167f1ae5 100644
+index 3250f5713cd67abe19c5f547f88bcddc303add51..7b34e06f1c29cee8efa566049e876ce4f12c6912 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2192,7 +2192,7 @@ impl ThreadRequestProcessor {
+@@ -2205,7 +2205,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index a7f9e06f924c8c8e0aabfa5a7ac14c17c8feab27..bc9faf48b611728df1e23970897cc52f
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6620,6 +6620,28 @@ impl ThreadRequestProcessor {
+@@ -6839,6 +6839,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,10 +41,10 @@ index a7f9e06f924c8c8e0aabfa5a7ac14c17c8feab27..bc9faf48b611728df1e23970897cc52f
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index a7156aac5e62dd3904ff82f5f2e2fd35b2b9a100..d147c2e0fc67e1b543bb79128dde176dd19add05 100644
+index 17d27fb9c9d13eff1b4e016efc3ea134da8b5690..9132659ef8c01aa11105f7dec86cbb5706e7f2fe 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -133,6 +133,7 @@ mod skills_list;
+@@ -135,6 +135,7 @@ mod skills_list;
  mod sleep;
  mod sqlite_recovery;
  mod thread_archive;
@@ -53,7 +53,7 @@ index a7156aac5e62dd3904ff82f5f2e2fd35b2b9a100..d147c2e0fc67e1b543bb79128dde176d
  mod thread_delete;
  mod thread_environments;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-index bd07b14abe79109342383aea97676954ae965691..1ce5e31a325a1db68679d7e3bcc68a7e176a19c2 100644
+index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..93b13d1eb71b0cc1cc0c05add421daf65e7f7120 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 @@ -208,6 +208,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
@@ -73,7 +73,7 @@ index bd07b14abe79109342383aea97676954ae965691..1ce5e31a325a1db68679d7e3bcc68a7e
          )
          .await?;
 
-@@ -574,7 +575,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
+@@ -576,7 +577,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -82,7 +82,7 @@ index bd07b14abe79109342383aea97676954ae965691..1ce5e31a325a1db68679d7e3bcc68a7e
          )
          .await?;
      state_db
-@@ -686,7 +687,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+@@ -688,7 +689,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,

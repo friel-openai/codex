@@ -11,7 +11,7 @@ index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 0579293247736f2fb0cdecad16626d095aa61e7e..1b4b43c74285497a06cddd9a0be2916457c6f1da 100644
+index 496901af523a2b96374de180143dabfd93c23e93..f452050bcb03ce33f07cf2c56629fae772b2ea3f 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -17,6 +17,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
@@ -23,7 +23,7 @@ index 0579293247736f2fb0cdecad16626d095aa61e7e..1b4b43c74285497a06cddd9a0be29164
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
-@@ -461,6 +463,7 @@ async fn run_compact_task_inner_impl(
+@@ -471,6 +473,7 @@ async fn run_compact_task_inner_impl(
      let user_messages = collect_annotated_user_messages(history_items);
 
      let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -32,10 +32,10 @@ index 0579293247736f2fb0cdecad16626d095aa61e7e..1b4b43c74285497a06cddd9a0be29164
          // This replacement history skips `record_conversation_items`; only the appended summary
          // belongs to this compaction turn.
 diff --git a/codex-rs/core/src/compact_remote_history.rs b/codex-rs/core/src/compact_remote_history.rs
-index aa7cd7607eeebef75a295a4409aa8f25dc2b2d6d..ac909bdd6eab2e2f7c2e0f948175039f339b2008 100644
+index 82fc5e3f0e2dabf03b30d56a0453702e4257402a..7cac5e2f79e537fce01a127ee887a267854fec82 100644
 --- a/codex-rs/core/src/compact_remote_history.rs
 +++ b/codex-rs/core/src/compact_remote_history.rs
-@@ -126,6 +126,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
+@@ -138,6 +138,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
  fn rewritten_output_for_context_window(
      envelope: &ResponseItemEnvelope,
  ) -> Option<ResponseItemEnvelope> {
@@ -82,33 +82,57 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 07caf0e75e7e3ad165f2b9e060f94590af10972f..145595c6dd25704533ab7541ec703430a078d86e 100644
+index 0b89c5439c41708518b9eee093045daf64c14e5d..0a397a529b21d0ae7d10e7e4276df51bebf0d313 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -10,6 +10,7 @@ use crate::compact::CompactionAnalyticsDetails;
+@@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
+ use crate::compact::CompactionAnalyticsDetails;
  use crate::compact::CompactionReporting;
- use crate::compact::build_compaction_replacement_history;
  use crate::compact::compaction_status_from_result;
 +use crate::compact::retain_independent_thread_messages;
  use crate::compact::retain_subagent_assignment_and_recent_messages;
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
-@@ -324,8 +325,9 @@ async fn run_remote_compact_task_inner_impl(
+diff --git a/codex-rs/core/src/compact_remote_v2_installation.rs b/codex-rs/core/src/compact_remote_v2_installation.rs
+index 2f15771ab49cfea4fa74ead9e702183a37989977..049845f6e6706c46cf3c0e4bd0b090262648c3e7 100644
+--- a/codex-rs/core/src/compact_remote_v2_installation.rs
++++ b/codex-rs/core/src/compact_remote_v2_installation.rs
+@@ -204,18 +204,19 @@ async fn build_and_install_compaction(
              RetainedImageBudget::Disabled
          },
      );
-+    let previous_history = sess.clone_history().await;
-+    retain_independent_thread_messages(previous_history.annotated_items(), &mut compacted_history);
-     if let Some(agent_path) = turn_context.session_source.get_agent_path() {
+-    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
 -        let previous_history = sess.clone_history().await;
+-        let previous_items = previous_history.annotated_items();
+-        let previous_items = if let Some((prefix, ..)) = prefix.as_ref() {
+-            // Prefix installation appends the live suffix separately.
+-            let Some(items) = previous_items.get(..prefix.len) else {
+-                return Ok(false);
+-            };
+-            items
+-        } else {
+-            previous_items
++    let previous_history = sess.clone_history().await;
++    let previous_items = previous_history.annotated_items();
++    let previous_items = if let Some((prefix, ..)) = prefix.as_ref() {
++        // Prefix installation appends the live suffix separately.
++        let Some(items) = previous_items.get(..prefix.len) else {
++            return Ok(false);
+         };
++        items
++    } else {
++        previous_items
++    };
++    retain_independent_thread_messages(previous_items, &mut compacted_history);
++    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
          retain_subagent_assignment_and_recent_messages(
-             previous_history.annotated_items(),
+             previous_items,
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 27b31bfedec54dc7c82ce9b2daf844578b8ee31e..f9259a41f985caa69994cd9b4f126e5357305217 100644
+index 5888ebd5d896631fa1cb17de9d2458aaa5afa514..4471b47752bbfb66cbf39b820957e42ea1417de6 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -536,6 +536,11 @@ impl ContextManager {
+@@ -537,6 +537,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -1004,10 +1028,10 @@ index 0000000000000000000000000000000000000000..61fcc2386bdb96997760348b424b14bb
 +}
 diff --git a/codex-rs/core/src/independent_thread/retention_tests.rs b/codex-rs/core/src/independent_thread/retention_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd12504c02d
+index 0000000000000000000000000000000000000000..ec21030fe941b331d166492ba9bc1c92e01dda5f
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/retention_tests.rs
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,153 @@
 +use super::*;
 +use crate::compact::collect_annotated_user_messages;
 +use codex_protocol::ResponseItemId;
@@ -1084,6 +1108,8 @@ index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd1
 +    let delivery = independent_thread_input("send_message_to_thread", 1);
 +    let user = ResponseItemEnvelope::new(ResponseItem::Message {
 +        id: Some(ResponseItemId::new("later-user")),
++        status: None,
++        encrypted_content: None,
 +        role: "user".to_string(),
 +        content: vec![ContentItem::InputText {
 +            text: "newer user request".to_string(),
@@ -1160,23 +1186,23 @@ index 0000000000000000000000000000000000000000..30f76f5ef4292f8b02816362b7f22bd1
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 59809e6351dd7f27eb0aa892c5213de9579966a5..86c95b8007280138b5932c1b00574df49de5caed 100644
+index f56f58caf6051dd97f7824c7d485c9b215e19cf5..4fc4b70c53f3dc6a2c14ae02a8779bd460b846a2 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -82,6 +82,8 @@ pub use rollout_budget::RolloutBudgetReminder;
+@@ -83,6 +83,8 @@ pub use rollout_budget::RolloutBudgetReminder;
  mod agent_communication;
  mod agent_message_board;
  pub use agent_message_board::install_agent_message_board;
 +mod independent_thread;
 +pub use independent_thread::install as install_independent_thread_tools;
  mod attestation;
+ mod code_mode_host;
  mod codex_delegate;
- mod command_canonicalization;
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 752ca93df112288d1a73eb597117cbab99d0e665..cef97bde8445f9fe92d26db7971419e2dd60a968 100644
+index cc16ab564fa58ddc6c13a471476f50d7be68c9e0..738008e51c3b89a008daab3c5001d0ab0db0b44f 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(
+@@ -157,6 +157,8 @@ pub(crate) fn build_tool_router(
      let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
      add_core_tool_sources(&context, &mut registry);
 
