@@ -262,6 +262,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
             "adopt_agent",
             "promote_agent",
             "close_agent",
+            "fork_thread",
             "send_message_to_thread",
         ] {
             assert!(
