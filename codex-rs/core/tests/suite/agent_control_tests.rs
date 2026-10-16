@@ -212,6 +212,27 @@ impl AgentControl for TestAgentControl {
     }
 }
 
+#[tokio::test]
+async fn default_list_page_uses_provided_host_controller() {
+    let thread_id = ThreadId::new();
+    let controller: Arc<dyn AgentControl> = Arc::new(TestAgentControl::new(thread_id));
+    let error = controller
+        .list_page(
+            thread_id,
+            None,
+            &SessionSource::Exec,
+            Some("/root"),
+            None,
+            Some(1),
+        )
+        .await
+        .expect_err("host list rejection must survive the default page adapter");
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message) if message == "host list rejection"
+    ));
+}
+
 async fn test_with_host_control(
     server: &MockServer,
 ) -> anyhow::Result<(TestCodex, Arc<TestAgentControl>)> {

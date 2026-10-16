@@ -1,3 +1,19 @@
+impl super::ThreadRequestProcessor {
+    /// Shares the actual dispatcher's manager and store so API tests can reproduce a
+    /// writerless saved runtime without adding production mutation APIs.
+    pub(crate) fn saved_thread_persistence_test_resources(
+        &self,
+    ) -> (
+        std::sync::Arc<codex_core::ThreadManager>,
+        std::sync::Arc<dyn codex_thread_store::ThreadStore>,
+    ) {
+        (
+            std::sync::Arc::clone(&self.thread_manager),
+            std::sync::Arc::clone(&self.thread_store),
+        )
+    }
+}
+
 mod thread_list_cwd_filter_tests {
     use super::super::normalize_thread_list_cwd_filters;
     use codex_app_server_protocol::ThreadListCwdFilter;
