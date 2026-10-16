@@ -3021,6 +3021,10 @@
           "description": "Hide native multi-agent tools while retaining the V2 runtime for host-provided tools.",
           "type": "boolean"
         },
+        "enable_thread_adoption": {
+          "description": "Expose same-thread adoption and subagent promotion only when explicitly enabled.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },

@@ -37,10 +37,23 @@ impl ThreadManagerState {
         thread: Arc<CodexThread>,
         membership: &AgentTreeMembership,
     ) -> CodexResult<ThreadEvictionOutcome> {
+        let thread_id = thread.session.thread_id;
+        let lifecycle = thread
+            .session
+            .services
+            .local_agent_runtime
+            .registry
+            .agent_lifecycle(thread_id)
+            .unwrap_or_default();
+        let Some(transition) = lifecycle.try_lock_transition() else {
+            return Ok(ThreadEvictionOutcome::Busy);
+        };
+        if lifecycle.completion_watcher_active() {
+            return Ok(ThreadEvictionOutcome::Busy);
+        }
         let Ok(residency_guard) = Arc::clone(&thread.residency_gate).try_write_owned() else {
             return Ok(ThreadEvictionOutcome::Busy);
         };
-        let thread_id = thread.session.thread_id;
         if !self
             .get_thread(thread_id)
             .await
@@ -57,6 +70,7 @@ impl ThreadManagerState {
             .into_teardown_guard("resident_eviction", Some(thread_id));
         // Once shutdown is submitted, cancellation cannot release delivery or capacity early.
         tokio::spawn(async move {
+            let _transition = transition;
             let _residency_guard = residency_guard;
             thread.ensure_rollout_materialized().await;
             if let Err(err) = thread.shutdown_and_wait().await {
@@ -89,7 +103,7 @@ impl ThreadManagerState {
                 .registry
                 .save_evicted_environments(thread_id, environments);
             let removed = threads.remove(&thread_id).is_some();
-            runtime.residency.remove(thread_id);
+            runtime.agent_residency.remove(thread_id);
             teardown.complete();
             Ok(if removed {
                 ThreadEvictionOutcome::Evicted
@@ -101,30 +115,38 @@ impl ThreadManagerState {
     }
 }
 
+/// Session-scoped LRU of loaded V1 and V2 agents that can be reconstructed from persisted rollout.
 #[derive(Default)]
-pub(super) struct V2Residency {
-    state: Mutex<V2ResidencyState>,
+pub(super) struct AgentResidency {
+    /// Loaded residents plus in-flight reservations for new or reloaded agents.
+    state: Mutex<AgentResidencyState>,
 }
 
+/// Mutable residency accounting protected by `AgentResidency::state`.
 #[derive(Default)]
-struct V2ResidencyState {
+struct AgentResidencyState {
+    /// Loaded agent IDs, ordered from least to most recently used.
     residents: VecDeque<ThreadId>,
+    /// Slots reserved before a thread has finished loading and can enter `residents`.
     pending_slots: usize,
 }
 
-pub(super) struct V2ResidencySlot {
-    residency: Arc<V2Residency>,
+/// A pending resident slot that must be committed after a thread loads successfully.
+pub(super) struct AgentResidencySlot {
+    /// Shared LRU that owns the pending slot.
+    residency: Arc<AgentResidency>,
+    /// Whether dropping this reservation must return the pending slot.
     active: bool,
 }
 
-impl V2ResidencySlot {
+impl AgentResidencySlot {
     pub(super) fn commit(mut self, thread_id: ThreadId) {
         self.residency.commit_slot(thread_id);
         self.active = false;
     }
 }
 
-impl Drop for V2ResidencySlot {
+impl Drop for AgentResidencySlot {
     fn drop(&mut self) {
         if self.active {
             self.residency.release_pending_slot();
@@ -133,23 +155,34 @@ impl Drop for V2ResidencySlot {
 }
 
 impl LocalAgentControl {
-    pub(super) async fn reserve_v2_residency_slot(
+    pub(super) async fn reserve_agent_residency_slot(
         &self,
         state: &Arc<ThreadManagerState>,
         config: &Config,
+        multi_agent_version: MultiAgentVersion,
         membership: &AgentTreeMembership,
         protected_thread_id: Option<ThreadId>,
-    ) -> CodexResult<V2ResidencySlot> {
+    ) -> CodexResult<AgentResidencySlot> {
         let capacity = config
-            .effective_agent_max_threads(MultiAgentVersion::V2)
+            .effective_agent_max_threads(multi_agent_version)
             .unwrap_or(usize::MAX);
-        Arc::clone(&self.runtime.residency)
-            .reserve_slot(state, capacity, membership, protected_thread_id)
+        Arc::clone(&self.runtime.agent_residency)
+            .reserve_slot(self, state, capacity, membership, protected_thread_id)
             .await
     }
 
-    pub(super) fn forget_v2_residency(&self, thread_id: ThreadId) {
-        self.runtime.residency.remove(thread_id);
+    pub(super) async fn touch_loaded_agent_residency(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        thread_id: ThreadId,
+    ) {
+        if let Ok(thread) = state.get_thread(thread_id).await {
+            let _ = self.runtime.pin_v2_residency(state, &thread).await;
+        }
+    }
+
+    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+        self.runtime.agent_residency.remove(thread_id);
     }
 }
 
@@ -160,42 +193,53 @@ impl LocalAgentRuntime {
         state: &ThreadManagerState,
         thread: &Arc<CodexThread>,
     ) -> CodexResult<Option<tokio::sync::OwnedRwLockReadGuard<()>>> {
-        if !is_resident_candidate(thread) {
-            return Ok(None);
-        }
+        // Roots are not evicted, but ownership transfer must also exclude their queued mail.
         let guard = Arc::clone(&thread.residency_gate).read_owned().await;
         let thread_id = thread.session.thread_id;
         if !Arc::ptr_eq(thread, &state.get_thread(thread_id).await?) {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        self.residency.touch(thread_id);
+        if is_resident_candidate(thread) {
+            self.agent_residency.touch(thread_id);
+        }
         Ok(Some(guard))
     }
 }
 
-impl V2Residency {
+/// Result of scanning the current LRU once for an unloadable resident.
+enum EvictionResult {
+    Unloaded,
+    Retry,
+    Unavailable,
+}
+
+impl AgentResidency {
     async fn reserve_slot(
         self: Arc<Self>,
+        control: &LocalAgentControl,
         manager: &Arc<ThreadManagerState>,
         capacity: usize,
         membership: &AgentTreeMembership,
         protected_thread_id: Option<ThreadId>,
-    ) -> CodexResult<V2ResidencySlot> {
+    ) -> CodexResult<AgentResidencySlot> {
         loop {
             if self.try_reserve_pending_slot(capacity) {
-                return Ok(V2ResidencySlot {
+                return Ok(AgentResidencySlot {
                     residency: self,
                     active: true,
                 });
             }
-            if !self
-                .try_unload_one_resident(manager, membership, protected_thread_id)
+            match self
+                .try_unload_one_resident(control, manager, membership, protected_thread_id)
                 .await
             {
-                return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
-                    max_threads: capacity,
-                })
-                .with_agent_context(AgentErrorContext::ResidencyCapacity));
+                EvictionResult::Unloaded | EvictionResult::Retry => {}
+                EvictionResult::Unavailable => {
+                    return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
+                        max_threads: capacity,
+                    })
+                    .with_agent_context(AgentErrorContext::ResidencyCapacity));
+                }
             }
         }
     }
@@ -214,10 +258,11 @@ impl V2Residency {
 
     async fn try_unload_one_resident(
         self: &Arc<Self>,
+        control: &LocalAgentControl,
         manager: &Arc<ThreadManagerState>,
         membership: &AgentTreeMembership,
         protected_thread_id: Option<ThreadId>,
-    ) -> bool {
+    ) -> EvictionResult {
         // Keep shutting-down workers counted until removal. Each runtime's write guard
         // excludes delivery and competing evictions without blocking unrelated workers.
         let candidates = self
@@ -226,6 +271,7 @@ impl V2Residency {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .residents
             .clone();
+        let mut pending_completion = None;
         for candidate_thread_id in candidates {
             if Some(candidate_thread_id) == protected_thread_id {
                 continue;
@@ -237,7 +283,7 @@ impl V2Residency {
                     Some(_) | None => {
                         // A reload cannot publish between the lookup and stale-entry removal.
                         self.remove(candidate_thread_id);
-                        return true;
+                        return EvictionResult::Unloaded;
                     }
                 }
             };
@@ -248,18 +294,33 @@ impl V2Residency {
             ) {
                 continue;
             }
+            let lifecycle = control
+                .runtime
+                .registry
+                .agent_lifecycle(candidate_thread_id)
+                .unwrap_or_default();
             match manager
                 .try_evict_v2_thread(candidate_thread, membership)
                 .await
             {
                 Ok(ThreadEvictionOutcome::Evicted | ThreadEvictionOutcome::NotCurrent) => {
-                    return true;
+                    return EvictionResult::Unloaded;
                 }
-                Ok(ThreadEvictionOutcome::Busy) => {}
+                Ok(ThreadEvictionOutcome::Busy) => {
+                    if lifecycle.completion_watcher_active() {
+                        self.touch(candidate_thread_id);
+                        pending_completion = Some(lifecycle);
+                    }
+                }
                 Err(err) => warn!("v2 resident eviction failed: {err}"),
             }
         }
-        false
+        if let Some(lifecycle) = pending_completion {
+            lifecycle.wait_for_completion_watcher().await;
+            EvictionResult::Retry
+        } else {
+            EvictionResult::Unavailable
+        }
     }
 
     fn touch(&self, thread_id: ThreadId) {
@@ -302,21 +363,22 @@ fn touch_resident(residents: &mut VecDeque<ThreadId>, thread_id: ThreadId) {
 }
 
 fn is_resident_candidate(thread: &CodexThread) -> bool {
-    thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-        && is_v2_resident_session_source(&thread.session_source)
+    is_resident_session_source(&thread.session_source)
 }
 
-pub(super) fn is_v2_resident_session_source(session_source: &SessionSource) -> bool {
+pub(super) fn is_resident_session_source(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
+        && !crate::goal_supervisor::is_goal_supervisor_helper_source(session_source)
 }
 
-async fn is_unloadable(thread: &CodexThread) -> bool {
+pub(super) async fn is_unloadable(thread: &CodexThread) -> bool {
     matches!(
         thread.agent_status().await,
         AgentStatus::PendingInit
             | AgentStatus::Completed(_)
             | AgentStatus::Errored(_)
             | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
     ) && thread.session.active_turn.lock().await.is_none()
         && !thread.session.has_outstanding_durable_sleep()
         && !thread
@@ -324,6 +386,30 @@ async fn is_unloadable(thread: &CodexThread) -> bool {
             .input_queue
             .has_trigger_turn_mailbox_items()
             .await
+}
+
+impl LocalAgentControl {
+    /// Persist and stop a loaded agent without releasing its addressability metadata.
+    pub(super) async fn unload_agent_thread(
+        &self,
+        manager: &Arc<ThreadManagerState>,
+        thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let Ok(thread) = manager.get_thread(thread_id).await else {
+            return Ok(false);
+        };
+        thread.ensure_rollout_materialized().await;
+        thread.flush_rollout().await?;
+        let environments = thread.environment_selections().await;
+        thread.shutdown_and_wait().await?;
+        thread
+            .session
+            .services
+            .local_agent_runtime
+            .registry
+            .save_evicted_environments(thread_id, environments);
+        Ok(manager.remove_thread(&thread_id).await.is_some())
+    }
 }
 
 #[cfg(test)]

@@ -58,6 +58,8 @@ impl ThreadLifecycleContributor<Config> for PauseShutdown {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()> {
     const QUEUED_TASK: &str = "handle this accepted task after dispatch resumes";
+    const LATE_MAIL: &str = "must not disappear behind shutdown";
+    const DRAIN_TASK: &str = "process the message queued after eviction";
     let server = start_mock_server().await;
     mount_root_collaboration_call(
         &server,
@@ -197,7 +199,7 @@ async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()
         "send during eviction",
         "late-mail",
         "send_message",
-        json!({ "target": "first", "message": "must not disappear behind shutdown" }),
+        json!({ "target": "first", "message": LATE_MAIL }),
     )
     .await;
     let send = test.submit_turn("send during eviction");
@@ -214,9 +216,45 @@ async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()
     timeout(Duration::from_secs(10), send).await??;
     assert_eq!(
         delivery.function_call_output_text("late-mail"),
-        Some(format!("agent with id {first_id} not found")),
+        Some(String::new()),
     );
-    assert!(test.thread_manager.get_thread(first_id).await.is_err());
+    timeout(Duration::from_secs(10), first.wait_until_terminated()).await?;
+    assert_eq!(
+        timeout(Duration::from_secs(10), created.recv()).await??,
+        first_id,
+    );
+    let reloaded = test.thread_manager.get_thread(first_id).await?;
+    assert!(
+        !Arc::ptr_eq(&first, &reloaded),
+        "delivery must reload the worker, not reuse the terminated runtime",
+    );
+    assert!(first.submit(Op::Interrupt).await.is_err());
+
+    // Frodex reloads an evicted worker after teardown; its accepted mail must survive once.
+    mount_root_collaboration_call(
+        &server,
+        "process queued mail",
+        "drain-mail",
+        "followup_task",
+        json!({ "target": "first", "message": DRAIN_TASK }),
+    )
+    .await;
+    let drained = mount_completed_worker(&server, DRAIN_TASK, "drain-mail").await;
+    test.submit_turn("process queued mail").await?;
+    wait_for_event(&reloaded, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    ThreadIdle::wait(&reloaded).await;
+    assert_eq!(
+        drained
+            .single_request()
+            .inputs_of_type("agent_message")
+            .into_iter()
+            .filter(|item| item.to_string().contains(LATE_MAIL))
+            .count(),
+        1,
+    );
 
     // The cancelled caller leaves no reservation behind once teardown finishes.
     mount_root_collaboration_call(
