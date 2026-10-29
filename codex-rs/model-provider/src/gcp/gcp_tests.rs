@@ -87,6 +87,7 @@ async fn bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_met
     let manager = provider.models_manager(
         PathBuf::from("unused-codex-home"),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     let bundled_models = codex_models_manager::bundled_models_response()
         .expect("bundled model catalog should deserialize")
@@ -166,6 +167,7 @@ async fn unknown_vertex_models_use_static_catalog_fallback() {
     let manager = provider.models_manager(
         PathBuf::from("unused-codex-home"),
         Some(ModelsResponse::default()),
+        /*custom_models*/ HashMap::new(),
     );
 
     let model = manager
