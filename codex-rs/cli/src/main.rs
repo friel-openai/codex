@@ -78,6 +78,7 @@ mod mcp_login;
 mod migrate_nfs_db;
 mod migrate_rollouts;
 mod plugin_cmd;
+mod prune_archived;
 mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
@@ -226,6 +227,9 @@ enum Subcommand {
 
     /// [experimental] Migrate configured SQLite databases to DELETE mode in place.
     MigrateNfsDb(migrate_nfs_db::MigrateNfsDbCommand),
+
+    /// Preview archived-thread expiry, or explicitly delete while all other Codex processes are stopped.
+    PruneArchived(prune_archived::PruneArchivedCommand),
 
     /// Unarchive a saved session by id or session name.
     Unarchive(SessionArchiveCommand),
@@ -1627,6 +1631,14 @@ async fn cli_main(
             )
             .await?;
         }
+        Some(Subcommand::PruneArchived(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "prune-archived",
+            )?;
+            prune_archived::run(command, root_config_overrides).await?;
+        }
         Some(Subcommand::Unarchive(cmd)) => {
             let output = run_session_archive_cli_command(
                 codex_tui::SessionArchiveAction::Unarchive,
@@ -2380,6 +2392,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
         Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
+        Some(Subcommand::PruneArchived(_)) => Some("prune-archived"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
@@ -4513,6 +4526,55 @@ enabled = true
             err.to_string(),
             "`--strict-config` is not supported for `codex remote-control`"
         );
+    }
+
+    #[test]
+    fn prune_archived_rejects_remote_and_runtime_only_root_flags() {
+        assert!(
+            profile_v2_for_args(&[
+                "codex",
+                "--profile",
+                "work",
+                "prune-archived",
+                "--older-than",
+                "30d"
+            ])
+            .is_err()
+        );
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--strict-config",
+            "prune-archived",
+            "--older-than",
+            "30d",
+        ])
+        .expect("parse");
+        let error = reject_root_strict_config_for_subcommand(
+            cli.interactive.strict_config,
+            &cli.subcommand,
+        )
+        .expect_err("prune-archived does not load strict runtime config");
+        assert_eq!(
+            error.to_string(),
+            "`--strict-config` is not supported for `codex prune-archived`"
+        );
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--remote",
+            "unix://codex.sock",
+            "prune-archived",
+            "--older-than",
+            "30d",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.subcommand, Some(Subcommand::PruneArchived(_))));
+        let error = reject_remote_mode_for_subcommand(
+            cli.remote.remote.as_deref(),
+            cli.remote.remote_auth_token_env.as_deref(),
+            "prune-archived",
+        )
+        .expect_err("prune-archived must stay local");
+        assert!(error.to_string().contains("prune-archived"));
     }
 
     #[test]
