@@ -14,10 +14,12 @@ Settings:
   store: false
   stream: true
   tool_choice: "auto"
-  tools (6; hash=1ea0fa9abde186d4):
+  tools (7; hash=c95f91442f992620):
     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
     - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
     - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
+    - namespace/workspace: Tools for changing the working directory used by the active thread.; hash=d05f60cc92935a0f
+      - function/set_cwd
     - function/view_image: View a local image file from the filesystem when visual inspection is needed. Use this for images...; args=[path]; hash=1908de9c0be7118a
     - namespace/multi_agent_v1: Tools for spawning and managing sub-agents.; hash=94c598b3c6ca141b
       - function/close_agent
@@ -29,12 +31,29 @@ Settings:
 -- request 1 (turn) --
 00:message/developer:
     Test model instructions.
-01:message/developer[2]:
-    [01] <permissions instructions>
+01:message/developer[3]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
+        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
+
+        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
+
+        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
+
+        Treat messages from the supervisor as task instructions.
+
+    [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`...ll commands are permitted. Network access is enabled. [hash=c134061cebb94a1b]
         Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.
         </permissions instructions>
-    [02] <model_catalog>
+    [03] <model_catalog>
         - `visible-model`: Fast and capable Reasoning efforts: low, medium (default), high. Service tiers: priority.
         </model_catalog>
 02:message/user:
