@@ -1400,7 +1400,8 @@ sqlite = true
 }
 
 #[tokio::test]
-async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result<()> {
+async fn thread_list_relation_filters_ignore_historical_spawn_edges_without_current_membership()
+-> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
     let mut mcp = init_mcp(codex_home.path()).await?;
@@ -1485,91 +1486,31 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;
 
-    let first_page = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 1,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-    let second_page = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        first_page.next_cursor.clone(),
-        /*limit*/ 1,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-
-    assert_eq!(
-        first_page
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
-    );
-    assert_eq!(
-        second_page
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![older_child_id.to_string()]
-    );
-    assert_eq!(second_page.next_cursor, None);
-    let expected_parent_id = parent_id.to_string();
-    assert!(
-        first_page
-            .data
-            .iter()
-            .chain(&second_page.data)
-            .all(|thread| thread.parent_thread_id.as_deref() == Some(expected_parent_id.as_str()))
-    );
-    let interactive_only = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DirectChildrenOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 10,
-        /*model_providers*/ None,
-        /*source_kinds*/ Some(Vec::new()),
-    )
-    .await?;
-    assert_eq!(
-        interactive_only
-            .data
-            .iter()
-            .map(|thread| thread.id.clone())
-            .collect::<Vec<_>>(),
-        vec![newer_child_id.to_string()]
-    );
-
-    let descendants = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::DescendantsOf(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 10,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-    assert_eq!(
-        descendants
-            .data
-            .iter()
-            .map(|thread| (thread.id.clone(), thread.parent_thread_id.clone()))
-            .collect::<Vec<_>>(),
-        vec![
-            (grandchild_id.to_string(), Some(newer_child_id.to_string())),
-            (closed_child_id.to_string(), Some(parent_id.to_string())),
-            (newer_child_id.to_string(), Some(parent_id.to_string())),
-            (older_child_id.to_string(), Some(parent_id.to_string())),
-        ]
-    );
-    assert_eq!(descendants.next_cursor, None);
+    for (relation, source_kinds) in [
+        (ThreadListRelation::DirectChildrenOf(parent_id), None),
+        (
+            ThreadListRelation::DirectChildrenOf(parent_id),
+            Some(Vec::new()),
+        ),
+        (ThreadListRelation::DescendantsOf(parent_id), None),
+    ] {
+        let response = list_threads_for_relation(
+            &mut mcp,
+            relation,
+            /*cursor*/ None,
+            /*limit*/ 1,
+            /*model_providers*/ None,
+            source_kinds,
+        )
+        .await?;
+        assert!(
+            response.data.is_empty(),
+            "persisted open and closed spawn edges must not manufacture current membership"
+        );
+        assert_eq!(response.next_cursor, None);
+        assert_eq!(response.backwards_cursor, None);
+        assert_eq!(response.read_states, Some(HashMap::new()));
+    }
     Ok(())
 }
 
@@ -1747,7 +1688,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             false,
         ),
     ] {
-        let thread_id = create_fake_parented_rollout_with_source(
+        let mut thread_id = create_fake_parented_rollout_with_source(
             codex_home.path(),
             filename_ts,
             timestamp,
@@ -1764,7 +1705,27 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             parent_thread_id.into(),
             parent_thread_id,
         )?;
-        let path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        let mut path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        if version == Some(MultiAgentVersion::V1) {
+            // This independently resumed child's empty registry shares the parent's
+            // session ID. Force it to sort before the loaded root and V2 child.
+            let first_id = "00000000-0000-0000-0000-000000000000";
+            let records = std::fs::read_to_string(&path)?;
+            let mut rewritten = String::new();
+            for line in records.lines() {
+                let mut record: serde_json::Value = serde_json::from_str(line)?;
+                if record["type"] == "session_meta" {
+                    record["payload"]["id"] = json!(first_id);
+                }
+                rewritten.push_str(&serde_json::to_string(&record)?);
+                rewritten.push('\n');
+            }
+            let new_path = rollout_path(codex_home.path(), filename_ts, first_id);
+            std::fs::write(&new_path, rewritten)?;
+            std::fs::remove_file(path)?;
+            path = new_path;
+            thread_id = first_id.to_string();
+        }
         let mut session_meta = read_session_meta_line(&path).await?;
         let source = SessionSource::from(session_meta.meta.source.clone());
         if let Some(version) = version {
@@ -1928,21 +1889,55 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             .iter()
             .all(|thread| thread.parent_thread_id.as_deref() == Some(cli_id.as_str()))
     );
+    // Only the explicitly resumed V2 child is current. Adding historical edges
+    // must not manufacture membership for the other persisted descendants.
+    let expected_current = expected_subagents
+        .into_iter()
+        .filter(|(_, capability, not_loaded)| *capability == Some(false) && !not_loaded)
+        .collect::<Vec<_>>();
+    assert_eq!(expected_current.len(), 1);
     assert_eq!(
         response
             .data
             .into_iter()
-            .map(|thread| {
-                (
-                    thread.id,
-                    thread.can_accept_direct_input,
-                    matches!(thread.status, ThreadStatus::NotLoaded),
-                )
-            })
+            .map(|thread| (
+                thread.id,
+                thread.can_accept_direct_input,
+                matches!(thread.status, ThreadStatus::NotLoaded),
+            ))
             .collect::<Vec<_>>(),
-        expected_subagents
+        expected_current
     );
     assert_eq!(response.next_cursor, None);
+
+    let excluded_response: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: codex_app_server_protocol::ThreadListParams {
+                excluded_thread_ids: Some(vec![expected_current[0].0.clone()]),
+                attached_to_thread_id: None,
+                originators: None,
+                cursor: None,
+                limit: Some(1),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
+                archived: None,
+                section_id: None,
+                project_id: None,
+                cwd: None,
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: Some(parent_thread_id.to_string()),
+            },
+        })
+        .await?;
+    assert!(excluded_response.data.is_empty());
+    assert_eq!(excluded_response.next_cursor, None);
+    assert_eq!(excluded_response.backwards_cursor, None);
+    assert_eq!(excluded_response.read_states, Some(HashMap::new()));
 
     Ok(())
 }

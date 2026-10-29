@@ -474,60 +474,6 @@ pub(super) async fn ensure_listener_task_running(
                         pending_thread_unloads.lock().await.remove(&conversation_id);
                         return;
                     }
-                    if is_v2_child {
-                        let eviction = thread_manager.try_evict_v2_thread(Arc::clone(&conversation));
-                        tokio::pin!(eviction);
-                        let result = match tokio::time::timeout(
-                            Duration::from_secs(/*secs*/ 10), &mut eviction,
-                        ).await {
-                            Ok(result) => result,
-                            Err(_) => {
-                                warn!(event.name = "codex.app_server.thread_shutdown_slow", "thread {conversation_id} shutdown is taking longer than expected; continuing to wait");
-                                eviction.await
-                            }
-                        };
-                        let outcome = match result {
-                            Ok(ThreadEvictionOutcome::Busy) => {
-                                pending_thread_unloads.lock().await.remove(&conversation_id);
-                                unloading_state.note_thread_activity_observed();
-                                continue;
-                            }
-                            Ok(outcome @ (ThreadEvictionOutcome::Evicted | ThreadEvictionOutcome::NotCurrent)) => outcome,
-                            Err(err) => {
-                                warn!("failed to evict thread {conversation_id}: {err}");
-                                pending_thread_unloads.lock().await.remove(&conversation_id);
-                                unloading_state.note_thread_activity_observed();
-                                continue;
-                            }
-                        };
-                        {
-                            let mut pending = pending_thread_unloads.lock().await;
-                            if !thread_state_manager.remove_unsubscribed_listener(
-                                conversation_id, &thread_state, listener_generation,
-                            ).await {
-                                pending.remove(&conversation_id);
-                                break;
-                            }
-                        }
-                        // Release the status receiver before removing its watch entry.
-                        drop(unloading_state);
-                        outgoing_for_task
-                            .cancel_requests_for_thread(conversation_id, /*error*/ None)
-                            .await;
-                        // A runtime removed by someone else may already have a replacement.
-                        if outcome == ThreadEvictionOutcome::Evicted {
-                            thread_watch_manager
-                                .remove_thread(&conversation_id.to_string())
-                                .await;
-                            outgoing_for_task
-                                .send_server_notification(ServerNotification::ThreadClosed(
-                                    ThreadClosedNotification { thread_id: conversation_id.to_string() },
-                                ))
-                                .await;
-                        }
-                        pending_thread_unloads.lock().await.remove(&conversation_id);
-                        return;
-                    }
                     unload_thread_without_subscribers(
                         thread_manager.clone(),
                         outgoing_for_task.clone(),

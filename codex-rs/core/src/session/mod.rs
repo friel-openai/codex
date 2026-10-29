@@ -280,6 +280,7 @@ mod mcp_runtime;
 mod model_alias_refresh;
 mod model_routing;
 pub(crate) mod multi_agents;
+mod persistence_repair;
 mod plugin_selection;
 mod realtime_history;
 mod retained_context;
@@ -1809,7 +1810,11 @@ impl Session {
     }
 
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
-        self.services.state_db.clone()
+        self.services.state_db.clone().or_else(|| {
+            self.repaired_persistence
+                .get()
+                .and_then(|persistence| persistence.state_db.clone())
+        })
     }
 
     pub(crate) fn live_thread_for_persistence(
@@ -1821,7 +1826,11 @@ impl Session {
     }
 
     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
-        self.services.live_thread.as_ref()
+        self.services.live_thread.as_ref().or_else(|| {
+            self.repaired_persistence
+                .get()
+                .map(|persistence| &persistence.live_thread)
+        })
     }
 
     pub(crate) async fn set_thread_memory_mode(
@@ -4383,8 +4392,24 @@ impl Session {
             .iter()
             .map(|envelope| envelope.item.clone())
             .collect::<Vec<_>>();
+        // Match persistence repair's settings -> state -> persistence lock order.
+        let settings_guard =
+            if force_mcp_checkpoint && self.reference_context_item().await.is_none() {
+                Some(thread_settings::acquire_persistence_lock(self).await)
+            } else {
+                None
+            };
+        let initial_settings = if settings_guard.is_some()
+            && self.reference_context_item().await.is_none()
+            && self.state.lock().await.take_initial_settings_pending()
         {
+            Some(thread_settings::applied_event(self).await)
+        } else {
+            None
+        };
+        let persistence = {
             let mut state = self.state.lock().await;
+            let persistence = self.persistence_repair_lock.lock().await;
             state
                 .current_time_reminder
                 .note_recorded_items(&response_items);
@@ -4424,7 +4449,8 @@ impl Session {
             state
                 .history
                 .record_annotated_items(&mut items, model_info.truncation_policy.into());
-        }
+            persistence
+        };
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -4433,32 +4459,19 @@ impl Session {
                     metadata: image,
                 });
         }
-        let settings_guard =
-            if force_mcp_checkpoint && self.reference_context_item().await.is_none() {
-                Some(thread_settings::acquire_persistence_lock(self).await)
-            } else {
-                None
-            };
-        let initial_settings = if settings_guard.is_some()
-            && self.reference_context_item().await.is_none()
-            && self.state.lock().await.take_initial_settings_pending()
-        {
-            Some(thread_settings::applied_event(self).await)
-        } else {
-            None
-        };
         let rollout_items = initial_settings
             .into_iter()
             .map(RolloutItem::EventMsg)
             .chain(items.into_iter().map(RolloutItem::ResponseItem))
             .collect::<Vec<_>>();
-        let persisted = self.persist_rollout_items(&rollout_items).await;
-        drop(settings_guard);
+        let persisted = self.persist_rollout_items_locked(&rollout_items).await;
         if persisted && let Some(revision) = mcp_revision {
             self.services
                 .executed_tool_calls
                 .mark_mcp_attribution_persisted(revision);
         }
+        drop(persistence);
+        drop(settings_guard);
         if turn_context.config.memories.disable_on_external_context
             && let Some(item) = response_items
                 .iter()
@@ -4849,24 +4862,27 @@ impl Session {
         for mut recording in pending {
             let _ = recording.changed().await;
         }
-        {
+        let persistence = {
             let mut state = self.state.lock().await;
+            let persistence = self.persistence_repair_lock.lock().await;
             state.current_time_reminder.note_recorded_items(items);
             state.history.record_annotated_items(
                 std::slice::from_mut(&mut response_item),
                 model_info.truncation_policy.into(),
             );
-        }
+            persistence
+        };
         if let Some(delivery) = &communication.delivery {
             delivery.consumed(self.thread_id);
         }
-        self.persist_rollout_items(&[
+        self.persist_rollout_items_locked(&[
             RolloutItem::InterAgentCommunicationMetadata {
                 trigger_turn: communication.trigger_turn,
             },
             RolloutItem::ResponseItem(response_item),
         ])
         .await;
+        drop(persistence);
         drop(boundary);
         self.send_raw_response_items(turn_context, items).await;
     }
@@ -5569,6 +5585,11 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
+        let _persistence = self.persistence_repair_lock.lock().await;
+        self.persist_rollout_items_locked(items).await
+    }
+
+    async fn persist_rollout_items_locked(&self, items: &[RolloutItem]) -> bool {
         if self.persistence_restart_required() {
             error!("failed to record rollout items: thread persistence requires a restart");
             return false;
@@ -5872,11 +5893,13 @@ impl Session {
                 thread_settings::applied_event(self).await,
             ));
         }
-        self.persist_rollout_items(&rollout_items).await;
+        // Recovery must not checkpoint the previous reference after this append.
+        let mut state = self.state.lock().await;
+        let _persistence = self.persistence_repair_lock.lock().await;
+        self.persist_rollout_items_locked(&rollout_items).await;
 
         // Advance the persisted-settings baseline even when this turn emitted no model-visible
         // context items.
-        let mut state = self.state.lock().await;
         state.set_reference_context_item(Some(turn_context_item));
         Ok(Arc::new(world_state))
     }
