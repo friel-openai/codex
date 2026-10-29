@@ -26,6 +26,7 @@ use super::RolloutWriterReservation;
 use super::goal_supervisor_history_repair::GoalSupervisorLineageProvenance;
 use super::goal_supervisor_history_repair::repair_legacy_goal_supervisor_lines_with_provenance;
 use super::thread_rollout_resolver;
+use crate::ForkBoundary;
 use crate::StoredThreadItem;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -74,7 +75,7 @@ pub(super) struct RolloutLineage {
     pub(super) segments: Vec<RolloutLineageSegment>,
 }
 
-/// A clean same-thread lineage prepared in one bounded-buffer pass per physical segment.
+/// A clean lineage prepared in one bounded-buffer pass per physical segment.
 pub(super) struct PreparedForkLineage {
     pub(super) lineage: RolloutLineage,
     pub(super) model_context: Vec<RolloutItem>,
@@ -293,19 +294,20 @@ impl LocalThreadStore {
         Ok((lineage, source_projection_was_missing))
     }
 
-    /// Prepares a clean same-thread rotation lineage without repeating compatibility scans.
+    /// Prepares a clean lineage without repeating compatibility scans.
     ///
     /// The head pass authenticates the reference graph. The second pass keeps at most one physical
     /// segment in memory while validating the closed goal-supervisor compatibility invariant,
     /// calculating every byte boundary, and reconstructing model context. Histories that need
-    /// repair or cross a fork or filter boundary return `None` and retain the existing
-    /// compatibility-repair implementation. Same-thread `history_base` boundaries are exact
-    /// ordinal and byte positions, so native segmented Paginated history uses this path.
-    pub(super) async fn try_prepare_same_thread_fork_lineage_reserved(
+    /// repair or filters retain the compatibility-repair implementation. Latest forks may also
+    /// read immutable ancestors without reserving their live writer. The resolver normalizes
+    /// native and legacy cutoffs; the materializer authenticates each consumed byte boundary.
+    pub(super) async fn try_prepare_clean_fork_lineage_reserved(
         &self,
         requested_thread_id: ThreadId,
         expected_rollout_id: Option<RolloutId>,
         reservation: &RolloutWriterReservation,
+        boundary: &ForkBoundary,
         include_full_history: bool,
     ) -> ThreadStoreResult<Option<PreparedForkLineage>> {
         let source =
@@ -341,10 +343,10 @@ impl LocalThreadStore {
         )
         .await?;
         if segments.iter().any(|segment| {
-            segment.thread_id != requested_thread_id
-                || segment.uses_fork_boundary
-                || !segment.filter_texts.is_empty()
-                || !reservation.contains(segment.thread_id)
+            !segment.filter_texts.is_empty()
+                // Explicit boundaries may publish an ancestor-owned prefix.
+                || !matches!(boundary, ForkBoundary::Latest)
+                    && (segment.thread_id != requested_thread_id || segment.uses_fork_boundary)
         }) {
             return Ok(None);
         }
@@ -363,6 +365,19 @@ impl LocalThreadStore {
         else {
             return Ok(None);
         };
+        // Latest on an empty child also normalizes to its ancestor. Keep that publication
+        // on the all-owner path instead of publishing from an unreserved ancestor.
+        if lineage
+            .segments
+            .last()
+            .is_some_and(|segment| segment.end_ordinal_exclusive == Some(segment.start_ordinal))
+            && lineage
+                .segments
+                .iter()
+                .any(|segment| !reservation.contains(segment.thread_id))
+        {
+            return Ok(None);
+        }
         Ok(Some(PreparedForkLineage {
             lineage,
             model_context,
@@ -390,9 +405,15 @@ impl LocalThreadStore {
         let mut model_context_complete = false;
         let mut canonical_session_meta = None;
         let mut full_history_segments = include_full_history.then(Vec::new);
+        // Resolve the home, not the segments directory: a symlink must not turn a mutable
+        // sessions/date file into an apparently immutable ancestor.
+        let immutable_root = tokio::fs::canonicalize(&self.config.codex_home)
+            .await
+            .map_err(lineage_io_error)?
+            .join(codex_rollout::SESSIONS_SUBDIR)
+            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR);
 
         for segment in lineage.segments.iter_mut().rev() {
-            debug_assert!(reservation.contains(segment.thread_id));
             let rollout_path = codex_rollout::existing_rollout_path(segment.rollout_path.as_path())
                 .await
                 .unwrap_or_else(|| segment.rollout_path.clone());
@@ -401,7 +422,8 @@ impl LocalThreadStore {
                 rollout_path.as_path(),
                 "Codex home",
             )?;
-            let materialized_path =
+            let reserved = reservation.contains(segment.thread_id);
+            let materialized_path = if reserved {
                 codex_rollout::materialize_rollout_for_reference(rollout_path.as_path())
                     .await
                     .map_err(|err| ThreadStoreError::Internal {
@@ -409,81 +431,84 @@ impl LocalThreadStore {
                             "failed to materialize referenced rollout {}: {err}",
                             rollout_path.display()
                         ),
-                    })?;
+                    })?
+            } else {
+                // Maintenance ownership prevents compression/repair while these immutable
+                // files are read. Their ancestor's live writer owns a different physical file.
+                if rollout_path_is_compressed(&rollout_path)
+                    || !rollout_path.starts_with(&immutable_root)
+                    || codex_rollout::rollout_id_from_path(&rollout_path)
+                        != Some(segment.rollout_id)
+                    || segment.end_ordinal_exclusive.is_none()
+                {
+                    return Ok(None);
+                }
+                rollout_path
+            };
             let bytes = tokio::fs::read(materialized_path.as_path())
                 .await
                 .map_err(lineage_io_error)?;
-            let prefix = match segment.jsonl_end_byte_offset {
-                Some(end_byte_offset) => {
-                    let end = usize::try_from(end_byte_offset).map_err(|_| {
-                        malformed_lineage(
-                            segment.rollout_id,
-                            "cutoff byte offset is past the source rollout",
-                        )
-                    })?;
-                    let prefix = bytes.get(..end).ok_or_else(|| {
-                        malformed_lineage(
-                            segment.rollout_id,
-                            "cutoff byte offset is past the source rollout",
-                        )
-                    })?;
-                    if end != 0 && !prefix.ends_with(b"\n") {
-                        // Snapshot stabilization can move record boundaries. Leave that narrow
-                        // ordinal recovery to the compatibility validator, not this fast path.
-                        return Ok(None);
-                    }
-                    prefix
-                }
-                None => bytes.as_slice(),
-            };
-            let parsed = parse_rollout_bytes(prefix, segment.thread_id)?;
-            let end_byte_offset = match segment.jsonl_end_byte_offset {
-                Some(end_byte_offset) => {
-                    let end_ordinal = segment.end_ordinal_exclusive.ok_or_else(|| {
-                        malformed_lineage(
-                            segment.rollout_id,
-                            "byte cutoff is missing its ordinal boundary",
-                        )
-                    })?;
-                    if parsed
-                        .iter()
-                        .any(|(_, line)| line.ordinal.is_some_and(|ordinal| ordinal >= end_ordinal))
-                    {
+            let end_byte_offset =
+                match (segment.jsonl_end_byte_offset, segment.end_ordinal_exclusive) {
+                    (Some(end_byte_offset), Some(_)) => end_byte_offset,
+                    (Some(_), None) => {
                         return Err(malformed_lineage(
                             segment.rollout_id,
-                            "cutoff byte offset does not match its ordinal boundary",
+                            "byte cutoff is missing its ordinal boundary",
                         ));
                     }
-                    if parsed
-                        .iter()
-                        .rev()
-                        .find_map(|(_, line)| line.ordinal)
-                        .and_then(|ordinal| ordinal.checked_add(1))
-                        != Some(end_ordinal)
-                    {
-                        // Gaps and unknown records cannot certify this prefix without inspecting
-                        // its suffix. Preserve the complete compatibility validation in that case.
-                        return Ok(None);
+                    (None, Some(end_ordinal_exclusive)) => {
+                        byte_offset_for_ordinal_in_bytes(&bytes, end_ordinal_exclusive)?
+                            .ok_or_else(|| {
+                                malformed_lineage(segment.rollout_id, "missing fork byte boundary")
+                            })?
                     }
-                    end_byte_offset
-                }
-                None => match segment.end_ordinal_exclusive {
-                    Some(end_ordinal_exclusive) => parsed
-                        .iter()
-                        .find_map(|(start, line)| {
-                            line.ordinal
-                                .is_some_and(|ordinal| ordinal >= end_ordinal_exclusive)
-                                .then_some(*start)
-                        })
-                        .unwrap_or_else(|| u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-                    None => u64::try_from(bytes.len()).map_err(|_| {
+                    (None, None) => u64::try_from(bytes.len()).map_err(|_| {
                         malformed_lineage(segment.thread_id, "rollout byte offset overflow")
                     })?,
-                },
-            };
+                };
+            let end = usize::try_from(end_byte_offset).map_err(|_| {
+                malformed_lineage(
+                    segment.rollout_id,
+                    "cutoff byte offset is past the source rollout",
+                )
+            })?;
+            let prefix = bytes.get(..end).ok_or_else(|| {
+                malformed_lineage(
+                    segment.rollout_id,
+                    "cutoff byte offset is past the source rollout",
+                )
+            })?;
+            if segment.jsonl_end_byte_offset.is_some() && end != 0 && !prefix.ends_with(b"\n") {
+                // Snapshot stabilization can move record boundaries. Leave that narrow
+                // ordinal recovery to the compatibility validator, not this fast path.
+                return Ok(None);
+            }
+            let parsed = parse_rollout_bytes(prefix, segment.thread_id)?;
+            if let Some(end_ordinal) = segment.end_ordinal_exclusive {
+                if parsed
+                    .iter()
+                    .any(|(_, line)| line.ordinal.is_some_and(|ordinal| ordinal >= end_ordinal))
+                {
+                    return Err(malformed_lineage(
+                        segment.rollout_id,
+                        "cutoff byte offset does not match its ordinal boundary",
+                    ));
+                }
+                if parsed
+                    .iter()
+                    .rev()
+                    .find_map(|(_, line)| line.ordinal)
+                    .and_then(|ordinal| ordinal.checked_add(1))
+                    != Some(end_ordinal)
+                {
+                    // An ordinal-only cutoff cannot exceed EOF. Gaps and unknown records
+                    // also require the complete compatibility validator to certify this prefix.
+                    return Ok(None);
+                }
+            }
             let mut lines = parsed
                 .iter()
-                .take_while(|(start, _)| *start < end_byte_offset)
                 .map(|(_, line)| line.clone())
                 .collect::<Vec<_>>();
             let repair = repair_legacy_goal_supervisor_lines_with_provenance(
@@ -638,16 +663,15 @@ impl LocalThreadStore {
                     })?;
             // A previously computed boundary is reusable only when it still names the same
             // immutable segment under the combined writer reservation.
-            let reusable_end_byte_offset = if materialized_path == segment.rollout_path
+            let reusable_end_byte_offset = if materialized_path == rollout_path
                 && segment.end_ordinal_exclusive.is_some()
                 && let Some(end_byte_offset) = segment.end_byte_offset
             {
                 if segment.thread_id == requested_thread_id {
                     Some(end_byte_offset)
                 } else {
-                    let immutable_thread_root = self
-                        .config
-                        .codex_home
+                    let immutable_thread_root = std::fs::canonicalize(&self.config.codex_home)
+                        .map_err(lineage_io_error)?
                         .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
                         .join(segment.thread_id.to_string());
                     let immutable_segment_id = materialized_path
@@ -1641,6 +1665,13 @@ async fn trim_to_history_position(
     let bytes = tokio::fs::read(segment.rollout_path.as_path())
         .await
         .map_err(lineage_io_error)?;
+    segment.end_byte_offset = Some(validated_history_byte_offset(&bytes, end)?);
+    segment.jsonl_end_byte_offset = segment.end_byte_offset;
+    Ok(())
+}
+
+/// Authenticates both parts of a native history boundary, including unordinaled suffixes.
+fn validated_history_byte_offset(bytes: &[u8], end: HistoryPosition) -> ThreadStoreResult<u64> {
     let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
         malformed_lineage(
             end.thread_id,
@@ -1656,16 +1687,14 @@ async fn trim_to_history_position(
     if end_byte_offset != 0 && bytes.get(end_byte_offset.saturating_sub(1)) != Some(&b'\n') {
         // Snapshot stabilization can change physical line lengths while preserving ordinals.
         // Recover a stale offset only when it no longer lands between complete JSONL records.
-        segment.end_byte_offset =
-            byte_offset_for_ordinal(segment.rollout_path.as_path(), end.end_ordinal_exclusive)
-                .await?;
-        segment.jsonl_end_byte_offset = segment.end_byte_offset;
-        return Ok(());
+        return byte_offset_for_ordinal_in_bytes(bytes, end.end_ordinal_exclusive)?.ok_or_else(
+            || malformed_lineage(end.thread_id, "plain rollout is missing its byte boundary"),
+        );
     }
     let ordinal_end_byte_offset =
-        byte_offset_for_ordinal_in_bytes(bytes.as_slice(), end.end_ordinal_exclusive)?.ok_or_else(
-            || malformed_lineage(end.thread_id, "plain rollout is missing its byte boundary"),
-        )?;
+        byte_offset_for_ordinal_in_bytes(bytes, end.end_ordinal_exclusive)?.ok_or_else(|| {
+            malformed_lineage(end.thread_id, "plain rollout is missing its byte boundary")
+        })?;
     if end.end_byte_offset != ordinal_end_byte_offset {
         let ordinal_end_byte_offset = usize::try_from(ordinal_end_byte_offset).map_err(|_| {
             malformed_lineage(
@@ -1674,7 +1703,14 @@ async fn trim_to_history_position(
             )
         })?;
         let valid_unordinaled_suffix = end_byte_offset < ordinal_end_byte_offset
-            && bytes[end_byte_offset..ordinal_end_byte_offset]
+            && bytes
+                .get(end_byte_offset..ordinal_end_byte_offset)
+                .ok_or_else(|| {
+                    malformed_lineage(
+                        end.thread_id,
+                        "ordinal byte boundary is past the source rollout",
+                    )
+                })?
                 .split_inclusive(|byte| *byte == b'\n')
                 .all(|line| {
                     codex_rollout::rollout_ordinal_from_slice(line)
@@ -1689,9 +1725,7 @@ async fn trim_to_history_position(
     }
     // The recorded offset remains authoritative when unordinaled records were appended after the
     // selected boundary; ordinal-only reconstruction cannot recover that earlier cutoff.
-    segment.end_byte_offset = Some(end.end_byte_offset);
-    segment.jsonl_end_byte_offset = segment.end_byte_offset;
-    Ok(())
+    Ok(end.end_byte_offset)
 }
 
 async fn trim_to_ordinal(
