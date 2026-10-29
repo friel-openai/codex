@@ -208,6 +208,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::Collab)
+        .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     let parent_id = create_fake_paginated_rollout(
         codex_home.path(),
@@ -236,7 +237,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
         .upsert_thread_spawn_edge(
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
 
@@ -576,7 +577,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
         .upsert_thread_spawn_edge(
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
     state_db
@@ -688,7 +689,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
         .upsert_thread_spawn_edge(
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
     state_db
@@ -712,6 +713,14 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("CODEX_API_KEY", None),
+            ("CODEX_ACCESS_TOKEN", None),
+            ("OPENAI_FEDERATION_RULE_ID", None),
+            ("OPENAI_IDENTITY_TOKEN_FILE", None),
+            ("OPENAI_WORKLOAD_IDENTITY_CONTEXT", None),
+        ])
         .build_initialized()
         .await?;
 
