@@ -52,15 +52,37 @@ use crate::ThreadStoreResult;
 mod canonicalizer;
 mod legacy_event;
 mod line_parser;
+mod lineage;
+mod lineage_compatibility;
+mod lineage_journal;
+mod lineage_manifest;
+mod lineage_publish;
+mod lineage_stage;
+mod lineage_transaction;
 mod publish;
 mod rollback;
 mod rollback_plan;
 mod rollback_replay;
+mod single_manifest;
 mod startup;
 mod subagent;
 mod telemetry;
 
 use canonicalizer::LegacyRolloutCanonicalizer;
+use lineage::LegacyLineageMigrationPlan;
+use lineage::plan_legacy_lineage;
+pub use lineage_manifest::RolloutMigrationAdditionalFreeSpace;
+pub use lineage_manifest::RolloutMigrationHistoryBaseDependency;
+pub use lineage_manifest::RolloutMigrationLineagePredecessor;
+pub use lineage_manifest::RolloutMigrationLineageSource;
+pub use lineage_manifest::RolloutMigrationLineageTarget;
+pub use lineage_manifest::RolloutMigrationManifest;
+pub use lineage_manifest::RolloutMigrationManifestKind;
+pub use lineage_manifest::RolloutMigrationPublicationPhase;
+pub use lineage_manifest::RolloutMigrationReferenceBoundary;
+pub use lineage_manifest::RolloutMigrationReferenceDependency;
+use lineage_manifest::build_lineage_manifest;
+use lineage_manifest::build_single_manifest;
 use publish::compress_rollout_to_path;
 use publish::compressed_staged_rollout_path;
 use publish::decompress_rollout_to_path;
@@ -79,7 +101,10 @@ use telemetry::RolloutMigrationTelemetry;
 use telemetry::RolloutMigrationTrigger;
 
 const PROJECTION_BATCH_BYTES: u64 = 256 * 1024;
-const MAX_ROLLOUT_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_ROLLOUT_LINE_BYTES: usize = 16 * 1024 * 1024;
+// `ThreadHistoryBuilder` retains the visible Legacy turns while proving that Paginated projection
+// preserves them. Refuse larger proofs until the Legacy reducer can spill its state to disk.
+pub(super) const MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Shared with blocking workers so cancellation cannot release their file ownership early.
 struct MigrationLocks {
@@ -177,6 +202,8 @@ pub struct RolloutMigrationOutcome {
     pub failure_reason: Option<RolloutMigrationFailureReason>,
     pub bytes_processed: u64,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<RolloutMigrationManifest>,
 }
 
 /// The complete result of scanning active rollout files.
@@ -207,7 +234,7 @@ struct RolloutRecord {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RolloutMigrationKind {
+pub(super) enum RolloutMigrationKind {
     Ordinary,
     Subagent,
 }
@@ -502,6 +529,7 @@ impl LocalThreadStore {
                 failure_reason,
                 bytes_processed: 0,
                 message: (!empty).then(|| error.to_string()),
+                manifest: None,
             }));
         };
         let thread_id = metadata.meta.id;
@@ -544,10 +572,15 @@ impl LocalThreadStore {
             && tokio::fs::try_exists(&journal_path)
                 .await
                 .map_err(migration_error)?;
-        if metadata.meta.history_mode == ThreadHistoryMode::Paginated {
+        let paginated_reference_lineage = metadata.meta.history_mode
+            == ThreadHistoryMode::Paginated
+            && rollout_contains_reference(path.as_path()).await?;
+        if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            && (pending_published_migration || !paginated_reference_lineage)
+        {
             let bytes_before = limiter.bytes_processed;
             let result = if pending_published_migration {
-                match self
+                let recovery = self
                     .recover_published_migration(
                         thread_id,
                         &path,
@@ -556,8 +589,8 @@ impl LocalThreadStore {
                         limiter,
                         maintenance_guard,
                     )
-                    .await
-                {
+                    .await;
+                match recovery {
                     Ok(recovered_path) => {
                         path = recovered_path;
                         Ok(RolloutMigrationStatus::Migrated)
@@ -592,23 +625,101 @@ impl LocalThreadStore {
         }
 
         if options.mode == RolloutMigrationMode::DryRun {
-            if let Some(message) = legacy_reference_migration_blocker(&path, &metadata).await? {
-                return Ok(Some(migration_outcome(
-                    thread_id,
-                    path,
-                    Err(RolloutMigrationFailure::new(
-                        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
-                        migration_error(message),
-                    )),
-                    /*bytes_processed*/ 0,
-                )));
+            let lineage_plan =
+                legacy_lineage_migration_plan(self.config.codex_home.as_path(), &path, &metadata)
+                    .await;
+            let lineage_plan = match lineage_plan {
+                Ok(plan) => plan,
+                Err(error) => {
+                    return Ok(Some(migration_outcome(
+                        thread_id,
+                        path,
+                        Err(RolloutMigrationFailure::new(
+                            RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                            error,
+                        )),
+                        /*bytes_processed*/ 0,
+                    )));
+                }
+            };
+            if let Some(plan) = lineage_plan {
+                return Ok(Some(match self.validate_legacy_lineage_plan(&plan).await {
+                    Ok(()) => match self
+                        .validate_legacy_lineage_desktop_compatibility(&plan)
+                        .await
+                    {
+                        Ok(()) => match build_lineage_manifest(&plan).await {
+                            Ok(manifest) => RolloutMigrationOutcome {
+                                thread_id: Some(thread_id),
+                                rollout_path: path,
+                                status: RolloutMigrationStatus::Eligible,
+                                failure_reason: None,
+                                bytes_processed: plan
+                                    .sources
+                                    .iter()
+                                    .map(|source| source.byte_count)
+                                    .sum(),
+                                message: Some(lineage_plan_summary(&plan)),
+                                manifest: Some(manifest),
+                            },
+                            Err(error) => migration_outcome(
+                                thread_id,
+                                path,
+                                Err(RolloutMigrationFailure::new(
+                                    RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                                    error,
+                                )),
+                                /*bytes_processed*/ 0,
+                            ),
+                        },
+                        Err(error) => migration_outcome(
+                            thread_id,
+                            path,
+                            Err(RolloutMigrationFailure::new(
+                                RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                                error,
+                            )),
+                            /*bytes_processed*/ 0,
+                        ),
+                    },
+                    Err(error) => {
+                        migration_outcome(
+                            thread_id,
+                            path,
+                            Err(RolloutMigrationFailure::new(
+                                RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                                error,
+                            )),
+                            /*bytes_processed*/ 0,
+                        )
+                    }
+                }));
             }
-            return Ok(Some(migration_outcome(
-                thread_id,
-                path,
-                Ok(RolloutMigrationStatus::Eligible),
-                /*bytes_processed*/ 0,
-            )));
+            return Ok(Some(
+                match build_single_manifest(path.as_path(), kind).await {
+                    Ok(manifest) => RolloutMigrationOutcome {
+                        thread_id: Some(thread_id),
+                        rollout_path: path,
+                        status: RolloutMigrationStatus::Eligible,
+                        failure_reason: None,
+                        bytes_processed: manifest.source_bytes,
+                        message: Some(
+                            "measured one-file Legacy migration without publishing artifacts"
+                                .to_string(),
+                        ),
+                        manifest: Some(manifest),
+                    },
+                    Err(error) => migration_outcome(
+                        thread_id,
+                        path,
+                        Err(RolloutMigrationFailure::new(
+                            RolloutMigrationFailureReason::RolloutReadFailed,
+                            error,
+                        )),
+                        /*bytes_processed*/ 0,
+                    ),
+                },
+            ));
         }
 
         let live_writer_guard = self.live_writer_locks.lock(thread_id).await;
@@ -659,8 +770,12 @@ impl LocalThreadStore {
         {
             return Ok(None);
         }
+        let locked_reference_lineage = locked_metadata.meta.history_mode
+            == ThreadHistoryMode::Paginated
+            && rollout_contains_reference(path.as_path()).await?;
         if locked_metadata.meta.id != thread_id
-            || locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
+            || (locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
+                && !locked_reference_lineage)
         {
             return Ok(Some(migration_outcome(
                 thread_id,
@@ -672,16 +787,70 @@ impl LocalThreadStore {
                 /*bytes_processed*/ 0,
             )));
         }
-        if let Some(message) = legacy_reference_migration_blocker(&path, &locked_metadata).await? {
-            return Ok(Some(migration_outcome(
-                thread_id,
-                path,
-                Err(RolloutMigrationFailure::new(
-                    RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
-                    migration_error(message),
-                )),
-                /*bytes_processed*/ 0,
-            )));
+        let lineage_plan = legacy_lineage_migration_plan(
+            self.config.codex_home.as_path(),
+            &path,
+            &locked_metadata,
+        )
+        .await;
+        let lineage_plan = match lineage_plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(Some(migration_outcome(
+                    thread_id,
+                    path,
+                    Err(RolloutMigrationFailure::new(
+                        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                        error,
+                    )),
+                    /*bytes_processed*/ 0,
+                )));
+            }
+        };
+        if let Some(plan) = lineage_plan {
+            let bytes_before = limiter.bytes_processed;
+            let result = self
+                .migrate_legacy_lineage(&path, &journal_path, plan, limiter, &locks)
+                .await;
+            let result = match result {
+                Err(error) => match self
+                    .cleanup_unpublished_lineage_migration(&journal_path)
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(migration_error(format!(
+                        "{error}; failed to clean up unpublished lineage migration: {cleanup_error}"
+                    ))),
+                },
+                result => result,
+            };
+            let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
+            return Ok(Some(match result {
+                Ok(selected_path) => RolloutMigrationOutcome {
+                    thread_id: Some(thread_id),
+                    rollout_path: selected_path,
+                    status: RolloutMigrationStatus::Migrated,
+                    failure_reason: None,
+                    bytes_processed,
+                    message: Some(
+                        "migrated authenticated segmented lineage to native history_base without deleting sources"
+                            .to_string(),
+                    ),
+                    manifest: None,
+                },
+                Err(ThreadStoreError::Conflict { message }) => {
+                    skipped_busy_outcome(thread_id, path, message, bytes_processed)
+                }
+                Err(error) => migration_outcome(
+                    thread_id,
+                    path,
+                    Err(RolloutMigrationFailure::new(
+                        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+                        error,
+                    )),
+                    bytes_processed,
+                ),
+            }));
         }
         let bytes_before = limiter.bytes_processed;
         let result = match self
@@ -839,6 +1008,7 @@ impl LocalThreadStore {
             } else {
                 None
             };
+            let bounded_subagent_prefix = bounded_subagent_context.is_some();
             let (_, expected_ordinal) = if let Some(items) = bounded_subagent_context {
                 Self::write_bounded_subagent_rollout(&canonicalization_source, items, limiter)
                     .await?
@@ -846,7 +1016,7 @@ impl LocalThreadStore {
                 Self::write_rollout_with_rollback_plan(&canonicalization_source, limiter).await?
             };
 
-            if kind == RolloutMigrationKind::Subagent {
+            if bounded_subagent_prefix {
                 rewrite_subagent_history_boundary(&staged_path, expected_ordinal).await?;
             }
             let expected_length = tokio::fs::metadata(&staged_path)
@@ -1082,6 +1252,7 @@ impl LocalThreadStore {
                     .checked_add(1)
                     .ok_or_else(|| migration_error("legacy rollout record index overflow"))?;
                 let Some(line) = planned else {
+                    canonicalizer.skip_source_line()?;
                     continue;
                 };
                 line
@@ -1151,6 +1322,16 @@ impl LocalThreadStore {
                     "selected rollout changed while waiting for published migration recovery",
                 ));
             }
+        }
+        if tokio::fs::metadata(journal_path)
+            .await
+            .map_err(migration_error)?
+            .len()
+            > 0
+        {
+            return self
+                .recover_legacy_lineage(thread_id, journal_path, limiter, &locks)
+                .await;
         }
         let decompressed_path = rollout_path_is_compressed(rollout_path)
             .then(|| decompressed_staged_rollout_path(rollout_path))
@@ -1365,17 +1546,50 @@ impl LocalThreadStore {
     }
 }
 
-async fn legacy_reference_migration_blocker(
+async fn legacy_lineage_migration_plan(
+    codex_home: &Path,
     rollout_path: &Path,
     metadata: &codex_protocol::protocol::SessionMetaLine,
-) -> ThreadStoreResult<Option<String>> {
-    if metadata.meta.history_base.is_some() {
-        return Ok(Some(
-            "segmented legacy rollout migration requires an atomic lineage conversion".to_string(),
-        ));
-    }
+) -> ThreadStoreResult<Option<LegacyLineageMigrationPlan>> {
+    let mut has_lineage = metadata.meta.history_base.is_some();
 
-    let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+    if !has_lineage {
+        let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+            .await
+            .map_err(migration_error)?;
+        while let Some(line) = reader.next_line().await.map_err(migration_error)? {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if matches!(
+                value.get("type").and_then(Value::as_str),
+                Some("rollout_reference" | "fork_reference")
+            ) {
+                has_lineage = true;
+                break;
+            }
+        }
+    }
+    if !has_lineage {
+        return Ok(None);
+    }
+    let prefix = if metadata.meta.history_mode == ThreadHistoryMode::Paginated {
+        "segmented Paginated rollout migration requires an atomic native-history conversion"
+    } else if metadata.meta.history_base.is_some() {
+        "segmented legacy rollout migration requires an atomic lineage conversion"
+    } else {
+        "reference-backed legacy rollout migration requires an atomic lineage conversion"
+    };
+    plan_legacy_lineage(codex_home, rollout_path)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            migration_error(format!("{prefix}; lineage authentication failed: {error}"))
+        })
+}
+
+async fn rollout_contains_reference(path: &Path) -> ThreadStoreResult<bool> {
+    let mut reader = codex_rollout::open_rollout_line_reader(path)
         .await
         .map_err(migration_error)?;
     while let Some(line) = reader.next_line().await.map_err(migration_error)? {
@@ -1386,13 +1600,24 @@ async fn legacy_reference_migration_blocker(
             value.get("type").and_then(Value::as_str),
             Some("rollout_reference" | "fork_reference")
         ) {
-            return Ok(Some(
-                "reference-backed legacy rollout migration requires an atomic lineage conversion"
-                    .to_string(),
-            ));
+            return Ok(true);
         }
     }
-    Ok(None)
+    Ok(false)
+}
+
+fn lineage_plan_summary(plan: &LegacyLineageMigrationPlan) -> String {
+    let bytes = plan
+        .sources
+        .iter()
+        .map(|source| source.byte_count)
+        .sum::<u64>();
+    format!(
+        "authenticated {} physical source(s), {bytes} byte(s), selected thread {}, rollout {}; sources are retained after apply",
+        plan.sources.len(),
+        plan.selected_thread_id,
+        plan.selected_rollout_id,
+    )
 }
 
 async fn read_rollout_record(
@@ -1534,6 +1759,7 @@ fn migration_outcome(
             failure_reason: None,
             bytes_processed,
             message: None,
+            manifest: None,
         },
         Err(failure) => RolloutMigrationOutcome {
             thread_id: Some(thread_id),
@@ -1542,6 +1768,7 @@ fn migration_outcome(
             failure_reason: Some(failure.reason),
             bytes_processed,
             message: Some(failure.error.to_string()),
+            manifest: None,
         },
     }
 }
@@ -1559,6 +1786,7 @@ fn skipped_busy_outcome(
         failure_reason: None,
         bytes_processed,
         message: Some(message),
+        manifest: None,
     }
 }
 
