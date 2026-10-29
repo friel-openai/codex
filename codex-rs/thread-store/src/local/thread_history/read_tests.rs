@@ -2444,7 +2444,7 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
     let session_meta = codex_rollout::read_session_meta_line(path.as_path())
         .await
         .expect("read canonical legacy session metadata");
-    let compacted = RolloutItem::Compacted(CompactedItem {
+    let compacted = RolloutItem::Compacted(Box::new(CompactedItem {
         message: String::new(),
         replacement_history: None,
         retained_context: None,
@@ -2456,7 +2456,9 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
-    });
+        resume_metadata: None,
+        segment_state_checkpoint: None,
+    }));
     let mut file = fs::OpenOptions::new()
         .append(true)
         .open(path.as_path())

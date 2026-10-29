@@ -405,22 +405,25 @@ async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
     };
     let mut file = File::create(&path).expect("create rollout");
     let mut ordinal = 0_u64;
-    for item in std::iter::once(RolloutItem::SessionMeta(session_meta)).chain((0..32).map(|_| {
-        RolloutItem::Compacted(CompactedItem {
-            message: "x".repeat(256 * 1024),
-            replacement_history: None,
-            retained_context: None,
-            guardian_history: None,
-            mcp_resource_origins: None,
-            window_number: None,
-            first_window_id: None,
-            previous_window_id: None,
-            window_id: None,
-            compaction_response_id: None,
-            latest_token_usage_record: None,
-            segment_state_checkpoint: None,
-        })
-    })) {
+    for item in
+        std::iter::once(RolloutItem::SessionMeta(Box::new(session_meta))).chain((0..32).map(|_| {
+            RolloutItem::Compacted(Box::new(CompactedItem {
+                message: "x".repeat(256 * 1024),
+                replacement_history: None,
+                retained_context: None,
+                guardian_history: None,
+                mcp_resource_origins: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
+                resume_metadata: None,
+                segment_state_checkpoint: None,
+            }))
+        }))
+    {
         let line = RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             ordinal: Some(ordinal),
@@ -466,7 +469,7 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
         RolloutLine {
             timestamp: "2026-01-27T12:34:55Z".to_string(),
             ordinal: Some(0),
-            item: RolloutItem::Compacted(CompactedItem {
+            item: RolloutItem::Compacted(Box::new(CompactedItem {
                 message: "prefix".to_string(),
                 replacement_history: None,
                 retained_context: None,
@@ -478,13 +481,14 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                resume_metadata: None,
                 segment_state_checkpoint: None,
-            }),
+            })),
         },
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             ordinal: Some(1),
-            item: RolloutItem::SessionMeta(SessionMetaLine {
+            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: SessionMeta {
                     session_id: id.into(),
                     id,
@@ -496,7 +500,7 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
                     ..SessionMeta::default()
                 },
                 git: None,
-            }),
+            })),
         },
     ];
     let mut file = File::create(&path).expect("create rollout");
@@ -535,6 +539,7 @@ fn builder_from_items_falls_back_to_filename() {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     }))];
 
     let builder = builder_from_items(items.as_slice(), path.as_path()).expect("builder");
