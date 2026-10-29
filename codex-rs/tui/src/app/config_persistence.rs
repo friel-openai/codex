@@ -315,7 +315,7 @@ impl App {
         match app_server.thread_settings_update(params).await {
             Ok(true) => {
                 // Omission preserves the active value on update, but uses defaults on start.
-                // Retain effective intent across consecutive requests before confirmation.
+                // Retain effective intent until confirmation while selection stays serialized.
                 let previous = self
                     .agents_overview
                     .requested_permission_profiles
@@ -331,13 +331,15 @@ impl App {
                 self.agents_overview
                     .selected_permission_profiles
                     .insert(thread_id, selection.profile_id.clone());
-                // Custom profiles still go to the server so edited definitions are reloaded.
-                // An unchanged selection may not emit a settings notification.
+                // Confirmation is separate from the override so a re-selection cannot pin
+                // old effective settings after another client's update.
                 if !already_selected {
                     self.agents_overview
                         .requested_permission_profiles
                         .insert(thread_id, selection.clone());
                 }
+                self.pending_server_profiles
+                    .insert(thread_id, selection.clone());
                 self.chat_widget.add_info_message(
                     format!(
                         "Permission selection requested: {}",

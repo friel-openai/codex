@@ -15,6 +15,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::call_trace;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolRouter;
 use codex_memories_read::citations::parse_memory_citation;
@@ -28,6 +29,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout::state_db;
+use codex_tools::ToolName;
 use codex_utils_stream_parser::strip_proposed_plan_blocks;
 use futures::Future;
 use tracing::debug;
@@ -223,6 +225,7 @@ pub(crate) type InFlightFuture<'f> =
 pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<String>,
     pub needs_follow_up: bool,
+    pub tool_name: Option<ToolName>,
     pub tool_future: Option<InFlightFuture<'static>>,
 }
 
@@ -349,16 +352,19 @@ pub(crate) async fn handle_output_item_done(
                 .await;
 
             let cancellation_token = ctx.cancellation_token.child_token();
+            output.tool_name = Some(call.tool_name.clone());
             let runtime = ctx.tool_runtime.clone();
             // handle_tool_call dispatches immediately, not when its future is polled.
-            // Defer for post-model hooks or to cancel buffered calls during mailbox drains.
-            let tool_future: InFlightFuture<'static> = if ctx.defer_tool_dispatch {
+            // Workspace changes must also wait for the complete response's sibling-call check.
+            let tool_future: InFlightFuture<'static> = if ctx.defer_tool_dispatch
+                || is_set_workspace_cwd_tool(&call.tool_name)
+            {
                 Box::pin(async move {
                     if cancellation_token.is_cancelled() {
                         // The call is already in history; resume needs its output even if we never dispatch.
                         let output =
                             ToolCallRuntime::aborted_response(&call, /*elapsed_secs*/ None);
-                        return Ok(output.into_response());
+                        return Ok(ToolCallResponse::Response(output.into_response()));
                     }
                     runtime.handle_tool_call(call, cancellation_token).await
                 })

@@ -4,6 +4,7 @@ mod additional_context;
 mod annotated_content;
 mod fragment;
 mod recap_prompt;
+mod standalone_side_boundary;
 
 pub use additional_context::AdditionalContextDeveloperFragment;
 pub use additional_context::AdditionalContextUserFragment;
@@ -17,6 +18,7 @@ pub use fragment::ContextualUserFragment;
 pub use fragment::RenderedFragment;
 
 pub use recap_prompt::RecapPrompt;
+pub use standalone_side_boundary::StandaloneSideBoundary;
 
 /// Shared classification for compaction summaries produced by core and filtered by Guardian.
 pub const COMPACTION_SUMMARY_KIND: &str = "compaction.summary";
