@@ -6,8 +6,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
 ## Window 1
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (4; hash=562141777d035178):
+        - namespace/functions; hash=06d8e4e13b50f565
           - custom/exec
           - function/wait
           - function/request_user_input
@@ -21,11 +21,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
           - function/send_message
           - function/spawn_agent
           - function/wait_agent
+        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
+          - function/adopt_agent
+          - function/close_agent
+          - function/promote_agent
 01:message/developer:
     <MODEL_INSTRUCTIONS>
-02:message/developer[2]:
-    [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
+02:message/developer[3]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
+        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
+
+        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
+
+        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
+
+        Treat messages from the supervisor as task instructions.
+
+    [02] <PERMISSIONS_INSTRUCTIONS>
+    [03] <COLLABORATION_MODE>
 03:message/developer:
     <MULTI_AGENT_ROLE>
 04:message/developer:
@@ -45,8 +66,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
 ## Window 2 (after request 3: input diverged at item 11)
 -- request 4 (compaction) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (4; hash=562141777d035178):
+        - namespace/functions; hash=06d8e4e13b50f565
           - custom/exec
           - function/wait
           - function/request_user_input
@@ -60,11 +81,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
           - function/send_message
           - function/spawn_agent
           - function/wait_agent
+        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
+          - function/adopt_agent
+          - function/close_agent
+          - function/promote_agent
 01:message/developer:
     <MODEL_INSTRUCTIONS>
-02:message/developer[2]:
-    [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
+02:message/developer[3]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
+        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
+
+        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
+
+        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
+
+        Treat messages from the supervisor as task instructions.
+
+    [02] <PERMISSIONS_INSTRUCTIONS>
+    [03] <COLLABORATION_MODE>
 03:message/developer:
     <MULTI_AGENT_ROLE>
 04:message/developer:
@@ -84,8 +126,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
 ## Window 3 (after request 4: input diverged at item 06)
 -- request 5 (turn) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (4; hash=562141777d035178):
+        - namespace/functions; hash=06d8e4e13b50f565
           - custom/exec
           - function/wait
           - function/request_user_input
@@ -99,11 +141,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
           - function/send_message
           - function/spawn_agent
           - function/wait_agent
+        - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
+          - function/adopt_agent
+          - function/close_agent
+          - function/promote_agent
 01:message/developer:
     <MODEL_INSTRUCTIONS>
-02:message/developer[2]:
-    [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
+02:message/developer[3]:
+    [01] # You are the Root Agent
+
+        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
+
+        ## Root Agent Responsibilities
+
+        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
+
+        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
+        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
+
+        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
+
+        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
+
+        Treat messages from the supervisor as task instructions.
+
+    [02] <PERMISSIONS_INSTRUCTIONS>
+    [03] <COLLABORATION_MODE>
 03:message/developer:
     <MULTI_AGENT_ROLE>
 04:message/developer:
@@ -112,7 +175,5 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
     <ENVIRONMENT_CONTEXT>
 06:compaction:encrypted=true; chars=31; hash=dc1cfb1784ca88e3
 07:message/user:
-    <ENVIRONMENT_CONTEXT>
-08:message/user:
     What request are you working on?
-09:configuration_update:reasoning={"effort":"low"}
+08:configuration_update:reasoning={"effort":"low"}
