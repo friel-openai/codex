@@ -198,6 +198,8 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
         }
         ThreadItem::HookPrompt { .. }
         | ThreadItem::AgentMessage { .. }
+        | ThreadItem::InterAgentCommunication { .. }
+        | ThreadItem::RawResponseItem { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
         | ThreadItem::FunctionCallOutput {
