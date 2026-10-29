@@ -111,6 +111,101 @@ async fn model_context_revision_invalidates_after_append_or_removal() {
 }
 
 #[tokio::test]
+async fn active_model_context_scan_stops_at_the_interactive_byte_limit() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2039);
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-39-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write active rollout");
+    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .expect("read session metadata");
+
+    let error = match scan_projected_active_model_context_blocking_with_limit(
+        path.as_path(),
+        session_meta,
+        /*max_scan_bytes*/ 1,
+    ) {
+        Ok(_) => panic!("oversized active scan must stop before complete replay"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    assert!(error.to_string().contains("migrate-rollouts"));
+}
+
+#[tokio::test]
+async fn compressed_active_model_context_scan_stops_at_the_interactive_byte_limit() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2038);
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-38-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write active rollout");
+    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .expect("read session metadata");
+    let compressed_path = path.with_extension("jsonl.zst");
+    let source = std::fs::read(path.as_path()).expect("read active rollout");
+    let compressed = zstd::stream::encode_all(source.as_slice(), 0).expect("compress rollout");
+    std::fs::write(compressed_path.as_path(), compressed).expect("write compressed rollout");
+
+    let error = match scan_compressed_active_model_context_blocking_with_limit(
+        compressed_path.as_path(),
+        session_meta,
+        /*max_scan_bytes*/ 1,
+        /*max_record_bytes*/ 1024,
+    ) {
+        Ok(_) => panic!("oversized compressed scan must stop before complete replay"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    assert!(error.to_string().contains("migrate-rollouts"));
+}
+
+#[tokio::test]
+async fn active_model_context_scan_rejects_an_oversized_record() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2037);
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-37-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write active rollout");
+    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .expect("read session metadata");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path.as_path())
+        .expect("open active rollout");
+    writeln!(
+        file,
+        "{{\"oversized\":\"{}\"}}",
+        "x".repeat(MAX_INTERACTIVE_MODEL_CONTEXT_RECORD_BYTES)
+    )
+    .expect("append oversized record");
+
+    let error = match scan_projected_active_model_context_blocking(path.as_path(), session_meta) {
+        Ok(_) => panic!("oversized active record must require migration"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    assert!(error.to_string().contains("migrate-rollouts"));
+}
+
+#[tokio::test]
 async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2040);
@@ -1253,6 +1348,288 @@ async fn assert_fork_version_respects_inherited_segment_cutoffs(compressed: bool
         serde_json::to_value(vec![RolloutItem::SessionMeta(Box::new(source_meta))])
             .expect("serialize expected context")
     );
+}
+
+#[tokio::test]
+async fn same_thread_fork_fast_path_preserves_native_byte_cutoff() {
+    assert_same_thread_fork_fast_path_preserves_native_byte_cutoff(/*compressed*/ false).await;
+}
+
+#[tokio::test]
+async fn same_thread_fork_fast_path_preserves_compressed_native_byte_cutoff() {
+    assert_same_thread_fork_fast_path_preserves_native_byte_cutoff(/*compressed*/ true).await;
+}
+
+async fn assert_same_thread_fork_fast_path_preserves_native_byte_cutoff(compressed: bool) {
+    let home = TempDir::new().expect("temp dir");
+    let (thread_id, predecessor, active, history_base) =
+        write_same_thread_fork_cutoff_fixture(home.path()).await;
+    append_items(
+        &predecessor,
+        [
+            turn_context(home.path(), "excluded-turn"),
+            user_message("excluded context"),
+        ],
+    );
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(&predecessor)
+            .expect("open predecessor"),
+        "{{invalid after frozen prefix"
+    )
+    .expect("append excluded malformed record");
+    if compressed {
+        compress_fork_predecessor(&predecessor);
+        assert!(!predecessor.exists());
+    }
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let reservation = store
+        .reserve_rollout_writers(&[thread_id])
+        .await
+        .expect("reserve source");
+
+    let prepared = store
+        .try_prepare_same_thread_fork_lineage_reserved(
+            thread_id,
+            Some(thread_id),
+            &reservation,
+            /*include_full_history*/ true,
+        )
+        .await
+        .expect("prepare frozen native prefix")
+        .expect("clean same-thread fast path");
+
+    let metadata = codex_rollout::read_session_meta_line(&active)
+        .await
+        .expect("read active metadata");
+    let expected = vec![
+        RolloutItem::SessionMeta(Box::new(metadata)),
+        turn_context(home.path(), "included-turn"),
+        user_message("included context"),
+    ];
+    assert_eq!(
+        serde_json::to_value(prepared.model_context).expect("model context"),
+        serde_json::to_value(&expected).expect("expected context")
+    );
+    assert_eq!(
+        serde_json::to_value(prepared.full_history.expect("full history")).expect("full context"),
+        serde_json::to_value(expected).expect("expected full context")
+    );
+    let prefix = &prepared.lineage.segments()[0];
+    assert_eq!(
+        prefix.end_ordinal_exclusive,
+        Some(history_base.end_ordinal_exclusive)
+    );
+    assert_eq!(
+        prefix.jsonl_end_byte_offset,
+        Some(history_base.end_byte_offset)
+    );
+    assert_eq!(prefix.end_byte_offset, Some(history_base.end_byte_offset));
+    assert!(
+        std::fs::metadata(&prefix.rollout_path)
+            .expect("materialized predecessor")
+            .len()
+            > history_base.end_byte_offset
+    );
+}
+
+#[tokio::test]
+async fn same_thread_fork_fast_path_rejects_invalid_native_byte_cutoffs() {
+    #[derive(Clone, Copy)]
+    enum InvalidCutoff {
+        PastEnd,
+        BeforeOrdinalEnd,
+        AfterOrdinalEnd,
+    }
+    for compressed in [false, true] {
+        for invalid in [
+            InvalidCutoff::PastEnd,
+            InvalidCutoff::BeforeOrdinalEnd,
+            InvalidCutoff::AfterOrdinalEnd,
+        ] {
+            let home = TempDir::new().expect("temp dir");
+            let (thread_id, predecessor, active, mut history_base) =
+                write_same_thread_fork_cutoff_fixture(home.path()).await;
+            let expected_error = match invalid {
+                InvalidCutoff::PastEnd => {
+                    history_base.end_byte_offset += 1;
+                    "cutoff byte offset is past the source rollout"
+                }
+                InvalidCutoff::BeforeOrdinalEnd => {
+                    history_base.end_byte_offset = rollout_end_byte_offset(&predecessor, 1);
+                    "cutoff byte offset does not match its ordinal boundary"
+                }
+                InvalidCutoff::AfterOrdinalEnd => {
+                    let line = RolloutLine {
+                        timestamp: "2025-01-03T13:02:04Z".to_string(),
+                        ordinal: Some(history_base.end_ordinal_exclusive),
+                        item: user_message("after ordinal cutoff"),
+                    };
+                    writeln!(
+                        OpenOptions::new()
+                            .append(true)
+                            .open(&predecessor)
+                            .expect("open predecessor"),
+                        "{}",
+                        serde_json::to_string(&line).expect("serialize excluded line")
+                    )
+                    .expect("append excluded ordinal");
+                    history_base.end_byte_offset = std::fs::metadata(&predecessor)
+                        .expect("predecessor length")
+                        .len();
+                    "cutoff byte offset does not match its ordinal boundary"
+                }
+            };
+            set_history_base(&active, history_base);
+            if compressed {
+                compress_fork_predecessor(&predecessor);
+            }
+            let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+            let reservation = store
+                .reserve_rollout_writers(&[thread_id])
+                .await
+                .expect("reserve source");
+            let error = match store
+                .try_prepare_same_thread_fork_lineage_reserved(
+                    thread_id,
+                    Some(thread_id),
+                    &reservation,
+                    /*include_full_history*/ true,
+                )
+                .await
+            {
+                Err(error) => error,
+                Ok(None) => store
+                    .resolve_rollout_lineage(thread_id)
+                    .await
+                    .expect_err("compatibility validator rejects inconsistent boundary"),
+                Ok(Some(_)) => panic!("invalid boundary must not prepare context"),
+            };
+            assert!(error.to_string().contains(expected_error), "{error}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn same_thread_fork_fast_path_defers_stabilized_offsets_to_compatibility() {
+    for compressed in [false, true] {
+        let home = TempDir::new().expect("temp dir");
+        let (thread_id, predecessor, active, history_base) =
+            write_same_thread_fork_cutoff_fixture(home.path()).await;
+        set_history_base(
+            &active,
+            HistoryPosition {
+                end_byte_offset: history_base.end_byte_offset - 1,
+                ..history_base
+            },
+        );
+        if compressed {
+            compress_fork_predecessor(&predecessor);
+        }
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let reservation = store
+            .reserve_rollout_writers(&[thread_id])
+            .await
+            .expect("reserve source");
+
+        assert!(
+            store
+                .try_prepare_same_thread_fork_lineage_reserved(
+                    thread_id,
+                    Some(thread_id),
+                    &reservation,
+                    /*include_full_history*/ true
+                )
+                .await
+                .expect("inspect stabilized offset")
+                .is_none()
+        );
+        let lineage = store
+            .resolve_rollout_lineage(thread_id)
+            .await
+            .expect("recover stale offset through compatibility validator");
+        assert_eq!(
+            lineage.segments()[0].jsonl_end_byte_offset,
+            Some(history_base.end_byte_offset)
+        );
+        assert_eq!(
+            lineage.segments()[0].end_ordinal_exclusive,
+            Some(history_base.end_ordinal_exclusive)
+        );
+    }
+}
+
+async fn write_same_thread_fork_cutoff_fixture(
+    home: &Path,
+) -> (ThreadId, PathBuf, PathBuf, HistoryPosition) {
+    let predecessor_uuid = Uuid::from_u128(/*v*/ 3005);
+    let predecessor_id =
+        ThreadId::from_string(&predecessor_uuid.to_string()).expect("predecessor id");
+    let active_uuid = Uuid::from_u128(/*v*/ 3006);
+    let thread_id = ThreadId::from_string(&active_uuid.to_string()).expect("thread id");
+    let predecessor =
+        write_ordinaled_paginated_rollout(home, "2025-01-03T13-02-04", predecessor_uuid, []);
+    let mut predecessor_meta = codex_rollout::read_session_meta_line(&predecessor)
+        .await
+        .expect("read predecessor metadata");
+    predecessor_meta.meta.id = thread_id;
+    predecessor_meta.meta.session_id = thread_id.into();
+    {
+        let mut file = std::fs::File::create(&predecessor).expect("rewrite predecessor");
+        for (ordinal, item) in [
+            RolloutItem::SessionMeta(Box::new(predecessor_meta)),
+            turn_context(home, "included-turn"),
+            user_message("included context"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let line = RolloutLine {
+                timestamp: "2025-01-03T13:02:04Z".to_string(),
+                ordinal: Some(ordinal as u64),
+                item,
+            };
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&line).expect("serialize predecessor line")
+            )
+            .expect("write predecessor line");
+        }
+    }
+    let history_base = history_position(
+        &predecessor,
+        predecessor_id,
+        /*end_ordinal_exclusive*/ 3,
+    );
+    let active = write_ordinaled_paginated_rollout(home, "2025-01-03T13-02-05", active_uuid, []);
+    let mut active_meta = codex_rollout::read_session_meta_line(&active)
+        .await
+        .expect("read active metadata");
+    active_meta.meta.history_base = Some(history_base);
+    let head = RolloutLine {
+        timestamp: "2025-01-03T13:02:05Z".to_string(),
+        ordinal: Some(history_base.end_ordinal_exclusive),
+        item: RolloutItem::SessionMeta(Box::new(active_meta)),
+    };
+    std::fs::write(
+        &active,
+        format!(
+            "{}\n",
+            serde_json::to_string(&head).expect("serialize active head")
+        ),
+    )
+    .expect("write active head");
+    (thread_id, predecessor, active, history_base)
+}
+
+fn compress_fork_predecessor(path: &Path) {
+    let bytes = std::fs::read(path).expect("read predecessor");
+    let encoded = zstd::stream::encode_all(bytes.as_slice(), 0).expect("compress predecessor");
+    std::fs::write(path.with_extension("jsonl.zst"), encoded)
+        .expect("write compressed predecessor");
+    std::fs::remove_file(path).expect("remove plain predecessor");
 }
 
 #[tokio::test]
