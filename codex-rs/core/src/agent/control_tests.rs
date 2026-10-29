@@ -1172,6 +1172,75 @@ async fn mcp_attribution_in_constructed_request(thread: &CodexThread) -> McpAttr
     .expect("valid request MCP attribution")
 }
 
+async fn persist_thread_environment_for_resume(
+    thread: &Arc<CodexThread>,
+    cwd: codex_utils_absolute_path::AbsolutePathBuf,
+) -> codex_protocol::protocol::TurnEnvironmentSelection {
+    let environment = codex_protocol::protocol::TurnEnvironmentSelection {
+        selected_capability_roots: Default::default(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&cwd),
+        workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+        config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
+    };
+    // The settings acknowledgement follows interruption on the same submission queue.
+    thread
+        .submit(Op::Interrupt)
+        .await
+        .expect("interrupt the initial task before committing resume settings");
+    thread
+        .update_thread_settings(ThreadSettingsOverrides {
+            environments: Some(TurnEnvironmentRequests::new(
+                cwd.clone(),
+                vec![codex_protocol::protocol::TurnEnvironmentRequest {
+                    environment_id: environment.environment_id.clone(),
+                    cwd: environment.cwd.clone(),
+                    workspace_roots: environment.workspace_roots.clone(),
+                    config: EnvironmentConfigState::FromThread,
+                }],
+            )),
+            ..Default::default()
+        })
+        .await
+        .expect("commit the environment through the submission loop");
+    assert!(thread.session.active_turn.lock().await.is_none());
+    assert_eq!(
+        thread.environment_selections().await,
+        vec![environment.clone()]
+    );
+    thread
+        .session
+        .try_ensure_rollout_materialized(PersistContext::Standard)
+        .await
+        .expect("materialize the resume fixture");
+    thread
+        .checkpoint_thread_settings()
+        .await
+        .expect("checkpoint committed settings");
+    let history = RolloutRecorder::get_rollout_history(
+        &thread.rollout_path().expect("checkpoint rollout path"),
+    )
+    .await
+    .expect("independently read the committed checkpoint");
+    let saved = history
+        .get_rollout_items()
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(&event.thread_settings)
+            }
+            _ => None,
+        })
+        .expect("persisted thread settings");
+    assert_eq!(saved.cwd, cwd);
+    assert_eq!(
+        saved.environments,
+        Some(TurnEnvironmentSelections::new(cwd, vec![environment.clone()]).into())
+    );
+    environment
+}
+
 async fn wait_for_live_thread_spawn_children(
     control: &LocalAgentControl,
     parent_thread_id: ThreadId,
@@ -2744,7 +2813,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
         assert!(
             saved_thread
                 .session
-                .persist_rollout_items(&[RolloutItem::Compacted(CompactedItem {
+                .persist_rollout_items(&[RolloutItem::Compacted(Box::new(CompactedItem {
                     message: String::new(),
                     replacement_history: Some(history.annotated_items().to_vec()),
                     guardian_history: history.guardian_history_checkpoint(),
@@ -2770,7 +2839,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
                     latest_token_usage_record: None,
                     resume_metadata: None,
                     segment_state_checkpoint: None,
-                })])
+                }))])
                 .await,
         );
     }
@@ -4557,6 +4626,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                         active_permission_profile: None,
                         cwd: harness.config.cwd.clone(),
                         runtime_workspace_roots: None,
+                        environments: None,
+                        workspace_roots: None,
+                        profile_workspace_roots: None,
+                        windows_sandbox_level: None,
                         reasoning_effort: None,
                         reasoning_summary: None,
                         personality: None,
@@ -5484,6 +5557,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
                 compaction_response_id: None,
                 latest_token_usage_record: Some(parent_record.clone()),
                 resume_metadata: Some(parent_resume_metadata.clone()),
+                segment_state_checkpoint: None,
             })),
             RolloutItem::TokenUsageRecord(parent_record),
             rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
@@ -5592,6 +5666,93 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
             thread_token_usage: child_usage,
         })
     );
+}
+
+#[tokio::test]
+async fn spawn_agent_full_history_fork_from_compacted_paginated_parent_preserves_summary() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
+    let parent_spawn_call_id = "spawn-call-paginated-numeric".to_string();
+    parent_thread
+        .session
+        .persist_rollout_items(&[
+            RolloutItem::Compacted(Box::new(CompactedItem {
+                message: String::new(),
+                replacement_history: Some(vec![
+                    ResponseItem::Message {
+                        id: None,
+                        status: None,
+                        encrypted_content: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: "compacted summary".to_string(),
+                        }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    }
+                    .into(),
+                ]),
+                retained_context: None,
+                guardian_history: None,
+                mcp_resource_origins: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
+                resume_metadata: None,
+                segment_state_checkpoint: None,
+            })),
+            rollout_response_item(ResponseItem::Message {
+                id: None,
+                status: None,
+                encrypted_content: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "recent parent turn".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
+        ])
+        .await;
+
+    let child_thread_id = harness
+        .spawn_anonymous_child(
+            parent_thread_id,
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("full-history child should be registered");
+    let history = child_thread.session.clone_history().await;
+    assert!(
+        history_contains_text(history.raw_items(), "recent parent turn"),
+        "full-history fork should keep the recent turn"
+    );
+    assert!(
+        history_contains_text(history.raw_items(), "compacted summary"),
+        "full-history fork should retain compacted parent context"
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("full-history child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
 }
 
 #[tokio::test]
@@ -6567,6 +6728,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
                 compaction_response_id: None,
                 latest_token_usage_record: None,
                 resume_metadata: None,
+                segment_state_checkpoint: None,
             })),
             RolloutItem::RetainedContext(answer_event),
             RolloutItem::ResponseItem(delivery),
@@ -6792,6 +6954,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 compaction_response_id: None,
                 latest_token_usage_record: None,
                 resume_metadata: None,
+                segment_state_checkpoint: None,
             })),
             RolloutItem::TurnContext(turn_context.to_turn_context_item()),
             rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
@@ -6996,6 +7159,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                         realtime_active: None,
                     }),
                 }),
+                segment_state_checkpoint: None,
             })),
         ];
         if let Some(instructions) = parent_developer_instructions {
@@ -8517,6 +8681,90 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
         .filter(|item| history_contains_text([*item], "persist after ephemeral archived resume"))
         .collect::<Vec<_>>();
     assert_eq!(persisted_markers, vec![&persisted_marker]);
+}
+
+#[tokio::test]
+async fn resume_agent_from_rollout_uses_persisted_checkpoint_environment() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let child_thread_id = harness
+        .spawn_anonymous_child(
+            parent_thread_id,
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let persisted_cwd = harness.config.codex_home.join("resumed-agent-environment");
+    std::fs::create_dir_all(persisted_cwd.as_path()).expect("create persisted agent environment");
+    let persisted_environment =
+        persist_thread_environment_for_resume(&child_thread, persisted_cwd).await;
+
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    harness
+        .control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            child_thread_id,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            }),
+        )
+        .await
+        .expect("child should resume");
+
+    let resumed = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("resumed child should exist");
+    assert_eq!(
+        resumed.environment_selections().await,
+        vec![persisted_environment]
+    );
+}
+
+#[tokio::test]
+async fn resume_root_from_rollout_uses_persisted_checkpoint_environment() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let persisted_cwd = harness.config.codex_home.join("resumed-root-environment");
+    std::fs::create_dir_all(persisted_cwd.as_path()).expect("create persisted root environment");
+    let persisted_environment = persist_thread_environment_for_resume(&thread, persisted_cwd).await;
+
+    thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("root shutdown should submit");
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), thread_id, SessionSource::Exec)
+        .await
+        .expect("root should resume");
+
+    let resumed = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("resumed root should exist");
+    assert_eq!(
+        resumed.environment_selections().await,
+        vec![persisted_environment]
+    );
 }
 
 #[test_case::test_case(vec!["child-plugin".to_string()]; "saved disabled plugin")]

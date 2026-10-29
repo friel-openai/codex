@@ -1038,6 +1038,13 @@ fn settings_submission(
 async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     let mut models = activation_models();
     for model in &mut models {
+        model.request_model = None;
+        model.supports_reasoning_summary_parameter = true;
+        model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
+            id: ServiceTier::Fast.request_value().to_string(),
+            name: "Fast".to_string(),
+            description: "Priority service for the captured request.".to_string(),
+        }];
         model
             .model_messages
             .as_mut()
@@ -1198,6 +1205,79 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         ]
     );
     assert!(Arc::ptr_eq(&before.turn, &after.turn));
+    assert_eq!(turn.reasoning_summary(), ReasoningSummary::Concise);
+    assert_eq!(
+        turn.to_turn_context_item().summary,
+        Some(ReasoningSummary::None)
+    );
+    // TurnContextItem keeps a legacy summary placeholder; requests use captured settings.
+    for step in [&before, &during, &after] {
+        let expected_context = step.to_turn_context_item();
+        session
+            .record_context_updates_and_set_reference_context_item(step)
+            .await
+            .expect("record captured settings");
+        assert_eq!(
+            session.reference_context_item().await,
+            Some(expected_context.clone()),
+        );
+        let world_state = Arc::new(
+            session
+                .build_world_state_for_step(step, /*new_window*/ true)
+                .await
+                .expect("build captured settings for the new context window"),
+        );
+        session
+            .start_new_context_window(step, world_state)
+            .await
+            .expect("persist captured settings in the new context window");
+        assert_eq!(
+            session.reference_context_item().await,
+            Some(expected_context),
+        );
+        let prompt = crate::session::turn::build_prompt(
+            session
+                .clone_history()
+                .await
+                .for_prompt(&step.settings.model_info.input_modalities),
+            step,
+            session.get_prompt_base_instructions().await,
+            session.current_window_uses_incremental_tools(step).await,
+        );
+        let metadata = session
+            .responses_metadata(
+                step,
+                crate::responses_metadata::CodexResponsesRequestKind::Turn,
+            )
+            .await;
+        let request = session
+            .services
+            .model_client
+            .build_responses_request(
+                &prompt,
+                &step.settings.model_info,
+                step.settings.reasoning_effort().cloned(),
+                step.settings.reasoning_summary,
+                step.settings.service_tier.clone(),
+                &metadata,
+                /*include_internal*/ true,
+            )
+            .expect("construct the captured request without a transport");
+        let reasoning = request
+            .reasoning
+            .as_ref()
+            .expect("request reasoning settings");
+        let (model, effort, summary, service_tier) = step_values(step);
+        assert_eq!(
+            (
+                request.model.as_str(),
+                reasoning.effort.clone(),
+                reasoning.summary,
+                request.service_tier.as_deref(),
+            ),
+            (model, effort, Some(summary), service_tier),
+        );
+    }
     assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
     let initial_budget = turn
         .config
