@@ -2994,6 +2994,50 @@ permissionProfile?: string | null};
         .map(str::to_string)
         .collect();
         assert_eq!(missing_client_request_methods, Vec::<String>::new());
+        assert!(client_request_methods.contains("thread/fork"));
+        assert!(!client_request_methods.contains("thread/fork/prepare"));
+        assert!(!client_request_methods.contains("thread/fork/import"));
+        assert!(collect_non_v2_refs(&definitions["ClientRequest"]).contains("ThreadForkParams"));
+        let mixed_bundle: Value = serde_json::from_str(&bundle_json)?;
+        for (type_name, required_field) in [
+            ("ThreadForkParams", "threadId"),
+            ("ThreadForkResponse", "thread"),
+        ] {
+            let standalone =
+                read_json_value(&output_dir.join("v2").join(format!("{type_name}.json")))?;
+            for schema in [
+                &standalone,
+                &mixed_bundle["definitions"]["v2"][type_name],
+                &definitions[type_name],
+            ] {
+                assert!(
+                    schema["properties"].get(required_field).is_some(),
+                    "{type_name}"
+                );
+                assert!(schema["properties"].get("runtimeWorkspaceRoots").is_none());
+            }
+        }
+        for dependency in collect_definition_dependencies(
+            definitions,
+            HashSet::from([
+                "ThreadForkParams".to_string(),
+                "ThreadForkResponse".to_string(),
+            ]),
+        ) {
+            assert!(
+                definitions.contains_key(&dependency),
+                "stable fork schema has a dangling dependency: {dependency}"
+            );
+        }
+        for experimental_type in ["ThreadForkPrepareResponse", "ThreadForkImportParams"] {
+            assert!(!definitions.contains_key(experimental_type));
+            assert!(
+                !output_dir
+                    .join("v2")
+                    .join(format!("{experimental_type}.json"))
+                    .exists()
+            );
+        }
         let server_notification_methods: BTreeSet<String> =
             definitions["ServerNotification"]["oneOf"]
                 .as_array()
