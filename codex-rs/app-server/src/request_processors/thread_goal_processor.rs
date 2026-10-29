@@ -158,17 +158,19 @@ impl ThreadGoalRequestProcessor {
             .map(ThreadGoalStatus::to_core)
             .or_else(|| existing_goal.as_ref().map(|goal| goal.status))
             .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
+        let loaded_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         if resulting_status == codex_protocol::protocol::ThreadGoalStatus::Active
-            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && let Some(thread) = loaded_thread.as_ref()
         {
             self.config_manager
                 .check_thread_model_provider(thread.config().await.as_ref())
                 .await
                 .map_err(|error| config_load_error(&error))?;
         }
-        let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
-            Ok(thread) => thread.config().await.max_goal_token_budget,
-            Err(_) => self.config.max_goal_token_budget,
+        let max_goal_token_budget = match loaded_thread.as_ref() {
+            Some(thread) => thread.config().await.max_goal_token_budget,
+            None => self.config.max_goal_token_budget,
         };
 
         let listener_command_tx = {
@@ -215,8 +217,8 @@ impl ThreadGoalRequestProcessor {
             .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
 
-        let persist_result = match self.thread_manager.get_thread(thread_id).await {
-            Ok(thread) => {
+        let persist_result = match loaded_thread.as_ref() {
+            Some(thread) => {
                 let needs_settings_checkpoint = match thread.rollout_path() {
                     Some(path) => codex_rollout::existing_rollout_path(&path).await.is_none(),
                     None => false,
@@ -233,7 +235,7 @@ impl ThreadGoalRequestProcessor {
                     result => result,
                 }
             }
-            Err(_) => Ok(()),
+            None => Ok(()),
         };
         if let Err(err) = persist_result {
             warn!("failed to persist goal update for live thread {thread_id}: {err}");
@@ -325,7 +327,9 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         access: GoalAccess,
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
-        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+        if let Some(thread) =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?
+        {
             if matches!(access, GoalAccess::Mutate) {
                 ensure_direct_input_allowed(thread.as_ref()).await?;
             }
@@ -392,7 +396,8 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         state_db: &StateDbHandle,
     ) -> Result<(), JSONRPCErrorError> {
-        let running_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        let running_thread =
+            get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         let rollout_path = match running_thread.as_ref() {
             Some(thread) => thread.rollout_path().ok_or_else(|| {
                 invalid_request(format!(
