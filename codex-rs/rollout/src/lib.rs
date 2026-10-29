@@ -220,6 +220,7 @@ pub use reference::materialize_model_context_rollout_items_from;
 pub use reference::materialize_recent_rollout_items;
 pub use reference::materialize_recent_rollout_lines;
 pub use reference::materialize_recent_rollout_lines_from;
+pub use reference::materialize_recent_rollout_lines_from_with_path;
 pub use reference::materialize_rollout_items;
 pub use reference::materialize_rollout_lines;
 pub use reference::materialize_rollout_lines_from;
