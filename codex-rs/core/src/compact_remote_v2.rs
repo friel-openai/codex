@@ -565,10 +565,13 @@ fn is_retained_for_remote_compaction_v2(
     };
 
     match role.as_str() {
-        "user" => matches!(
-            crate::event_mapping::parse_turn_item(item),
-            Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
-        ),
+        "user" => {
+            !crate::compact::is_compaction_filtered_history_item(item)
+                && matches!(
+                    crate::event_mapping::parse_turn_item(item),
+                    Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
+                )
+        }
         "developer" => {
             features.enabled(Feature::RetainClientDeveloperMessages)
                 && is_client_authored_developer_message(envelope)
@@ -851,6 +854,11 @@ mod tests {
             message("developer", "dev", /*phase*/ None),
             message("system", "sys", /*phase*/ None),
             message("user", "user", /*phase*/ None),
+            message(
+                "user",
+                crate::compact::UNIFIED_EXEC_PROCESS_WARNING_PREFIX,
+                /*phase*/ None,
+            ),
             hook.clone(),
             message("assistant", "commentary", Some(MessagePhase::Commentary)),
             message("assistant", "final", Some(MessagePhase::FinalAnswer)),
