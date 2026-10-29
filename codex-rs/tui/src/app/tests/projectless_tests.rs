@@ -7,6 +7,19 @@ use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn projectless_permissions_survive_session_transitions_without_trust() -> Result<()> {
+    for key in [
+        "CODEX_ACCESS_TOKEN",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    ] {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "projectless fixture requires {key} absent from its test process",
+        );
+    }
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let home = tempfile::tempdir()?;
     app.config.codex_home = home.path().to_path_buf().abs();
@@ -40,14 +53,51 @@ sandbox = "unelevated"
     app.config = app
         .rebuild_config_for_cwd(source.path().to_path_buf())
         .await?;
+    assert_eq!(app.config.codex_home.as_path(), home.path());
+    assert_eq!(
+        app.config.cli_auth_credentials_store_mode,
+        codex_config::types::AuthCredentialsStoreMode::File
+    );
+    assert!(!home.path().join("auth.json").exists());
+    assert!(app.config.config_layer_stack.is_projectless());
+    assert!(app.config.active_project.trust_level.is_none());
+    assert_eq!(app.config.workspace_roots, vec![app.config.cwd.clone()]);
+    let synthetic_thread_id = ThreadId::new();
     app.chat_widget
         .handle_thread_session_quiet(test_thread_session(
-            ThreadId::new(),
+            synthetic_thread_id,
             source.path().to_path_buf(),
         ));
     let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.pause_events();
+    // Establish isolation without applying defaults or preparing an extra session.
+    let defaults = crate::config_update::read_effective_config_if_supported(
+        server.request_handle(),
+        source.path(),
+    )
+    .await?
+    .expect("embedded fixture supports config/read");
+    let layers = defaults
+        .layers
+        .as_ref()
+        .expect("config/read includes layers");
+    assert!(layers.iter().all(|layer| {
+        layer["name"]["type"] != "enterpriseManaged" && layer["name"]["type"] != "project"
+    }));
+    assert!(defaults.config.sandbox_mode.is_none());
+    assert!(defaults.config.sandbox_workspace_write.is_none());
+    assert!(defaults.config.approval_policy.is_none());
+    for key in ["default_permissions", "permissions", "network"] {
+        assert!(
+            defaults
+                .config
+                .additional
+                .get(key)
+                .is_none_or(serde_json::Value::is_null),
+            "isolated projectless fixture unexpectedly configures {key}",
+        );
+    }
     app.start_fresh_session(
         &mut tui,
         &mut server,
@@ -56,17 +106,106 @@ sandbox = "unelevated"
         /*new_thread_name*/ None,
     )
     .await;
+    let current_thread_id = app.chat_widget.thread_id();
+    let widget_config = app.chat_widget.config_ref();
+    let observed = format!(
+        "synthetic={synthetic_thread_id}, current={current_thread_id:?}, \
+         app(cwd,profile,approval,roots)={:?}, widget(cwd,profile,approval,roots)={:?}, \
+         attached(id,cwd,profile,approval,roots)={:?}",
+        (
+            &app.config.cwd,
+            app.config.permissions.active_permission_profile(),
+            app.config.permissions.approval_policy.value(),
+            &app.config.workspace_roots,
+        ),
+        (
+            &widget_config.cwd,
+            widget_config.permissions.active_permission_profile(),
+            widget_config.permissions.approval_policy.value(),
+            &widget_config.workspace_roots,
+        ),
+        app.primary_session_configured.as_ref().map(|session| (
+            session.thread_id,
+            &session.cwd,
+            &session.active_permission_profile,
+            session.approval_policy,
+            &session.runtime_workspace_roots,
+        )),
+    );
+    let mut fixture_errors = || {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .take(64)
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    let lines = cell.display_lines(/*width*/ 500);
+                    Some(
+                        lines
+                            .iter()
+                            .flat_map(|line| {
+                                line.spans
+                                    .iter()
+                                    .flat_map(|span| span.content.chars())
+                                    .chain(std::iter::once('\n'))
+                            })
+                            .take(2048)
+                            .collect::<String>(),
+                    )
+                }
+                _ => None,
+            })
+            .filter(|message| message.starts_with('\u{25a0}'))
+            .take(8)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        current_thread_id.is_some_and(|thread_id| thread_id != synthetic_thread_id),
+        "fresh /new did not replace the synthetic thread: {observed}; errors={:?}",
+        fixture_errors(),
+    );
+    let current_thread_id = current_thread_id.expect("checked fresh thread ID");
+    assert_eq!(
+        app.primary_thread_id,
+        Some(current_thread_id),
+        "{observed}; errors={:?}",
+        fixture_errors(),
+    );
+    let attached = app.primary_session_configured.as_ref().unwrap_or_else(|| {
+        panic!(
+            "missing attached session: {observed}; errors={:?}",
+            fixture_errors(),
+        )
+    });
+    assert_eq!(attached.thread_id, current_thread_id, "{observed}");
+    assert_eq!(attached.cwd.as_path(), source.path(), "{observed}");
+    let actual = server
+        .thread_read(current_thread_id, /*include_turns*/ false)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "fresh server thread read failed: {error}; {observed}; errors={:?}",
+                fixture_errors(),
+            )
+        });
+    assert_eq!(actual.id, current_thread_id.to_string(), "{observed}");
+    assert_eq!(actual.cwd.as_path(), source.path(), "{observed}");
+    assert_eq!(app.config.cwd.as_path(), source.path(), "{observed}");
     assert!(
         app.config
             .permissions
             .permission_profile()
             .file_system_sandbox_policy()
-            .can_write_local_path_with_cwd(source.path(), source.path())
+            .can_write_local_path_with_cwd(source.path(), source.path()),
+        "fresh server thread is attached but source is not writable: {observed}; errors={:?}",
+        fixture_errors(),
     );
-    assert!(matches!(
-        app.config.permissions.approval_policy.value(),
-        codex_protocol::protocol::AskForApproval::Granular(_)
-    ));
+    assert!(
+        matches!(
+            app.config.permissions.approval_policy.value(),
+            codex_protocol::protocol::AskForApproval::Granular(_)
+        ),
+        "{observed}; errors={:?}",
+        fixture_errors(),
+    );
     // Saving history must not turn implicit writable defaults into read-only on /cd.
     server
         .thread_inject_items(

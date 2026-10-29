@@ -28,6 +28,19 @@ fn tui_startup_future_stays_bounded() {
     assert!(size < 64 * 1024, "TUI startup future is {size} bytes");
 }
 
+#[test]
+fn format_error_chain_preserves_nested_side_fork_failure() {
+    let error =
+        color_eyre::eyre::eyre!("missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021")
+            .wrap_err("thread/fork failed during TUI bootstrap")
+            .wrap_err("Failed to start standalone side conversation from parent");
+
+    assert_eq!(
+        format_error_chain(&error),
+        "Failed to start standalone side conversation from parent: thread/fork failed during TUI bootstrap: missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021"
+    );
+}
+
 async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
@@ -815,6 +828,7 @@ fn app_server_target_for_launch_uses_local_daemon_for_default_socket() -> color_
             /*can_reuse_implicit_local_daemon*/ !explicit,
             /*workload_identity_selected*/ false,
             /*exec_server_url*/ None,
+            /*force_embedded*/ false,
         )?;
         assert_eq!(
             target,
@@ -840,6 +854,7 @@ fn app_server_target_for_launch_preserves_executor_selection() -> color_eyre::Re
                 /*can_reuse_implicit_local_daemon*/ true,
                 /*workload_identity_selected*/ false,
                 Some(std::ffi::OsStr::new(executor)),
+                /*force_embedded*/ false,
             )?,
             AppServerTarget::Embedded,
         );
@@ -858,6 +873,7 @@ fn app_server_target_for_launch_prefers_explicit_remote_endpoint() -> color_eyre
         /*can_reuse_implicit_local_daemon*/ false,
         /*workload_identity_selected*/ false,
         Some(std::ffi::OsStr::new("none")),
+        /*force_embedded*/ false,
     )?;
 
     assert_eq!(
@@ -881,6 +897,7 @@ fn app_server_target_for_launch_skips_local_daemon_when_launch_config_is_not_rep
         /*can_reuse_implicit_local_daemon*/ false,
         /*workload_identity_selected*/ false,
         /*exec_server_url*/ None,
+        /*force_embedded*/ false,
     )?;
 
     assert_eq!(target, AppServerTarget::Embedded);
@@ -897,6 +914,7 @@ fn workload_identity_requires_an_embedded_app_server() -> color_eyre::Result<()>
             /*can_reuse_implicit_local_daemon*/ true,
             /*workload_identity_selected*/ true,
             /*exec_server_url*/ None,
+            /*force_embedded*/ false,
         )?,
         AppServerTarget::Embedded
     );
@@ -910,6 +928,7 @@ fn workload_identity_requires_an_embedded_app_server() -> color_eyre::Result<()>
         /*can_reuse_implicit_local_daemon*/ false,
         /*workload_identity_selected*/ true,
         /*exec_server_url*/ None,
+        /*force_embedded*/ false,
     )
     .expect_err("remote hosts must own workload identity");
     assert_eq!(
@@ -917,6 +936,50 @@ fn workload_identity_requires_an_embedded_app_server() -> color_eyre::Result<()>
         "workload identity must be configured on the remote app-server host"
     );
     Ok(())
+}
+
+#[test]
+fn internal_side_launch_forces_embedded_app_server() -> color_eyre::Result<()> {
+    let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
+        socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
+    };
+    let target = app_server_target_for_launch(
+        Some(explicit_endpoint),
+        Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
+        /*can_reuse_implicit_local_daemon*/ true,
+        /*workload_identity_selected*/ false,
+        /*exec_server_url*/ None,
+        /*force_embedded*/ true,
+    )?;
+
+    assert_eq!(target, AppServerTarget::Embedded);
+    Ok(())
+}
+
+#[test]
+fn internal_side_uses_persisted_cwd_without_interactive_prompt() {
+    let backend_id = crate::backend_id::BackendId::new();
+    let side = resume_picker::SessionSelection::Side(resume_picker::SessionTarget {
+        backend_id,
+        path: None,
+        thread_id: ThreadId::new(),
+        cwd: Some(PathBuf::from("/persisted/project")),
+        history_mode: None,
+    });
+    let fork = resume_picker::SessionSelection::Fork(resume_picker::SessionTarget {
+        backend_id,
+        path: None,
+        thread_id: ThreadId::new(),
+        cwd: Some(PathBuf::from("/persisted/project")),
+        history_mode: None,
+    });
+
+    assert!(!allow_interactive_session_cwd_prompt(
+        /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &side,
+    ));
+    assert!(allow_interactive_session_cwd_prompt(
+        /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &fork,
+    ));
 }
 
 #[test]

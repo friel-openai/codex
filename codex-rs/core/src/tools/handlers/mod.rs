@@ -35,6 +35,7 @@ pub(crate) mod unified_exec;
 mod view_image;
 pub(crate) mod view_image_spec;
 mod wait_for_environment;
+mod workspace;
 
 use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
@@ -85,6 +86,8 @@ pub use unified_exec::WriteStdinHandler;
 pub use view_image::ViewImageHandler;
 pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
 pub use wait_for_environment::WaitForEnvironmentToolConfig;
+pub(crate) use workspace::SetWorkspaceCwdHandler;
+pub(crate) use workspace::is_set_workspace_cwd_tool;
 
 pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
 where

@@ -1,5 +1,9 @@
 //! Permission selection through the existing app-server settings API.
 
+use super::session_lifecycle_requests::HistoryCapabilities;
+use super::session_lifecycle_requests::recorded_params;
+use super::session_lifecycle_requests::start_recording_app_server;
+use super::session_lifecycle_requests::start_recording_app_server_with_history;
 use super::*;
 use pretty_assertions::assert_eq;
 
@@ -347,9 +351,16 @@ async fn custom_permission_selection_scenario() -> Result<()> {
         turn_completed_notification(thread_id, "turn-1", TurnStatus::Completed),
         /*replay_kind*/ None,
     );
-    // Unchanged re-selection is accepted without requiring a notification.
+    // Named profiles are re-read by the server, so re-selection still needs confirmation.
     app.select_permission_profile(&mut server, selection.clone())
         .await;
+    assert!(app.pending_server_profiles.contains_key(&thread_id));
+    let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ThreadSettingsUpdated(settings),
+    )
+    .await?;
     assert!(!app.reject_pending_permission_change());
     assert!(app.agents_overview.requested_permission_profiles.is_empty());
     // Another client's policy change must not leave a no-op request's old policy behind.
@@ -416,6 +427,10 @@ async fn custom_permission_selection_scenario() -> Result<()> {
     }))?]).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     while events.try_recv().is_ok() {}
+    app.change_working_directory(&mut tui, &mut server, client_home.path().abs())
+        .await;
+    assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+    insta::assert_snapshot!(next_history_message(&mut events), @"■ Permission profile has different settings.");
     let side = Box::pin(
         server.fork_side_thread(
             &app.local_settings,
@@ -444,7 +459,10 @@ async fn custom_permission_selection_scenario() -> Result<()> {
         Box::pin(app.handle_event(
             &mut tui,
             &mut server,
-            AppEvent::ForkCurrentSession { name: None },
+            AppEvent::ForkCurrentSession {
+                name: None,
+                placement: None,
+            },
         ))
         .await?;
         assert_ne!(app.chat_widget.thread_id(), previous_thread_id);
@@ -460,7 +478,7 @@ async fn custom_permission_selection_scenario() -> Result<()> {
 #[tokio::test]
 async fn accepted_permissions_survive_directory_change_before_notification() -> Result<()> {
     for preserve_history in [false, true] {
-        let (mut app, _events, _ops) = make_test_app_with_channels().await;
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
         app.config.ephemeral = false;
         app.config
             .permissions
@@ -501,27 +519,449 @@ async fn accepted_permissions_survive_directory_change_before_notification() -> 
                 .contains_key(&source),
             "selection must be unconfirmed"
         );
+        assert!(app.pending_server_profiles.contains_key(&source));
         // Destination constraints belong to the client; the server's result is authoritative.
         let requirements = app.config.codex_home.join("client-requirements.toml");
         std::fs::write(&requirements, "allowed_approval_policies = [\"never\"]")?;
         app.loader_overrides.system_requirements_path = Some(requirements.to_path_buf());
+        assert_eq!(
+            app.chat_widget
+                .rollout_path()
+                .as_deref()
+                .is_some_and(rollout_path_is_resumable),
+            preserve_history,
+            "preserve_history={preserve_history}",
+        );
         let mut tui = crate::tui::test_support::make_test_tui()?;
         app.change_working_directory(&mut tui, &mut server, destination.clone())
             .await;
-        assert_ne!(app.chat_widget.thread_id(), Some(source));
+        let mut fixture_errors = || {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .take(64)
+                .filter_map(|event| match event {
+                    AppEvent::InsertHistoryCell(cell) => {
+                        let lines = cell.display_lines(/*width*/ 500);
+                        Some(
+                            lines
+                                .iter()
+                                .flat_map(|line| {
+                                    line.spans
+                                        .iter()
+                                        .flat_map(|span| span.content.chars())
+                                        .chain(std::iter::once('\n'))
+                                })
+                                .take(2048)
+                                .collect::<String>(),
+                        )
+                    }
+                    _ => None,
+                })
+                .filter(|message| message.starts_with('\u{25a0}'))
+                .take(8)
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            app.chat_widget.thread_id(),
+            Some(source),
+            "preserve_history={preserve_history}, errors={:?}",
+            fixture_errors(),
+        );
+        let returned = app
+            .primary_session_configured
+            .as_ref()
+            .expect("replacement session response");
+        assert_eq!(
+            Some(returned.thread_id),
+            app.chat_widget.thread_id(),
+            "preserve_history={preserve_history}",
+        );
+        assert_eq!(
+            returned.runtime_workspace_roots,
+            vec![destination.clone()],
+            "preserve_history={preserve_history}, errors={:?}",
+            fixture_errors(),
+        );
+        assert_eq!(app.config.workspace_roots, returned.runtime_workspace_roots);
         assert_eq!(
             (&app.config.cwd, app.config.permissions.permission_profile()),
-            (&destination, &PermissionProfile::read_only())
+            (&destination, &PermissionProfile::read_only()),
+            "preserve_history={preserve_history}, errors={:?}",
+            fixture_errors(),
         );
         assert_eq!(
             app.config.permissions.approval_policy.value(),
-            AskForApproval::OnRequest.to_core()
+            AskForApproval::OnRequest.to_core(),
+            "preserve_history={preserve_history}, errors={:?}",
+            fixture_errors(),
         );
         assert_eq!(
             app.runtime_permission_profile_override,
-            Some(RuntimePermissionProfileOverride::from_config(&app.config))
+            Some(RuntimePermissionProfileOverride::from_config(&app.config)),
+            "preserve_history={preserve_history}, errors={:?}",
+            fixture_errors(),
         );
         server.shutdown().await?;
     }
+    Ok(())
+}
+
+fn read_only_permission_selection() -> PermissionProfileSelection {
+    PermissionProfileSelection {
+        profile_id: ":read-only".into(),
+        approval_policy: Some(AskForApproval::OnRequest),
+        approvals_reviewer: Some(ApprovalsReviewer::User),
+        display_label: "Read Only".into(),
+    }
+}
+
+fn assert_permission_selection_eq(
+    actual: &PermissionProfileSelection,
+    expected: &PermissionProfileSelection,
+) {
+    assert_eq!(
+        (
+            &actual.profile_id,
+            actual.approval_policy,
+            actual.approvals_reviewer,
+            &actual.display_label,
+        ),
+        (
+            &expected.profile_id,
+            expected.approval_policy,
+            expected.approvals_reviewer,
+            &expected.display_label,
+        ),
+    );
+}
+
+#[tokio::test]
+async fn directory_change_rejects_unconfirmed_permission_mismatches() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    app.config.ephemeral = false;
+    let destination = app.config.codex_home.join("destination");
+    std::fs::create_dir(&destination)?;
+    let (mut server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    let started = server.start_thread(&app.config).await?;
+    let source = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    let source_cwd = app.config.cwd.clone();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    for case in [
+        "missing_request",
+        "named_profile",
+        "unknown_builtin",
+        "profile_mismatch",
+        "approval_mismatch",
+        "reviewer_mismatch",
+        "missing_approval",
+        "missing_reviewer",
+    ] {
+        let mut pending = read_only_permission_selection();
+        let mut requested = Some(pending.clone());
+        match case {
+            "missing_request" => requested = None,
+            "named_profile" | "unknown_builtin" => {
+                pending.profile_id = if case == "named_profile" {
+                    "custom-profile"
+                } else {
+                    ":unknown-profile"
+                }
+                .to_string();
+                requested = Some(pending.clone());
+            }
+            "profile_mismatch" => {
+                requested.as_mut().unwrap().profile_id = ":workspace".into();
+            }
+            "approval_mismatch" => {
+                requested.as_mut().unwrap().approval_policy = Some(AskForApproval::Never);
+            }
+            "reviewer_mismatch" => {
+                requested.as_mut().unwrap().approvals_reviewer =
+                    Some(ApprovalsReviewer::AutoReview);
+            }
+            "missing_approval" => {
+                pending.approval_policy = None;
+                requested = Some(pending.clone());
+            }
+            "missing_reviewer" => {
+                pending.approvals_reviewer = None;
+                requested = Some(pending.clone());
+            }
+            _ => unreachable!("known pending selection case"),
+        }
+        app.pending_server_profiles.insert(source, pending.clone());
+        app.agents_overview
+            .requested_permission_profiles
+            .remove(&source);
+        if let Some(requested) = &requested {
+            app.agents_overview
+                .requested_permission_profiles
+                .insert(source, requested.clone());
+        }
+        requests.lock().expect("request recorder lock").clear();
+        while events.try_recv().is_ok() {}
+
+        app.change_working_directory(&mut tui, &mut server, destination.clone())
+            .await;
+
+        assert_eq!(app.chat_widget.thread_id(), Some(source), "{case}");
+        assert_eq!(app.config.cwd, source_cwd, "{case}");
+        assert!(app.runtime_working_directory_override.is_none(), "{case}");
+        assert!(
+            requests.lock().expect("request recorder lock").is_empty(),
+            "{case} must be rejected before sending destination requests"
+        );
+        assert!(
+            next_history_message(&mut events)
+                .contains("Wait for permissions to update before changing directories."),
+            "{case}"
+        );
+        assert_permission_selection_eq(&app.pending_server_profiles[&source], &pending);
+        match requested {
+            Some(requested) => assert_permission_selection_eq(
+                &app.agents_overview.requested_permission_profiles[&source],
+                &requested,
+            ),
+            None => assert!(
+                !app.agents_overview
+                    .requested_permission_profiles
+                    .contains_key(&source)
+            ),
+        }
+    }
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_builtin_permission_selection_still_blocks_reselection() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    app.config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)?;
+    let (mut server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    let started = server.start_thread(&app.config).await?;
+    let source = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    let selection = read_only_permission_selection();
+    app.select_permission_profile(&mut server, selection.clone())
+        .await;
+    let accepted_requests = recorded_params(&requests, "thread/settings/update");
+    assert_eq!(accepted_requests.len(), 1);
+
+    for profile_id in [":read-only", ":workspace"] {
+        while events.try_recv().is_ok() {}
+        app.select_permission_profile(
+            &mut server,
+            PermissionProfileSelection {
+                profile_id: profile_id.into(),
+                ..selection.clone()
+            },
+        )
+        .await;
+
+        assert_eq!(
+            recorded_params(&requests, "thread/settings/update"),
+            accepted_requests,
+        );
+        assert_permission_selection_eq(&app.pending_server_profiles[&source], &selection);
+        assert_permission_selection_eq(
+            &app.agents_overview.requested_permission_profiles[&source],
+            &selection,
+        );
+        assert!(
+            next_history_message(&mut events)
+                .contains("Wait for permissions to update before changing permissions.")
+        );
+    }
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_permissions_directory_change_rejects_changed_server_policy() -> Result<()> {
+    for preserve_history in [false, true] {
+        assert_accepted_permissions_directory_change_rejected(
+            preserve_history,
+            /*invalid_requirements*/ false,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_permissions_directory_change_rejects_invalid_server_requirements() -> Result<()> {
+    for preserve_history in [false, true] {
+        assert_accepted_permissions_directory_change_rejected(
+            preserve_history,
+            /*invalid_requirements*/ true,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn assert_accepted_permissions_directory_change_rejected(
+    preserve_history: bool,
+    invalid_requirements: bool,
+) -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    app.config.ephemeral = false;
+    app.config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)?;
+    let destination = app.config.codex_home.join("destination");
+    std::fs::create_dir(&destination)?;
+    crate::legacy_core::config::set_project_trust_level(
+        app.config.codex_home.as_path(),
+        &destination,
+        codex_protocol::config_types::TrustLevel::Trusted,
+    )
+    .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    let requirements = app.config.codex_home.join("server-requirements.toml");
+    std::fs::write(&requirements, "")?;
+    let loader_overrides = LoaderOverrides {
+        system_requirements_path: Some(requirements.to_path_buf()),
+        ..LoaderOverrides::without_managed_config_for_tests()
+    };
+    let (mut server, requests, proxy) = start_recording_app_server_with_history(
+        &app.config,
+        HistoryCapabilities::Current,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        loader_overrides,
+    )
+    .await?;
+    let started = server.start_thread(&app.config).await?;
+    let source = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    app.runtime_permission_profile_override =
+        Some(RuntimePermissionProfileOverride::from_config(&app.config));
+    if preserve_history {
+        server
+            .thread_inject_items(
+                source,
+                vec![serde_json::from_value(serde_json::json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "saved history"}],
+                }))?],
+            )
+            .await?;
+    }
+    let selection = read_only_permission_selection();
+    app.select_permission_profile(&mut server, selection.clone())
+        .await;
+    assert_permission_selection_eq(&app.pending_server_profiles[&source], &selection);
+    assert_permission_selection_eq(
+        &app.agents_overview.requested_permission_profiles[&source],
+        &selection,
+    );
+    let source_cwd = app.config.cwd.clone();
+    let source_permissions = RuntimePermissionProfileOverride::from_config(&app.config);
+    assert_eq!(
+        app.chat_widget
+            .rollout_path()
+            .as_deref()
+            .is_some_and(rollout_path_is_resumable),
+        preserve_history,
+        "the fixture must exercise both new-thread and fork destination validation",
+    );
+    std::fs::write(
+        &requirements,
+        if invalid_requirements {
+            "allowed_approval_policies = []"
+        } else {
+            "allowed_approval_policies = [\"never\"]"
+        },
+    )?;
+    requests.lock().expect("request recorder lock").clear();
+    while events.try_recv().is_ok() {}
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.change_working_directory(&mut tui, &mut server, destination)
+        .await;
+
+    assert_eq!(app.chat_widget.thread_id(), Some(source));
+    assert_eq!(app.config.cwd, source_cwd);
+    assert_eq!(
+        RuntimePermissionProfileOverride::from_config(&app.config),
+        source_permissions,
+    );
+    assert_eq!(
+        app.runtime_permission_profile_override,
+        Some(source_permissions),
+    );
+    assert!(app.runtime_working_directory_override.is_none());
+    assert_permission_selection_eq(&app.pending_server_profiles[&source], &selection);
+    assert_permission_selection_eq(
+        &app.agents_overview.requested_permission_profiles[&source],
+        &selection,
+    );
+
+    let starts = recorded_params(&requests, "thread/start");
+    let forks = recorded_params(&requests, "thread/fork");
+    let unsubscribes = recorded_params(&requests, "thread/unsubscribe");
+    let archives = recorded_params(&requests, "thread/archive");
+    let message = next_history_message(&mut events);
+    if invalid_requirements {
+        assert!(message.contains("allowed_approval_policies"), "{message}");
+        if preserve_history {
+            assert!(message.contains("Failed to change:"), "{message}");
+            assert_eq!(forks.len(), 1);
+        } else {
+            assert!(message.contains("Cannot read defaults:"), "{message}");
+            assert!(!recorded_params(&requests, "config/read").is_empty());
+            assert!(forks.is_empty());
+        }
+        assert!(starts.is_empty());
+        assert!(unsubscribes.is_empty());
+        assert!(archives.is_empty());
+    } else {
+        assert!(
+            message.contains("Requested directory or permissions not applied."),
+            "{message}"
+        );
+        let transition = if preserve_history {
+            assert!(starts.is_empty());
+            assert_eq!(forks.len(), 1);
+            &forks[0]
+        } else {
+            assert!(forks.is_empty());
+            assert_eq!(starts.len(), 1);
+            &starts[0]
+        };
+        assert_eq!(transition["permissions"], ":read-only");
+        assert_eq!(transition["approvalPolicy"], "on-request");
+        assert_eq!(transition["approvalsReviewer"], "user");
+        assert_eq!(unsubscribes.len(), 1);
+        assert_ne!(unsubscribes[0]["threadId"], source.to_string());
+        if preserve_history {
+            assert_eq!(archives.len(), 1);
+            assert_eq!(archives[0]["threadId"], unsubscribes[0]["threadId"]);
+        } else {
+            assert!(archives.is_empty());
+        }
+    }
+    server.shutdown().await?;
+    proxy.await??;
     Ok(())
 }

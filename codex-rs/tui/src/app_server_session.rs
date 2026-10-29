@@ -140,6 +140,9 @@ use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
@@ -1104,8 +1107,7 @@ impl AppServerSession {
             ForkConfigSource::Session => Some(config.model_provider_id.clone()),
         };
         if config_source == ForkConfigSource::Session {
-            // Active-session config has already adopted the server's roots. Fork does
-            // not restore saved roots when omitted, so preserve this explicit selection.
+            // Explicit session roots keep a local /cd from restoring the parent's saved roots.
             params.runtime_workspace_roots = Some(config.workspace_roots.clone());
         }
         if self.thread_params_mode() == ThreadParamsMode::Remote
@@ -1118,12 +1120,12 @@ impl AppServerSession {
             params.permissions = None;
             remove_permission_config_overrides(&mut params.config);
         } else if let Some(selected_profile) = selected_profile {
-            params.runtime_workspace_roots = None;
-            params.permissions = Some(selected_profile.profile_id.clone());
-            params.sandbox = None;
-            params.approval_policy = selected_profile.approval_policy;
-            params.approvals_reviewer = selected_profile.approvals_reviewer.map(Into::into);
-            remove_permission_config_overrides(&mut params.config);
+            apply_selected_fork_permission_profile(
+                &mut params,
+                selected_profile,
+                self.thread_params_mode(),
+                config_source,
+            );
         }
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);
@@ -2052,6 +2054,30 @@ fn config_request_overrides_from_config(
     Some(overrides)
 }
 
+fn apply_selected_fork_permission_profile(
+    params: &mut ThreadForkParams,
+    selected_profile: &PermissionProfileSelection,
+    thread_params_mode: ThreadParamsMode,
+    config_source: ForkConfigSource,
+) {
+    let preserve_local_session_roots = thread_params_mode == ThreadParamsMode::Embedded
+        && config_source == ForkConfigSource::Session
+        && matches!(
+            selected_profile.profile_id.as_str(),
+            BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+                | BUILT_IN_PERMISSION_PROFILE_WORKSPACE
+                | BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS
+        );
+    if !preserve_local_session_roots {
+        params.runtime_workspace_roots = None;
+    }
+    params.permissions = Some(selected_profile.profile_id.clone());
+    params.sandbox = None;
+    params.approval_policy = selected_profile.approval_policy;
+    params.approvals_reviewer = selected_profile.approvals_reviewer.map(Into::into);
+    remove_permission_config_overrides(&mut params.config);
+}
+
 fn remove_permission_config_overrides(config: &mut Option<HashMap<String, serde_json::Value>>) {
     if let Some(overrides) = config.as_mut() {
         for key in [
@@ -2680,8 +2706,6 @@ mod tests {
     use codex_protocol::config_types::ServiceTier;
     use codex_protocol::config_types::Verbosity;
     use codex_protocol::config_types::WebSearchMode;
-    use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
-    use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
     use codex_protocol::models::ManagedFileSystemPermissions;
     use codex_protocol::openai_models::ModelAccessPrograms;
     use codex_protocol::openai_models::ModelServiceTier;
@@ -3518,6 +3542,74 @@ model = "gpt-5.1-codex"
         assert_eq!(fork.thread_source, Some(ThreadSource::User));
     }
 
+    #[test]
+    fn selected_fork_profiles_preserve_roots_only_for_local_session_builtins() {
+        let roots = vec![test_path_buf("/workspace/destination").abs()];
+        for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
+            for source in [ForkConfigSource::Session, ForkConfigSource::Local] {
+                for (profile_id, builtin) in [
+                    (BUILT_IN_PERMISSION_PROFILE_READ_ONLY, true),
+                    (BUILT_IN_PERMISSION_PROFILE_WORKSPACE, true),
+                    (BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS, true),
+                    ("custom-workspace", false),
+                    (":unknown", false),
+                ] {
+                    let selection = PermissionProfileSelection {
+                        profile_id: profile_id.to_string(),
+                        approval_policy: Some(AskForApproval::OnRequest),
+                        approvals_reviewer: Some(
+                            codex_protocol::config_types::ApprovalsReviewer::User,
+                        ),
+                        display_label: profile_id.to_string(),
+                    };
+                    let mut params = ThreadForkParams {
+                        thread_id: ThreadId::new().to_string(),
+                        runtime_workspace_roots: Some(roots.clone()),
+                        permissions: Some("previous-profile".to_string()),
+                        sandbox: Some(codex_app_server_protocol::SandboxMode::DangerFullAccess),
+                        approval_policy: Some(AskForApproval::Never),
+                        approvals_reviewer: Some(
+                            codex_app_server_protocol::ApprovalsReviewer::AutoReview,
+                        ),
+                        config: Some(HashMap::from([
+                            ("default_permissions".to_string(), "previous-profile".into()),
+                            ("permissions".to_string(), serde_json::json!({})),
+                            ("network".to_string(), serde_json::json!({})),
+                            ("sandbox_workspace_write".to_string(), serde_json::json!({})),
+                            ("model_reasoning_effort".to_string(), "high".into()),
+                        ])),
+                        ..Default::default()
+                    };
+
+                    apply_selected_fork_permission_profile(&mut params, &selection, mode, source);
+
+                    let preserve_roots = mode == ThreadParamsMode::Embedded
+                        && source == ForkConfigSource::Session
+                        && builtin;
+                    assert_eq!(
+                        params.runtime_workspace_roots,
+                        preserve_roots.then(|| roots.clone()),
+                        "{mode:?} {source:?} {profile_id}",
+                    );
+                    assert_eq!(params.permissions.as_deref(), Some(profile_id));
+                    assert_eq!(params.sandbox, None);
+                    assert_eq!(params.approval_policy, selection.approval_policy);
+                    assert_eq!(
+                        params.approvals_reviewer,
+                        selection.approvals_reviewer.map(Into::into),
+                    );
+                    assert_eq!(
+                        params.config,
+                        Some(HashMap::from([(
+                            "model_reasoning_effort".to_string(),
+                            "high".into(),
+                        )])),
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn remote_resume_params_keep_cwd_without_overriding_saved_permissions() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -4158,6 +4250,9 @@ model = "gpt-5.1-codex"
     async fn side_fork_excludes_turns_without_clearing_regular_ephemeral_fork() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&codex_home).await;
+        config
+            .features
+            .disable(Feature::BackgroundPaginatedRolloutMigration)?;
         config.ephemeral = true;
         let thread_id = ThreadId::from_string(
             &create_fake_rollout(
