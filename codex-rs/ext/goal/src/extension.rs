@@ -32,7 +32,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TokenUsageInfo;
 
@@ -103,10 +102,8 @@ where
         Box::pin(async move {
             let config = (self.goal_config)(input.config);
             let enabled = config.enabled;
-            let tools_visible_for_thread = !matches!(
-                input.session_source,
-                SessionSource::SubAgent(SubAgentSource::Review)
-            );
+            let tools_visible_for_thread =
+                !matches!(input.session_source, SessionSource::SubAgent(_));
             let tools_available_for_thread =
                 input.persistent_thread_state_available && tools_visible_for_thread;
             input.thread_store.insert(config);
