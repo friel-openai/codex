@@ -57,8 +57,8 @@ fn check_attached_children(
 
 /// A physical rollout whose ownership has been checked before any deletion-side effects.
 #[derive(Clone)]
-struct OwnedRollout {
-    path: std::path::PathBuf,
+pub(super) struct OwnedRollout {
+    pub(super) path: std::path::PathBuf,
     rollout_id: RolloutId,
     /// Noncanonical files are authenticated individually and must not authorize sibling deletion.
     authenticated_noncanonical: bool,
@@ -309,7 +309,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
     }
 }
 
-async fn owned_rollouts_for_thread(
+pub(super) async fn owned_rollouts_for_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<Vec<OwnedRollout>> {
@@ -454,7 +454,7 @@ async fn owned_rollouts_for_thread(
     Ok(owned_rollouts)
 }
 
-async fn delete_thread_after_reference_check(
+pub(super) async fn delete_thread_after_reference_check(
     store: &LocalThreadStore,
     thread_id: codex_protocol::ThreadId,
     owned_rollouts: Vec<OwnedRollout>,
@@ -515,9 +515,9 @@ async fn delete_thread_after_reference_check(
 }
 
 /// Records whether a failed deletion has already removed the thread's readable rollout data.
-struct DeleteThreadFailure {
-    error: ThreadStoreError,
-    thread_unavailable: bool,
+pub(super) struct DeleteThreadFailure {
+    pub(super) error: ThreadStoreError,
+    pub(super) thread_unavailable: bool,
 }
 
 impl DeleteThreadFailure {
