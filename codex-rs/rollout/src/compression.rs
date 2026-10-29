@@ -375,8 +375,6 @@ mod worker {
     use std::fs::Permissions;
     use std::io;
     use std::io::Write;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -391,6 +389,8 @@ mod worker {
     use tokio::task::JoinSet;
 
     use crate::ARCHIVED_SESSIONS_SUBDIR;
+    use crate::ROLLOUT_SEGMENTS_SUBDIR;
+    use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
     use crate::SESSIONS_SUBDIR;
 
     use super::RolloutCompressionTrigger;
@@ -563,6 +563,7 @@ mod worker {
             for root in [
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
                 codex_home.join(SESSIONS_SUBDIR),
+                codex_home.join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
             ] {
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     stats.time_budget_exhausted = true;
@@ -674,6 +675,13 @@ mod worker {
         let mut stack = vec![root.to_path_buf()];
         let mut jobs = JoinSet::new();
         while let Some(dir) = stack.pop() {
+            // Do not follow a symlink used as a storage root or discovered directory.
+            if !tokio::fs::symlink_metadata(&dir)
+                .await
+                .is_ok_and(|metadata| metadata.is_dir())
+            {
+                continue;
+            }
             if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                 stats.time_budget_exhausted = true;
                 break;
@@ -742,8 +750,33 @@ mod worker {
                     metrics::file(trigger, "skipped_unreadable_meta");
                     continue;
                 };
+                // Capture identity before reading the header so replacement cannot pair a
+                // new file's bytes with the previous file's writer reservation.
+                let before = match cold_file_state(&path) {
+                    Ok(ColdFileState::Cold(state)) => state,
+                    Ok(ColdFileState::NotCold(state)) => {
+                        stats.skipped = stats.skipped.saturating_add(1);
+                        metrics::file(trigger, CompressionOutcome::SkippedNotCold.tag());
+                        if let Some(state) = state {
+                            metrics::source_bytes(trigger, "skipped_not_cold", state.len);
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        stats.failed = stats.failed.saturating_add(1);
+                        FailureMetric::File(trigger).record("read_metadata", &err);
+                        continue;
+                    }
+                };
                 let thread_id = match crate::read_session_meta_line(path.as_path()).await {
-                    Ok(metadata) => metadata.meta.id,
+                    Ok(metadata) => {
+                        if !valid_segment_identity(root, &path, &metadata.meta) {
+                            stats.skipped = stats.skipped.saturating_add(1);
+                            metrics::file(trigger, "skipped_unreadable_meta");
+                            continue;
+                        }
+                        metadata.meta.id
+                    }
                     Err(err) => {
                         stats.scan_errors = true;
                         let reason = err
@@ -800,6 +833,7 @@ mod worker {
                     // Blocking work retains maintenance ownership even if the async worker exits.
                     let result = compress_rollout_if_cold_blocking(
                         path.as_path(),
+                        before,
                         &writer_locks,
                         thread_id,
                         &maintenance,
@@ -815,6 +849,31 @@ mod worker {
     }
 
     type CompressionJobResult = (PathBuf, Duration, io::Result<CompressionMeasurement>);
+
+    /// Only the two segment layouts published by thread-store are compression candidates.
+    /// Review inputs and unknown detached files must not inherit rollout treatment.
+    fn valid_segment_identity(
+        root: &Path,
+        path: &Path,
+        meta: &codex_protocol::protocol::SessionMeta,
+    ) -> bool {
+        if root.file_name() == Some(OsStr::new(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)) {
+            let segment = meta
+                .segment_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "initial".to_string());
+            return path.parent() == Some(root.join(meta.id.to_string()).join(segment).as_path());
+        }
+        let native = root.join(ROLLOUT_SEGMENTS_SUBDIR);
+        if path.starts_with(&native) {
+            let Some((year, month, day)) = path.file_name().and_then(crate::rollout_date_parts)
+            else {
+                return false;
+            };
+            return path.parent() == Some(native.join(year).join(month).join(day).as_path());
+        }
+        true
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum CompressionOutcome {
@@ -930,6 +989,7 @@ mod worker {
 
     fn compress_rollout_if_cold_blocking(
         path: &Path,
+        before: FileState,
         writer_locks: &Arc<crate::WriterLockCoordinator>,
         thread_id: codex_protocol::ThreadId,
         maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
@@ -942,21 +1002,18 @@ mod worker {
                 /*compressed_bytes*/ None,
             ));
         }
-        let before = match cold_file_state(path)
-            .inspect_err(|err| FailureMetric::File(trigger).record("read_metadata", err))?
-        {
-            ColdFileState::Cold(state) => state,
-            ColdFileState::NotCold(state) => {
-                return Ok(CompressionMeasurement::new(
-                    CompressionOutcome::SkippedNotCold,
-                    state.map(|state| state.len),
-                    /*compressed_bytes*/ None,
-                ));
-            }
-        };
         let source_bytes = Some(before.len);
+        if !same_file_state(path, &before)? {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedChanged,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        }
         let compressed_path = path::compressed_rollout_path(path);
         if compressed_path.exists() {
+            // Plain takes precedence for readers. A surviving compressed sibling may
+            // predate an append or be corrupt; never discard either copy without proof.
             return Ok(CompressionMeasurement::new(
                 CompressionOutcome::SkippedAlreadyCompressed,
                 source_bytes,
@@ -988,7 +1045,7 @@ mod worker {
                 let _ = resume.recv();
             }
         }
-        if !encode_zstd_to_writer(&input, temp_file.as_file_mut(), maintenance)
+        if !encode_zstd_to_writer(&input, &before, temp_file.as_file_mut(), maintenance)
             .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?
         {
             return Ok(CompressionMeasurement::new(
@@ -1034,7 +1091,9 @@ mod worker {
             .len();
 
         // Encoding and verification do not block writers. Coordination prevents writer
-        // acquisition while we recheck, publish, and remove the original file.
+        // acquisition while we recheck, publish, and remove the original file. Keep
+        // this reservation for sealed segments too: repair, deletion, and immutable
+        // fork readers use the same thread lock even when no append is possible.
         let Some(_publication_guard) = writer_locks
             .try_acquire_for_publication(thread_id)
             .inspect_err(|err| FailureMetric::File(trigger).record("writer_lock", err))?
@@ -1086,8 +1145,14 @@ mod worker {
                 /*compressed_bytes*/ None,
             ));
         }
+        // Persist the new directory entry before unlinking the only durable source.
+        // A failure leaves both representations, with plain-file read precedence.
+        sync_directory(temp_dir)
+            .inspect_err(|err| FailureMetric::File(trigger).record("sync", err))?;
         std::fs::remove_file(path)
             .inspect_err(|err| FailureMetric::File(trigger).record("remove_source", err))?;
+        sync_directory(temp_dir)
+            .inspect_err(|err| FailureMetric::File(trigger).record("sync", err))?;
         Ok(CompressionMeasurement::new(
             CompressionOutcome::Compressed,
             source_bytes,
@@ -1095,16 +1160,18 @@ mod worker {
         ))
     }
 
+    /// The source snapshot binds header identity, encoded bytes, and publication checks.
     struct FileState {
         len: u64,
         modified: SystemTime,
         permissions: Permissions,
+        // Device, inode, and ctime (seconds, nanoseconds) detect replacement and rewrites.
         #[cfg(unix)]
-        change_time: (i64, i64),
+        identity: (u64, u64, i64, i64),
     }
 
     fn cold_file_state(path: &Path) -> io::Result<ColdFileState> {
-        let metadata = match std::fs::metadata(path) {
+        let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return Ok(ColdFileState::NotCold(None));
@@ -1114,13 +1181,21 @@ mod worker {
         if !metadata.is_file() {
             return Ok(ColdFileState::NotCold(None));
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // A second name could still be a mutable rollout owned by another thread.
+            if metadata.nlink() != 1 {
+                return Ok(ColdFileState::NotCold(None));
+            }
+        }
         let modified = metadata.modified()?;
         let state = FileState {
             len: metadata.len(),
             modified,
             permissions: metadata.permissions(),
             #[cfg(unix)]
-            change_time: (metadata.ctime(), metadata.ctime_nsec()),
+            identity: file_identity(&metadata),
         };
         let age = SystemTime::now()
             .duration_since(modified)
@@ -1132,29 +1207,58 @@ mod worker {
     }
 
     fn same_file_state(path: &Path, expected: &FileState) -> io::Result<bool> {
-        match std::fs::metadata(path) {
-            Ok(metadata) => {
-                // Ownership and ACL edits change ctime even when mode, length
-                // and mtime are unchanged. Do not publish stale access metadata.
-                #[cfg(unix)]
-                if (metadata.ctime(), metadata.ctime_nsec()) != expected.change_time {
-                    return Ok(false);
-                }
-                Ok(metadata.len() == expected.len
-                    && metadata.modified()? == expected.modified
-                    && metadata.permissions() == expected.permissions)
-            }
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => matches_file_state(&metadata, expected),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(err),
         }
     }
 
+    fn matches_file_state(metadata: &std::fs::Metadata, expected: &FileState) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 || file_identity(metadata) != expected.identity {
+                return Ok(false);
+            }
+        }
+        Ok(metadata.is_file()
+            && metadata.len() == expected.len
+            && metadata.modified()? == expected.modified
+            && metadata.permissions() == expected.permissions)
+    }
+
+    #[cfg(unix)]
+    fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64, i64, i64) {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
+
+    fn sync_directory(path: &Path) -> io::Result<()> {
+        // std does not provide portable directory handles on Windows.
+        #[cfg(unix)]
+        File::open(path)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
+    }
+
     fn encode_zstd_to_writer(
         mut input: &File,
+        expected: &FileState,
         output: impl Write,
         maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
     ) -> io::Result<bool> {
+        if !matches_file_state(&input.metadata()?, expected)? {
+            return Err(io::Error::other("rollout changed before encoding"));
+        }
         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
+        encoder.include_checksum(true)?;
         // Preserve fast byte-bound checks for paginated history without decoding the whole file.
         encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
         if !copy_until_foreground(&mut input, &mut encoder, maintenance)? {
@@ -1201,6 +1305,7 @@ mod worker {
         for root in [
             codex_home.join(SESSIONS_SUBDIR),
             codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+            codex_home.join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
         ] {
             if maintenance.should_yield()? {
                 break;
@@ -1228,6 +1333,12 @@ mod worker {
         }
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
+            if !tokio::fs::symlink_metadata(&dir)
+                .await
+                .is_ok_and(|metadata| metadata.is_dir())
+            {
+                continue;
+            }
             if maintenance.should_yield()? {
                 return Ok(errors);
             }
@@ -1268,7 +1379,12 @@ mod worker {
                     && path
                         .file_name()
                         .and_then(OsStr::to_str)
-                        .is_some_and(|name| name.ends_with(TEMP_SUFFIX))
+                        .is_some_and(|name| {
+                            name.ends_with(TEMP_SUFFIX)
+                                && (root.file_name()
+                                    != Some(OsStr::new(ROTATED_ROLLOUT_SEGMENTS_SUBDIR))
+                                    || name.starts_with("rollout-compress-"))
+                        })
                 {
                     let stale = entry
                         .metadata()

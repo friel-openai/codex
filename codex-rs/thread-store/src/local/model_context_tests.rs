@@ -311,6 +311,15 @@ async fn active_scan_limit_yields_to_unmarked_paginated_compatibility_reader() {
 
 #[tokio::test]
 async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
+    assert_certified_active_checkpoint_skips_predecessor(false).await;
+}
+
+#[tokio::test]
+async fn compressed_certified_active_checkpoint_does_not_open_missing_predecessor() {
+    assert_certified_active_checkpoint_skips_predecessor(true).await;
+}
+
+async fn assert_certified_active_checkpoint_skips_predecessor(compressed: bool) {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2040);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -333,7 +342,19 @@ async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
     })];
     items.extend(certified_cleared_checkpoint("active checkpoint").into_items());
     append_items(path.as_path(), items);
+    let jsonl_len = std::fs::metadata(&path).expect("metadata").len();
+    let compressed_bytes = compressed.then(|| compress_fixture(&path));
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let (physical_path, mut access) = prepare_history_access(&store, thread_id, path.clone())
+        .await
+        .expect("repair preflight must also avoid ancestors");
+    let snapshot = access
+        .take_certified_active_snapshot()
+        .expect("certified snapshot from either representation");
+    assert_eq!(snapshot.end_byte_offset, jsonl_len);
+    assert_eq!(snapshot.rollout_path, physical_path);
+    drop(access);
 
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
@@ -352,6 +373,59 @@ async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
     read_thread::load_history_items(home.path(), path.as_path())
         .await
         .expect_err("complete history still requires the predecessor");
+    if let Some(bytes) = compressed_bytes {
+        assert!(
+            !path.exists(),
+            "read-only resume must not materialize JSONL"
+        );
+        assert_eq!(
+            std::fs::read(&physical_path).expect("compressed bytes"),
+            bytes
+        );
+        store
+            .resume_thread(crate::ResumeThreadParams {
+                history_revision: context.revision,
+                thread_id,
+                rollout_path: Some(physical_path),
+                history: Some(std::sync::Arc::new(context.items)),
+                include_archived: false,
+                metadata: crate::ThreadPersistenceMetadata {
+                    cwd: Some(home.path().to_path_buf()),
+                    model_provider: "test-provider".to_string(),
+                    memory_mode: codex_protocol::protocol::ThreadMemoryMode::Enabled,
+                },
+            })
+            .await
+            .expect("open writer without obsolete predecessor");
+        store
+            .append_items(crate::AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message("after compressed checkpoint resume")],
+            })
+            .await
+            .expect("append after cold resume");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush resumed writer");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown resumed writer");
+        assert!(
+            std::fs::read_to_string(path)
+                .expect("materialized active JSONL")
+                .contains("after compressed checkpoint resume")
+        );
+    }
+}
+
+fn compress_fixture(path: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("read JSONL fixture");
+    let encoded = zstd::stream::encode_all(bytes.as_slice(), 3).expect("compress fixture");
+    std::fs::write(path.with_extension("jsonl.zst"), &encoded).expect("write compressed fixture");
+    std::fs::remove_file(path).expect("remove plain fixture");
+    encoded
 }
 
 #[tokio::test]
@@ -418,6 +492,22 @@ async fn certified_active_checkpoint_accepts_literal_decimal_rate_limits() {
 
 #[tokio::test]
 async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+    assert_checkpoint_requires_predecessor(false, false).await;
+}
+
+#[tokio::test]
+async fn compressed_invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+    assert_checkpoint_requires_predecessor(true, false).await;
+}
+
+#[tokio::test]
+async fn rollback_after_certified_checkpoint_requires_missing_predecessor() {
+    for compressed in [false, true] {
+        assert_checkpoint_requires_predecessor(compressed, true).await;
+    }
+}
+
+async fn assert_checkpoint_requires_predecessor(compressed: bool, rolled_back: bool) {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2041);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -432,11 +522,13 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
     let Some(RolloutItem::Compacted(compacted)) = checkpoint.first_mut() else {
         panic!("checkpoint must start with compaction");
     };
-    compacted
-        .segment_state_checkpoint
-        .as_mut()
-        .expect("checkpoint descriptor")
-        .version += 1;
+    if !rolled_back {
+        compacted
+            .segment_state_checkpoint
+            .as_mut()
+            .expect("checkpoint descriptor")
+            .version += 1;
+    }
     let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
         rollout_id: Some(thread_id),
         rollout_path: home.path().join("missing-predecessor.jsonl"),
@@ -448,7 +540,15 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
         compacted_replacement_history_filter_texts: None,
     })];
     items.extend(checkpoint);
+    if rolled_back {
+        items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )));
+    }
     append_items(path.as_path(), items);
+    if compressed {
+        compress_fixture(&path);
+    }
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
 
     store
@@ -457,7 +557,7 @@ async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
             include_archived: false,
         })
         .await
-        .expect_err("invalid checkpoint must not hide missing predecessor");
+        .expect_err("invalid or rolled-back checkpoint must not hide missing predecessor");
 }
 
 #[tokio::test]
@@ -831,6 +931,15 @@ async fn empty_wake_requires_surviving_full_world_state_and_matching_context() {
 
 #[tokio::test]
 async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+    assert_projected_checkpoint_resume_skips_older_segments(false).await;
+}
+
+#[tokio::test]
+async fn compressed_checkpoint_resume_does_not_expand_513_older_segments() {
+    assert_projected_checkpoint_resume_skips_older_segments(true).await;
+}
+
+async fn assert_projected_checkpoint_resume_skips_older_segments(compressed: bool) {
     const SEGMENT_COUNT: usize = 514;
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2015);
@@ -911,6 +1020,11 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
     let active_len = std::fs::metadata(active_path.as_path())
         .expect("active metadata")
         .len();
+    if compressed {
+        for path in &paths {
+            compress_fixture(path);
+        }
+    }
     let store = projected_thread_store(
         home.path(),
         thread_id,
@@ -918,7 +1032,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
         u64::try_from(SEGMENT_COUNT * 16).expect("ordinal"),
     )
     .await;
-    std::fs::remove_file(&paths[SEGMENT_COUNT - 2])
+    let predecessor = if compressed {
+        paths[SEGMENT_COUNT - 2].with_extension("jsonl.zst")
+    } else {
+        paths[SEGMENT_COUNT - 2].clone()
+    };
+    std::fs::remove_file(predecessor)
         .expect("remove predecessor that a bounded checkpoint must not open");
 
     let context = store
@@ -932,6 +1051,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(item) if item.message == "latest checkpoint")
     }));
+    if compressed {
+        assert!(
+            !active_path.exists(),
+            "resume must leave compressed storage intact"
+        );
+    }
 }
 
 #[tokio::test]

@@ -341,6 +341,11 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
         )
         .await;
     }
+    sqlx::query("UPDATE thread_turns SET root_turn_id = 'causal-root' WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(db)
+        .await
+        .expect("retain turn ancestry in indexed rows before publishing completeness");
     sqlx::query(
         "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
     )
@@ -388,6 +393,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
     )
     .await;
     assert_eq!(turn_ids(&first_turn_page), vec!["turn-5", "turn-4"]);
+    assert!(
+        first_turn_page
+            .turns
+            .iter()
+            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
+    );
     assert_eq!(
         first_turn_page.turns[0].items,
         vec![
@@ -409,6 +420,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
     )
     .await;
     assert_eq!(turn_ids(&older_turn_page), vec!["turn-3", "turn-2"]);
+    assert!(
+        older_turn_page
+            .turns
+            .iter()
+            .all(|turn| turn.root_turn_id.as_deref() == Some("causal-root"))
+    );
     assert!(older_turn_page.turns[0].items.is_empty());
 
     let oldest_turn_page = indexed_projected_turn_page(
@@ -4047,23 +4064,58 @@ async fn assert_native_lineage_pagination(
         matches!(store.list_items(anchored).await, Err(ThreadStoreError::InvalidRequest { message }) if message == "cursor.itemId does not identify an item in the requested history scope")
     );
 
-    let inherited_lookup =
-        item_lookup_params(child_id, "root-1", &["root-agent", "root-user", "missing"]);
-    let inherited_lookup = store
-        .list_items(inherited_lookup)
-        .await
-        .expect("lookup inherited items");
-    assert_eq!(item_ids(&inherited_lookup), vec!["root-user", "root-agent"]);
-
-    let excluded_lookup = item_lookup_params(child_id, "excluded-root", &["excluded-item"]);
-    assert!(
-        store
-            .list_items(excluded_lookup)
-            .await
-            .expect("exclude source item after fork cutoff")
-            .items
-            .is_empty()
-    );
+    for compressed in [false, true] {
+        let preserved = if compressed {
+            [&root_path, &child_path]
+                .map(|path| {
+                    let bytes = fs::read(path).expect("read plain lineage fixture");
+                    let encoded = zstd::stream::encode_all(bytes.as_slice(), 0)
+                        .expect("compress lineage fixture");
+                    let compressed_path = path.with_extension("jsonl.zst");
+                    fs::write(&compressed_path, &encoded).expect("write compressed lineage");
+                    fs::remove_file(path).expect("remove plain lineage fixture");
+                    (compressed_path, encoded)
+                })
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        // Item-ID lookups normalize both caller directions to canonical ascending order.
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            let mut params =
+                item_lookup_params(child_id, "root-1", &["root-agent", "root-user", "missing"]);
+            params.sort_direction = direction;
+            let inherited_lookup = store
+                .list_items(params)
+                .await
+                .expect("lookup inherited items");
+            assert_eq!(
+                item_ids(&inherited_lookup),
+                vec!["root-user", "root-agent"],
+                "compressed={compressed}"
+            );
+        }
+        let excluded_lookup = item_lookup_params(child_id, "excluded-root", &["excluded-item"]);
+        assert!(
+            store
+                .list_items(excluded_lookup)
+                .await
+                .expect("exclude source item after fork cutoff")
+                .items
+                .is_empty()
+        );
+        for (path, encoded) in preserved {
+            assert_eq!(
+                fs::read(&path).expect("unchanged compressed lineage"),
+                encoded
+            );
+            assert!(
+                !path.with_extension("").exists(),
+                "lookup must not materialize the plain rollout"
+            );
+        }
+    }
 
     let owner_counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         "SELECT (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)",

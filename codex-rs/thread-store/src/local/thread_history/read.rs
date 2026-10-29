@@ -532,10 +532,11 @@ async fn existing_legacy_projection(
         break;
     }
 
-    let rollout_len = match tokio::fs::metadata(&metadata.rollout_path).await {
-        Ok(metadata) => metadata.len(),
-        Err(_) => return Ok(None),
-    };
+    let rollout_len =
+        match super::super::live_writer::legacy_rollout_jsonl_len(&metadata.rollout_path).await {
+            Ok(len) => len,
+            Err(_) => return Ok(None),
+        };
 
     let db_path = store.config.sqlite.thread_history_db_path();
     let db_exists = tokio::fs::try_exists(db_path)
