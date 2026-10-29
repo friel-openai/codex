@@ -204,18 +204,19 @@ async fn build_and_install_compaction(
             RetainedImageBudget::Disabled
         },
     );
-    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
-        let previous_history = sess.clone_history().await;
-        let previous_items = previous_history.annotated_items();
-        let previous_items = if let Some((prefix, ..)) = prefix.as_ref() {
-            // Prefix installation appends the live suffix separately.
-            let Some(items) = previous_items.get(..prefix.len) else {
-                return Ok(false);
-            };
-            items
-        } else {
-            previous_items
+    let previous_history = sess.clone_history().await;
+    let previous_items = previous_history.annotated_items();
+    let previous_items = if let Some((prefix, ..)) = prefix.as_ref() {
+        // Prefix installation appends the live suffix separately.
+        let Some(items) = previous_items.get(..prefix.len) else {
+            return Ok(false);
         };
+        items
+    } else {
+        previous_items
+    };
+    retain_independent_thread_messages(previous_items, &mut compacted_history);
+    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
         retain_subagent_assignment_and_recent_messages(
             previous_items,
             &mut compacted_history,
