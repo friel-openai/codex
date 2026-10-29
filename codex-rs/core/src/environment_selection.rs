@@ -13,6 +13,7 @@ use codex_exec_server::EnvironmentConnectionState;
 use codex_exec_server::EnvironmentInfo;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerError;
+use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::SelectedCapabilityRootsStatus;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::EnvironmentCapabilityRoots;
@@ -1403,6 +1404,32 @@ impl TurnEnvironmentSnapshot {
             .collect()
     }
 
+    /// Retains Starting environments and rejects Failed environments rather than silently
+    /// dropping a selected environment that still constrains the parent's permissions.
+    pub(crate) fn to_spawn_selections(
+        &self,
+    ) -> codex_protocol::error::Result<Vec<TurnEnvironmentSelection>> {
+        self.environments
+            .iter()
+            .map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => Ok(environment.selection()),
+                TurnEnvironmentState::Starting(environment) => Ok(
+                    environment
+                        .config_origin
+                        .into_input_selection(environment.selection.clone()),
+                ),
+                TurnEnvironmentState::Failed { .. } => Err(codex_protocol::error::CodexErr::Fatal(
+                    "cannot inherit a failed environment when spawning an agent; reconnect the environment before retrying".to_string(),
+                )),
+            })
+            .collect()
+    }
+
+    pub(crate) fn primary_filesystem(&self) -> Option<Arc<dyn ExecutorFileSystem>> {
+        self.primary()
+            .map(|environment| environment.environment.get_filesystem())
+    }
+
     pub(crate) fn single_local_environment(&self) -> Option<&TurnEnvironment> {
         if self.starting().next().is_some() {
             return None;
@@ -1433,6 +1460,31 @@ mod connection_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_environment_cannot_be_inherited_by_spawn_agent() {
+        let snapshot = super::TurnEnvironmentSnapshot {
+            environments: vec![super::TurnEnvironmentState::Failed {
+                required_skills: Vec::new(),
+                selection: TurnEnvironmentSelection {
+                    selected_capability_roots: Default::default(),
+                    environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                    cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+                    workspace_roots: Vec::new(),
+                    config: EnvironmentConfigState::FromThread,
+                },
+                error: "environment is unavailable".to_string(),
+            }],
+        };
+        let error = snapshot
+            .to_spawn_selections()
+            .expect_err("failed environment must not be omitted");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inherit a failed environment")
+        );
+    }
+
     use std::time::Duration;
 
     use crate::config::PermissionProfileSnapshot;
@@ -2025,6 +2077,10 @@ url = "ws://127.0.0.1:8765"
             starting.all_selections(),
             vec![remote.clone(), local.clone()]
         );
+        assert_eq!(
+            starting.to_spawn_selections().expect("starting selections"),
+            vec![remote.clone(), local.clone()]
+        );
         assert!(starting.single_local_environment().is_none());
 
         let next_config = EnvironmentConfig {
@@ -2115,6 +2171,10 @@ url = "ws://127.0.0.1:8765"
             }
         );
         assert_eq!(attached.all_selections(), attached.to_selections());
+        assert_eq!(
+            attached.to_spawn_selections().expect("ready selections"),
+            attached.to_selections()
+        );
         assert_eq!(
             next_starting
                 .refresh_readiness()

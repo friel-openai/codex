@@ -12,7 +12,8 @@ use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
-use std::borrow::Borrow;
+use codex_rollout::ResponseItemEnvelope;
+use codex_rollout::RetainedInputSource;
 
 // Frozen legacy equivalent of core::compact::is_summary_message: the exact
 // codex_prompts::SUMMARY_PREFIX, including the required following newline.
@@ -56,17 +57,14 @@ pub(super) fn is_pre_turn_context_update(response: &ResponseItem) -> bool {
 /// Apply the same response-history cut used by legacy cold resume to a persisted
 /// compaction checkpoint. The migration adapter uses a frozen contextual-fragment
 /// matcher because thread-store cannot depend on core's runtime fragment registry.
-pub(super) fn drop_last_n_user_turns<T>(history: &mut Vec<T>, num_turns: u32)
-where
-    T: Borrow<ResponseItem>,
-{
+pub(super) fn drop_last_n_user_turns(history: &mut Vec<ResponseItemEnvelope>, num_turns: u32) {
     if num_turns == 0 {
         return;
     }
     let user_positions = history
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| counts_as_boundary(item.borrow()).then_some(index))
+        .filter_map(|(index, item)| counts_as_boundary(&item.item).then_some(index))
         .collect::<Vec<_>>();
     let Some(&first_turn_index) = user_positions.first() else {
         return;
@@ -77,12 +75,22 @@ where
     } else {
         user_positions[user_positions.len() - count]
     };
-    while cut_index > first_turn_index
-        && is_pre_turn_context_update(history[cut_index - 1].borrow())
-    {
+    let acceptance_boundary =
+        RetainedInputSource::from(history[cut_index].metadata.as_ref()).acceptance_order();
+    while cut_index > first_turn_index && is_pre_turn_context_update(&history[cut_index - 1].item) {
         cut_index -= 1;
     }
     history.truncate(cut_index);
+    if let Some(boundary) = acceptance_boundary {
+        // Match live rollback when assistant output precedes an earlier-accepted steer.
+        history.retain(|envelope| {
+            !(matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+                || matches!(&envelope.item, ResponseItem::FunctionCall { .. }))
+                || RetainedInputSource::from(envelope.metadata.as_ref())
+                    .acceptance_order()
+                    .is_none_or(|order| order < boundary)
+        });
+    }
 }
 
 fn is_known_contextual_user_message_content(content: &[ContentItem]) -> bool {
@@ -95,6 +103,8 @@ fn is_known_contextual_user_message_content(content: &[ContentItem]) -> bool {
 }
 
 fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> bool {
+    // Keep core/event_mapping.rs's persisted developer prefixes: trimming these records
+    // also supplies the source turn IDs used to remove retained verified answers.
     content.iter().any(|item| {
         let ContentItem::InputText { text } = item else {
             return false;
@@ -102,10 +112,13 @@ fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> boo
         let text = text.trim_start();
         [
             "<permissions instructions>",
+            "Approved command prefix saved:",
             "<model_switch>",
             "<managed_developer_instructions>",
+            "<persistent_mode>",
             "<apps_instructions>",
             "<collaboration_mode>",
+            "<multi_agent_role>",
             "<multi_agent_mode>",
             "<environments_instructions>",
             "<git_attribution>",
@@ -129,7 +142,7 @@ fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> boo
 
 // Keep this frozen alongside the legacy migration adapter. Core's live predicate also knows
 // about dynamically registered fragments, but legacy rollouts only need these persisted shapes.
-fn is_known_contextual_user_text(text: &str) -> bool {
+pub(super) fn is_known_contextual_user_text(text: &str) -> bool {
     let text = text.trim();
     parse_hook_prompt_fragment(text).is_some()
         || [

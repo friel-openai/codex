@@ -680,6 +680,7 @@ mod tests {
             message: "compacted".to_string(),
             replacement_history: None,
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
