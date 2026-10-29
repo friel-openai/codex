@@ -4,6 +4,8 @@ use crate::sqlite::SqlitePoolWriteExt;
 use crate::sqlite::SqliteWriteQueryExt;
 use uuid::Uuid;
 
+mod resumable_goal;
+
 const GOAL_SUPERVISOR_STATE_TABLE_SQL: &str = r#"
 CREATE TABLE thread_goal_supervisor_state (
     thread_id TEXT PRIMARY KEY NOT NULL,
