@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use codex_history::InitialHistory;
+use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_protocol::mcp::McpAttribution;
 use codex_protocol::mcp::McpAttributionErrorReason;
@@ -47,44 +48,23 @@ impl Default for McpAttributionRecorder {
 
 impl McpAttributionRecorder {
     pub(super) fn new(history: &InitialHistory) -> Self {
-        let mut state = State {
-            attribution: McpAttribution::default(),
-            // Persist an initial checkpoint even when no MCP result has been recorded.
-            revision: 1,
-            persisted_revision: 0,
-        };
-        let mut found_checkpoint = matches!(history, InitialHistory::New | InitialHistory::Cleared);
-        for item in history.get_rollout_items() {
-            match item {
-                RolloutItem::ResponseItem(envelope) => {
-                    if let Some(metadata) = envelope.metadata.as_ref()
-                        && let Some(checkpoint) = metadata.mcp_attribution.as_ref()
-                    {
-                        found_checkpoint = true;
-                        state.merge_checkpoint(checkpoint);
-                    }
-                }
-                RolloutItem::Compacted(compacted) => {
-                    for metadata in compacted
-                        .replacement_history
-                        .iter()
-                        .flatten()
-                        .filter_map(|envelope| envelope.metadata.as_ref())
-                    {
-                        if let Some(checkpoint) = metadata.mcp_attribution.as_ref() {
-                            found_checkpoint = true;
-                            state.merge_checkpoint(checkpoint);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !found_checkpoint {
-            // Pre-attribution history cannot establish that earlier context was MCP-free.
-            state.mark_error(McpAttributionErrorReason::HistoryMissingCheckpoint);
-        }
+        let state = State::from_rollout_items(
+            history.get_rollout_items(),
+            matches!(history, InitialHistory::New | InitialHistory::Cleared),
+        );
         Self(Arc::new(Mutex::new(state)))
+    }
+
+    pub(super) fn restore_from_snapshot(&self, snapshot: &McpAttribution) {
+        *self.lock() = State::new(snapshot.clone());
+    }
+
+    pub(super) fn restore_from_rollout_items(&self, items: &[RolloutItem]) {
+        *self.lock() = State::from_rollout_items(items, /*known_empty*/ false);
+    }
+
+    pub(super) fn restore_from_response_items(&self, items: &[ResponseItemEnvelope]) {
+        *self.lock() = State::from_response_items(items, /*known_empty*/ false);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -116,6 +96,49 @@ impl McpAttributionRecorder {
 }
 
 impl State {
+    fn new(attribution: McpAttribution) -> Self {
+        Self {
+            attribution,
+            // Startup restoration still needs its own durable checkpoint.
+            revision: 1,
+            persisted_revision: 0,
+        }
+    }
+
+    fn from_rollout_items(items: &[RolloutItem], known_empty: bool) -> Self {
+        Self::from_response_items(
+            items.iter().flat_map(|item| match item {
+                RolloutItem::ResponseItem(envelope) => std::slice::from_ref(envelope),
+                RolloutItem::Compacted(compacted) => {
+                    compacted.replacement_history.as_deref().unwrap_or_default()
+                }
+                _ => &[],
+            }),
+            known_empty,
+        )
+    }
+
+    fn from_response_items<'a>(
+        items: impl IntoIterator<Item = &'a ResponseItemEnvelope>,
+        known_empty: bool,
+    ) -> Self {
+        let mut state = Self::new(McpAttribution::default());
+        let mut found_checkpoint = known_empty;
+        for envelope in items {
+            if let Some(metadata) = envelope.metadata.as_ref()
+                && let Some(checkpoint) = metadata.mcp_attribution.as_ref()
+            {
+                found_checkpoint = true;
+                state.merge_checkpoint(checkpoint);
+            }
+        }
+        if !found_checkpoint {
+            // An explicit MCP-free checkpoint is evidence; missing metadata is not.
+            state.mark_error(McpAttributionErrorReason::HistoryMissingCheckpoint);
+        }
+        state
+    }
+
     fn mark_error(&mut self, reason: McpAttributionErrorReason) {
         if self.attribution.status != McpAttributionStatus::AttributionError {
             self.attribution.status = McpAttributionStatus::AttributionError;

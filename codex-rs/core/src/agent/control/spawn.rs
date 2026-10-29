@@ -7,6 +7,7 @@ use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::role::apply_role_to_config;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
+use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
 use crate::agents_md_manager::SessionInstructions;
 use crate::codex_thread::CodexThread;
@@ -25,9 +26,11 @@ use crate::context::MultiAgentRoleInstructions;
 use crate::context::MultiAgentUsageHint;
 use crate::context::world_state::IncrementalToolsHint;
 use crate::context::world_state::PersistentModeState;
+use crate::session::ForkStartupItems;
 use crate::session::multi_agents::resolve_usage_hints;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::thread_manager::ForkSnapshot;
+use crate::thread_manager::FullHistorySourceReservation;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::fork_history_from_snapshot;
 use codex_context_fragments::set_annotated_content;
@@ -56,6 +59,15 @@ const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
 pub(super) enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
+}
+
+/// Fork history and its source reservation remain paired until child persistence completes.
+struct PreparedForkHistory {
+    history: InitialHistory,
+    history_mode: Option<ThreadHistoryMode>,
+    startup_items: ForkStartupItems,
+    /// Prevent source retirement while the child's inherited history is being published.
+    source_reservation: Option<FullHistorySourceReservation>,
 }
 
 fn default_agent_nickname_list() -> Vec<&'static str> {
@@ -122,7 +134,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_context_baselines,
         // Child threads inherit model context, not the parent's cumulative usage state.
         RolloutItem::TokenUsageRecord(_) => false,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -844,10 +859,12 @@ impl LocalAgentControl {
             ..StartThreadOptions::new(config.clone())
         };
         let mut inherited_thread_state = InheritedThreadState::default();
+        let mut fork_startup_items = ForkStartupItems::default();
+        let mut fork_source_reservation = None;
         let fork_context = match (session_source, options.fork_mode.as_ref()) {
             (Some(session_source), Some(_)) => {
                 let fork_context_started_at = Instant::now();
-                let (initial_history, history_mode) = self
+                let prepared = self
                     .prepare_forked_history(
                         &state,
                         &session_source,
@@ -857,14 +874,17 @@ impl LocalAgentControl {
                     )
                     .await
                     .map_err(|err| err.with_agent_context(AgentErrorContext::ForkHistory))?;
-                start_options.initial_history = initial_history;
-                start_options.history_mode = history_mode;
+                start_options.initial_history = prepared.history;
+                start_options.history_mode = prepared.history_mode;
+                fork_startup_items = prepared.startup_items;
+                fork_source_reservation = prepared.source_reservation;
                 inherited_thread_state = InheritedThreadState::builder()
                     .prompt_cache_key(
                         parent_prompt_cache_key_for_source(&state, Some(&session_source)).await,
                     )
                     .response_continuation(
-                        parent_response_continuation_for_source(&state, Some(&session_source)).await,
+                        parent_response_continuation_for_source(&state, Some(&session_source))
+                            .await,
                     )
                     .mcp_tool_snapshot(
                         parent_mcp_tool_snapshot_for_source(&state, Some(&session_source)).await,
@@ -899,6 +919,7 @@ impl LocalAgentControl {
                 parent_thread_id,
                 inherited_exec_policy,
                 inherited_thread_state,
+                fork_startup_items,
             )
             .await
             .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup))?;
@@ -963,9 +984,11 @@ impl LocalAgentControl {
                     .ensure_rollout_materialized(PersistContext::Standard),
                 pending_spawn.wait_for_edge(),
             );
+            state.flush_fork_or_shutdown(&new_thread).await?;
         } else {
             pending_spawn.wait_for_edge().await;
         }
+        drop(fork_source_reservation);
         let durability_wait = durability_wait_started_at.elapsed();
 
         // Capture startup settings before the child can publish metadata for a later turn.
@@ -1079,17 +1102,17 @@ impl LocalAgentControl {
         options: &SpawnAgentOptions,
         config: &Config,
         multi_agent_version: MultiAgentVersion,
-    ) -> CodexResult<(InitialHistory, Option<ThreadHistoryMode>)> {
+    ) -> CodexResult<PreparedForkHistory> {
         if options.fork_parent_spawn_call_id.is_none() {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
         }
-        if options.fork_mode.is_none() {
+        let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
             ));
-        }
+        };
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
         }) = session_source
@@ -1137,16 +1160,48 @@ impl LocalAgentControl {
 
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
-        let mut forked_rollout_items =
-            load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                .await?
-                .ok_or_else(|| {
-                    CodexErr::Fatal(format!(
-                        "parent thread history unavailable for fork: {parent_thread_id}"
-                    ))
-                })?
-                .items;
 
+        let (
+            mut forked_rollout_items,
+            reference_rollout_items,
+            source_reservation,
+            forked_from_ordinal_exclusive,
+        ) = match fork_mode {
+            SpawnAgentForkMode::FullHistory
+                if parent_thread
+                    .session
+                    .services
+                    .thread_store
+                    .as_any()
+                    .is::<codex_thread_store::LocalThreadStore>() =>
+            {
+                let (reference_history, logical_history, source_reservation, end_ordinal) = state
+                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                    .await?;
+                (
+                    logical_history,
+                    Some(reference_history.get_rollout_items().to_vec()),
+                    Some(source_reservation),
+                    end_ordinal,
+                )
+            }
+            SpawnAgentForkMode::FullHistory => {
+                let parent_history =
+                    load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                        .await?
+                        .ok_or_else(|| {
+                            CodexErr::Fatal(format!(
+                                "parent thread history unavailable for fork: {parent_thread_id}"
+                            ))
+                        })?
+                        .items;
+                (parent_history, None, None, None)
+            }
+        };
+        let unsanitized_parent_history = reference_rollout_items
+            .as_ref()
+            .map(|_| serde_json::to_value(&forked_rollout_items))
+            .transpose()?;
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
@@ -1342,7 +1397,8 @@ impl LocalAgentControl {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::RolloutReference(_) => true,
                 RolloutItem::RetainedContext(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::SecurityRiskScore(_) => false,
@@ -1354,6 +1410,12 @@ impl LocalAgentControl {
                     "You are now a newly spawned child agent. The preceding conversation is inherited parent context. Follow your own role, identity, and task below; earlier identities, tasks, and action-specific approvals belong to your ancestors. Inherited tool calls are historical records; live tool sessions and process handles are not inherited. Report your result to your parent.",
                 )).into(),
             ));
+        }
+        if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
+            (reference_rollout_items, unsanitized_parent_history)
+            && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
+        {
+            forked_rollout_items = reference_rollout_items;
         }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
@@ -1393,10 +1455,13 @@ impl LocalAgentControl {
                 subagent_usage_hint_message.into(),
             ));
         }
-        Ok((
-            InitialHistory::Forked(forked_rollout_items),
-            destination_history_mode,
-        ))
+        Ok(PreparedForkHistory {
+            history: InitialHistory::Forked(forked_rollout_items),
+            history_mode: destination_history_mode,
+            startup_items: ForkStartupItems::default()
+                .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
+            source_reservation,
+        })
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
