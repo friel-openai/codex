@@ -345,6 +345,32 @@ async fn resolves_lineage_at_explicit_history_position() {
 
 #[tokio::test]
 async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
+    assert_fork_lineage_preserves_validated_unordinaled_ancestor_cutoff(
+        /*compressed*/ false, /*native*/ false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fork_lineage_preserves_validated_compressed_unordinaled_ancestor_cutoff() {
+    assert_fork_lineage_preserves_validated_unordinaled_ancestor_cutoff(
+        /*compressed*/ true, /*native*/ false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fork_lineage_preserves_validated_native_unordinaled_ancestor_cutoff() {
+    assert_fork_lineage_preserves_validated_unordinaled_ancestor_cutoff(
+        /*compressed*/ false, /*native*/ true,
+    )
+    .await;
+}
+
+async fn assert_fork_lineage_preserves_validated_unordinaled_ancestor_cutoff(
+    compressed: bool,
+    native: bool,
+) {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
     let state_db = codex_state::StateRuntime::init(
@@ -363,16 +389,29 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         /*next_ordinal*/ 3,
     );
     let segment_id = SegmentId::new();
-    let parent_path = home
-        .path()
-        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-        .join(parent.to_string())
-        .join(segment_id.to_string())
-        .join(
-            mutable_parent_path
-                .file_name()
-                .expect("parent rollout file name"),
-        );
+    let parent_rollout_id = if native { ThreadId::default() } else { parent };
+    let parent_path = if native {
+        let physical_path = codex_rollout::history_rollout_path_with_rollout_id(
+            &mutable_parent_path,
+            parent_rollout_id,
+        )
+        .expect("native physical rollout filename");
+        home.path()
+            .join(codex_rollout::SESSIONS_SUBDIR)
+            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+            .join("2026/07/16")
+            .join(physical_path.file_name().expect("native rollout file name"))
+    } else {
+        home.path()
+            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            .join(parent.to_string())
+            .join(segment_id.to_string())
+            .join(
+                mutable_parent_path
+                    .file_name()
+                    .expect("parent rollout file name"),
+            )
+    };
     let mut lines = fs::read_to_string(mutable_parent_path.as_path())
         .expect("read parent rollout")
         .lines()
@@ -383,7 +422,7 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
     else {
         panic!("parent rollout must start with session metadata");
     };
-    session_meta.meta.segment_id = Some(segment_id);
+    session_meta.meta.segment_id = (!native).then_some(segment_id);
     let records = lines
         .iter()
         .map(serde_json::to_string)
@@ -395,7 +434,7 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         .expect("write immutable parent rollout");
     let parent_end = history_position(
         parent_path.as_path(),
-        parent,
+        parent_rollout_id,
         /*end_ordinal_exclusive*/ 2,
     );
     lines.insert(
@@ -413,7 +452,23 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         .expect("serialize parent rollout");
     fs::write(parent_path.as_path(), format!("{}\n", records.join("\n")))
         .expect("write parent rollout");
+    assert!(
+        super::byte_offset_for_ordinal_in_bytes(
+            &fs::read(&parent_path).expect("read decoded parent"),
+            parent_end.end_ordinal_exclusive,
+        )
+        .expect("ordinal-only boundary")
+        .expect("parent ordinal boundary")
+            > parent_end.end_byte_offset
+    );
     fs::remove_file(mutable_parent_path.as_path()).expect("remove mutable parent rollout");
+    let plain_parent_path = parent_path;
+    let parent_path = if compressed {
+        compress_rollout(&plain_parent_path)
+    } else {
+        plain_parent_path.clone()
+    };
+    let parent_bytes = fs::read(&parent_path).expect("read parent representation");
     let mut parent_metadata = codex_state::ThreadMetadataBuilder::new(
         parent,
         parent_path.clone(),
@@ -425,12 +480,13 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         .upsert_thread(&parent_metadata.build(config.default_model_provider_id.as_str()))
         .await
         .expect("register immutable parent rollout");
-    write_rollout(
+    let child_path = write_rollout(
         home.path(),
         child,
         Some(parent_end),
         /*next_ordinal*/ 2,
     );
+    let child_bytes = fs::read(&child_path).expect("read child rollout");
 
     let mut expected = store
         .resolve_rollout_lineage(child)
@@ -438,6 +494,10 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         .expect("resolve child lineage with explicit byte cutoff");
     assert_eq!(
         expected.segments[0].end_byte_offset,
+        (!compressed).then_some(parent_end.end_byte_offset),
+    );
+    assert_eq!(
+        expected.segments[0].jsonl_end_byte_offset,
         Some(parent_end.end_byte_offset),
     );
 
@@ -451,6 +511,76 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
             fs::canonicalize(&segment.rollout_path).expect("canonical expected rollout path");
     }
     assert_eq!(prepared.segments, expected.segments);
+    let ancestor = &prepared.segments[0];
+    assert_eq!(ancestor.thread_id, parent);
+    assert_eq!(
+        HistoryPosition {
+            thread_id: ancestor.rollout_id,
+            end_ordinal_exclusive: ancestor.end_ordinal_exclusive.expect("parent ordinal"),
+            end_byte_offset: ancestor.jsonl_end_byte_offset.expect("parent JSONL cutoff"),
+        },
+        parent_end,
+    );
+    assert_eq!(plain_parent_path.exists(), !compressed);
+    assert_eq!(
+        plain_parent_path.with_extension("jsonl.zst").exists(),
+        compressed
+    );
+    assert_eq!(
+        fs::read(&parent_path).expect("read unchanged parent"),
+        parent_bytes
+    );
+    assert_eq!(
+        fs::read(&child_path).expect("read unchanged child"),
+        child_bytes
+    );
+}
+
+#[tokio::test]
+async fn clean_fork_lineage_requires_whole_file_for_unbounded_byte_cutoff() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        /*history_base*/ None,
+        /*next_ordinal*/ 3,
+    );
+    let source_bytes = fs::read(&path).expect("source bytes");
+    let reservation = store
+        .reserve_rollout_writers(&[thread_id])
+        .await
+        .expect("reserve source writer");
+    let lineage = store
+        .resolve_rollout_lineage(thread_id)
+        .await
+        .expect("resolve source");
+    let full_len = u64::try_from(source_bytes.len()).expect("source length fits u64");
+    assert_eq!(lineage.segments[0].end_ordinal_exclusive, None);
+    assert_eq!(lineage.segments[0].jsonl_end_byte_offset, Some(full_len));
+    let mut shortened = lineage.clone();
+    shortened.segments[0].jsonl_end_byte_offset =
+        Some(history_position(&path, thread_id, 2).end_byte_offset);
+    let error = store
+        .materialize_clean_fork_lineage(thread_id, shortened, &reservation, true)
+        .await
+        .expect_err("partial byte-only boundary lacks ordinal authority");
+    assert!(
+        error
+            .to_string()
+            .contains("byte cutoff is missing its ordinal boundary")
+    );
+
+    let (prepared, _, _, _) = store
+        .materialize_clean_fork_lineage(thread_id, lineage, &reservation, true)
+        .await
+        .expect("prepare complete source")
+        .expect("complete source is eligible");
+    assert_eq!(prepared.segments[0].end_ordinal_exclusive, Some(3));
+    assert_eq!(prepared.segments[0].jsonl_end_byte_offset, Some(full_len));
+    assert_eq!(prepared.segments[0].end_byte_offset, Some(full_len));
+    assert_eq!(fs::read(&path).expect("unchanged source"), source_bytes);
 }
 
 #[tokio::test]

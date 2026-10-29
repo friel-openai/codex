@@ -5492,6 +5492,266 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
         .expect("shutdown reopened full-history child");
 }
 
+#[test_case::test_case(false; "plain_messages")]
+#[test_case::test_case(true; "compacted_messages")]
+#[tokio::test]
+async fn full_history_fork_persists_metadata_only_sanitization(compacted: bool) {
+    let (home, mut config) = test_config().await;
+    config.features.enable(Feature::MultiAgentV2).unwrap();
+    config
+        .features
+        .enable(Feature::GuardianThreadContext)
+        .unwrap();
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_id, parent) = harness.start_paginated_thread().await;
+    let turn = parent.session.new_default_turn().await;
+    let mut items = ["user", "assistant"].map(|role| codex_history::ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: Some(ResponseItemId::from_server(format!("metadata-only-{role}"))),
+            status: None,
+            encrypted_content: None,
+            role: role.to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!("unchanged {role} payload"),
+            }],
+            phase: (role == "assistant").then_some(MessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        },
+        metadata: Some(codex_history::CodexHarnessMetadata {
+            user_input_order: Some(7),
+            sender_user_messages: Some(Box::new(codex_history::SenderUserMessages {
+                receiver_turn_id: "parent-turn".to_string(),
+                receiver_message_id: format!("metadata-only-{role}"),
+                text: "Parent-only sender context".to_string(),
+            })),
+            history_truncation_token_limit: Some(8000),
+            ..Default::default()
+        }),
+    });
+    // Both persistence variants retain the same originating turn and creation time.
+    for envelope in &mut items {
+        crate::session::session::Session::stamp_response_item_for_history(
+            &mut envelope.item,
+            &turn.sub_id,
+        );
+    }
+    if compacted {
+        let step = parent
+            .session
+            .capture_step_context(
+                Arc::clone(&turn),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("capture compacted fixture step");
+        let world_state = parent
+            .session
+            .build_world_state_for_step(&step, true)
+            .await
+            .expect("build compacted fixture world state");
+        let prepared_window_advance = parent.session.prepare_auto_compact_window_advance().await;
+        parent
+            .session
+            .replace_compacted_history(
+                &turn,
+                items.to_vec(),
+                step.to_turn_context_item(),
+                world_state.render_full().0,
+                crate::compact::CompactedHistoryMetadata {
+                    input_goal_ids: Default::default(),
+                    message: String::new(),
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    reviewer_compaction_hash: None,
+                    prepared_window_advance,
+                },
+            )
+            .await
+            .expect("persist compacted metadata fixture");
+    } else {
+        parent
+            .session
+            .record_annotated_conversation_items(&turn, turn.model_info(), items.to_vec())
+            .await;
+    }
+    // Parent persistence adds a cumulative checkpoint even without MCP calls. Compare the
+    // fork with that recorded parent metadata, including compaction's final-item checkpoint.
+    let checkpoint_index = if compacted { 1 } else { 0 };
+    items[checkpoint_index]
+        .metadata
+        .as_mut()
+        .expect("source metadata")
+        .mcp_attribution = Some(McpAttribution::default());
+    let recorded_parent_items = parent
+        .session
+        .clone_history()
+        .await
+        .annotated_items()
+        .iter()
+        .filter(|envelope| {
+            matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(recorded_parent_items.len(), items.len());
+    if !compacted {
+        for (expected, recorded) in items.iter_mut().zip(&recorded_parent_items) {
+            let source = recorded
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.retained_source.as_ref())
+                .expect("ordinary parent messages capture retained-source provenance");
+            let ResponseItem::Message {
+                id: Some(id), role, ..
+            } = &expected.item
+            else {
+                unreachable!("fixture contains identified messages");
+            };
+            assert_eq!(
+                source.id,
+                codex_history::RetainedSourceId {
+                    message_id: id.to_string(),
+                    turn_id: turn.sub_id.clone(),
+                    role: if role == "user" {
+                        codex_history::RetainedSourceRole::User
+                    } else {
+                        codex_history::RetainedSourceRole::Assistant
+                    },
+                }
+            );
+            assert_eq!(source.complete, role == "assistant");
+            assert!(!source.revision.as_str().is_empty());
+            expected
+                .metadata
+                .as_mut()
+                .expect("source metadata")
+                .retained_source = Some(source.clone());
+        }
+    }
+    assert_eq!(recorded_parent_items, items.to_vec());
+    let spawn_call_id = "spawn-metadata-only";
+    parent
+        .session
+        .record_conversation_items(&turn, turn.model_info(), &[spawn_agent_call(spawn_call_id)])
+        .await;
+    let child_id = harness
+        .spawn_anonymous_child(
+            parent_id,
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(spawn_call_id.to_string()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await;
+    let child = harness
+        .manager
+        .get_thread(child_id)
+        .await
+        .expect("forked child");
+    let expected = items.map(|mut envelope| {
+        let metadata = envelope.metadata.as_mut().expect("source metadata");
+        metadata.sender_user_messages = None;
+        metadata.user_input_order = None;
+        metadata.inherited_user_message = true;
+        envelope
+    });
+    let assert_model_history = |history: &crate::context_manager::ContextManager| {
+        let selected = history.annotated_items().iter().filter(|envelope| {
+            matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+        }).cloned().collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            expected.to_vec(),
+            "fork must only change parent-scoped metadata"
+        );
+    };
+    assert_model_history(&child.session.clone_history().await);
+    let parent_after_fork = parent.session.clone_history().await;
+    assert_eq!(
+        parent_after_fork
+            .annotated_items()
+            .iter()
+            .filter(|envelope| {
+                matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+        recorded_parent_items,
+        "fork sanitization must not change the parent envelopes"
+    );
+    child.ensure_rollout_materialized().await;
+    child.flush_rollout().await.expect("flush sanitized child");
+    let child_path = child.rollout_path().expect("child rollout");
+    let persisted = std::fs::read_to_string(&child_path)
+        .expect("read child rollout")
+        .lines()
+        .map(|line| {
+            codex_rollout::parse_rollout_line(line)
+                .expect("decode child rollout")
+                .item
+        })
+        .collect::<Vec<_>>();
+    // Reusing either ancestor pointer would restore the original sender metadata on cold resume.
+    assert!(persisted.iter().all(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.history_base.is_none(),
+        RolloutItem::RolloutReference(_) => false,
+        _ => true,
+    }));
+    let persisted_messages = persisted.iter().flat_map(|item| match item {
+        RolloutItem::ResponseItem(envelope) => std::slice::from_ref(envelope),
+        RolloutItem::Compacted(compaction) => compaction.replacement_history.as_deref().unwrap_or_default(),
+        _ => &[],
+    }).filter(|envelope| {
+        matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+    }).collect::<Vec<_>>();
+    for envelope in &expected {
+        assert!(
+            persisted_messages.contains(&envelope),
+            "sanitized metadata must be durable"
+        );
+    }
+    assert!(
+        persisted_messages
+            .iter()
+            .all(|envelope| expected.contains(envelope))
+    );
+    harness
+        .control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("unload child");
+    harness
+        .control
+        .shutdown_live_agent(parent_id)
+        .await
+        .expect("unload parent");
+    let cold_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        harness.config.model_provider.clone(),
+        harness.config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        harness.state_db.clone(),
+    );
+    cold_manager
+        .agent_control()
+        .resume_agent_from_rollout(harness.config.clone(), child_id, SessionSource::Exec)
+        .await
+        .expect("cold resume sanitized child");
+    let resumed = cold_manager.get_thread(child_id).await.expect("cold child");
+    assert_model_history(&resumed.session.clone_history().await);
+    cold_manager
+        .agent_control()
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("close cold child");
+}
+
 #[test_case::test_case(MultiAgentVersion::V1, true, false; "v1_gate_enabled")]
 #[test_case::test_case(MultiAgentVersion::V2, false, false; "v2_gate_disabled")]
 #[test_case::test_case(MultiAgentVersion::V2, true, true; "v2_gate_enabled")]
@@ -10316,9 +10576,56 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
     let _ = config.features.enable(Feature::Goals);
     let _ = config.features.enable(Feature::GoalSupervisor);
     let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::FastMode);
+    // Retired bundled models fall back to metadata with no service tiers. This test
+    // requires both selected models to advertise priority routing explicitly.
+    config.model = Some("gpt-5.2".to_string());
+    config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
+        models: ["gpt-5.2", "gpt-5.4"]
+            .into_iter()
+            .map(|slug| {
+                let mut model = codex_models_manager::model_info::model_info_from_slug(slug);
+                model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
+                    id: ServiceTier::Fast.request_value().to_string(),
+                    name: "Fast".to_string(),
+                    description: "Test priority routing".to_string(),
+                }];
+                model
+            })
+            .collect(),
+    });
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     config.model_provider.supports_websockets = false;
-    let harness = AgentControlHarness::new_with_config(home, config).await;
+    // The shared harness constructor intentionally uses the bundled catalog. Install
+    // this test's explicit catalog in the manager that resolves every helper model.
+    let state_db = init_state_db(&config).await;
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    crate::thread_manager::set_thread_manager_test_mode_for_tests(true);
+    let manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        crate::thread_manager::passthrough_image_store(),
+        crate::thread_manager::thread_store_from_config(&config, state_db.clone()),
+        crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
+        uuid::Uuid::new_v4().to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let control = manager.agent_control();
+    let harness = AgentControlHarness {
+        _home: home,
+        config,
+        state_db,
+        manager,
+        control,
+    };
     let state_db = harness
         .state_db
         .as_ref()
@@ -10581,6 +10888,7 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
         "Keep retrying after transient supervisor failures.",
     )
     .await?;
+    let before_segments = supervisor_test_segment_files(harness.config.codex_home.as_path())?;
 
     // Reserve in the parent's registry; the harness control owns a separate agent tree.
     let parent_control = parent_thread
@@ -10764,6 +11072,11 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
         2,
         "the second implicit failure should advance the backoff tier"
     );
+    assert_eq!(
+        supervisor_test_segment_files(harness.config.codex_home.as_path())?,
+        before_segments,
+        "failed ephemeral supervisor attempts must not retain parent snapshots or installation temporaries"
+    );
     Ok(())
 }
 
@@ -10774,6 +11087,7 @@ fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> an
         "goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
         goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
             ThreadHistoryMode::Legacy,
+            false,
         ),
     )
 }
@@ -10785,8 +11099,44 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
         "paginated_goal_supervisor_helper_preserves_parent_request_prefix",
         goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
             ThreadHistoryMode::Paginated,
+            false,
         ),
     )
+}
+
+#[test]
+#[serial(fork_env)]
+fn repeated_ephemeral_supervisors_do_not_publish_parent_snapshots() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "repeated_ephemeral_supervisors_do_not_publish_parent_snapshots",
+        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+            ThreadHistoryMode::Paginated,
+            true,
+        ),
+    )
+}
+
+fn supervisor_test_segment_files(
+    home: &std::path::Path,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for root in [
+        home.join(codex_rollout::SESSIONS_SUBDIR)
+            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR),
+        home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
+    ] {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                files.push(entry.into_path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 #[test]
@@ -11196,6 +11546,7 @@ async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inne
 
 async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
     history_mode: ThreadHistoryMode,
+    repeat_helper: bool,
 ) -> anyhow::Result<()> {
     const MATERIALIZE_EPHEMERAL_ROLLOUTS: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
     const AGENTS_MARKER: &str =
@@ -11205,20 +11556,23 @@ async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_i
     let _materialize_ephemeral_rollouts =
         EnvVarGuard::set(MATERIALIZE_EPHEMERAL_ROLLOUTS, OsStr::new("1"));
     let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-parent"),
-                ev_completed("resp-parent"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-child"),
-                ev_completed("resp-child"),
-            ]),
-        ],
-    )
-    .await;
+    let mut responses = vec![
+        sse(vec![
+            ev_response_created("resp-parent"),
+            ev_completed("resp-parent"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-child"),
+            ev_completed("resp-child"),
+        ]),
+    ];
+    if repeat_helper {
+        responses.push(sse(vec![
+            ev_response_created("resp-child-repeat"),
+            ev_completed("resp-child-repeat"),
+        ]));
+    }
+    let request_log = mount_sse_sequence(&server, responses).await;
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::AgentPromptInjection);
     let _ = config.features.enable(Feature::MultiAgentV2);
@@ -11416,6 +11770,13 @@ while True:
         parent_thread.session.flush_rollout().await?;
     }
     let before_thread_ids = harness.manager.list_thread_ids().await;
+    let before_segments = supervisor_test_segment_files(harness.config.codex_home.as_path())?;
+    let parent_rollout_path = parent_thread
+        .session
+        .current_rollout_path()
+        .await?
+        .expect("materialized parent rollout");
+    let parent_rollout_before = std::fs::read(parent_rollout_path.as_path())?;
     let (goal_id, goal) = create_active_thread_goal_for_test(
         state_db,
         parent_thread_id,
@@ -11462,16 +11823,22 @@ while True:
             panic!("paginated supervisor child should load as resumed physical history");
         };
         assert!(
-            child_rollout.history.iter().any(|item| {
+            !child_rollout.history.iter().any(|item| {
                 matches!(item, RolloutItem::RolloutReference(_))
                     || matches!(
                         item,
                         RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()
                     )
             }),
-            "paginated supervisor children must retain a physical lineage pointer while the model request uses materialized logical history"
+            "debug materialization of an ephemeral supervisor must be self-contained, not publish a parent snapshot reference"
         );
     }
+    assert!(child_thread.config_snapshot().await.ephemeral);
+    assert_eq!(
+        supervisor_test_segment_files(harness.config.codex_home.as_path())?,
+        before_segments,
+        "an ephemeral supervisor must not install a parent snapshot or installation temporary"
+    );
     let requests = request_log.requests();
     assert_eq!(requests.len(), 2);
     let parent_body = requests[0].body_json();
@@ -11543,6 +11910,16 @@ while True:
         "goal supervisor helpers must preserve the exact parent request prefix, including both instruction providers and workspace AGENTS.md in their original order"
     );
     let child_suffix = &child_input[parent_input.len()..];
+    let continuity_text = child_suffix
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|item| item["text"].as_str())
+        .find(|text| text.contains("last_parent_message_at_utc"))
+        .expect("supervisor continuity context");
+    assert!(
+        !continuity_text.contains("\"last_parent_message_at_utc\": null"),
+        "context-only preparation must retain the completed parent turn timestamp"
+    );
     assert!(
         child_suffix.iter().all(|item| {
             item["content"]
@@ -11673,6 +12050,46 @@ while True:
                 .any(|tool| tool["type"].as_str() == Some("tool_search"))
         }),
         "the inherited MCP snapshot should be discoverable through tool_search: {child_body:#}"
+    );
+
+    if repeat_helper {
+        timeout(Duration::from_secs(5), async {
+            while harness.manager.get_thread(child_thread_id).await.is_ok() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed ephemeral supervisor must leave the live thread registry");
+        let repeated_id =
+            crate::goal_supervisor::spawn_supervisor_helper_for_test(&parent_thread.session, &goal)
+                .await?;
+        assert_ne!(repeated_id, child_thread_id);
+        let repeated_thread = harness.manager.get_thread(repeated_id).await?;
+        wait_for_turn_complete(repeated_thread.as_ref()).await;
+        assert!(repeated_thread.config_snapshot().await.ephemeral);
+        let requests = request_log.requests();
+        assert_eq!(requests.len(), 3);
+        let repeated_body = requests[2].body_json();
+        let repeated_input = repeated_body["input"].as_array().expect("repeated input");
+        assert_eq!(&repeated_input[..parent_input.len()], parent_input);
+        assert_eq!(
+            repeated_body["prompt_cache_key"],
+            child_body["prompt_cache_key"]
+        );
+        assert_eq!(
+            non_agent_tools(&repeated_body),
+            non_agent_tools(&parent_body)
+        );
+        assert_eq!(
+            supervisor_test_segment_files(harness.config.codex_home.as_path())?,
+            before_segments,
+            "repeated ephemeral check-ins must not retain additional parent snapshots"
+        );
+    }
+    parent_thread.session.flush_rollout().await?;
+    assert!(
+        std::fs::read(parent_rollout_path.as_path())?.starts_with(&parent_rollout_before),
+        "supervisor preparation must preserve the parent's persisted history"
     );
 
     Ok(())
