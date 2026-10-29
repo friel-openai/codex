@@ -18,6 +18,7 @@ use crate::thread_sample::SampleTask;
 use crate::thread_sample::SampleThread;
 use crate::thread_sample::generate_sample;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListAnchor;
 use codex_app_server_protocol::ThreadItemsListCursor;
@@ -31,6 +32,7 @@ use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_config::types::WindowsSandboxModeToml;
+use codex_core::CurrentAgentMember;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -40,6 +42,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::ScanOutcome;
@@ -49,6 +52,9 @@ use std::fs::File;
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
 use std::time::SystemTime;
+
+mod current_agent_list;
+use current_agent_list::CurrentAgentThreadListParams;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -1197,7 +1203,7 @@ impl ThreadRequestProcessor {
             .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
     }
 
-    async fn finalize_thread_teardown(&self, thread_id: ThreadId) {
+    pub(super) async fn finalize_thread_teardown(&self, thread_id: ThreadId) {
         self.outgoing
             .cancel_requests_for_thread(thread_id, /*error*/ None)
             .await;
@@ -1903,7 +1909,16 @@ impl ThreadRequestProcessor {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
 
-        let subtree_thread_ids = self.state_db_spawn_subtree_thread_ids(thread_id).await?;
+        let current_agent_membership = self
+            .thread_manager
+            .prepare_current_agent_membership_eviction(thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to prepare thread subtree {thread_id} for archive: {err}"
+                ))
+            })?;
+        let subtree_thread_ids = current_agent_membership.candidate_thread_ids().to_vec();
 
         // Fresh threads have no rollout until their first turn. Materialize the
         // loaded persistent thread before looking it up for archival.
@@ -1917,17 +1932,20 @@ impl ThreadRequestProcessor {
         }
 
         let mut archive_thread_ids = Vec::new();
+        let mut already_archived_thread_ids = Vec::new();
         match self
             .thread_store
             .read_thread(StoreReadThreadParams {
                 thread_id,
-                include_archived: false,
+                include_archived: true,
                 include_history: false,
             })
             .await
         {
             Ok(thread) => {
-                if thread.archived_at.is_none() {
+                if thread.archived_at.is_some() {
+                    already_archived_thread_ids.push(thread_id);
+                } else {
                     archive_thread_ids.push(thread_id);
                 }
             }
@@ -1944,10 +1962,13 @@ impl ThreadRequestProcessor {
                 .await
             {
                 Ok(thread) => {
-                    if thread.archived_at.is_none() {
+                    if thread.archived_at.is_some() {
+                        already_archived_thread_ids.push(descendant_thread_id);
+                    } else {
                         archive_thread_ids.push(descendant_thread_id);
                     }
                 }
+                Err(ThreadStoreError::ThreadNotFound { .. }) => {}
                 Err(err) => {
                     warn!(
                         "failed to read spawned descendant thread {descendant_thread_id} while archiving {thread_id}: {err}"
@@ -1957,43 +1978,84 @@ impl ThreadRequestProcessor {
         }
 
         if archive_thread_ids.is_empty() {
+            let current_agent_ids_to_evict = current_agent_membership
+                .current_ids_with_current_only_descendants(&already_archived_thread_ids);
+            if let Err(err) = current_agent_membership
+                .evict_exact(&current_agent_ids_to_evict)
+                .await
+            {
+                warn!(
+                    "reconciled archived thread {thread_id}, but runtime shutdown reported an error: {err}"
+                );
+            }
             return Ok((ThreadArchiveResponse {}, Vec::new()));
         }
 
-        archive_thread_ids[1..].reverse();
+        if archive_thread_ids.first().copied() == Some(thread_id) {
+            archive_thread_ids[1..].reverse();
+        } else {
+            archive_thread_ids.reverse();
+        }
         // Collaboration may resume an archived descendant without unarchiving it.
-        self.prepare_thread_for_archive(thread_id).await?;
-        for &descendant_thread_id in subtree_thread_ids.iter().skip(1).rev() {
-            self.prepare_thread_for_archive(descendant_thread_id)
-                .await?;
+        for thread_id_to_archive in
+            std::iter::once(thread_id).chain(subtree_thread_ids.iter().copied().skip(1).rev())
+        {
+            let identity_preserved = current_agent_membership
+                .unload_candidate_runtime_preserving_identity(thread_id_to_archive)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to prepare thread {thread_id_to_archive} for archive: {err}"
+                    ))
+                })?;
+            if identity_preserved {
+                self.finalize_thread_teardown(thread_id_to_archive).await;
+            } else {
+                self.prepare_thread_for_archive(thread_id_to_archive)
+                    .await?;
+            }
         }
 
-        let archived_thread_ids = self
+        let archive_result = self
             .thread_store
             .archive_threads(StoreArchiveThreadsParams {
                 thread_ids: archive_thread_ids,
                 writer_lock_thread_ids: subtree_thread_ids,
             })
+            .await;
+        let archived_thread_ids = match archive_result {
+            Ok(archived_thread_ids) => archived_thread_ids,
+            Err(err) => {
+                let current_agent_ids_to_evict = current_agent_membership
+                    .current_ids_with_current_only_descendants(&already_archived_thread_ids);
+                if let Err(cleanup_err) = current_agent_membership
+                    .evict_exact(&current_agent_ids_to_evict)
+                    .await
+                {
+                    warn!(
+                        "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
+                    );
+                }
+                return Err(thread_store_archive_error("archive", err));
+            }
+        };
+        let mut current_agent_ids_to_evict = already_archived_thread_ids;
+        current_agent_ids_to_evict.extend(archived_thread_ids.iter().copied());
+        let current_agent_ids_to_evict = current_agent_membership
+            .current_ids_with_current_only_descendants(&current_agent_ids_to_evict);
+        if let Err(err) = current_agent_membership
+            .evict_exact(&current_agent_ids_to_evict)
             .await
-            .map_err(|err| thread_store_mutation_error("archive", err))?
+        {
+            warn!(
+                "archived thread {thread_id} and retired its current identities, but runtime shutdown reported an error: {err}"
+            );
+        }
+        let archived_thread_ids = archived_thread_ids
             .into_iter()
             .map(|thread_id| thread_id.to_string())
             .collect();
         Ok((ThreadArchiveResponse {}, archived_thread_ids))
-    }
-
-    pub(super) async fn state_db_spawn_subtree_thread_ids(
-        &self,
-        thread_id: ThreadId,
-    ) -> Result<Vec<ThreadId>, JSONRPCErrorError> {
-        self.thread_manager
-            .list_agent_subtree_thread_ids(thread_id)
-            .await
-            .map_err(|err| {
-                internal_error(format!(
-                    "failed to list spawned descendants for thread id {thread_id}: {err}"
-                ))
-            })
     }
 
     async fn thread_increment_elicitation_inner(
@@ -2875,42 +2937,82 @@ impl ThreadRequestProcessor {
             }
         }
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
-        let relation_filter = match (parent_thread_id, ancestor_thread_id, attached_to_thread_id) {
+        let (relation_filter, relation_root_id, direct_children_only) = match (
+            parent_thread_id,
+            ancestor_thread_id,
+            attached_to_thread_id,
+        ) {
             (Some(_), Some(_), None) => {
                 return Err(invalid_request(
                     "parentThreadId and ancestorThreadId are mutually exclusive",
                 ));
             }
             (Some(parent_thread_id), None, None) => {
-                Some(StoreThreadRelationFilter::DirectChildrenOf(
-                    ThreadId::from_string(&parent_thread_id).map_err(|err| {
-                        invalid_request(format!("invalid parent thread id: {err}"))
-                    })?,
-                ))
+                let parent_thread_id = ThreadId::from_string(&parent_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?;
+                (
+                    Some(StoreThreadRelationFilter::DirectChildrenOf(
+                        parent_thread_id,
+                    )),
+                    Some(parent_thread_id),
+                    true,
+                )
             }
             (None, Some(ancestor_thread_id), None) => {
-                Some(StoreThreadRelationFilter::DescendantsOf(
-                    ThreadId::from_string(&ancestor_thread_id).map_err(|err| {
-                        invalid_request(format!("invalid ancestor thread id: {err}"))
-                    })?,
-                ))
+                let ancestor_thread_id = ThreadId::from_string(&ancestor_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+                (
+                    Some(StoreThreadRelationFilter::DescendantsOf(ancestor_thread_id)),
+                    Some(ancestor_thread_id),
+                    false,
+                )
             }
             (None, None, Some(parent)) => {
                 if self.state_db.is_none() || !self.thread_store.as_any().is::<LocalThreadStore>() {
                     return Err(unsupported_thread_store_operation("attached threads"));
                 }
-                Some(StoreThreadRelationFilter::AttachedThreadsOf(
-                    ThreadId::from_string(&parent).map_err(|err| {
-                        invalid_request(format!("invalid attached thread parent id: {err}"))
-                    })?,
-                ))
+                (
+                    Some(StoreThreadRelationFilter::AttachedThreadsOf(
+                        ThreadId::from_string(&parent).map_err(|err| {
+                            invalid_request(format!("invalid attached thread parent id: {err}"))
+                        })?,
+                    )),
+                    None,
+                    false,
+                )
             }
             (_, _, Some(_)) => {
                 return Err(invalid_request(
                     "attachedToThreadId cannot be combined with parentThreadId or ancestorThreadId",
                 ));
             }
-            (None, None, None) => None,
+            (None, None, None) => (None, None, false),
+        };
+
+        let current_agent_members = if let Some(relation_root_id) = relation_root_id {
+            match self
+                .thread_manager
+                .current_agent_membership_snapshot(relation_root_id)
+                .await
+            {
+                Ok(snapshot) => Some(
+                    snapshot
+                        .members
+                        .into_iter()
+                        .filter(|member| !excluded_thread_ids.contains(&member.thread_id))
+                        .collect(),
+                ),
+                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    Some(Vec::new())
+                }
+                Err(err) => {
+                    return Err(internal_error(format!(
+                        "failed to list current agents for thread {relation_root_id}: {err}"
+                    )));
+                }
+            }
+        } else {
+            None
         };
 
         let requested_page_size = limit
@@ -2929,6 +3031,26 @@ impl ThreadRequestProcessor {
             | StoreThreadSortKey::UpdatedAt
             | StoreThreadSortKey::RecencyAt => SortDirection::Desc,
         });
+        if let (Some(root_thread_id), Some(members)) = (relation_root_id, current_agent_members) {
+            return self
+                .current_agent_thread_list_response(CurrentAgentThreadListParams {
+                    root_thread_id,
+                    direct_children_only,
+                    members,
+                    cursor,
+                    limit: requested_page_size,
+                    sort_key: store_sort_key,
+                    sort_direction,
+                    model_providers,
+                    project_id,
+                    source_kinds,
+                    archived,
+                    section_id,
+                    cwd_filters,
+                    search_term,
+                })
+                .await;
+        }
         let (stored_threads, next_cursor) = self
             .list_threads_common(
                 requested_page_size,
@@ -3106,17 +3228,61 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadLoadedListParams,
     ) -> Result<ThreadLoadedListResponse, JSONRPCErrorError> {
-        let ThreadLoadedListParams { cursor, limit } = params;
+        let ThreadLoadedListParams {
+            cursor,
+            limit,
+            ancestor_thread_id,
+        } = params;
+        let ancestor_filter = match ancestor_thread_id {
+            Some(ancestor_thread_id) => {
+                let ancestor_thread_id = ThreadId::from_string(&ancestor_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+                let indexed_descendants: HashSet<_> = self
+                    .thread_manager
+                    .list_open_agent_subtree_thread_ids(ancestor_thread_id)
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!(
+                            "failed to list open spawned descendants for thread id {ancestor_thread_id}: {err}"
+                        ))
+                    })?
+                    .into_iter()
+                    .collect();
+                Some((ancestor_thread_id, indexed_descendants))
+            }
+            None => None,
+        };
         let mut data = Vec::new();
         for thread_id in self.thread_manager.list_thread_ids().await {
-            if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
-                && thread
-                    .thread_extension_data()
-                    .get::<SampleThread>()
-                    .is_none()
+            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+                continue;
+            };
+            if thread
+                .thread_extension_data()
+                .get::<SampleThread>()
+                .is_some()
             {
-                data.push(thread_id.to_string());
+                continue;
             }
+            if let Some((ancestor_thread_id, indexed_descendants)) = &ancestor_filter {
+                if thread_id == *ancestor_thread_id {
+                    continue;
+                }
+                if !indexed_descendants.contains(&thread_id)
+                    && !self
+                        .thread_manager
+                        .loaded_thread_descends_from(thread_id, *ancestor_thread_id)
+                        .await
+                        .map_err(|err| {
+                            internal_error(format!(
+                                "failed to resolve loaded thread ancestry for {thread_id}: {err}"
+                            ))
+                        })?
+                {
+                    continue;
+                }
+            }
+            data.push(thread_id.to_string());
         }
 
         if data.is_empty() {
@@ -3249,6 +3415,15 @@ impl ThreadRequestProcessor {
         };
 
         thread.daybreak_enabled = thread.daybreak_enabled.or(pending_daybreak_enabled);
+        if loaded_thread.is_none()
+            && matches!(&thread.source, SessionSource::SubAgent(_))
+            && let Some(root_thread_id) = self
+                .thread_manager
+                .agent_session_root_thread_id(thread_id)
+                .await
+        {
+            thread.session_id = root_thread_id.to_string();
+        }
 
         let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
             matches!(loaded_thread.agent_status().await, AgentStatus::Running)
@@ -3361,6 +3536,10 @@ impl ThreadRequestProcessor {
                 thread.path = fallback_thread.path.clone();
             }
             thread.session_id.clone_from(&fallback_thread.session_id);
+            // Adoption changes the current parent without rewriting the original rollout head.
+            thread
+                .parent_thread_id
+                .clone_from(&fallback_thread.parent_thread_id);
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
@@ -4982,7 +5161,7 @@ impl ThreadRequestProcessor {
                 Err(error) => Err(error),
             }
         };
-        let (thread_history, resume_source_thread) = resume_result?;
+        let (mut thread_history, resume_source_thread) = resume_result?;
         // Path-based resume can use an empty request thread ID. Coordinate once its real
         // identity is known; unrelated loaded threads never wait for this cold startup.
         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
@@ -5005,6 +5184,33 @@ impl ThreadRequestProcessor {
                 "thread {} is closing; retry thread/resume after the thread is closed",
                 resumed.conversation_id
             )));
+        }
+        // Promotion updates indexed ownership, not the immutable subagent rollout head.
+        // Only normalize this task's own metadata, never an inherited ancestor's head.
+        if let Some(stored) = resume_source_thread.as_ref()
+            && !stored.source.is_non_root_agent()
+            && !matches!(
+                stored.source,
+                codex_protocol::protocol::SessionSource::Unknown
+            )
+            && let InitialHistory::Resumed(resumed) = &mut thread_history
+            && let Some(meta) = Arc::make_mut(&mut resumed.history)
+                .iter_mut()
+                .find_map(|item| match item {
+                    RolloutItem::SessionMeta(line) if line.meta.id == stored.thread_id => {
+                        Some(&mut line.meta)
+                    }
+                    _ => None,
+                })
+            && meta.source.is_non_root_agent()
+        {
+            meta.source = stored.source.clone();
+            meta.session_id = stored.thread_id.into();
+            meta.parent_thread_id = None;
+            meta.thread_source = stored.thread_source.clone();
+            meta.agent_path = None;
+            meta.agent_nickname = None;
+            meta.agent_role = None;
         }
         let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
@@ -5691,11 +5897,9 @@ impl ThreadRequestProcessor {
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-                && self
-                    .thread_manager
-                    .get_thread(existing_thread_id)
-                    .await
-                    .is_ok()
+                && get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
+                    .await?
+                    .is_some()
             {
                 return Err(invalid_request(format!(
                     "cannot resume thread {existing_thread_id} with history while it is already running"
@@ -5703,7 +5907,8 @@ impl ThreadRequestProcessor {
             }
             None
         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-            && let Ok(existing_thread) = self.thread_manager.get_thread(existing_thread_id).await
+            && let Some(existing_thread) =
+                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?
         {
             let source_thread = self
                 .read_stored_thread_for_resume(
@@ -5722,9 +5927,11 @@ impl ThreadRequestProcessor {
                 )
                 .await?;
             let existing_thread_id = source_thread.thread_id;
-            match self.thread_manager.get_thread(existing_thread_id).await {
-                Ok(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
-                Err(_) => {
+            match get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
+                .await?
+            {
+                Some(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
+                None => {
                     return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
                         source_thread,
                     ))));
@@ -6220,13 +6427,31 @@ impl ThreadRequestProcessor {
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
         let result = if let Some(path) = path {
-            self.thread_store
+            // Explicit paths determine the source ID. Read only metadata until any loaded
+            // source has been repaired, then reread the requested path to retain its selection.
+            let stored_thread = self
+                .thread_store
                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
                     rollout_path: path.clone(),
                     include_archived: true,
-                    include_history,
+                    include_history: false,
                 })
                 .await
+                .map_err(thread_store_resume_read_error)?;
+            let loaded_thread =
+                get_loaded_thread_for_persistence(&self.thread_manager, stored_thread.thread_id)
+                    .await?;
+            if loaded_thread.is_some() || include_history {
+                self.thread_store
+                    .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
+                        rollout_path: path.clone(),
+                        include_archived: true,
+                        include_history,
+                    })
+                    .await
+            } else {
+                Ok(stored_thread)
+            }
         } else {
             let existing_thread_id = match ThreadId::from_string(thread_id) {
                 Ok(id) => id,
@@ -6234,6 +6459,7 @@ impl ThreadRequestProcessor {
                     return Err(invalid_request(format!("invalid session id: {err}")));
                 }
             };
+            get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?;
             let params = StoreReadThreadParams {
                 thread_id: existing_thread_id,
                 include_archived: true,
@@ -8366,6 +8592,7 @@ pub(crate) fn thread_from_stored_thread(
         updated_at: thread.updated_at.timestamp(),
         recency_at: Some(thread.recency_at.timestamp()),
         status: ThreadStatus::NotLoaded,
+        agent_status: None,
         path,
         cwd,
         cli_version: thread.cli_version,
@@ -8548,6 +8775,7 @@ fn build_thread_from_snapshot(
         updated_at: now,
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
+        agent_status: None,
         path,
         cwd: config_snapshot.cwd().clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
