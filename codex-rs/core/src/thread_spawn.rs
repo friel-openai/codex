@@ -134,6 +134,10 @@ pub(crate) async fn spawn(
     } else {
         None
     };
+    step_context
+        .environments
+        .to_spawn_selections()
+        .map_err(ThreadSpawnError::Backend)?;
     let (agent, config) = session
         .services
         .agent_control

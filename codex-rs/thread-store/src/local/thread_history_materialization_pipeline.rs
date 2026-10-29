@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HistoryPosition;
 
 use super::super::LocalThreadStore;
 use super::super::thread_history::RolloutProjectionStep;
@@ -30,6 +31,7 @@ pub(super) async fn read_and_apply(
     expected_ordinal: u64,
     initial_ordinal: u64,
     subagent_history_start_ordinal: Option<u64>,
+    end: Option<HistoryPosition>,
 ) -> ThreadStoreResult<()> {
     // Two queued batches, one being produced and one being consumed. Each is limited by
     // source bytes and step count; an oversized individual record remains indivisible.
@@ -45,6 +47,7 @@ pub(super) async fn read_and_apply(
             expected_ordinal,
             thread_id,
             subagent_history_start_ordinal,
+            end,
             || stop.is_closed(),
             |projections, next_offset| {
                 sender

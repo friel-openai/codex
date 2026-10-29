@@ -339,6 +339,58 @@ fn restored_input_order_accounts_for_surviving_local_sources() {
 }
 
 #[test]
+fn input_order_observation_preserves_retained_evidence() {
+    let mut captured = RetainedContext::default();
+    assert!(captured.record(&publish_answer()));
+    assert!(captured.record(&delivered_message("confirmed", "Already sent.", 1)));
+    captured.mark_user_messages_incomplete();
+    let inherited = CodexHarnessMetadata {
+        user_input_order: Some(100),
+        inherited_user_message: true,
+        ..Default::default()
+    };
+    for (next_order, expected_order) in [(2, 8), (20, 20)] {
+        let mut observed = RetainedContext {
+            next_order,
+            ..captured.clone()
+        };
+        for source in [
+            RetainedInputSource::Local(Some(7)),
+            RetainedInputSource::from(Some(&inherited)),
+            RetainedInputSource::Local(None),
+            RetainedInputSource::Local(Some(0)),
+        ] {
+            observed.observe_input_order(source);
+            assert_eq!(
+                observed,
+                RetainedContext {
+                    next_order: expected_order,
+                    ..captured.clone()
+                }
+            );
+        }
+        assert_eq!(observed.reserve_order(), expected_order);
+    }
+}
+
+#[test]
+fn input_order_observation_saturates_at_maximum() {
+    let mut captured = RetainedContext::default();
+    assert!(captured.record(&delivered_message("confirmed", "Already sent.", 0)));
+    let mut observed = captured.clone();
+    observed.observe_input_order(RetainedInputSource::Local(Some(u64::MAX)));
+    assert_eq!(observed.reserve_order(), u64::MAX);
+    assert_eq!(observed.reserve_order(), u64::MAX);
+    assert_eq!(
+        observed,
+        RetainedContext {
+            next_order: u64::MAX,
+            ..captured
+        }
+    );
+}
+
+#[test]
 fn accepted_order_survives_delayed_recording_and_checkpoint_replay() {
     let mut context = RetainedContext::default();
     // Rejected/canceled input consumes a sequence but never becomes evidence.

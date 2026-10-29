@@ -542,8 +542,10 @@ async fn thread_id_from_rollout(path: &Path) -> RolloutThreadId {
             Err(_) => continue,
         };
         if item_type == "session_meta" {
-            return match codex_rollout::parse_rollout_line(line.trim()) {
-                Ok(line) => match line.item {
+            return match codex_rollout::RolloutRecorder::parse_rollout_line_bytes(
+                line.trim().as_bytes(),
+            ) {
+                Ok(Some(line)) => match line.item {
                     RolloutItem::SessionMeta(session_meta) => {
                         RolloutThreadId::Id(session_meta.meta.id.to_string())
                     }
@@ -552,14 +554,16 @@ async fn thread_id_from_rollout(path: &Path) -> RolloutThreadId {
                         path.display()
                     )),
                 },
-                Err(_) => RolloutThreadId::Unusable(format!(
+                Ok(None) | Err(_) => RolloutThreadId::Unusable(format!(
                     "rollout at {} has invalid session metadata",
                     path.display()
                 )),
             };
         }
         if !has_legacy_item {
-            has_legacy_item = codex_rollout::parse_rollout_line(line.trim()).is_ok();
+            has_legacy_item =
+                codex_rollout::RolloutRecorder::parse_rollout_line_bytes(line.trim().as_bytes())
+                    .is_ok_and(|line| line.is_some());
         }
     }
 
