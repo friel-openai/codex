@@ -105,18 +105,21 @@ class DeclarationTests(unittest.TestCase):
                 selection.load_selection(declaration(invalid))
 
     def test_limits_total_cases_across_groups(self):
-        first = group(names=[f"module::case_{index}" for index in range(584)])
-        second = group("codex-core::all", list(first["tests"]), "test", "all")
-        second["tests"].append("module::legacy_paging_case")
+        limit = 1492
+        first = group(names=[f"module::case_{index}" for index in range(limit // 2)])
+        second = group("codex-core::all", [
+            f"module::case_{index}" for index in range(limit - len(first["tests"]))
+        ], "test", "all")
+        self.assertEqual(len(first["tests"]) + len(second["tests"]), limit)
         self.assertEqual(selection.load_selection(declaration(first, second)), [first, second])
         second["tests"].append("module::extra_case")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "CI selection exceeds 1492 exact cases"):
             selection.load_selection(declaration(first, second))
 
     def test_checked_in_selection_fits_the_validated_limit(self):
         configured = Path(__file__).resolve().parents[1] / "frodex-ci-selection.json"
         groups = selection.load_selection(selection.load_json(configured.read_text()))
-        self.assertEqual(sum(len(group["tests"]) for group in groups), 1169)
+        self.assertEqual(sum(len(group["tests"]) for group in groups), 1492)
 
     def test_rejects_duplicate_json_keys_in_declarations_and_listings(self):
         duplicate_documents = [
@@ -171,6 +174,24 @@ class ListingTests(unittest.TestCase):
 
 class ExecutionTests(unittest.TestCase):
     def setUp(self):
+        self.child_environment = {
+            "PATH": "/fixture/bin",
+            "CARGO_BIN_EXE_codex": "/fixture/bin/codex",
+            "RUST_MIN_STACK": "33554432",
+            "FRODEX_CI_TEST_GUARD": "preserved",
+        }
+        self.environment = {
+            **self.child_environment,
+            "CODEX_ACCESS_TOKEN": "synthetic-access-token",
+            "CODEX_API_KEY": "synthetic-codex-key",
+            "OPENAI_API_KEY": "synthetic-openai-key",
+            "OPENAI_FEDERATION_RULE_ID": "synthetic-federation",
+            "OPENAI_IDENTITY_TOKEN_FILE": "/fixture/identity",
+            "OPENAI_WORKLOAD_IDENTITY_CONTEXT": "synthetic-workload",
+        }
+        environment_patch = mock.patch.dict(selection.os.environ, self.environment, clear=True)
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
         self.source = Path("projection")
         self.config = Path("canonical") / ".github" / "nextest-ci.toml"
         self.groups = [
@@ -206,17 +227,21 @@ class ExecutionTests(unittest.TestCase):
             mock.call(
                 ["cargo", "nextest", "list", "--message-format", "json", *arguments],
                 cwd=self.source / "codex-rs", check=True, text=True, stdout=subprocess.PIPE,
+                env=self.child_environment,
             )
             for arguments in self.arguments
         ] + [
             mock.call(
                 ["just", "--set", "rust_min_stack", "33554432", "test",
                  *arguments, "--no-tests", "fail"],
-                cwd=self.source, check=True,
+                cwd=self.source, check=True, env=self.child_environment,
             )
             for arguments in self.arguments
         ]
         self.assertEqual(run.call_args_list, expected)
+        self.assertEqual(dict(selection.os.environ), self.environment)
+        for call in run.call_args_list:
+            self.assertIsNot(call.kwargs["env"], selection.os.environ)
 
     @mock.patch.object(selection.subprocess, "run")
     def test_second_listing_failure_prevents_every_test_run(self, run):
@@ -230,6 +255,9 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(len(run.call_args_list), 2)
         self.assertTrue(all(call.args[0][:3] == ["cargo", "nextest", "list"]
                             for call in run.call_args_list))
+        self.assertTrue(all(call.kwargs["env"] == self.child_environment
+                            for call in run.call_args_list))
+        self.assertEqual(dict(selection.os.environ), self.environment)
 
 
 if __name__ == "__main__":

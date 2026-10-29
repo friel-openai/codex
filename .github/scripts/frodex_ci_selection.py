@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -58,7 +59,7 @@ def load_selection(value):
             case = (binary, name)
             require(case not in seen, f"Duplicate intended case: {case}")
             seen.add(case)
-    require(len(seen) <= 1169, "CI selection exceeds 1169 exact cases")
+    require(len(seen) <= 1492, "CI selection exceeds 1492 exact cases")
     return groups
 
 
@@ -99,6 +100,13 @@ def command_arguments(group, config):
 
 
 def run_selected(source, config, groups):
+    environment = os.environ.copy()
+    for name in (
+        "CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY",
+        "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    ):
+        environment.pop(name, None)
     commands = [command_arguments(group, config) for group in groups]
     # Validate every group before the first test executes. A renamed or ignored
     # case must fail CI, even when other cases still match the expression.
@@ -106,13 +114,14 @@ def run_selected(source, config, groups):
         result = subprocess.run(
             ["cargo", "nextest", "list", "--message-format", "json", *arguments],
             cwd=source / "codex-rs", check=True, text=True, stdout=subprocess.PIPE,
+            env=environment,
         )
         checked_selection(load_json(result.stdout), group)
     for arguments in commands:
         subprocess.run(
             ["just", "--set", "rust_min_stack", "33554432", "test",
              *arguments, "--no-tests", "fail"],
-            cwd=source, check=True,
+            cwd=source, check=True, env=environment,
         )
 
 
