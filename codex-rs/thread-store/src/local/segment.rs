@@ -47,6 +47,154 @@ use crate::ThreadPersistenceMode;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+pub(crate) mod confined_publication;
+pub(super) mod history_repair_publication;
+
+/// Copies an externally written Legacy source without reserving or changing its writer.
+/// The selected files are verified before the owned records cross into child persistence.
+pub(super) async fn capture_external_legacy_fork(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected_rollout_id: Option<RolloutId>,
+) -> ThreadStoreResult<PreparedFork> {
+    capture_external_fork(
+        store,
+        thread_id,
+        expected_rollout_id,
+        ThreadHistoryMode::Legacy,
+        /*include_turns*/ true,
+    )
+    .await
+}
+
+pub(super) async fn capture_external_paginated_fork(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected_rollout_id: RolloutId,
+    include_turns: bool,
+) -> ThreadStoreResult<PreparedFork> {
+    capture_external_fork(
+        store,
+        thread_id,
+        Some(expected_rollout_id),
+        ThreadHistoryMode::Paginated,
+        include_turns,
+    )
+    .await
+}
+
+async fn capture_external_fork(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected_rollout_id: Option<RolloutId>,
+    history_mode: ThreadHistoryMode,
+    include_turns: bool,
+) -> ThreadStoreResult<PreparedFork> {
+    let reservation = store.reserve_thread_lifecycle(thread_id).await;
+    let selected = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
+        store, thread_id,
+    )
+    .await?
+    .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    if expected_rollout_id.is_some_and(|expected| expected != selected.rollout_id) {
+        return Err(ThreadStoreError::Conflict {
+            message: format!("external fork source selection changed for thread {thread_id}"),
+        });
+    }
+    let captured = match history_mode {
+        ThreadHistoryMode::Legacy => codex_rollout::capture_external_legacy_rollout_lines(
+            &store.config.codex_home,
+            &selected.path,
+            thread_id,
+        )
+        .await
+        .map(|lines| (lines, None)),
+        ThreadHistoryMode::Paginated => codex_rollout::capture_external_paginated_rollout_lines(
+            &store.config.codex_home,
+            &selected.path,
+            thread_id,
+        )
+        .await
+        .map(|(lines, next)| (lines, Some(next))),
+    };
+    let (mut lines, next_ordinal) = captured.map_err(|error| match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => ThreadStoreError::Conflict {
+            message: format!("external fork source changed for thread {thread_id}: {error}"),
+        },
+        _ => ThreadStoreError::InvalidRequest {
+            message: format!("cannot capture external fork source {thread_id}: {error}"),
+        },
+    })?;
+    let current = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
+        store, thread_id,
+    )
+    .await?
+    .ok_or_else(|| ThreadStoreError::Conflict {
+        message: format!("external fork source disappeared for thread {thread_id}"),
+    })?;
+    if current.rollout_id != selected.rollout_id || current.path != selected.path {
+        return Err(ThreadStoreError::Conflict {
+            message: format!("external fork source selection changed for thread {thread_id}"),
+        });
+    }
+    let model_context = if history_mode == ThreadHistoryMode::Paginated {
+        if let Some(RolloutLine {
+            item: RolloutItem::SessionMeta(meta),
+            ..
+        }) = lines.first_mut()
+        {
+            // Complete expansion already copied the inherited records. Neither reconstruction nor
+            // child persistence may follow the mutable source ancestry again.
+            meta.meta.history_base = None;
+        }
+        let items = lines
+            .iter()
+            .map(|line| line.item.clone())
+            .collect::<Vec<_>>();
+        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(&items)?;
+        Some(Arc::new(
+            codex_rollout::materialize_model_context_rollout_items_from(
+                &store.config.codex_home,
+                lines.clone(),
+            )
+            .await
+            .map_err(|error| ThreadStoreError::InvalidRequest {
+                message: format!("cannot reconstruct external fork source {thread_id}: {error}"),
+            })?,
+        ))
+    } else {
+        None
+    };
+    let (content_id, items) = tokio::task::spawn_blocking(move || {
+        let content_id = snapshot_segment_id(&lines)?;
+        let items = Arc::new(lines.into_iter().map(|line| line.item).collect::<Vec<_>>());
+        Ok::<_, ThreadStoreError>((content_id, items))
+    })
+    .await
+    .map_err(|error| ThreadStoreError::Internal {
+        message: format!("failed to seal external fork source {thread_id}: {error}"),
+    })??;
+    let model_context = model_context.unwrap_or_else(|| Arc::clone(&items));
+    let response_history = if include_turns {
+        Arc::clone(&items)
+    } else {
+        Arc::clone(&model_context)
+    };
+    let mut prepared = PreparedFork::new(
+        thread_id,
+        next_ordinal,
+        /*history_base*/ None,
+        /*frozen_segment*/ None,
+        Arc::clone(&model_context),
+        model_context,
+        response_history,
+        /*interrupt_if_open*/ history_mode == ThreadHistoryMode::Paginated,
+        (reservation, selected.rollout_id, content_id),
+    );
+    prepared.copied_history = Some(items);
+    Ok(prepared)
+}
+
 #[cfg(test)]
 static SEGMENT_REOPEN_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
     LazyLock::new(|| StdMutex::new(HashSet::new()));
