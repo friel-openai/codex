@@ -715,6 +715,7 @@ impl LocalThreadStore {
         if let Some(selected) = &selected
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             // A stable thread can retain older physical rollouts after a revert. Migrating one of
             // those files would overwrite the selected thread's history mode and migration journal.
@@ -977,6 +978,7 @@ impl LocalThreadStore {
         if let Some(selected) = &locked_selected
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             return Ok(None);
         }
@@ -2054,6 +2056,16 @@ async fn find_current_rollout_path(
         .find(|candidate| {
             codex_rollout::plain_rollout_path(candidate).file_name() == Some(file_name)
         }))
+}
+
+// Archiving changes the directory but not physical rollout identity. A still-present selected
+// file or a different filename means this is an older rollout, not the selected file moving.
+async fn same_rollout_moved(selected: &Path, candidate: &Path) -> bool {
+    codex_rollout::plain_rollout_path(selected).file_name()
+        == codex_rollout::plain_rollout_path(candidate).file_name()
+        && codex_rollout::existing_rollout_path(selected)
+            .await
+            .is_none()
 }
 
 fn matches_selection(selected: &[ThreadId], actual: Option<ThreadId>) -> bool {
