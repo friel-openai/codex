@@ -14,6 +14,16 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use std::borrow::Borrow;
 
+// Frozen legacy equivalent of core::compact::is_summary_message: the exact
+// codex_prompts::SUMMARY_PREFIX, including the required following newline.
+const LEGACY_SUMMARY_PREFIX: &str = concat!(
+    "Another language model started to solve this problem and produced a summary of its ",
+    "thinking process. You also have access to the state of the tools that were used by that ",
+    "language model. Use this to build on the work that has already been done and avoid ",
+    "duplicating work. Here is the summary produced by the other language model, use the ",
+    "information in this summary to assist with your own analysis:\n",
+);
+
 /// Match the rollback boundaries used by legacy history reconstruction without
 /// treating every persisted lifecycle as a user turn. This intentionally stays
 /// local to the frozen migration adapter: the full core predicate also knows
@@ -26,7 +36,12 @@ pub(super) fn counts_as_boundary(response: &ResponseItem) -> bool {
     let ResponseItem::Message { role, content, .. } = response else {
         return false;
     };
-    (role == "user" && !is_known_contextual_user_message_content(content))
+    (role == "user"
+        && !is_known_contextual_user_message_content(content)
+        && !content.iter().any(|part| {
+            matches!(part,
+            ContentItem::InputText { text } if text.starts_with(LEGACY_SUMMARY_PREFIX))
+        }))
         || (role == "assistant" && InterAgentCommunication::is_message_content(content))
 }
 

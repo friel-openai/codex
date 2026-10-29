@@ -214,6 +214,8 @@ pub struct CodexThread {
     // reviewers keep their existing subagent identity inside the session.
     pub(crate) session_source: SessionSource,
     startup_metadata: ThreadStartupMetadata,
+    /// Resumed Paginated sessions may contain only recent segments and cannot seed exact forks.
+    model_history_complete: bool,
     rollout_path: Option<PathBuf>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
     _diagnostics_guard: GaugeGuard,
@@ -242,6 +244,7 @@ impl CodexThread {
         startup_metadata: ThreadStartupMetadata,
         rollout_path: Option<PathBuf>,
         session_source: SessionSource,
+        model_history_complete: bool,
     ) -> Self {
         Self {
             session,
@@ -249,6 +252,7 @@ impl CodexThread {
             residency_gate: Arc::default(),
             session_source,
             startup_metadata,
+            model_history_complete,
             rollout_path,
             out_of_band_elicitations: Mutex::new(OutOfBandElicitations::default()),
             _diagnostics_guard: LIVE_THREADS.track(),
@@ -260,12 +264,26 @@ impl CodexThread {
     }
 
     /// Returns a model-history snapshot only while the source thread is idle.
-    pub async fn model_history_snapshot(&self) -> Option<Arc<Vec<ResponseItem>>> {
+    pub async fn model_history_snapshot(
+        &self,
+    ) -> Option<Arc<Vec<codex_history::ResponseItemEnvelope>>> {
+        if !self.model_history_complete {
+            return None;
+        }
         if self.session.active_turn.lock().await.is_some() {
             return None;
         }
-        let history = Arc::new(self.session.clone_history().await.into_raw_items());
-        if self.session.active_turn.lock().await.is_some() {
+        if self.session.current_auto_compact_window_number().await != 0 {
+            return None;
+        }
+        let history = self.session.clone_history().await.shared_annotated_items();
+        if self.session.active_turn.lock().await.is_some()
+            || self.session.current_auto_compact_window_number().await != 0
+            || !Arc::ptr_eq(
+                &history,
+                &self.session.clone_history().await.shared_annotated_items(),
+            )
+        {
             return None;
         }
         Some(history)
