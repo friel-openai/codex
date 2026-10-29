@@ -4,6 +4,7 @@ use super::process_responses_event;
 use super::spawn_response_stream;
 use crate::api_bridge::map_api_error;
 use crate::common::ResponseEvent;
+use crate::error::ApiError;
 use bytes::Bytes;
 use codex_client::StreamResponse;
 use codex_http_client::RetryAfter;
@@ -19,64 +20,95 @@ use std::time::Duration;
 /// Flex failures remain terminal even with retry headers and a later completed event.
 #[tokio::test(start_paused = true)]
 async fn flex_failure_with_retry_header_ends_stream_immediately() {
-    let error = json!({
-        "code": "flex_unavailable",
-        "plan_type": 42,
-        "headers": {"retry-after": "300"}
-    });
-    for failure in [
-        json!({"type": "error", "error": error}),
-        json!({"type": "response.failed", "response": {"error": error}}),
+    for error in [
+        json!({
+            "code": "flex_unavailable",
+            "plan_type": 42,
+            "headers": {"retry-after": "300"}
+        }),
+        json!({
+            "type": "usage_limit_reached",
+            "code": "flex_unavailable",
+            "plan_type": "pro",
+            "resets_at": 4_102_444_800_i64,
+            "headers": {"retry-after": "300"}
+        }),
     ] {
-        let completed = json!({"type": "response.completed", "response": {"id": "later"}});
-        let bytes = stream::iter([Ok(Bytes::from(format!(
-            "data: {failure}\n\ndata: {completed}\n\n"
-        )))])
-        .chain(stream::pending());
-        let mut stream = spawn_response_stream(
-            StreamResponse {
-                status: StatusCode::OK,
-                headers: HeaderMap::new(),
-                bytes: Box::pin(bytes),
-            },
-            Duration::from_secs(60),
-            /*telemetry*/ None,
-            /*turn_state*/ None,
-        );
-        let error = loop {
-            match stream.next().await {
-                Some(Ok(ResponseEvent::RateLimits(_))) => {}
-                Some(Err(error)) => break map_api_error(error),
-                event => panic!("expected a Flex error, got {event:?}"),
-            }
-        };
-        assert_eq!(
-            (
-                error.to_codex_protocol_error(),
-                error.retry_delay(/*retry_count*/ 1)
-            ),
-            (CodexErrorInfo::FlexUnavailable, None)
-        );
-        assert!(stream.next().await.is_none());
+        for failure in [
+            json!({"type": "error", "error": error}),
+            json!({"type": "response.failed", "response": {"error": error}}),
+        ] {
+            let completed = json!({"type": "response.completed", "response": {"id": "later"}});
+            let bytes = stream::iter([Ok(Bytes::from(format!(
+                "data: {failure}\n\ndata: {completed}\n\n"
+            )))])
+            .chain(stream::pending());
+            let mut stream = spawn_response_stream(
+                StreamResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    bytes: Box::pin(bytes),
+                },
+                Duration::from_secs(60),
+                /*telemetry*/ None,
+                /*turn_state*/ None,
+            );
+            let error = loop {
+                match stream.next().await {
+                    Some(Ok(ResponseEvent::RateLimits(_))) => {}
+                    Some(Err(error)) => break map_api_error(error),
+                    event => panic!("expected a Flex error, got {event:?}"),
+                }
+            };
+            assert_eq!(
+                (
+                    error.to_codex_protocol_error(),
+                    error.retry_delay(/*retry_count*/ 1)
+                ),
+                (CodexErrorInfo::FlexUnavailable, None)
+            );
+            assert!(stream.next().await.is_none());
+        }
     }
 }
 
 #[test]
 fn statusless_model_errors_have_no_http_status() {
-    let error = json!({"code": "model_not_found"});
-    for event in [
-        json!({"type": "error", "error": error}),
-        json!({"type": "response.failed", "response": {"error": error}}),
+    for error in [
+        json!({"code": "model_not_found"}),
+        json!({
+            "type": "usage_limit_reached",
+            "code": "model_not_found",
+            "plan_type": 42,
+            "resets_at": 4_102_444_800_i64,
+        }),
+        json!({
+            "type": "usage_limit_reached",
+            "code": "model_not_found",
+            "plan_type": "pro",
+            "resets_at": "later",
+        }),
     ] {
-        let event = serde_json::from_value(event).unwrap();
-        let error = map_api_error(process_responses_event(event).unwrap_err().into_api_error());
-        assert_eq!(
-            (
-                error.to_codex_protocol_error(),
-                error.http_status_code_value()
-            ),
-            (CodexErrorInfo::ModelNotFound, None)
-        );
+        for event in [
+            json!({"type": "error", "error": error}),
+            json!({"type": "response.failed", "response": {"error": error}}),
+        ] {
+            let event = serde_json::from_value(event).unwrap();
+            let error = process_responses_event(event).unwrap_err().into_api_error();
+            assert!(
+                matches!(&error, ApiError::ModelNotFound { message, status: None }
+                    if message == "model_not_found"),
+                "expected a statusless model error, got {error:?}"
+            );
+            let error = map_api_error(error);
+            assert_eq!(
+                (
+                    error.to_codex_protocol_error(),
+                    error.http_status_code_value()
+                ),
+                (CodexErrorInfo::ModelNotFound, None)
+            );
+        }
     }
 }
 
@@ -107,6 +139,38 @@ async fn rate_limit_plaintext_loses_to_valid_error_header() {
                 error.retry_after(),
                 RetryAfter::from_delay(Duration::from_secs(expected_seconds))
             );
+        }
+    }
+
+    for error_header in [Some("2"), None] {
+        let event = serde_json::from_value(json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "plan_type": 42,
+                    "message": "Try again in 35 seconds.",
+                    "headers": {"Retry-After": error_header}
+                }
+            }
+        }))
+        .unwrap();
+        let error = process_responses_event(event).unwrap_err().into_api_error();
+        match (error_header, error) {
+            (
+                Some(_),
+                ApiError::Retryable {
+                    message,
+                    retry_after,
+                },
+            ) => {
+                assert_eq!(message, "response.failed event received");
+                assert_eq!(retry_after, RetryAfter::from_delay(Duration::from_secs(2)));
+            }
+            (None, ApiError::Stream(message)) => {
+                assert_eq!(message, "response.failed event received");
+            }
+            (_, error) => panic!("unexpected malformed failed response: {error:?}"),
         }
     }
 }

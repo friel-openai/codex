@@ -1,5 +1,6 @@
 //! Vertex AI provider routing, command-backed credentials, and supported model capabilities.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
@@ -141,8 +143,11 @@ impl ModelProvider for GcpModelProvider {
         &self,
         _codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.models_manager_without_cache(config_model_catalog)
+        let manager = self.models_manager_without_cache(config_model_catalog);
+        manager.replace_custom_models(custom_models);
+        manager
     }
 
     fn models_manager_without_cache(

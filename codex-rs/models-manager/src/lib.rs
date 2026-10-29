@@ -5,10 +5,13 @@ pub mod manager;
 pub mod model_info;
 pub mod model_presets;
 mod originator;
+pub mod routing;
 pub mod test_support;
 
 pub use codex_protocol::auth::AuthMode;
 pub use config::CustomModelConfig;
+pub use config::ModelRoutingCandidate;
+pub use config::ModelRoutingProfile;
 pub use config::ModelsManagerConfig;
 pub use originator::ModelCatalogOriginator;
 
