@@ -337,10 +337,10 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 6a085b654117318a6a3c98c51582b4010c54e54e..8901042a93ceaadab84a84321b1fd040348b74ce 100644
+index e9bb937171944c95d45e34a7b44de37f1f9b208f..2a5b825079702310e9d4eb3713b844d90617549e 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -97,6 +97,7 @@ mod guardian_cached_score;
+@@ -100,6 +100,7 @@ mod guardian_cached_score;
  mod guardian_checkpoint_migration;
  // Uses the same command-approval harness as guardian_review below.
  mod canonical_plugin_connectors;
@@ -363,7 +363,7 @@ index 6245636eb8705e5609aae655dceee25d477ea4ea..4b11b5f344b1adadffd417b0bfc4e7d1
  const CUSTOM_MODE_HINT_TEXT: &str = "Use the configured delegation policy.";
  const CATALOG_MODE_HINT_TEXT: &str = "Use the model catalog delegation policy.";
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
-index 783b34d93c0b771c4515dd81b80ec770b530571a..a41f4582c7c5f544320b3d12130ca807ce1cc1b2 100644
+index 881a7e25cf1710fad2860fb0ebcf7eedd4fb0e0f..66bd74ce84d2ff910b5ce7351b2c69b49273a1ed 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
 @@ -8,18 +8,35 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
@@ -1062,7 +1062,7 @@ index 2ffaedb0d6e78643d6fdda3afce90cd96ea31999..cfc175e49989c75111ae304b287985d5
 +10:message/user:
      second prompt
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
-index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7f636fdde 100644
+index b13ef69cfa4be0d20bdf98fb7d9ed7471a2069ce..3243faad7b05c16b27c41b0c2b728ebba6a6a8eb 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__astra_async_compaction_with_live_suffix.snap
 @@ -6,8 +6,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
@@ -1112,9 +1112,9 @@ index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -41,8 +62,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+@@ -42,8 +63,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 
- ## Window 2 (after request 2: input diverged at item 08)
+ ## Window 2 (after request 2: input diverged at item 09)
  -- request 3 (request) --
 -00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
 -        - namespace/functions; hash=fada4a476a3754dd
@@ -1123,7 +1123,7 @@ index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7
            - custom/exec
            - function/wait
            - function/request_user_input
-@@ -56,11 +77,32 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+@@ -57,11 +78,32 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
            - function/send_message
            - function/spawn_agent
            - function/wait_agent
@@ -1159,7 +1159,7 @@ index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -78,8 +120,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+@@ -80,8 +122,8 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 
  ## Window 3 (after request 3: input diverged at item 02)
  -- request 4 (request) --
@@ -1170,7 +1170,7 @@ index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7
            - custom/exec
            - function/wait
            - function/request_user_input
-@@ -93,14 +135,35 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
+@@ -95,14 +137,35 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
            - function/send_message
            - function/spawn_agent
            - function/wait_agent
@@ -1209,17 +1209,62 @@ index fb8b1f915c64711a8dbc70db9411497abb13f067..9a9ed1c3b4db91acda1f43f3554908b7
  05:message/developer:
      <MULTI_AGENT_ROLE>
  06:message/developer:
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
+index e7d2ffa51ee7e1a56e3f0173dedb452054d56a6f..0bdfb2c766150f577984e83d51e9990b32fbdaf6 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
+@@ -14,10 +14,12 @@ Settings:
+   store: false
+   stream: true
+   tool_choice: "auto"
+-  tools (6; hash=1ea0fa9abde186d4):
++  tools (7; hash=c95f91442f992620):
+     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
+     - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
+     - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
++    - namespace/workspace: Tools for changing the working directory used by the active thread.; hash=d05f60cc92935a0f
++      - function/set_cwd
+     - function/view_image: View a local image file from the filesystem when visual inspection is needed. Use this for images...; args=[path]; hash=1908de9c0be7118a
+     - namespace/multi_agent_v1: Tools for spawning and managing sub-agents.; hash=94c598b3c6ca141b
+       - function/close_agent
+@@ -29,12 +31,29 @@ Settings:
+ -- request 1 (turn) --
+ 00:message/developer:
+     Test model instructions.
+-01:message/developer[2]:
+-    [01] <permissions instructions>
++01:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <permissions instructions>
+         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`...ll commands are permitted. Network access is enabled. [hash=c134061cebb94a1b]
+         Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.
+         </permissions instructions>
+-    [02] <model_catalog>
++    [03] <model_catalog>
+         - `visible-model`: Fast and capable Reasoning efforts: low, medium (default), high. Service tiers: priority.
+         </model_catalog>
+ 02:message/user:
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
-index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f4a6385e3 100644
+index 576e8fd3a1e3b059745320b06b1293b9c050b1dc..bb48a50d0a0f25869c4654b6bdd9ea4e18daba6e 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_retention_disabled.snap
-@@ -1,13 +1,13 @@
- ---
- source: core/tests/suite/scenarios_retained_tool_outputs.rs
--expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction shares the 64K retention budget with oversized task details, and a cold resume preserves the retained tool content.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
-+expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
- ---
- Scenario: With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.
+@@ -6,8 +6,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
  ## Window 1
  -- request 1 (turn) --
@@ -1266,9 +1311,9 @@ index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -44,8 +65,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+@@ -45,8 +66,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
- ## Window 2 (after request 3: input diverged at item 10)
+ ## Window 2 (after request 3: input diverged at item 11)
  -- request 4 (compaction) --
 -00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
 -        - namespace/functions; hash=fada4a476a3754dd
@@ -1277,7 +1322,7 @@ index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f
            - custom/exec
            - function/wait
            - function/request_user_input
-@@ -59,11 +80,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+@@ -60,11 +81,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
            - function/send_message
            - function/spawn_agent
            - function/wait_agent
@@ -1313,7 +1358,7 @@ index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -82,8 +124,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+@@ -84,8 +126,8 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
 
  ## Window 3 (after request 4: input diverged at item 06)
  -- request 5 (turn) --
@@ -1324,7 +1369,7 @@ index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f
            - custom/exec
            - function/wait
            - function/request_user_input
-@@ -97,11 +139,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+@@ -99,11 +141,32 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
            - function/send_message
            - function/spawn_agent
            - function/wait_agent
@@ -1360,24 +1405,20 @@ index 502a050722789d946ad8a3faaac34684dbbbfdbd..a043f0bff5b4581e583474741010546f
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -110,6 +173,4 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
+@@ -112,7 +175,5 @@ Scenario: With retention disabled, the client can still send retain=true. Tool o
      <ENVIRONMENT_CONTEXT>
  06:compaction:encrypted=true; chars=31; hash=dc1cfb1784ca88e3
  07:message/user:
 -    <ENVIRONMENT_CONTEXT>
 -08:message/user:
      What request are you working on?
+-09:configuration_update:reasoning={"effort":"low"}
++08:configuration_update:reasoning={"effort":"low"}
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
-index af3d0a2d315d4029b64debef3bf29ecb1a40b001..43a65968839695b9157f3629c25eb7f6f867a99f 100644
+index 7f21eb9e2dd93599c6940c6ce18a3e73300a0a7e..7c52db0ffd7a25196625e2330093a0cf704bc474 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__retained_tool_outputs__retained_tool_output_survives_compaction_and_resume.snap
-@@ -1,13 +1,13 @@
- ---
- source: core/tests/suite/scenarios_retained_tool_outputs.rs
--expression: "context_snapshot::format_request_history_snapshot(\"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\",\n&requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
-+expression: "context_snapshot::format_request_history_snapshot(if enabled\n{\n    \"Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.\"\n} else\n{\n    \"With retention disabled, the client can still send retain=true. Tool outputs use ordinary emergency trimming and are not retained after compaction and cold resume.\"\n}, &requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
- ---
- Scenario: Retained thread instructions stop emergency tool-output trimming. Compaction keeps whole outputs within the shared 64K retention budget, dropping oversized task details and older instructions. A cold resume preserves the latest instruction unchanged.
+@@ -6,8 +6,8 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
 
  ## Window 1
  -- request 1 (turn) --
@@ -1424,7 +1465,7 @@ index af3d0a2d315d4029b64debef3bf29ecb1a40b001..43a65968839695b9157f3629c25eb7f6
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -47,8 +68,8 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+@@ -48,8 +69,8 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
 
  ## Window 2 (after request 4: input diverged at item 06)
  -- request 5 (turn) --
@@ -1435,7 +1476,7 @@ index af3d0a2d315d4029b64debef3bf29ecb1a40b001..43a65968839695b9157f3629c25eb7f6
            - custom/exec
            - function/wait
            - function/request_user_input
-@@ -62,11 +83,32 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+@@ -63,11 +84,32 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
            - function/send_message
            - function/spawn_agent
            - function/wait_agent
@@ -1471,15 +1512,17 @@ index af3d0a2d315d4029b64debef3bf29ecb1a40b001..43a65968839695b9157f3629c25eb7f6
  03:message/developer:
      <MULTI_AGENT_ROLE>
  04:message/developer:
-@@ -76,6 +118,4 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
+@@ -77,7 +119,5 @@ Scenario: Retained thread instructions stop emergency tool-output trimming. Comp
  06:function_call_output/codex_app.send_message_to_thread:Report your findings without changing files.
  07:compaction:encrypted=true; chars=31; hash=dc1cfb1784ca88e3
  08:message/user:
 -    <ENVIRONMENT_CONTEXT>
 -09:message/user:
      What request are you working on?
+-10:configuration_update:reasoning={"effort":"low"}
++09:configuration_update:reasoning={"effort":"low"}
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap b/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
-index 83139c7dcab5520ca9f586625e7347ff8a830763..cf85a680cb34e3bae654256527472c3cd6087710 100644
+index fbee7acd92bf7b2bcc6a7c5709ff6bef4ccc937b..5d664ff45463b739bc951dcc7f2472c0165403c8 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
 @@ -8,9 +8,26 @@ Scenario: New context window tool installs fresh full context before the next fo
@@ -1509,13 +1552,13 @@ index 83139c7dcab5520ca9f586625e7347ff8a830763..cf85a680cb34e3bae654256527472c3c
 +
 +    [02] <SKILLS_INSTRUCTIONS>
 +    [03] <PERMISSIONS_INSTRUCTIONS>
- 02:message/developer:
-     <context_window>
-     Agent name: /root
-@@ -18,7 +35,27 @@ Scenario: New context window tool installs fresh full context before the next fo
-     Current context window id: <UUID 2>
-     Previous context window id: <UUID 1>
-     </context_window>
+ 02:message/developer[3]:
+     [01] <context_window>
+     [02]
+@@ -20,7 +37,27 @@ Scenario: New context window tool installs fresh full context before the next fo
+         Previous context window id: <UUID 1>
+
+     [03] </context_window>
 -03:message/user:
 +03:message/developer:
 +    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
@@ -1544,10 +1587,10 @@ index 83139c7dcab5520ca9f586625e7347ff8a830763..cf85a680cb34e3bae654256527472c3c
 +06:function_call/update_plan:{"plan":[{"status":"in_progress","step":"Continue in the new context window"}]}
 +07:function_call_output:Plan updated
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 557c36dde15dc4a9c12c284ae6dcbb907eb553b4..dc3ca5fc3ccfe9f618c3bcee021b7587d0c5c203 100644
+index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99deeb4bd7 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -117,7 +117,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
+@@ -120,7 +120,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
  const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
  const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
  const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
@@ -1556,33 +1599,50 @@ index 557c36dde15dc4a9c12c284ae6dcbb907eb553b4..dc3ca5fc3ccfe9f618c3bcee021b7587
 
  fn body_contains(req: &wiremock::Request, text: &str) -> bool {
      decoded_body(req)
-@@ -1605,7 +1605,7 @@ enum FullHistoryV2ModelSelection {
+@@ -1624,7 +1624,7 @@ enum FullHistoryV2ModelSelection {
  #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
- #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
- #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
--#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork retains proactive policy across effort changes")]
+ #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork appends current-time reminders after inherited notices")]
+ #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork appends child multi-agent mode instructions")]
+-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork retains explicit policy after proactive transition")]
 +#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork replaces parent proactive policy after effort changes")]
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
      selection: FullHistoryV2ModelSelection,
-@@ -1958,8 +1958,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1995,8 +1995,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              (
-                 mode_instruction_count(&parent_request),
-                 mode_instruction_count(&child_request),
+                 mode_instruction_count(&parent_request.message_input_texts("developer")),
+                 mode_instruction_count(&child_developer_messages),
 +                parent_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
-+                child_request.body_contains_text(FULL_HISTORY_MULTI_AGENT_MODE_HINT),
-+                child_request.body_contains_text(FULL_HISTORY_EXPLICIT_POLICY),
++                child_developer_messages
++                    .iter()
++                    .any(|message| message.contains(FULL_HISTORY_MULTI_AGENT_MODE_HINT)),
++                child_developer_messages
++                    .iter()
++                    .any(|message| message.contains(FULL_HISTORY_EXPLICIT_POLICY)),
              ),
 -            (1, 1)
 +            (1, 1, true, false, true)
          );
      }
      if matches!(
-@@ -1985,7 +1988,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2007,10 +2014,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+             .message_input_texts("developer")
+             .into_iter()
+             .rfind(|message| message.starts_with(MULTI_AGENT_MODE_OPEN_TAG))
+-            .expect("inherited delegation policy");
++            .expect("child delegation policy");
+         assert!(latest_child_policy.contains(FULL_HISTORY_EXPLICIT_POLICY));
+         assert!(!latest_child_policy.contains(FULL_HISTORY_PROACTIVE_POLICY));
+-        // The current policy is already inherited, so only the child's usage hint is appended.
++        // The parent policy stays in the prefix; the child appends its scoped delegation policy.
+         assert_eq!(
+             (
+                 child_developer_messages
+@@ -2030,7 +2037,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                      .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                      .count(),
              ),
--            (1, 0, 1, 1)
+-            (0, 0, 0, 1)
 +            (1, 1, 0, 1)
          );
      }

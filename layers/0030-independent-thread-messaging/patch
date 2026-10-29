@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c73475163 100644
+index e4f43ca88d1f5ebf1170550d6f0eda7e437c8363..6af34e7d7fb285524299b9711108be0646e91eaa 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
-@@ -73,6 +73,7 @@ pub(crate) fn thread_extensions(
+@@ -84,6 +84,7 @@ pub(crate) fn thread_extensions(
      }
      codex_history_notes_extension::install(&mut builder, auth_manager.clone());
      codex_core::install_agent_message_board(&mut builder, thread_manager.clone());
@@ -11,7 +11,7 @@ index c2d6d6d0a2358e353adb977fd7d03b495bc439c6..57e70399cf5eafb7c0107751984baf0c
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 496901af523a2b96374de180143dabfd93c23e93..f452050bcb03ce33f07cf2c56629fae772b2ea3f 100644
+index 533c61cf20b9b8c248991ad488e5953787f66328..c2b7e69fa916319ea7d906b5700230e3696785ba 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -17,6 +17,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
@@ -23,7 +23,7 @@ index 496901af523a2b96374de180143dabfd93c23e93..f452050bcb03ce33f07cf2c56629fae7
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
-@@ -471,6 +473,7 @@ async fn run_compact_task_inner_impl(
+@@ -481,6 +483,7 @@ async fn run_compact_task_inner_impl(
      let user_messages = collect_annotated_user_messages(history_items);
 
      let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -129,10 +129,10 @@ index 2f15771ab49cfea4fa74ead9e702183a37989977..049845f6e6706c46cf3c0e4bd0b09026
              previous_items,
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 5888ebd5d896631fa1cb17de9d2458aaa5afa514..4471b47752bbfb66cbf39b820957e42ea1417de6 100644
+index 8e03585419b4486560c305d1663629dbecc6f7fc..7f068189d21e42b499fe1120ad85cf11af323a91 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -537,6 +537,11 @@ impl ContextManager {
+@@ -542,6 +542,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -361,10 +361,10 @@ index 0000000000000000000000000000000000000000..9074db181b876312df8e7fc24821298a
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..69e457bcb61dd92b653ffa316e79aae863cadb79
+index 0000000000000000000000000000000000000000..6a264c623c46370e2b8939925c26409623972cda
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,426 @@
 +use super::*;
 +use crate::CodexAppsToolsCache;
 +use crate::ThreadManager;
@@ -379,6 +379,7 @@ index 0000000000000000000000000000000000000000..69e457bcb61dd92b653ffa316e79aae8
 +use crate::thread_manager::StartThreadOptions;
 +use crate::thread_manager::thread_store_from_config;
 +use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolEnvironments;
 +use crate::turn_diff_tracker::TurnDiffTracker;
 +use codex_extension_api::ExtensionRegistryBuilder;
 +use codex_login::AuthManager;
@@ -746,6 +747,7 @@ index 0000000000000000000000000000000000000000..69e457bcb61dd92b653ffa316e79aae8
 +                cancellation_token: CancellationToken::new(),
 +                tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +                call_id: "message-call".to_string(),
++                environments: ToolEnvironments::All,
 +                tool_name: ToolName::namespaced("frodex", "send_message_to_thread"),
 +                source: ToolCallSource::Direct,
 +                payload: ToolPayload::Function {
@@ -1186,11 +1188,11 @@ index 0000000000000000000000000000000000000000..ec21030fe941b331d166492ba9bc1c92
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index f56f58caf6051dd97f7824c7d485c9b215e19cf5..4fc4b70c53f3dc6a2c14ae02a8779bd460b846a2 100644
+index c46233768267c2eec7c4ba269bed47710453dc34..f0165be156d590d2247872b51356ef97aa6d8b95 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -83,6 +83,8 @@ pub use rollout_budget::RolloutBudgetReminder;
- mod agent_communication;
+@@ -84,6 +84,8 @@ mod agent_communication;
+ pub use agent_communication::PendingAgentMessage;
  mod agent_message_board;
  pub use agent_message_board::install_agent_message_board;
 +mod independent_thread;
@@ -1199,7 +1201,7 @@ index f56f58caf6051dd97f7824c7d485c9b215e19cf5..4fc4b70c53f3dc6a2c14ae02a8779bd4
  mod code_mode_host;
  mod codex_delegate;
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index cc16ab564fa58ddc6c13a471476f50d7be68c9e0..738008e51c3b89a008daab3c5001d0ab0db0b44f 100644
+index 4867d4588060a437665e8ea0bcef954f627f526a..ec4db2c91d74b2c283f7121bd5059e84d5a9a7a6 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -157,6 +157,8 @@ pub(crate) fn build_tool_router(

@@ -84,6 +84,15 @@ jobs:
             echo "CODEX_REPO_ROOT=${projection_path}"
           } >>"${GITHUB_ENV}"
 
+      - name: Install Linux build dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config libcap-dev libasound2-dev
+
       - name: Configure Linux sandboxing
         shell: bash
         run: |
@@ -107,41 +116,23 @@ jobs:
         shell: bash
         env:
           TARGET: x86_64-unknown-linux-gnu
+          PYTHONPATH: ${{ steps.projection.outputs.path }}/scripts
         run: |
           set -euo pipefail
+          python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          from codex_package.targets import TARGET_SPECS
+          from codex_package.v8 import fetch_codex_v8_artifacts
 
-          version=$(python3 \
-            "${{ steps.projection.outputs.path }}/.github/scripts/rusty_v8_bazel.py" \
-            resolved-v8-crate-version)
-          release_tag="rusty-v8-v${version}"
-          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
-          artifact_dir="${RUNNER_TEMP}/rusty_v8"
-          profile="ptrcomp_sandbox_release"
-
-          archive_name="librusty_v8_${profile}_${TARGET}.a.gz"
-          binding_name="src_binding_${profile}_${TARGET}.rs"
-          checksums_name="rusty_v8_${profile}_${TARGET}.sha256"
-          archive_path="${artifact_dir}/${archive_name}"
-          binding_path="${artifact_dir}/${binding_name}"
-          checksums_path="${artifact_dir}/${checksums_name}"
-
-          mkdir -p "${artifact_dir}"
-          curl -fsSL "${base_url}/${archive_name}" -o "${archive_path}"
-          curl -fsSL "${base_url}/${binding_name}" -o "${binding_path}"
-          curl -fsSL "${base_url}/${checksums_name}" -o "${checksums_path}"
-
-          [[ $(wc -l <"${checksums_path}") -eq 2 ]] || {
-            echo "Expected exactly two checksums for ${TARGET}." >&2
-            exit 1
-          }
-          (
-            cd "${artifact_dir}"
-            tr -d '\r' <"${checksums_path}" | sha256sum -c -
+          artifacts = fetch_codex_v8_artifacts(
+              TARGET_SPECS[os.environ["TARGET"]],
+              cache_root=Path(os.environ["RUNNER_TEMP"]) / "rusty_v8",
           )
-          {
-            echo "RUSTY_V8_ARCHIVE=${archive_path}"
-            echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}"
-          } >>"${GITHUB_ENV}"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"RUSTY_V8_ARCHIVE={artifacts.archive}\n")
+              output.write(f"RUSTY_V8_SRC_BINDING_PATH={artifacts.binding}\n")
+          PY
 
       - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
 
@@ -169,15 +160,16 @@ jobs:
           # Selected integration tests launch executables from other Cargo packages.
           cargo build --manifest-path codex-rs/Cargo.toml --profile ci-test --locked \
             -p codex-cli -p codex-app-server -p codex-app-server-test-client \
-            -p codex-code-mode-host -p codex-rmcp-client \
+            -p codex-code-mode-host -p codex-rmcp-client -p codex-exec \
             --bin codex --bin codex-app-server --bin codex-app-server-test-client \
-            --bin codex-code-mode-host --bin test_stdio_server
+            --bin codex-code-mode-host --bin test_stdio_server --bin codex-exec
           env \
             CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex" \
             CARGO_BIN_EXE_codex-app-server="${CARGO_TARGET_DIR}/ci-test/codex-app-server" \
             CARGO_BIN_EXE_codex-app-server-test-client="${CARGO_TARGET_DIR}/ci-test/codex-app-server-test-client" \
             CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host" \
             CARGO_BIN_EXE_test_stdio_server="${CARGO_TARGET_DIR}/ci-test/test_stdio_server" \
+            CARGO_BIN_EXE_codex-exec="${CARGO_TARGET_DIR}/ci-test/codex-exec" \
             python3 "${GITHUB_WORKSPACE}/.github/scripts/frodex_ci_selection.py" \
               --source "$PWD" \
               --config "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \

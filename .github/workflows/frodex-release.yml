@@ -239,9 +239,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           targets: ${{ matrix.target }}
 
@@ -283,13 +283,27 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Build bwrap and export digest
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          cargo build --jobs 2 --target "$target" --release --timings --bin bwrap
+          bwrap_path="target/${target}/release/bwrap"
+          # Codex must embed the digest of the finalized bytes that will be packaged.
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
+          echo "Built bwrap ${bwrap_path} with sha256:${digest}"
+
       - name: Cargo build
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             cargo build --jobs 2 --target ${{ matrix.target }} --release --timings \
-              --bin codex --bin codex-code-mode-host --bin bwrap
+              --bin codex --bin codex-code-mode-host
           else
             cargo build --target ${{ matrix.target }} --release --timings \
               --bin codex --bin codex-code-mode-host
@@ -371,6 +385,9 @@ jobs:
             "${dest}/frodex-${{ matrix.target }}.tar.gz" \
             --version "${RELEASE_TAG#frodex-v}" \
             --target "${{ matrix.target }}"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            printf '%s  %s\n' "${CODEX_BWRAP_SHA256:?}" "${package}/codex-resources/bwrap" | sha256sum --check
+          fi
 
       - name: Verify packaged code-mode host executes JavaScript
         shell: bash

@@ -43,10 +43,10 @@ index cfcb0a6aa91e0c7933ba01469b0d5e6a38427c1c..1453ba5e7625b5a86ab14ae5d3b90044
  }
 
 diff --git a/codex-rs/ext/goal/src/lib.rs b/codex-rs/ext/goal/src/lib.rs
-index e95dcc01d2e3026dc58fce5d9426ec4e85cfdd77..edbaed46ef1775234ba5a88564453c5f393c269d 100644
+index 7e6022441cd81f356bb868b921c8dba36e0a890a..5f3f00aa117db8d85d59f41cb01fdaed04a45d95 100644
 --- a/codex-rs/ext/goal/src/lib.rs
 +++ b/codex-rs/ext/goal/src/lib.rs
-@@ -6,6 +6,7 @@ mod api;
+@@ -8,6 +8,7 @@ mod api;
  mod events;
  mod extension;
  mod metrics;
@@ -247,7 +247,7 @@ index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b
          self.inner.thread_id
      }
 diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-index d3571262440593af8f554c70c9354a7c497e7339..16f456cc25e4334734faa291275230550317569e 100644
+index 597c7301556f7fc21443e46fa8c5eb3ef9443d23..12b8c15ef7ee25f87a58744602a4a3d58d2d14dc 100644
 --- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
 +++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
 @@ -53,6 +53,9 @@ use pretty_assertions::assert_eq;
@@ -484,11 +484,11 @@ index 0000000000000000000000000000000000000000..8ea4b1c6251a4f6dc91b9b753b8e758e
 +    Ok(())
 +}
 diff --git a/codex-rs/state/src/runtime/goals.rs b/codex-rs/state/src/runtime/goals.rs
-index c625914f9e20637776a04bacf11ee2f68c3f119e..511a0ab1cb944d7dd0a744c8b37cdd3d28d61680 100644
+index 18801f78b7a507802f0ea493aeb3fd6a56e32dca..505d1703bf58f009037f1c892bbd54ca4aaf0213 100644
 --- a/codex-rs/state/src/runtime/goals.rs
 +++ b/codex-rs/state/src/runtime/goals.rs
-@@ -2,6 +2,8 @@ use super::*;
- use crate::model::ThreadGoalRow;
+@@ -4,6 +4,8 @@ use crate::sqlite::SqlitePoolWriteExt;
+ use crate::sqlite::SqliteWriteQueryExt;
  use uuid::Uuid;
 
 +mod resumable_goal;

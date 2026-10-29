@@ -105,7 +105,7 @@ class DeclarationTests(unittest.TestCase):
                 selection.load_selection(declaration(invalid))
 
     def test_limits_total_cases_across_groups(self):
-        first = group(names=[f"module::case_{index}" for index in range(215)])
+        first = group(names=[f"module::case_{index}" for index in range(584)])
         second = group("codex-core::all", list(first["tests"]), "test", "all")
         second["tests"].append("module::legacy_paging_case")
         self.assertEqual(selection.load_selection(declaration(first, second)), [first, second])
@@ -116,7 +116,7 @@ class DeclarationTests(unittest.TestCase):
     def test_checked_in_selection_fits_the_validated_limit(self):
         configured = Path(__file__).resolve().parents[1] / "frodex-ci-selection.json"
         groups = selection.load_selection(selection.load_json(configured.read_text()))
-        self.assertEqual(sum(len(group["tests"]) for group in groups), 431)
+        self.assertEqual(sum(len(group["tests"]) for group in groups), 1169)
 
     def test_rejects_duplicate_json_keys_in_declarations_and_listings(self):
         duplicate_documents = [

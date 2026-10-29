@@ -1,6 +1,6 @@
 diff --git a/codex-rs/core/src/independent_thread/fork.rs b/codex-rs/core/src/independent_thread/fork.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b2dfa991aa276fa100e94746f3f4d2ee11b17d7
+index 0000000000000000000000000000000000000000..073241ae9c42670ba77aa31c14dbd481a6643d3b
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork.rs
 @@ -0,0 +1,351 @@
@@ -194,7 +194,7 @@ index 0000000000000000000000000000000000000000..5b2dfa991aa276fa100e94746f3f4d2e
 +        let options = StartThreadOptions {
 +            history_mode: Some(turn.history_mode),
 +            session_source: Some(session.session_source().await),
-+            dynamic_tools: turn.dynamic_tools.clone(),
++            dynamic_tools: turn.dynamic_tools.to_vec(),
 +            inherited_environments: Some(invocation.step_context.environments.clone()),
 +            client_mcp_extensions: session.services.client_mcp_extensions.clone(),
 +            disabled_plugin_ids: Some(turn.disabled_plugin_ids.clone()),
@@ -693,15 +693,16 @@ index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/fork/section_tests.rs b/codex-rs/core/src/independent_thread/fork/section_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49ebf23eca
+index 0000000000000000000000000000000000000000..e22445d44a267cc78c1f02123e17c4f836a8c8af
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/section_tests.rs
-@@ -0,0 +1,577 @@
+@@ -0,0 +1,583 @@
 +use super::*;
 +use crate::session::step_context::StepContext;
 +use crate::session::tests::make_session_and_context_with_dynamic_tools_and_rx;
 +use crate::state::ActiveTurn;
 +use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolEnvironments;
 +use crate::tools::context::ToolPayload;
 +use crate::turn_diff_tracker::TurnDiffTracker;
 +use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
@@ -784,6 +785,7 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "placement-test".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1108,6 +1110,7 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +            cancellation_token: CancellationToken::new(),
 +            tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +            call_id: "explicit-section-test".to_string(),
++            environments: ToolEnvironments::All,
 +            tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +            source: ToolCallSource::Direct,
 +            payload: ToolPayload::Function {
@@ -1165,6 +1168,7 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "timeout-test".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1215,6 +1219,7 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "opt-out-test".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1246,6 +1251,7 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "ended-turn-test".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1276,10 +1282,10 @@ index 0000000000000000000000000000000000000000..02462c43a4e1093803c734b0a4c91b49
 +}
 diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca92461a320ded
+index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259bbd2d139
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/tests.rs
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,527 @@
 +//! Deterministic tests of the tool's persisted history and independent lifecycle.
 +
 +use super::*;
@@ -1292,6 +1298,7 @@ index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca9246
 +use crate::thread_manager::NewThread;
 +use crate::thread_manager::thread_store_from_config;
 +use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolEnvironments;
 +use crate::turn_diff_tracker::TurnDiffTracker;
 +use codex_extension_api::ExtensionRegistryBuilder;
 +use codex_extension_api::TurnStartAdmission;
@@ -1366,6 +1373,7 @@ index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca9246
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "blank-section".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1446,7 +1454,7 @@ index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca9246
 +        let source = manager
 +            .start_thread(StartThreadOptions {
 +                history_mode: Some(history_mode),
-+                dynamic_tools: turn.dynamic_tools.clone(),
++                dynamic_tools: turn.dynamic_tools.to_vec(),
 +                thread_extension_init: {
 +                    let mut init = ExtensionDataInit::new();
 +                    init.insert(codex_extension_api::ToolPolicy {
@@ -1766,6 +1774,7 @@ index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca9246
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "fork-call".to_string(),
++        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
 +        payload: ToolPayload::Function {
@@ -1805,10 +1814,10 @@ index 0000000000000000000000000000000000000000..0cfac453cba881966b0f39ac0bca9246
 +    )
 +}
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
-index 69e457bcb61dd92b653ffa316e79aae863cadb79..b99bd93d3afada032bea5d6943516e223ccfaadb 100644
+index 6a264c623c46370e2b8939925c26409623972cda..1fab84100bd2c288abc929f1d11b18d8d6ba97bd 100644
 --- a/codex-rs/core/src/independent_thread/message_tests.rs
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
-@@ -262,6 +262,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
+@@ -263,6 +263,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
              "adopt_agent",
              "promote_agent",
              "close_agent",
@@ -1836,10 +1845,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index e11a56fe751cc755f2b392563d52804ec84dc602..1fc944899b02cd88f613b01d13836e30e5cf1404 100644
+index fa035c11510783dbbe8f3fe95f3ef57f30a465ac..57892148bcb5197b49b55ffabb8d8af7495c5efb 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1159,6 +1159,11 @@ impl ThreadManager {
+@@ -1191,6 +1191,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1852,10 +1861,10 @@ index e11a56fe751cc755f2b392563d52804ec84dc602..1fc944899b02cd88f613b01d13836e30
          let thread = self.state.get_thread(thread_id).await?;
          if !thread.has_persistence() && self.state.is_saved_target(thread_id) {
 diff --git a/codex-rs/core/src/tools/handlers/dynamic.rs b/codex-rs/core/src/tools/handlers/dynamic.rs
-index 9e78325058546a3924b12fa8c9de938d6421fbcf..004cf7ecd093a3c64f35f49359ecee750e4ddd6f 100644
+index 0eac846e05187ab469d9ecc33f295b75e06f7a48..5e5beef1e477f4f265c82d9a2e9dae5986a8c6d1 100644
 --- a/codex-rs/core/src/tools/handlers/dynamic.rs
 +++ b/codex-rs/core/src/tools/handlers/dynamic.rs
-@@ -183,7 +183,7 @@ impl CoreToolRuntime for DynamicToolHandler {
+@@ -187,7 +187,7 @@ impl CoreToolRuntime for DynamicToolHandler {
      clippy::await_holding_invalid_type,
      reason = "active turn checks and dynamic tool response registration must remain atomic"
  )]
@@ -1865,7 +1874,7 @@ index 9e78325058546a3924b12fa8c9de938d6421fbcf..004cf7ecd093a3c64f35f49359ecee75
      turn_context: &TurnContext,
      call_id: String,
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 2df4586f7affd2afe8275a9fa52e6bc6d8f2f6fc..dce0710272114791e0fa772081f1b447292bc692 100644
+index 190ca56c4dce66321e152999fdd6baeeb458825d..b4c1c0359ec59578eadfb0a5333fac7898dc65e7 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@
@@ -1878,7 +1887,7 @@ index 2df4586f7affd2afe8275a9fa52e6bc6d8f2f6fc..dce0710272114791e0fa772081f1b447
  mod get_context_remaining;
  pub(crate) mod get_context_remaining_spec;
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index 4cadd93adc5c6cb21ab2162678a8ad430e527e14..0dd9f21339dfaf97b13b1af53c0b593a69ef5f8f 100644
+index 505508bbeb7fe5ae852e1f140326c7ecf74c1f88..b0b1506fe6d51046939aa7b8818c7a9eb3092f22 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
 @@ -1410,10 +1410,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
@@ -1945,7 +1954,7 @@ index 4cadd93adc5c6cb21ab2162678a8ad430e527e14..0dd9f21339dfaf97b13b1af53c0b593a
      }
  }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 67ce64ce02b6d454788f5a7c368c1c1009b61348..fac30acdc23d5482b71ad296a90f0c7109d54489 100644
+index 69aaccf38723d422cfaf281db5152e06346e3ad6..4932fb82f9bd2e09949c8198de4252dab2637251 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
 @@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;

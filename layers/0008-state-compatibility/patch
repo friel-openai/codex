@@ -1,12 +1,14 @@
 diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
-index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bcb0e43dbc 100644
+index a5548ce8686993b03519389ea5a16f85c85767d8..41337c8b1e2359207909e0ee783926bcb0e43dbc 100644
 --- a/codex-rs/state/src/migrations.rs
 +++ b/codex-rs/state/src/migrations.rs
-@@ -2,11 +2,9 @@ use std::borrow::Cow;
+@@ -1,13 +1,10 @@
+ use std::borrow::Cow;
 
+-use crate::sqlite::SqlitePoolWriteExt;
+-use crate::sqlite::SqliteWriteQueryExt;
  use anyhow::Context;
  use anyhow::bail;
--use sqlx::Connection;
  use sqlx::Row;
  use sqlx::migrate::Migrator;
  use sqlx_sqlite::SqliteConnection;
@@ -14,7 +16,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
 
  pub(crate) static STATE_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
  pub(crate) static LOGS_MIGRATOR: Migrator = sqlx_macros::migrate!("./logs_migrations");
-@@ -16,6 +14,18 @@ pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx_macros::migrate!("./queue_migr
+@@ -17,6 +14,18 @@ pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx_macros::migrate!("./queue_migr
  pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator =
      sqlx_macros::migrate!("./thread_history_migrations");
 
@@ -33,7 +35,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
  const FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION: &str = "thread goal supervisor state";
  const FRODEX_GOAL_SUPERVISOR_MIGRATION_CHECKSUM: [u8; 48] = [
      0xa3, 0x76, 0x8f, 0x53, 0x74, 0x09, 0x87, 0xd9, 0xb5, 0xf6, 0xa6, 0xdc, 0xee, 0x57, 0xab, 0x73,
-@@ -78,12 +88,12 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
+@@ -79,12 +88,12 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
  /// migrator can apply those versions. The legacy table remains until its rows are durably copied
  /// to the goals database.
  pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
@@ -48,7 +50,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
      .await?
          != 0;
      if !migrations_table_exists {
-@@ -93,26 +103,13 @@ pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
+@@ -94,25 +103,13 @@ pub(crate) async fn repair_frodex_goal_supervisor_state_migration(
          "SELECT COUNT(*) FROM _sqlx_migrations WHERE version IN (33, 34) AND description = ?",
      )
      .bind(FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION)
@@ -60,8 +62,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
          return Ok(());
      }
 
--    let mut connection = pool.acquire().await?;
--    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+-    let mut transaction = pool.begin_immediate().await?;
 -    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
 -        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations'",
 -    )
@@ -365,7 +366,7 @@ index fae85a88d41caecc9abfc468586d3145646ceafd..41337c8b1e2359207909e0ee783926bc
      .bind(38_i64)
      .bind(recency_migration.checksum.as_ref())
      .bind(recency_migration.version)
--    .execute(pool)
+-    .execute_with_busy_retry(pool)
 +    .execute(&mut *connection)
      .await?;
      Ok(())
@@ -1808,10 +1809,10 @@ index 5967dcbf29c3dac3597cb8133a771b2e77c6b070..64198d21ce1dc2104b39e7d2c7999161
      repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
          .await
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index a3361e52ed18a1849817a467f9eb4c6a4a68a89b..222e5ed8e361c226398d3b3e2fb0ea8661bb78ac 100644
+index 87e15c28b8365bdea9ac8b7cd4aac46a76e28939..e039fa9570114a27d8f33b18f8b840aee7ed6b53 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -7,27 +7,28 @@
+@@ -9,6 +9,7 @@
  )]
 
  use crate::DbTelemetry;
@@ -1819,10 +1820,7 @@ index a3361e52ed18a1849817a467f9eb4c6a4a68a89b..222e5ed8e361c226398d3b3e2fb0ea86
  use crate::migrations::repair_frodex_goal_supervisor_state_migration;
  use crate::migrations::repair_legacy_recency_migration_version;
  use crate::runtime::recovery::RuntimeDbInitError;
- use crate::telemetry;
- use crate::telemetry::DbKind;
--use anyhow::Context;
- use codex_utils_absolute_path::AbsolutePathBuf;
+@@ -20,19 +21,20 @@ use codex_utils_absolute_path::AbsolutePathBuf;
  use log::LevelFilter;
  use sqlx::ConnectOptions;
  use sqlx::Error;
@@ -1837,13 +1835,15 @@ index a3361e52ed18a1849817a467f9eb4c6a4a68a89b..222e5ed8e361c226398d3b3e2fb0ea86
 -use std::fs::OpenOptions;
  use std::path::Path;
  use std::path::PathBuf;
+ use std::sync::Arc;
  use std::time::Duration;
  use std::time::Instant;
+ use tokio::sync::OnceCell;
 +use tracing::warn;
 
+ mod busy_retry;
  mod validation;
-
-@@ -41,35 +42,140 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+@@ -50,35 +52,140 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
  const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
  const STATE_DB_FILENAME: &str = "state_5.sqlite";
  const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
@@ -2004,18 +2004,23 @@ index a3361e52ed18a1849817a467f9eb4c6a4a68a89b..222e5ed8e361c226398d3b3e2fb0ea86
  }
 
  #[derive(Clone, Copy, Eq, PartialEq)]
-@@ -335,9 +441,17 @@ impl SqliteConfig {
+@@ -397,9 +504,22 @@ impl SqliteConfig {
      ) -> anyhow::Result<SqlitePool> {
-         let path = spec.path(self.home());
+         let path = spec.path(self);
          let started = Instant::now();
 -        let pool_result = self
 -            .open_read_write_pool_with_spec(path.as_path(), Some(spec), telemetry_override)
 -            .await;
 +        let pool_result = loop {
-+            match self.open_read_write_pool_with_spec(&path, Some(spec), telemetry_override).await {
++            match self
++                .open_read_write_pool_with_spec(&path, Some(spec), telemetry_override)
++                .await
++            {
 +                Err(error)
 +                    if matches!(spec.kind, DbKind::State)
-+                        && error.downcast_ref::<sqlx::Error>().is_some_and(is_sqlite_writer_contention) =>
++                        && error
++                            .downcast_ref::<sqlx::Error>()
++                            .is_some_and(is_sqlite_writer_contention) =>
 +                {
 +                    tokio::time::sleep(Duration::from_millis(25)).await;
 +                }
@@ -2025,7 +2030,7 @@ index a3361e52ed18a1849817a467f9eb4c6a4a68a89b..222e5ed8e361c226398d3b3e2fb0ea86
          telemetry::record_init_result(
              telemetry_override,
              spec.kind,
-@@ -350,18 +464,11 @@ impl SqliteConfig {
+@@ -412,18 +532,11 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {

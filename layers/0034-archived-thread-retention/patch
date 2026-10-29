@@ -1,17 +1,17 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index c1486848eac38cc5a091649775204fef184917d8..25834c149df23a0090e2d0a4797f88662ff2d173 100644
+index 54a2c534592ecc89a6717b9ca8f0c17deaeb7fe9..8bcf2db1d4aa38d839f3d4790f3bb453888d7f42 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2508,7 +2508,7 @@ dependencies = [
+@@ -2501,7 +2501,7 @@ dependencies = [
 
  [[package]]
  name = "codex-cli"
 -version = "0.162.1"
-+version = "0.163.0"
++version = "0.165.0"
  dependencies = [
   "anyhow",
   "app_test_support",
-@@ -2517,6 +2517,7 @@ dependencies = [
+@@ -2510,6 +2510,7 @@ dependencies = [
   "chrono",
   "clap",
   "clap_complete",
@@ -19,11 +19,19 @@ index c1486848eac38cc5a091649775204fef184917d8..25834c149df23a0090e2d0a4797f8866
   "codex-api",
   "codex-app-server",
   "codex-app-server-client",
+@@ -2539,6 +2540,7 @@ dependencies = [
+  "codex-login",
+  "codex-mcp",
+  "codex-memories-write",
++ "codex-message-board",
+  "codex-model-provider",
+  "codex-models-manager",
+  "codex-multi-env-copy-file",
 diff --git a/codex-rs/cli/Cargo.toml b/codex-rs/cli/Cargo.toml
-index 608921c370a184c0c465e5cf079be947f0a9664a..58510aeb3972b0e1e3d830f6af53b674307ca4ca 100644
+index c812cf988731f2bd2a4547534399597ffd3b9d75..58378fe458d801ce2ec67356e6f6c576d40442e6 100644
 --- a/codex-rs/cli/Cargo.toml
 +++ b/codex-rs/cli/Cargo.toml
-@@ -28,6 +28,7 @@ anyhow = { workspace = true }
+@@ -32,6 +32,7 @@ anyhow = { workspace = true }
  chrono = { workspace = true }
  clap = { workspace = true, features = ["derive", "env"] }
  clap_complete = { workspace = true }
@@ -31,21 +39,29 @@ index 608921c370a184c0c465e5cf079be947f0a9664a..58510aeb3972b0e1e3d830f6af53b674
  codex-app-server = { workspace = true }
  codex-app-server-daemon = { workspace = true }
  codex-app-server-protocol = { workspace = true }
+@@ -61,6 +62,7 @@ codex-git-utils = { workspace = true }
+ codex-install-context = { workspace = true }
+ codex-login = { workspace = true }
+ codex-memories-write = { workspace = true }
++codex-message-board = { workspace = true }
+ codex-mcp = { workspace = true }
+ codex-model-provider = { workspace = true }
+ codex-models-manager = { workspace = true }
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index 7a13505814c6fc3cf5d92fba3bc57d5502119057..1d1eb475aaad7a3d28c073e8e181e7bdea2fff58 100644
+index 3dbaa7f02e9cf0a80f6ba5bcaf000bf2771dd7bd..c53df6df5320a6fbc611afbc910476a07018a761 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
-@@ -75,6 +75,7 @@ mod mcp_cmd;
- mod mcp_login;
+@@ -78,6 +78,7 @@ mod mcp_login;
+ mod migrate_nfs_db;
  mod migrate_rollouts;
  mod plugin_cmd;
 +mod prune_archived;
  mod queue_cmd;
  mod remote_control_cmd;
  #[cfg(target_os = "windows")]
-@@ -221,6 +222,9 @@ enum Subcommand {
-     /// Inspect or migrate legacy local sessions to paginated thread history.
-     MigrateRollouts(migrate_rollouts::MigrateRolloutsCommand),
+@@ -227,6 +228,9 @@ enum Subcommand {
+     /// [experimental] Migrate configured SQLite databases to DELETE mode in place.
+     MigrateNfsDb(migrate_nfs_db::MigrateNfsDbCommand),
 
 +    /// Preview archived-thread expiry, or explicitly delete while all other Codex processes are stopped.
 +    PruneArchived(prune_archived::PruneArchivedCommand),
@@ -53,9 +69,9 @@ index 7a13505814c6fc3cf5d92fba3bc57d5502119057..1d1eb475aaad7a3d28c073e8e181e7bd
      /// Unarchive a saved session by id or session name.
      Unarchive(SessionArchiveCommand),
 
-@@ -1536,6 +1540,14 @@ async fn cli_main(
-             )?;
-             migrate_rollouts::run(command, root_config_overrides).await?;
+@@ -1627,6 +1631,14 @@ async fn cli_main(
+             )
+             .await?;
          }
 +        Some(Subcommand::PruneArchived(command)) => {
 +            reject_remote_mode_for_subcommand(
@@ -68,25 +84,82 @@ index 7a13505814c6fc3cf5d92fba3bc57d5502119057..1d1eb475aaad7a3d28c073e8e181e7bd
          Some(Subcommand::Unarchive(cmd)) => {
              let output = run_session_archive_cli_command(
                  codex_tui::SessionArchiveAction::Unarchive,
-@@ -2280,6 +2292,7 @@ fn unsupported_subcommand_name_for_strict_config(
-         Some(Subcommand::Mcp(_)) => Some("mcp"),
+@@ -2380,6 +2392,7 @@ fn unsupported_subcommand_name_for_strict_config(
          Some(Subcommand::Plugin(_)) => Some("plugin"),
          Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
+         Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
 +        Some(Subcommand::PruneArchived(_)) => Some("prune-archived"),
          #[cfg(any(target_os = "macos", target_os = "windows"))]
          Some(Subcommand::App(_)) => Some("app"),
          Some(Subcommand::Login(_)) => Some("login"),
+@@ -4515,6 +4528,55 @@ enabled = true
+         );
+     }
+
++    #[test]
++    fn prune_archived_rejects_remote_and_runtime_only_root_flags() {
++        assert!(
++            profile_v2_for_args(&[
++                "codex",
++                "--profile",
++                "work",
++                "prune-archived",
++                "--older-than",
++                "30d"
++            ])
++            .is_err()
++        );
++        let cli = MultitoolCli::try_parse_from([
++            "codex",
++            "--strict-config",
++            "prune-archived",
++            "--older-than",
++            "30d",
++        ])
++        .expect("parse");
++        let error = reject_root_strict_config_for_subcommand(
++            cli.interactive.strict_config,
++            &cli.subcommand,
++        )
++        .expect_err("prune-archived does not load strict runtime config");
++        assert_eq!(
++            error.to_string(),
++            "`--strict-config` is not supported for `codex prune-archived`"
++        );
++        let cli = MultitoolCli::try_parse_from([
++            "codex",
++            "--remote",
++            "unix://codex.sock",
++            "prune-archived",
++            "--older-than",
++            "30d",
++        ])
++        .expect("parse");
++        assert!(matches!(cli.subcommand, Some(Subcommand::PruneArchived(_))));
++        let error = reject_remote_mode_for_subcommand(
++            cli.remote.remote.as_deref(),
++            cli.remote.remote_auth_token_env.as_deref(),
++            "prune-archived",
++        )
++        .expect_err("prune-archived must stay local");
++        assert!(error.to_string().contains("prune-archived"));
++    }
++
+     #[test]
+     fn app_server_subcommands_reject_strict_config() {
+         let app_server =
 diff --git a/codex-rs/cli/src/prune_archived.rs b/codex-rs/cli/src/prune_archived.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..303481b2c901dcc604933fa49f3e4168662da1fa
+index 0000000000000000000000000000000000000000..1048e404e595fc4c8f2b62bce2b4d9a1b10ad0da
 --- /dev/null
 +++ b/codex-rs/cli/src/prune_archived.rs
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,171 @@
 +use std::time::Duration;
 +
 +use clap::Parser;
-+use codex_agent_message_board_extension::LocalAgentMessageBoard;
++use codex_agent_message_board_extension::local_board_options;
 +use codex_core::config::ConfigBuilder;
++use codex_message_board::LocalAgentMessageBoard;
 +use codex_thread_store::LocalThreadStore;
 +use codex_thread_store::LocalThreadStoreConfig;
 +use codex_utils_cli::CliConfigOverrides;
@@ -156,7 +229,7 @@ index 0000000000000000000000000000000000000000..303481b2c901dcc604933fa49f3e4168
 +            let sqlite = sqlite.clone();
 +            Box::pin(async move {
 +                let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-+                LocalAgentMessageBoard::delete_boards(&sqlite, &boards)
++                LocalAgentMessageBoard::delete_boards(&sqlite, &local_board_options(), &boards)
 +                    .await
 +                    .map_err(|error| codex_thread_store::ThreadStoreError::Internal {
 +                        message: format!("failed to delete agent message boards: {error}"),
@@ -253,7 +326,7 @@ index 0000000000000000000000000000000000000000..303481b2c901dcc604933fa49f3e4168
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index 01b1e4e7de6b62a8305cb2b3881add117b71b0cd..6274870f5f64e2d9ff6d7ca1a811fd6b73527822 100644
+index cc93fef22c103c5541001fad747ea61b2d99e053..9c1f94ea78c567971410632cc6bfbee32afc18a0 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
 @@ -33,6 +33,7 @@ pub use in_memory::InMemoryThreadStore;
@@ -265,10 +338,10 @@ index 01b1e4e7de6b62a8305cb2b3881add117b71b0cd..6274870f5f64e2d9ff6d7ca1a811fd6b
  pub use local::LocalThreadStoreConfig;
  pub use local::RolloutMigrationAdditionalFreeSpace;
 diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
-index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e6691e222 100644
+index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a3a59782f 100644
 --- a/codex-rs/thread-store/src/local/delete_thread.rs
 +++ b/codex-rs/thread-store/src/local/delete_thread.rs
-@@ -31,8 +31,8 @@ use crate::ThreadStoreResult;
+@@ -57,8 +57,8 @@ fn check_attached_children(
 
  /// A physical rollout whose ownership has been checked before any deletion-side effects.
  #[derive(Clone)]
@@ -279,16 +352,7 @@ index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e
      rollout_id: RolloutId,
      /// Noncanonical files are authenticated individually and must not authorize sibling deletion.
      authenticated_noncanonical: bool,
-@@ -229,7 +229,7 @@ where
-     })
- }
-
--async fn delete_state_rows(
-+pub(super) async fn delete_state_rows(
-     store: &LocalThreadStore,
-     thread_ids: &[ThreadId],
- ) -> ThreadStoreResult<u64> {
-@@ -281,7 +281,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
+@@ -309,7 +309,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
      }
  }
 
@@ -297,7 +361,7 @@ index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e
      store: &LocalThreadStore,
      thread_id: ThreadId,
  ) -> ThreadStoreResult<Vec<OwnedRollout>> {
-@@ -426,7 +426,7 @@ async fn owned_rollouts_for_thread(
+@@ -454,7 +454,7 @@ async fn owned_rollouts_for_thread(
      Ok(owned_rollouts)
  }
 
@@ -306,7 +370,7 @@ index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e
      store: &LocalThreadStore,
      thread_id: codex_protocol::ThreadId,
      owned_rollouts: Vec<OwnedRollout>,
-@@ -487,9 +487,9 @@ async fn delete_thread_after_reference_check(
+@@ -515,9 +515,9 @@ async fn delete_thread_after_reference_check(
  }
 
  /// Records whether a failed deletion has already removed the thread's readable rollout data.
@@ -320,7 +384,7 @@ index 06fe1646cd921de7406d1b77663af9c7a934c9bd..ef5ec4ac8e5f55941189895808a6153e
 
  impl DeleteThreadFailure {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 880891373566e83b3d1805c045d6bdb119d123d9..4f17da190938c2a5db8f2183dc68dc7086ac7a78 100644
+index f15ab2fa8cbd23c7c5ca0bef678f514740fe1b9f..9becc08672d5ff55713ca76394d6952616de171e 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -17,6 +17,7 @@ mod paginated_fork;
@@ -341,10 +405,10 @@ index 880891373566e83b3d1805c045d6bdb119d123d9..4f17da190938c2a5db8f2183dc68dc70
  pub use rollout_migration::RolloutMigrationHistoryBaseDependency;
 diff --git a/codex-rs/thread-store/src/local/prune_archived.rs b/codex-rs/thread-store/src/local/prune_archived.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..22729b2b587b85fbfa74f0b0f141f2f6edf68929
+index 0000000000000000000000000000000000000000..939274941fcab3ebc31510e078755709118d5338
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/prune_archived.rs
-@@ -0,0 +1,749 @@
+@@ -0,0 +1,753 @@
 +//! Explicit offline expiry. Archive timestamps select candidates; complete physical history
 +//! determines which candidates must remain because retained files reference them.
 +
@@ -651,6 +715,10 @@ index 0000000000000000000000000000000000000000..22729b2b587b85fbfa74f0b0f141f2f6
 +        report
 +            .referenced_thread_ids
 +            .sort_unstable_by_key(ToString::to_string);
++        if !report.eligible_thread_ids.is_empty() {
++            self.ensure_no_attached_threads(&report.eligible_thread_ids)
++                .await?;
++        }
 +        if !apply || eligible.is_empty() {
 +            return Ok(report);
 +        }
@@ -1096,10 +1164,10 @@ index 0000000000000000000000000000000000000000..22729b2b587b85fbfa74f0b0f141f2f6
 +mod tests;
 diff --git a/codex-rs/thread-store/src/local/prune_archived_tests.rs b/codex-rs/thread-store/src/local/prune_archived_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..39371bc13a3e1e4d8f075f621c8682626bc6990d
+index 0000000000000000000000000000000000000000..56d6299eef11f829f0cd3e80f3f3cff19381aa71
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/prune_archived_tests.rs
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,820 @@
 +use super::*;
 +use std::io::Write;
 +use std::sync::LazyLock;
@@ -1251,6 +1319,53 @@ index 0000000000000000000000000000000000000000..39371bc13a3e1e4d8f075f621c868262
 +    }
 +}
 +
++fn copy_fork_history(
++    parent: &Path,
++    child: &Path,
++    parent_id: ThreadId,
++    attached: bool,
++    compressed: bool,
++) -> PathBuf {
++    let mut history = std::fs::read_to_string(parent)
++        .unwrap()
++        .lines()
++        .map(|line| codex_rollout::parse_rollout_line(line).unwrap())
++        .collect::<Vec<_>>();
++    assert!(history.len() > 1);
++    let RolloutItem::SessionMeta(parent_meta) = &history[0].item else {
++        panic!("parent must have session metadata");
++    };
++    assert_eq!(parent_meta.meta.id, parent_id);
++    let child_contents = std::fs::read_to_string(child).unwrap();
++    let mut header =
++        codex_rollout::parse_rollout_line(child_contents.lines().next().unwrap()).unwrap();
++    let RolloutItem::SessionMeta(meta) = &mut header.item else {
++        panic!("child must have session metadata");
++    };
++    assert!(meta.meta.history_base.is_none());
++    meta.meta.session_id = parent_meta.meta.session_id;
++    meta.meta.forked_from_id = Some(parent_id);
++    meta.meta.attached_thread = attached;
++    history[0] = header;
++    let mut file = File::create(child).unwrap();
++    for line in history {
++        writeln!(file, "{}", serde_json::to_string(&line).unwrap()).unwrap();
++    }
++    drop(file);
++    if compressed {
++        let compressed_child = child.with_extension("jsonl.zst");
++        std::fs::write(
++            &compressed_child,
++            zstd::stream::encode_all(File::open(child).unwrap(), 1).unwrap(),
++        )
++        .unwrap();
++        std::fs::remove_file(child).unwrap();
++        compressed_child
++    } else {
++        child.to_path_buf()
++    }
++}
++
 +#[test]
 +fn prune_header_discovery_bounds_plain_and_compressed_first_records() {
 +    let home = TempDir::new().unwrap();
@@ -1376,6 +1491,108 @@ index 0000000000000000000000000000000000000000..39371bc13a3e1e4d8f075f621c868262
 +        .await
 +        .unwrap();
 +    assert!(report.deleted_thread_ids.is_empty());
++}
++
++#[tokio::test]
++async fn prune_refuses_attached_copied_forks_before_preview_or_cleanup() {
++    for expired_child in [false, true] {
++        for compressed in [false, true] {
++            let home = TempDir::new().unwrap();
++            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
++            let observed = calls.clone();
++            let store = store(&home).await.with_thread_data_cleanup(move |ids| {
++                let observed = observed.clone();
++                Box::pin(async move {
++                    observed.lock().unwrap().extend(ids);
++                    Ok(())
++                })
++            });
++            let old = now() - chrono::Duration::days(2);
++            let (parent_id, parent) = add_thread(&store, 1, Some(old), true).await;
++            let (child_id, child) =
++                add_thread(&store, 2, expired_child.then_some(old), expired_child).await;
++            let child = copy_fork_history(&parent, &child, parent_id, true, compressed);
++            let parent_bytes = std::fs::read(&parent).unwrap();
++            let child_bytes = std::fs::read(&child).unwrap();
++            let state = store.state_db.as_ref().unwrap();
++            let parent_metadata = state.get_thread(parent_id).await.unwrap().unwrap();
++            let child_metadata = state.get_thread(child_id).await.unwrap().unwrap();
++            assert_eq!(child_metadata.attached_thread_parent_id, None);
++            for apply in [false, true] {
++                let error = store
++                    .prune_archived_at(DAY, apply, apply, now())
++                    .await
++                    .unwrap_err();
++                assert!(matches!(&error, ThreadStoreError::InvalidRequest { .. }));
++                assert!(
++                    error
++                        .to_string()
++                        .contains(&format!("attached thread {child_id}")),
++                    "expired_child={expired_child}, compressed={compressed}, apply={apply}: {error}"
++                );
++                assert!(calls.lock().unwrap().is_empty());
++                assert_eq!(std::fs::read(&parent).unwrap(), parent_bytes);
++                assert_eq!(std::fs::read(&child).unwrap(), child_bytes);
++                assert_eq!(
++                    state.get_thread(parent_id).await.unwrap(),
++                    Some(parent_metadata.clone())
++                );
++                assert_eq!(
++                    state.get_thread(child_id).await.unwrap(),
++                    Some(child_metadata.clone())
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn prune_allows_nonattached_copied_forks() {
++    for expired_child in [false, true] {
++        for compressed in [false, true] {
++            let home = TempDir::new().unwrap();
++            let store = store(&home).await;
++            let old = now() - chrono::Duration::days(2);
++            let (parent_id, parent) = add_thread(&store, 1, Some(old), true).await;
++            let (child_id, child) =
++                add_thread(&store, 2, expired_child.then_some(old), expired_child).await;
++            let child = copy_fork_history(&parent, &child, parent_id, false, compressed);
++            let parent_bytes = std::fs::read(&parent).unwrap();
++            let child_bytes = std::fs::read(&child).unwrap();
++            let state = store.state_db.as_ref().unwrap();
++            let child_metadata = state.get_thread(child_id).await.unwrap().unwrap();
++            let expected = if expired_child {
++                vec![parent_id, child_id]
++            } else {
++                vec![parent_id]
++            };
++            let preview = store
++                .prune_archived_at(DAY, false, false, now())
++                .await
++                .unwrap();
++            assert_eq!(preview.eligible_thread_ids, expected);
++            assert!(preview.deleted_thread_ids.is_empty());
++            assert_eq!(std::fs::read(&parent).unwrap(), parent_bytes);
++            assert_eq!(std::fs::read(&child).unwrap(), child_bytes);
++            let report = store
++                .prune_archived_at(DAY, true, true, now())
++                .await
++                .unwrap();
++            assert_eq!(report.deleted_thread_ids, expected);
++            assert!(!parent.exists());
++            assert!(state.get_thread(parent_id).await.unwrap().is_none());
++            if expired_child {
++                assert!(!child.exists());
++                assert!(state.get_thread(child_id).await.unwrap().is_none());
++            } else {
++                assert_eq!(std::fs::read(&child).unwrap(), child_bytes);
++                assert_eq!(
++                    state.get_thread(child_id).await.unwrap(),
++                    Some(child_metadata)
++                );
++            }
++        }
++    }
 +}
 +
 +#[tokio::test]
@@ -1773,10 +1990,10 @@ index 0000000000000000000000000000000000000000..39371bc13a3e1e4d8f075f621c868262
 +}
 diff --git a/docs/archived-thread-retention.md b/docs/archived-thread-retention.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..45e4efcf988479c2da2323f9366daa0bb3c161eb
+index 0000000000000000000000000000000000000000..f281b82da052ce90c0023e34b3faab834561303e
 --- /dev/null
 +++ b/docs/archived-thread-retention.md
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,76 @@
 +# Archived-thread retention
 +
 +Archiving a thread does not expire it. Codex has no default retention period and
@@ -1826,6 +2043,12 @@ index 0000000000000000000000000000000000000000..45e4efcf988479c2da2323f9366daa0b
 +retained file preserves the referenced archived thread and its ancestors.
 +Threads eligible for the same operation can be deleted together; children are
 +deleted before their ancestors.
++
++Attached forks also carry an ownership constraint: a parent cannot be deleted
++while an attached child exists, even if both are expired candidates in the same
++operation. Delete the attached child separately first. This check also applies
++to copied child history without a history reference; an ordinary, non-attached
++copied fork does not by itself prevent deletion of its source.
 +
 +This is a full history scan and can take a long time on large archives. Records
 +are decoded one at a time, with a 64 MiB record limit. The command retains file
