@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use codex_core::CodexThread;
 use codex_core::NewThread;
 use codex_core::StartIfIdleSubmission;
