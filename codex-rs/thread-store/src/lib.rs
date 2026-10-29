@@ -33,6 +33,7 @@ pub use in_memory::InMemoryThreadStore;
 pub use in_memory::InMemoryThreadStoreCalls;
 pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
+pub use local::ArchivedRetentionReport;
 pub use local::LocalThreadStore;
 pub use local::LocalThreadStoreConfig;
 pub use local::RolloutMigrationAdditionalFreeSpace;
