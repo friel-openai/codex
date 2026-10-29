@@ -485,7 +485,7 @@ async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -
         })
             if content.iter().any(|item| matches!(
                 item,
-                ContentItem::OutputText { text } if text == "before"
+                ContentItem::OutputText { text, .. } if text == "before"
             ))
     ));
     assert!(matches!(
@@ -505,10 +505,68 @@ async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -
         })
             if content.iter().any(|item| matches!(
                 item,
-                ContentItem::OutputText { text } if text == "after"
+                ContentItem::OutputText { text, .. } if text == "after"
             ))
     ));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_recovers_complete_legacy_suffix_records() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let thread_id = ThreadId::new();
+    let ts = "2026-06-12T19:05:57Z";
+    let session_meta = serde_json::json!({
+        "timestamp": ts,
+        "type": "session_meta",
+        "payload": {
+            "session_id": thread_id,
+            "id": thread_id,
+            "timestamp": ts,
+            "cwd": ".",
+            "originator": "test_originator",
+            "cli_version": "test_version",
+            "source": "cli",
+            "model_provider": "test-provider",
+            "history_mode": "legacy",
+        },
+    });
+    let recovered = r#"{"timestamp":"2026-06-12T19:05:58Z","type":"event_msg","payload":{"type":"agent_message","message":"recovered","phase":null}}"#;
+    fs::write(
+        &rollout_path,
+        format!("{session_meta}\n{{\"timestamp\":\"broken\",\"payload\"{recovered}\n"),
+    )?;
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    assert!(matches!(
+        &items[1],
+        RolloutItem::EventMsg(EventMsg::AgentMessage(event)) if event.message == "recovered"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_does_not_split_paginated_records() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let thread_id = ThreadId::new();
+    write_paginated_rollout(&rollout_path, thread_id, &[])?;
+    let recovered = r#"{"timestamp":"2026-06-12T19:05:58Z","ordinal":1,"type":"event_msg","payload":{"type":"agent_message","message":"must not recover","phase":null}}"#;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    writeln!(file, "{{\"timestamp\":\"broken\",\"payload\"{recovered}")?;
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 1);
+    assert_eq!(items.len(), 1);
     Ok(())
 }
 
