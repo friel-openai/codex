@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::Metadata;
 use std::io;
-use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Component;
@@ -24,11 +23,13 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 
 use crate::ARCHIVED_SESSIONS_SUBDIR;
 use crate::ModelContextScan;
+use crate::ROLLOUT_SEGMENTS_SUBDIR;
 use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use crate::SESSIONS_SUBDIR;
 use crate::compression;
@@ -120,6 +121,8 @@ struct ExpansionFrame {
     history_base: Option<HistoryPosition>,
     /// Remove this physical identity from cycle detection when the frame completes.
     inbound_history_base: Option<RolloutId>,
+    /// Native rotations reuse the active filename's timestamp minus one second for all ancestors.
+    native_predecessor_hint: Option<PathBuf>,
 }
 
 /// Applies the source reference's filter and fork cutoff after its segment finishes expanding.
@@ -207,6 +210,7 @@ impl<'a> BoundedRolloutMaterializer<'a> {
             &mut has_older_reference,
             Some(&mut self.cache),
             self.retain_source_metadata,
+            Some(self.rollout_path),
         )
         .await?;
         Ok(BoundedRolloutLines {
@@ -517,6 +521,7 @@ pub async fn materialize_rollout_lines(
         lines,
         MaterializationPolicy::Complete,
         &mut has_older_reference,
+        Some(rollout_path),
     )
     .await
 }
@@ -532,6 +537,7 @@ pub async fn materialize_rollout_lines_from(
         lines,
         MaterializationPolicy::Complete,
         &mut has_older_reference,
+        None,
     )
     .await
 }
@@ -577,6 +583,7 @@ pub async fn materialize_model_context_rollout_items_from(
             &mut has_older_reference,
             Some(&mut cache),
             /*retain_source_metadata*/ false,
+            None,
         )
         .await?;
         let mut scan = ModelContextScan::default();
@@ -616,7 +623,27 @@ pub async fn materialize_recent_rollout_lines(
     rollout_path: &Path,
 ) -> io::Result<Vec<RolloutLine>> {
     let lines = load_active_rollout_lines(rollout_path).await?;
-    materialize_recent_rollout_lines_from(codex_home, lines).await
+    materialize_recent_rollout_lines_from_with_path(codex_home, rollout_path, lines).await
+}
+
+/// Replays caller-decoded records while retaining the physical filename for native lookup.
+///
+/// Filenames use the original local time, while SessionMeta timestamps use UTC. The filename
+/// lets ordinary native predecessor reads avoid recursively searching every historical segment.
+pub async fn materialize_recent_rollout_lines_from_with_path(
+    codex_home: &Path,
+    rollout_path: &Path,
+    lines: Vec<RolloutLine>,
+) -> io::Result<Vec<RolloutLine>> {
+    let mut has_older_reference = false;
+    materialize_rollout_lines_from_with_policy(
+        codex_home,
+        lines,
+        MaterializationPolicy::RecentSegments,
+        &mut has_older_reference,
+        Some(rollout_path),
+    )
+    .await
 }
 
 /// Expands already loaded root lines using the recent-segment replay policy.
@@ -630,6 +657,7 @@ pub async fn materialize_recent_rollout_lines_from(
         lines,
         MaterializationPolicy::RecentSegments,
         &mut has_older_reference,
+        None,
     )
     .await
 }
@@ -645,20 +673,13 @@ pub async fn materialize_bounded_rollout_lines(
     ordinary_reference_limit: usize,
 ) -> io::Result<BoundedRolloutLines> {
     let lines = load_active_rollout_lines(rollout_path).await?;
-    materialize_bounded_rollout_lines_from(codex_home, lines, ordinary_reference_limit).await
-}
-
-async fn materialize_bounded_rollout_lines_from(
-    codex_home: &Path,
-    lines: Vec<RolloutLine>,
-    ordinary_reference_limit: usize,
-) -> io::Result<BoundedRolloutLines> {
     let mut has_older_reference = false;
     let lines = materialize_rollout_lines_from_with_policy(
         codex_home,
         lines,
         MaterializationPolicy::OrdinaryReferenceLimit(ordinary_reference_limit),
         &mut has_older_reference,
+        Some(rollout_path),
     )
     .await?;
     Ok(BoundedRolloutLines {
@@ -672,6 +693,7 @@ async fn materialize_rollout_lines_from_with_policy(
     lines: Vec<RolloutLine>,
     policy: MaterializationPolicy,
     has_older_reference: &mut bool,
+    root_path: Option<&Path>,
 ) -> io::Result<Vec<RolloutLine>> {
     materialize_rollout_lines_from_with_cache(
         codex_home,
@@ -680,6 +702,7 @@ async fn materialize_rollout_lines_from_with_policy(
         has_older_reference,
         /*cache*/ None,
         /*retain_source_metadata*/ false,
+        root_path,
     )
     .await
 }
@@ -691,6 +714,7 @@ async fn materialize_rollout_lines_from_with_cache(
     has_older_reference: &mut bool,
     cache: Option<&mut ImmutableRolloutCache>,
     retain_source_metadata: bool,
+    root_path: Option<&Path>,
 ) -> io::Result<Vec<RolloutLine>> {
     let root_thread_id = canonical_session_meta(&lines)?.meta.id;
     let mut state = ExpansionState {
@@ -704,7 +728,7 @@ async fn materialize_rollout_lines_from_with_cache(
     let mut materialized = Vec::with_capacity(lines.len());
     materialized.push(lines[0].clone());
     materialized.extend(
-        expand_lines(
+        expand_lines_with_root_path(
             codex_home,
             lines,
             &mut state,
@@ -716,6 +740,7 @@ async fn materialize_rollout_lines_from_with_cache(
             /*inherited_filter_texts*/ None,
             policy,
             has_older_reference,
+            root_path,
         )
         .await?,
     );
@@ -727,42 +752,48 @@ async fn materialize_rollout_lines_from_with_cache(
 async fn load_history_base_prefix(
     codex_home: &Path,
     position: HistoryPosition,
-) -> io::Result<Vec<RolloutLine>> {
-    let path = crate::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
-        .await?
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("history_base rollout {} was not found", position.thread_id),
-            )
-        })?;
-    let path = compression::existing_rollout_path(&path)
-        .await
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("history_base rollout {} disappeared", path.display()),
-            )
-        })?;
-    // Reading ancestry must not decompress it in place or remove a compressed source that
-    // a migration journal still fingerprints. Offsets address the uncompressed JSONL.
-    let bytes = if compression::plain_rollout_path(&path) != path {
-        let compressed_path = path.clone();
-        tokio::task::spawn_blocking(move || -> io::Result<Vec<u8>> {
-            let input = std::fs::File::open(compressed_path)?;
-            let mut reader =
-                zstd::stream::read::Decoder::new(input)?.take(position.end_byte_offset);
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
-        .await
-        .map_err(io::Error::other)??
-    } else {
-        tokio::fs::read(path.as_path()).await?
+    current_thread_id: ThreadId,
+    native_predecessor_hint: Option<&Path>,
+) -> io::Result<(Vec<RolloutLine>, PathBuf)> {
+    let mut path = None;
+    if let Some(candidate) = native_predecessor_hint
+        && let Some(candidate) = compression::existing_rollout_path(candidate).await
+        && let Some(candidate) = canonical_approved_reference_path(codex_home, &candidate).await?
+    {
+        let meta = read_candidate_session_meta(&candidate).await?;
+        if meta.meta.id == current_thread_id
+            && crate::rollout_id_from_path(&candidate) == Some(position.thread_id)
+        {
+            path = Some(candidate);
+        }
+    }
+    let path = match path {
+        Some(path) => path,
+        None => {
+            #[cfg(test)]
+            native_segment_tests::record_recursive_lookup();
+            crate::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
+                .await?
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("history_base rollout {} was not found", position.thread_id),
+                    )
+                })?
+        }
     };
     let end = usize::try_from(position.end_byte_offset)
         .map_err(|_| io::Error::other("history_base byte offset exceeds addressable memory"))?;
+    // Both representations address original JSONL bytes. Frozen prefixes can be much shorter
+    // than their physical source; never read the remaining file merely to discard it afterward.
+    #[cfg(test)]
+    native_segment_tests::record_prefix_read();
+    let path_for_read = path.clone();
+    let bytes =
+        tokio::task::spawn_blocking(move || crate::read_rollout_prefix(&path_for_read, end))
+            .await
+            .map_err(io::Error::other)??
+            .ok_or_else(|| io::Error::other("history_base source is not a regular file"))?;
     let prefix = bytes.get(..end).ok_or_else(|| {
         io::Error::other(format!(
             "history_base byte offset exceeds rollout {}",
@@ -783,7 +814,18 @@ async fn load_history_base_prefix(
         let value = serde_json::from_slice(encoded)?;
         lines.push(crate::decode_rollout_line(value)?);
     }
-    canonical_session_meta(&lines)?;
+    let meta = canonical_session_meta(&lines)?;
+    if crate::rollout_id_from_path(&path) != Some(position.thread_id)
+        || crate::thread_id_from_path(&path) != Some(meta.meta.id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "history_base rollout identity does not match {}",
+                path.display()
+            ),
+        ));
+    }
     let actual_end = lines
         .last()
         .and_then(|line| line.ordinal)
@@ -794,7 +836,42 @@ async fn load_history_base_prefix(
             path.display()
         )));
     }
-    Ok(lines)
+    Ok((lines, path))
+}
+
+/// Derives a lookup hint only; imported filenames and cross-thread predecessors retain fallback.
+fn native_predecessor_hint(
+    codex_home: &Path,
+    source_path: Option<&Path>,
+    meta: &SessionMeta,
+) -> Option<PathBuf> {
+    let position = meta.history_base?;
+    let native_root = codex_home
+        .join(SESSIONS_SUBDIR)
+        .join(ROLLOUT_SEGMENTS_SUBDIR);
+    let source_path = source_path
+        .filter(|path| crate::thread_id_from_path(path) == Some(meta.id))
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let timestamp = time::OffsetDateTime::parse(
+                &meta.timestamp,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .ok()?
+            .to_offset(time::UtcOffset::UTC);
+            crate::rollout_file_name::RolloutFileName::new(timestamp, meta.id, meta.id)
+                .render()
+                .ok()
+                .map(PathBuf::from)
+        })?;
+    let predecessor = if source_path.starts_with(&native_root) {
+        crate::rollout_path_with_rollout_id(&source_path, position.thread_id)?
+    } else {
+        crate::history_rollout_path_with_rollout_id(&source_path, position.thread_id)?
+    };
+    let file_name = predecessor.file_name()?;
+    let (year, month, day) = crate::rollout_date_parts(file_name)?;
+    Some(native_root.join(year).join(month).join(day).join(file_name))
 }
 
 /// Expands a rollout graph and discards only physical line metadata.
@@ -830,10 +907,38 @@ async fn expand_lines(
     policy: MaterializationPolicy,
     has_older_reference: &mut bool,
 ) -> io::Result<Vec<RolloutLine>> {
+    expand_lines_with_root_path(
+        codex_home,
+        lines,
+        state,
+        cursor,
+        inherited_filter_texts,
+        policy,
+        has_older_reference,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "external captures do not have a confined physical root filename"
+)]
+async fn expand_lines_with_root_path(
+    codex_home: &Path,
+    lines: Vec<RolloutLine>,
+    state: &mut ExpansionState<'_>,
+    cursor: ExpansionCursor,
+    inherited_filter_texts: Option<&[String]>,
+    policy: MaterializationPolicy,
+    has_older_reference: &mut bool,
+    root_path: Option<&Path>,
+) -> io::Result<Vec<RolloutLine>> {
     let metadata = canonical_session_meta(&lines)?;
     let history_base = (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
         .then_some(metadata.meta.history_base)
         .flatten();
+    let root_predecessor_hint = native_predecessor_hint(codex_home, root_path, &metadata.meta);
     let mut frames = vec![ExpansionFrame {
         session_meta: lines[0].clone(),
         materialized: Vec::with_capacity(lines.len()),
@@ -844,6 +949,7 @@ async fn expand_lines(
         inbound_reference: None,
         history_base,
         inbound_history_base: None,
+        native_predecessor_hint: root_predecessor_hint,
     }];
 
     while let Some(frame) = frames.last_mut() {
@@ -863,9 +969,21 @@ async fn expand_lines(
                     position.thread_id
                 )));
             }
-            let predecessor = match state.captured_prefixes.as_deref_mut() {
-                Some(prefixes) => prefixes.load_history_base(codex_home, position).await?,
-                None => load_history_base_prefix(codex_home, position).await?,
+            let (predecessor, predecessor_path) = match state.captured_prefixes.as_deref_mut() {
+                Some(prefixes) => (
+                    prefixes.load_history_base(codex_home, position).await?,
+                    None,
+                ),
+                None => {
+                    let (lines, path) = load_history_base_prefix(
+                        codex_home,
+                        position,
+                        frame.cursor.current_thread_id,
+                        frame.native_predecessor_hint.as_deref(),
+                    )
+                    .await?;
+                    (lines, Some(path))
+                }
             };
             let metadata = canonical_session_meta(&predecessor)?;
             let fork_boundary = metadata.meta.id != frame.cursor.current_thread_id;
@@ -892,6 +1010,11 @@ async fn expand_lines(
                 history_base: (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
                     .then_some(metadata.meta.history_base)
                     .flatten(),
+                native_predecessor_hint: native_predecessor_hint(
+                    codex_home,
+                    predecessor_path.as_deref(),
+                    &metadata.meta,
+                ),
                 lines: predecessor.into_iter(),
                 inherited_filter_texts: frame.inherited_filter_texts.clone(),
                 inbound_reference: None,
@@ -1018,6 +1141,8 @@ async fn expand_lines(
         let history_base = (referenced_meta.meta.history_mode == ThreadHistoryMode::Paginated)
             .then_some(referenced_meta.meta.history_base)
             .flatten();
+        let referenced_predecessor_hint =
+            native_predecessor_hint(codex_home, Some(&path), &referenced_meta.meta);
         let filter_texts = compose_compacted_replacement_history_filter_texts(
             frame.inherited_filter_texts.as_deref(),
             reference
@@ -1052,6 +1177,7 @@ async fn expand_lines(
             }),
             history_base,
             inbound_history_base: None,
+            native_predecessor_hint: referenced_predecessor_hint,
         });
     }
 
@@ -1494,3 +1620,7 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
 #[cfg(test)]
 #[path = "reference_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reference/native_segment_tests.rs"]
+mod native_segment_tests;

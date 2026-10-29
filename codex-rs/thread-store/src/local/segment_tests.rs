@@ -2773,6 +2773,54 @@ async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {
 
 #[tokio::test]
 async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(false, false).await;
+}
+
+#[tokio::test]
+async fn resumed_compressed_segmented_legacy_history_preserves_projected_item_identity() {
+    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(true, false).await;
+}
+
+#[tokio::test]
+async fn compressed_active_legacy_backfill_preserves_decoded_offsets_and_projected_item_identity() {
+    assert_resumed_segmented_legacy_history_preserves_projected_item_identity(true, true).await;
+}
+
+#[tokio::test]
+async fn legacy_projection_length_counts_all_compressed_frames() {
+    let home = TempDir::new().expect("temp dir");
+    let plain = home.path().join("rollout.jsonl");
+    let compressed = plain.with_extension("jsonl.zst");
+    let records = [b"first record\n".as_slice(), b"second record\n".as_slice()];
+    let mut frames = Vec::new();
+    for record in records {
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("encoder");
+        encoder
+            .set_pledged_src_size(Some(record.len() as u64))
+            .expect("pledged size");
+        std::io::Write::write_all(&mut encoder, record).expect("encode record");
+        frames.extend(encoder.finish().expect("complete frame"));
+    }
+    std::fs::write(&compressed, &frames).expect("write frames");
+    for path in [&plain, &compressed] {
+        assert_eq!(
+            super::super::live_writer::legacy_rollout_jsonl_len(path)
+                .await
+                .expect("decoded length"),
+            records
+                .iter()
+                .map(|record| record.len() as u64)
+                .sum::<u64>()
+        );
+    }
+    assert!(!plain.exists());
+    assert_eq!(std::fs::read(compressed).expect("unchanged frames"), frames);
+}
+
+async fn assert_resumed_segmented_legacy_history_preserves_projected_item_identity(
+    compress_predecessor: bool,
+    compress_active: bool,
+) {
     let home = TempDir::new().expect("temp dir");
     let thread_id = ThreadId::new();
     let params = create_params(thread_id, ThreadHistoryMode::Legacy);
@@ -2783,7 +2831,7 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
         .await
         .expect("create legacy thread");
     append_message(&store, thread_id, "first indexed message").await;
-    store
+    let first_segment = store
         .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
         .await
         .expect("index first legacy segment");
@@ -2807,6 +2855,9 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
         .shutdown_thread(thread_id)
         .await
         .expect("shutdown initial recorder");
+    if compress_predecessor {
+        compress_rollout_for_test(&first_segment.reference.rollout_path);
+    }
 
     let rollout_id = ThreadId::new();
     let file_name = rollout_path
@@ -2822,10 +2873,22 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
     tokio::fs::rename(rollout_path.as_path(), selected_path.as_path())
         .await
         .expect("rename selected physical rollout");
+    let selected_jsonl_len = tokio::fs::metadata(&selected_path)
+        .await
+        .expect("selected JSONL metadata")
+        .len();
+    let (physical_selected_path, compressed_active_bytes) = if compress_active {
+        compress_rollout_for_test(&selected_path);
+        let physical_path = selected_path.with_extension("jsonl.zst");
+        let bytes = std::fs::read(&physical_path).expect("compressed active bytes");
+        (physical_path, Some(bytes))
+    } else {
+        (selected_path.clone(), None)
+    };
     let state_db = store.state_db().await.expect("state runtime");
     let mut selected_metadata = codex_state::ThreadMetadataBuilder::new(
         thread_id,
-        selected_path.clone(),
+        physical_selected_path.clone(),
         chrono::Utc::now(),
         SessionSource::Exec,
     );
@@ -2859,10 +2922,48 @@ WHERE thread_id = ?
     super::super::live_writer::backfill_segmented_legacy_projection(
         &resumed,
         thread_id,
-        selected_path.as_path(),
+        physical_selected_path.as_path(),
     )
     .await
     .expect("backfill selected physical rollout projection");
+    assert_eq!(
+        super::super::thread_history::projection_state(&resumed, rollout_id)
+            .await
+            .expect("read selected projection")
+            .expect("selected projection exists")
+            .next_byte_offset,
+        selected_jsonl_len
+    );
+    assert!(
+        super::super::thread_history::has_complete_segmented_legacy_projection(&resumed, thread_id)
+            .await
+            .expect("check selected legacy projection")
+    );
+    if let Some(bytes) = compressed_active_bytes {
+        // A second backfill exercises the current-projection reducer, not just reconstruction.
+        super::super::live_writer::backfill_segmented_legacy_projection(
+            &resumed,
+            thread_id,
+            &physical_selected_path,
+        )
+        .await
+        .expect("reuse compressed active projection");
+        assert!(!selected_path.exists());
+        assert_eq!(
+            std::fs::read(&physical_selected_path).expect("unchanged compressed active"),
+            bytes
+        );
+    }
+    if compress_predecessor {
+        assert!(!first_segment.reference.rollout_path.exists());
+        assert!(
+            first_segment
+                .reference
+                .rollout_path
+                .with_extension("jsonl.zst")
+                .exists()
+        );
+    }
     assert_eq!(
         resumed
             .projected_history_position(thread_id)
@@ -2876,7 +2977,7 @@ WHERE thread_id = ?
         .resume_thread(ResumeThreadParams {
             history_revision: None,
             thread_id,
-            rollout_path: Some(selected_path.clone()),
+            rollout_path: Some(physical_selected_path),
             history: Some(Arc::new(history)),
             include_archived: true,
             metadata,
