@@ -884,6 +884,7 @@ non_code_mode_only = true
             message_board_in_memory: Some(true),
             message_board_remote: None,
             non_code_mode_only: Some(true),
+            enable_thread_adoption: None,
         }))
     );
 }
