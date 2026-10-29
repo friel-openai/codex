@@ -2229,6 +2229,7 @@ fn thread_start_params_with_reviewer(
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
+        experimental_raw_events: true,
         ..ThreadStartParams::default()
     }
 }
@@ -3250,6 +3251,7 @@ model = "gpt-5.1-codex"
         assert_eq!(params.model_provider, None);
         assert_eq!(params.thread_source, Some(ThreadSource::User));
         assert_eq!(params.dynamic_tools, None);
+        assert!(params.experimental_raw_events);
     }
 
     #[tokio::test]
