@@ -30,6 +30,20 @@
       "report_schema": "assertions"
     },
     {
+      "name": "agent-defaults-and-explicit-overrides",
+      "argv": [
+        "/usr/bin/python3",
+        "{source}/scripts/frodex_agent_defaults_smoke.py",
+        "--codex", "{candidate}",
+        "--source", "{source}",
+        "--report", "{report}"
+      ],
+      "timeout_seconds": 120,
+      "network": false,
+      "auth": false,
+      "report_schema": "assertions"
+    },
+    {
       "name": "configured-model-six-tool-smoke",
       "argv": [
         "/usr/bin/python3",

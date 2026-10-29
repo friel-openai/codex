@@ -625,6 +625,11 @@ async fn cancelled_spawn_discards_provisional_child(caller: SpawnCaller) -> anyh
                     .features
                     .enable(Feature::MultiAgentV2)
                     .expect("enable V2");
+            } else {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("use the scripted V1 spawn tool");
             }
             config
                 .features
