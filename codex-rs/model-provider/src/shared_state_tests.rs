@@ -29,6 +29,7 @@ use http::HeaderName;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::collections::HashMap;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -325,6 +326,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
             let models = provider.models_manager(
                 home.path().to_path_buf(),
                 /*config_model_catalog*/ None,
+                Default::default(),
             );
             models.set_api_key_model_discovery_enabled(/*enabled*/ true);
             let catalog = models
@@ -565,6 +567,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
     let models = provider.models_manager(
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     models.set_api_key_model_discovery_enabled(/*enabled*/ true);
     let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
@@ -605,6 +608,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
     let restarted = provider.models_manager(
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     restarted.set_api_key_model_discovery_enabled(/*enabled*/ true);
     assert_eq!(
