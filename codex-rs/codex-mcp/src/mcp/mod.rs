@@ -465,7 +465,7 @@ pub async fn read_mcp_resource(
     let cancel_token = CancellationToken::new();
     let runtime_config = config.for_threadless_operations(&mcp_servers);
     let manager = McpConnectionSet::new(
-        /*ema_auth*/ None,
+        /*ema_auth*/ Arc::new(std::sync::OnceLock::new()),
         /*existing_ema*/ None,
         /*previous*/ None,
         McpPublicationGate::already_published(),
@@ -479,6 +479,8 @@ pub async fn read_mcp_resource(
             submit_id: String::new(),
             tx_event: None,
             startup_cancellation_token: cancel_token.clone(),
+            connection_pool: crate::McpConnectionPool::default(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
@@ -554,7 +556,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let cancel_token = CancellationToken::new();
     let runtime_config = config.for_threadless_operations(&mcp_servers);
     let mcp_connection_manager = McpConnectionSet::new(
-        /*ema_auth*/ None,
+        /*ema_auth*/ Arc::new(std::sync::OnceLock::new()),
         /*existing_ema*/ None,
         /*previous*/ None,
         McpPublicationGate::already_published(),
@@ -568,6 +570,8 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             submit_id: String::new(),
             tx_event: None,
             startup_cancellation_token: cancel_token.clone(),
+            connection_pool: crate::McpConnectionPool::default(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
