@@ -459,6 +459,11 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "use_ultrafast": {
+          "default": false,
+          "description": "Runs approval autoreview on `gpt-5.6-sol` with UltraFast preferred and Fast fallback.",
+          "type": "boolean"
         }
       },
       "type": "object"
