@@ -1,4 +1,8 @@
 use codex_models_manager::ModelsManagerConfig;
+use codex_models_manager::cache::ModelsCache;
+use codex_models_manager::cache::ModelsCacheEntry;
+use codex_models_manager::cache::ModelsCacheError;
+use codex_models_manager::cache::ModelsCacheFuture;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -155,6 +159,101 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
         }));
 
         assert_eq!(manager.get_remote_models().await, vec![expected_model]);
+    }
+}
+
+#[tokio::test]
+async fn custom_vertex_models_preserve_authoritative_catalog_and_ignore_cache() {
+    #[derive(Debug)]
+    struct UnexpectedModelsCache;
+
+    impl ModelsCache for UnexpectedModelsCache {
+        fn load<'a>(
+            &'a self,
+            _client_version: &'a str,
+        ) -> ModelsCacheFuture<'a, std::result::Result<Option<ModelsCacheEntry>, ModelsCacheError>>
+        {
+            panic!("authoritative Vertex catalog must not load a cache");
+        }
+
+        fn store<'a>(
+            &'a self,
+            _entry: &'a ModelsCacheEntry,
+        ) -> ModelsCacheFuture<'a, std::result::Result<(), ModelsCacheError>> {
+            panic!("authoritative Vertex catalog must not store a cache");
+        }
+
+        fn refresh_ttl<'a>(
+            &'a self,
+            _client_version: &'a str,
+            _identity: &'a str,
+            _etag: &'a str,
+        ) -> ModelsCacheFuture<'a, std::result::Result<(), ModelsCacheError>> {
+            panic!("authoritative Vertex catalog must not refresh a cache");
+        }
+    }
+
+    let provider = GcpModelProvider::new(
+        ModelProviderInfo::create_gcp_provider(),
+        /*auth_manager*/ None,
+    );
+    let mut configured_model = codex_models_manager::bundled_models_response()
+        .expect("bundled model catalog should deserialize")
+        .models
+        .into_iter()
+        .find(|info| info.slug == "gpt-6.1-sol")
+        .expect("bundled model catalog should contain the supported Vertex model");
+    configured_model.use_responses_lite = true;
+    configured_model.tool_mode = Some(ToolMode::CodeModeOnly);
+    configured_model.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    configured_model.multi_agent_version = Some(MultiAgentVersion::V2);
+    let mut expected_model = configured_model.clone();
+    expected_model.use_responses_lite = false;
+    expected_model.tool_mode = Some(ToolMode::Direct);
+    expected_model.apply_patch_tool_type = None;
+    let mut unsupported_model = configured_model.clone();
+    unsupported_model.slug = "gpt-6-sol".to_string();
+    let configured_catalog = ModelsResponse {
+        models: vec![unsupported_model, configured_model],
+    };
+    let custom_models = HashMap::from([(
+        "vertex-local".to_string(),
+        CustomModelConfig {
+            model: "gpt-6.1-sol".to_string(),
+            routing_profile: None,
+            model_context_window: Some(123_456),
+            model_auto_compact_token_limit: Some(100_000),
+            trust_candidate_constraints: false,
+        },
+    )]);
+    let cache: Arc<dyn ModelsCache> = Arc::new(UnexpectedModelsCache);
+    let managers = [
+        provider.models_manager(
+            PathBuf::from("unused-codex-home"),
+            Some(configured_catalog.clone()),
+            custom_models.clone(),
+        ),
+        provider.models_manager_with_cache(
+            Some(configured_catalog),
+            Arc::clone(&cache),
+            custom_models.clone(),
+        ),
+    ];
+    assert_eq!(Arc::strong_count(&cache), 1);
+
+    for manager in managers {
+        assert_eq!(manager.custom_models_snapshot().as_ref(), &custom_models);
+        assert_eq!(
+            manager.get_remote_models().await,
+            vec![expected_model.clone()]
+        );
+        assert!(
+            manager
+                .try_list_models()
+                .expect("static models should be available")
+                .iter()
+                .any(|model| model.model == "vertex-local")
+        );
     }
 }
 
