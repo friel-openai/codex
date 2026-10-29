@@ -68,6 +68,7 @@ mod external_agent_config;
 mod external_agent_import_sync;
 mod external_agent_memory_concurrency;
 mod feedback;
+mod frodex_runtime_recovery;
 mod frozen_cloud_skills;
 mod fs;
 #[path = "gateway_oauth_tests.rs"]
