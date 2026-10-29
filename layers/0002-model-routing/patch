@@ -4303,7 +4303,7 @@ index 7f076a139c2a9b1aaf6ea29649427d010d83439f..7556f68f8acd1028873a89e907ab8ae3
      async fn table_driven_event_kinds() {
          struct TestCase {
 diff --git a/codex-rs/codex-api/src/sse/responses_error.rs b/codex-rs/codex-api/src/sse/responses_error.rs
-index 2e0e0bf4c9c144d2e6b92b5a76bef15610459f39..cf60f7683f7d905bccca1aeeeded6de0628e109e 100644
+index 2e0e0bf4c9c144d2e6b92b5a76bef15610459f39..e55377acbd3885e85cad9fafe9b5bc9fd2961089 100644
 --- a/codex-rs/codex-api/src/sse/responses_error.rs
 +++ b/codex-rs/codex-api/src/sse/responses_error.rs
 @@ -2,9 +2,12 @@
@@ -4330,7 +4330,29 @@ index 2e0e0bf4c9c144d2e6b92b5a76bef15610459f39..cf60f7683f7d905bccca1aeeeded6de0
      resets_at: Option<i64>,
      #[serde(default)]
      misalignment: Option<Value>,
-@@ -53,6 +57,18 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+@@ -29,11 +33,17 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+         .and_then(|error| error.get("headers"))
+         .and_then(Value::as_object)
+         .and_then(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
+-    if let Some(error) = parse_terminal_provider_error(error, /*status*/ None) {
+-        return error;
++    let decoded_error = error.and_then(|error| serde_json::from_value::<Error>(error.clone()).ok());
++    if let Some(terminal_error) = parse_terminal_provider_error(error, /*status*/ None) {
++        let defer_model_not_found = matches!(&terminal_error, ApiError::ModelNotFound { .. })
++            && decoded_error
++                .as_ref()
++                .is_some_and(|error| error.r#type.as_deref() == Some("usage_limit_reached"));
++        if !defer_model_not_found {
++            return terminal_error;
++        }
+     }
+-    let Some(error) = error.and_then(|error| serde_json::from_value::<Error>(error.clone()).ok())
+-    else {
++    let Some(error) = decoded_error else {
+         let message = "response.failed event received".to_string();
+         return match retry_after_header {
+             Some(_) => ApiError::Retryable {
+@@ -53,6 +63,18 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
              | "project_spend_limit_exceeded",
          ) => ApiError::QuotaExceeded,
          Some("usage_not_included") => ApiError::UsageNotIncluded,
@@ -4349,7 +4371,7 @@ index 2e0e0bf4c9c144d2e6b92b5a76bef15610459f39..cf60f7683f7d905bccca1aeeeded6de0
          Some("cyber_policy") => ApiError::CyberPolicy {
              message: cyber_policy_message(error.message),
          },
-@@ -88,6 +104,8 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+@@ -88,6 +110,8 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
              retry_after: retry_after_header,
          },
          Some("rate_limit_exceeded" | "slow_down") => {
@@ -4358,7 +4380,7 @@ index 2e0e0bf4c9c144d2e6b92b5a76bef15610459f39..cf60f7683f7d905bccca1aeeeded6de0
              let retry_after = retry_after_header
                  .or_else(|| try_parse_retry_delay(&error).and_then(RetryAfter::from_delay));
              ApiError::RateLimitExceeded {
-@@ -95,6 +113,18 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+@@ -95,6 +119,18 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
                  retry_after,
              }
          }
@@ -4476,6 +4498,204 @@ index feb4098e07f5ed0c173470f4f87f0de708b3b868..c98eebfa57732c50ae9165248d4b1aed
          plan_type: None,
          resets_at: None,
          misalignment: None,
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index 1f0cccb844bd6f14adc6c0865a2f1890b9953a32..4db36c47a9a905fec8ad570ea9948d97d8833a46 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -4,6 +4,7 @@ use super::process_responses_event;
+ use super::spawn_response_stream;
+ use crate::api_bridge::map_api_error;
+ use crate::common::ResponseEvent;
++use crate::error::ApiError;
+ use bytes::Bytes;
+ use codex_client::StreamResponse;
+ use codex_http_client::RetryAfter;
+@@ -19,64 +20,95 @@ use std::time::Duration;
+ /// Flex failures remain terminal even with retry headers and a later completed event.
+ #[tokio::test(start_paused = true)]
+ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+-    let error = json!({
+-        "code": "flex_unavailable",
+-        "plan_type": 42,
+-        "headers": {"retry-after": "300"}
+-    });
+-    for failure in [
+-        json!({"type": "error", "error": error}),
+-        json!({"type": "response.failed", "response": {"error": error}}),
++    for error in [
++        json!({
++            "code": "flex_unavailable",
++            "plan_type": 42,
++            "headers": {"retry-after": "300"}
++        }),
++        json!({
++            "type": "usage_limit_reached",
++            "code": "flex_unavailable",
++            "plan_type": "pro",
++            "resets_at": 4_102_444_800_i64,
++            "headers": {"retry-after": "300"}
++        }),
+     ] {
+-        let completed = json!({"type": "response.completed", "response": {"id": "later"}});
+-        let bytes = stream::iter([Ok(Bytes::from(format!(
+-            "data: {failure}\n\ndata: {completed}\n\n"
+-        )))])
+-        .chain(stream::pending());
+-        let mut stream = spawn_response_stream(
+-            StreamResponse {
+-                status: StatusCode::OK,
+-                headers: HeaderMap::new(),
+-                bytes: Box::pin(bytes),
+-            },
+-            Duration::from_secs(60),
+-            /*telemetry*/ None,
+-            /*turn_state*/ None,
+-        );
+-        let error = loop {
+-            match stream.next().await {
+-                Some(Ok(ResponseEvent::RateLimits(_))) => {}
+-                Some(Err(error)) => break map_api_error(error),
+-                event => panic!("expected a Flex error, got {event:?}"),
+-            }
+-        };
+-        assert_eq!(
+-            (
+-                error.to_codex_protocol_error(),
+-                error.retry_delay(/*retry_count*/ 1)
+-            ),
+-            (CodexErrorInfo::FlexUnavailable, None)
+-        );
+-        assert!(stream.next().await.is_none());
++        for failure in [
++            json!({"type": "error", "error": error}),
++            json!({"type": "response.failed", "response": {"error": error}}),
++        ] {
++            let completed = json!({"type": "response.completed", "response": {"id": "later"}});
++            let bytes = stream::iter([Ok(Bytes::from(format!(
++                "data: {failure}\n\ndata: {completed}\n\n"
++            )))])
++            .chain(stream::pending());
++            let mut stream = spawn_response_stream(
++                StreamResponse {
++                    status: StatusCode::OK,
++                    headers: HeaderMap::new(),
++                    bytes: Box::pin(bytes),
++                },
++                Duration::from_secs(60),
++                /*telemetry*/ None,
++                /*turn_state*/ None,
++            );
++            let error = loop {
++                match stream.next().await {
++                    Some(Ok(ResponseEvent::RateLimits(_))) => {}
++                    Some(Err(error)) => break map_api_error(error),
++                    event => panic!("expected a Flex error, got {event:?}"),
++                }
++            };
++            assert_eq!(
++                (
++                    error.to_codex_protocol_error(),
++                    error.retry_delay(/*retry_count*/ 1)
++                ),
++                (CodexErrorInfo::FlexUnavailable, None)
++            );
++            assert!(stream.next().await.is_none());
++        }
+     }
+ }
+
+ #[test]
+ fn statusless_model_errors_have_no_http_status() {
+-    let error = json!({"code": "model_not_found"});
+-    for event in [
+-        json!({"type": "error", "error": error}),
+-        json!({"type": "response.failed", "response": {"error": error}}),
++    for error in [
++        json!({"code": "model_not_found"}),
++        json!({
++            "type": "usage_limit_reached",
++            "code": "model_not_found",
++            "plan_type": 42,
++            "resets_at": 4_102_444_800_i64,
++        }),
++        json!({
++            "type": "usage_limit_reached",
++            "code": "model_not_found",
++            "plan_type": "pro",
++            "resets_at": "later",
++        }),
+     ] {
+-        let event = serde_json::from_value(event).unwrap();
+-        let error = map_api_error(process_responses_event(event).unwrap_err().into_api_error());
+-        assert_eq!(
+-            (
+-                error.to_codex_protocol_error(),
+-                error.http_status_code_value()
+-            ),
+-            (CodexErrorInfo::ModelNotFound, None)
+-        );
++        for event in [
++            json!({"type": "error", "error": error}),
++            json!({"type": "response.failed", "response": {"error": error}}),
++        ] {
++            let event = serde_json::from_value(event).unwrap();
++            let error = process_responses_event(event).unwrap_err().into_api_error();
++            assert!(
++                matches!(&error, ApiError::ModelNotFound { message, status: None }
++                    if message == "model_not_found"),
++                "expected a statusless model error, got {error:?}"
++            );
++            let error = map_api_error(error);
++            assert_eq!(
++                (
++                    error.to_codex_protocol_error(),
++                    error.http_status_code_value()
++                ),
++                (CodexErrorInfo::ModelNotFound, None)
++            );
++        }
+     }
+ }
+
+@@ -109,6 +141,38 @@ async fn rate_limit_plaintext_loses_to_valid_error_header() {
+             );
+         }
+     }
++
++    for error_header in [Some("2"), None] {
++        let event = serde_json::from_value(json!({
++            "type": "response.failed",
++            "response": {
++                "error": {
++                    "code": "rate_limit_exceeded",
++                    "plan_type": 42,
++                    "message": "Try again in 35 seconds.",
++                    "headers": {"Retry-After": error_header}
++                }
++            }
++        }))
++        .unwrap();
++        let error = process_responses_event(event).unwrap_err().into_api_error();
++        match (error_header, error) {
++            (
++                Some(_),
++                ApiError::Retryable {
++                    message,
++                    retry_after,
++                },
++            ) => {
++                assert_eq!(message, "response.failed event received");
++                assert_eq!(retry_after, RetryAfter::from_delay(Duration::from_secs(2)));
++            }
++            (None, ApiError::Stream(message)) => {
++                assert_eq!(message, "response.failed event received");
++            }
++            (_, error) => panic!("unexpected malformed failed response: {error:?}"),
++        }
++    }
+ }
+
+ /// Retry advice uses the same HTTP value validation as other event headers.
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
 index c982e764254a6d2539fb0b4b9dfd6ff5fe8b2479..b97ad6e24b56a46d2169ec4e3b05077af9495a90 100644
 --- a/codex-rs/config/src/config_toml.rs

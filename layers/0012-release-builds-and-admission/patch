@@ -752,6 +752,18 @@ index fac8578b1eaee304b1ce8d61a2ecb1f45979f645..3dbaa7f02e9cf0a80f6ba5bcaf000bf2
  use clap::Args;
  use clap::CommandFactory;
  use clap::Parser;
+diff --git a/codex-rs/ext/queue/src/lib.rs b/codex-rs/ext/queue/src/lib.rs
+index 47fa50459533bac84a4c17dd96fb10eb684655d5..c4f9f01bd41de334922245efa9b6b2f8c2682046 100644
+--- a/codex-rs/ext/queue/src/lib.rs
++++ b/codex-rs/ext/queue/src/lib.rs
+@@ -1,5 +1,7 @@
+ //! Durable, storage-neutral user-message queue and idle dispatch.
+
++#![recursion_limit = "256"]
++
+ use std::sync::Arc;
+
+ use codex_extension_api::ExtensionRegistryBuilder;
 diff --git a/scripts/frodex_admission.py b/scripts/frodex_admission.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..5922c56dc87cfa4dda1e44c20e08e45d83155f30
