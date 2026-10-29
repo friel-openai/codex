@@ -25,6 +25,7 @@ pub(super) async fn run_compaction(
     mut started_item: Option<&TurnItem>,
     candidate: Option<BackgroundCompactionCandidate>,
     fallback: CompactionFallback,
+    reporting: CompactionReporting,
 ) -> CodexResult<bool> {
     if let Some(candidate) = candidate {
         let installed = build_and_install_compaction(
@@ -37,6 +38,7 @@ pub(super) async fn run_compaction(
             analytics_details,
             started_item,
             Some(candidate),
+            reporting,
         )
         .await?;
         if installed {
@@ -65,6 +67,7 @@ pub(super) async fn run_compaction(
         analytics_details,
         started_item,
         /*candidate*/ None,
+        reporting,
     )
     .await
 }
@@ -80,6 +83,7 @@ async fn build_and_install_compaction(
     analytics_details: &mut CompactionAnalyticsDetails,
     started_item: Option<&TurnItem>,
     candidate: Option<BackgroundCompactionCandidate>,
+    reporting: CompactionReporting,
 ) -> CodexResult<bool> {
     let turn_context = &step_context.turn;
     if let Some(candidate) = &candidate
@@ -103,7 +107,7 @@ async fn build_and_install_compaction(
             }),
         turn_context.provider.info().name.as_str(),
     );
-    if needs_start && candidate.is_none() {
+    if needs_start && candidate.is_none() && !reporting.defers_lifecycle() {
         sess.emit_turn_item_started(turn_context, &compaction_item)
             .await;
     }
@@ -201,6 +205,7 @@ async fn build_and_install_compaction(
         },
     );
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
+    let installing_prefix = prefix.is_some();
     let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
         let (initial_context, world_state_baseline) = sess
             .build_initial_context_with_world_state(replacement_step_context, &cutoff_world_state)
@@ -276,6 +281,12 @@ async fn build_and_install_compaction(
     }
     sess.recompute_token_usage(&replacement_step_context.turn)
         .await;
+    // Prefix installation emits its start only after validation. A routing
+    // evaluation must likewise stay invisible until foreground installation succeeds.
+    if !installing_prefix && needs_start && reporting.defers_lifecycle() {
+        sess.emit_turn_item_started(compaction_turn_context, &compaction_item)
+            .await;
+    }
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(true)

@@ -158,6 +158,9 @@ pub enum CodexErrorDetails {
     },
     #[error("{message}")]
     InvalidPrompt { message: String },
+    /// The selected model, reasoning effort, or service tier cannot serve the request.
+    #[error("{0}")]
+    ModelUnavailable(String),
     /// Multiple registered tools share the same effective name.
     #[error("duplicate tool: {0}")]
     ToolCollision(String),
@@ -375,6 +378,7 @@ impl CodexErr {
         ThreadNotFound(thread_id: ThreadId),
         UnexpectedStatus(error: UnexpectedResponseError),
         InvalidRequest(message: String),
+        ModelUnavailable(message: String),
         UsageLimitReached(error: UsageLimitReachedError),
         ResponseStreamFailed(error: ResponseStreamFailed),
         ConnectionFailed(error: ConnectionFailedError),
@@ -429,6 +433,7 @@ impl CodexErr {
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
             | CodexErrorDetails::InvalidPrompt { .. }
+            | CodexErrorDetails::ModelUnavailable(_)
             | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
             | CodexErrorDetails::GatewayLoginRequired(_)
@@ -530,7 +535,8 @@ impl CodexErr {
             | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
             CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::ThreadNotFound(_)
-            | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
+            | CodexErrorDetails::AgentLimitReached { .. }
+            | CodexErrorDetails::ModelUnavailable(_) => CodexErrorInfo::BadRequest,
             CodexErrorDetails::Sandbox(_) => CodexErrorInfo::SandboxError,
             _ => CodexErrorInfo::Other,
         }

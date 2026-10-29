@@ -136,6 +136,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
                     phase,
                     Some(candidate),
                     crate::compact_remote_v2::CompactionFallback::Skip,
+                    crate::compact::CompactionReporting::Immediate,
                 )
                 .await
                 .expect("optional adoption")
