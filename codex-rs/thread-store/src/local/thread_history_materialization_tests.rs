@@ -346,6 +346,101 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
 }
 
 #[tokio::test]
+async fn imported_legacy_fork_validation_preserves_missing_and_stale_source_metadata() {
+    let home = TempDir::new().expect("temp dir");
+    let source = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&source, thread_id).await;
+    source
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![user_message("legacy handoff source")],
+        })
+        .await
+        .expect("append source context");
+    source
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist legacy source");
+    let prepared = source
+        .prepare_legacy_fork_handoff(thread_id)
+        .await
+        .expect("prepare legacy snapshot");
+    assert_eq!(prepared.source_end_ordinal_exclusive, None);
+    assert!(contains_user_message(
+        &prepared.model_context,
+        "legacy handoff source"
+    ));
+    let frozen = prepared
+        .frozen_segment
+        .as_ref()
+        .expect("frozen legacy prefix");
+    assert_eq!(frozen.history_mode, ThreadHistoryMode::Legacy);
+    assert_eq!(frozen.history_base, None);
+    let _export = source
+        .reserve_exported_fork(thread_id)
+        .await
+        .expect("export source lease");
+    let source_path = source
+        .live_rollout_path(thread_id)
+        .await
+        .expect("source path");
+    let source_bytes = fs::read(&source_path).expect("source bytes before import");
+    let frozen_bytes =
+        fs::read(&frozen.reference.rollout_path).expect("frozen bytes before import");
+    let receiver = projection_store(home.path()).await;
+    let state_db = receiver.state_db().await.expect("receiver state database");
+    for stale in [false, true] {
+        state_db
+            .delete_thread(thread_id)
+            .await
+            .expect("remove source index fixture");
+        if stale {
+            let mut metadata = codex_state::ThreadMetadataBuilder::new(
+                thread_id,
+                home.path().join("missing-source.jsonl"),
+                Utc::now(),
+                SessionSource::Exec,
+            );
+            metadata.history_mode = ThreadHistoryMode::Legacy;
+            state_db
+                .upsert_thread(&metadata.build("test-provider"))
+                .await
+                .expect("install stale source index fixture");
+        }
+        let before = state_db
+            .get_thread(thread_id)
+            .await
+            .expect("source metadata before validation");
+        assert_eq!(before.is_some(), stale);
+        let _import = receiver
+            .reserve_imported_fork(thread_id)
+            .await
+            .expect("receiver source lease");
+        receiver
+            .validate_imported_fork(thread_id, frozen)
+            .await
+            .expect("validate legacy snapshot through filesystem fallback");
+        assert_eq!(
+            state_db
+                .get_thread(thread_id)
+                .await
+                .expect("source metadata after validation"),
+            before,
+            "receiver validation must not backfill or repair the source index"
+        );
+        assert_eq!(
+            fs::read(&source_path).expect("source bytes after validation"),
+            source_bytes
+        );
+        assert_eq!(
+            fs::read(&frozen.reference.rollout_path).expect("frozen bytes after validation"),
+            frozen_bytes
+        );
+    }
+}
+
+#[tokio::test]
 async fn legacy_projection_materializes_visible_messages_without_rollout_ordinals() {
     assert_legacy_projection_materializes_visible_messages_without_rollout_ordinals(false).await;
 }
@@ -2362,19 +2457,23 @@ async fn active_turn_stores_only_its_start_position() {
     assert!(prepared.model_context.iter().any(|item| {
         matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == "turn-1")
     }));
-    // Another store may fork the persisted prefix while this store keeps the source writer open.
+    // The writer exports the immutable prefix; another store imports it without acquiring
+    // mutable ownership. App-server fork handoff uses this protocol for an active source.
     let other_store = projection_store(home.path()).await;
-    let other_prepared =
-        prepare_paginated_fork(&other_store, thread_id, ForkBoundary::Latest).await;
-    assert_eq!(
-        serde_json::to_value((
-            other_prepared.history_base,
-            other_prepared.model_context.as_ref()
-        ))
-        .expect("serialize other store's fork snapshot"),
-        serde_json::to_value((prepared.history_base, prepared.model_context.as_ref()))
-            .expect("serialize live store's fork snapshot"),
-    );
+    let export = store
+        .reserve_exported_fork(thread_id)
+        .await
+        .expect("export immutable prefix");
+    let import = other_store
+        .reserve_imported_fork(thread_id)
+        .await
+        .expect("import source lease");
+    other_store
+        .validate_imported_fork(thread_id, frozen)
+        .await
+        .expect("validate imported snapshot");
+    drop(import);
+    drop(export);
     let before_first_turn = prepare_paginated_fork(
         &store,
         thread_id,
@@ -2382,7 +2481,7 @@ async fn active_turn_stores_only_its_start_position() {
     )
     .await;
     assert_eq!(before_first_turn.history_base, None);
-    assert_eq!(before_first_turn.source_end_ordinal_exclusive, 1);
+    assert_eq!(before_first_turn.source_end_ordinal_exclusive, Some(1));
 }
 
 #[tokio::test]

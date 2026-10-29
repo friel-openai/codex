@@ -9,6 +9,7 @@ use super::persisted_resume_settings::latest_persisted_model_settings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
+use super::thread_fork_handoff::ForkHandoff;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
@@ -723,6 +724,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) thread_state_manager: ThreadStateManager,
     pub(super) thread_watch_manager: ThreadWatchManager,
     pub(super) thread_list_state_permit: Arc<Semaphore>,
+    pub(super) fork_handoff_slots: Arc<Semaphore>,
     pub(super) thread_goal_processor: ThreadGoalRequestProcessor,
     pub(super) state_db: Option<StateDbHandle>,
     pub(super) log_db: Option<LogDbLayer>,
@@ -789,6 +791,7 @@ impl ThreadRequestProcessor {
             thread_state_manager,
             thread_watch_manager,
             thread_list_state_permit,
+            fork_handoff_slots: Arc::new(Semaphore::new(2)),
             thread_goal_processor,
             state_db,
             log_db,
@@ -871,6 +874,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            ForkHandoff::Local,
         ))
         .await
         .map(|()| None)
@@ -7047,6 +7051,7 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
+        get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?;
         self.thread_store
             .read_thread(StoreReadThreadParams {
                 thread_id,
@@ -7183,13 +7188,35 @@ impl ThreadRequestProcessor {
         }
     }
 
-    async fn thread_fork_inner(
+    // Keep the large fork future out of the prepare/import caller's poll frame. Nested
+    // unoptimized frames otherwise exhaust the embedded app-server's worker stack at startup.
+    pub(super) fn thread_fork_inner(
         &self,
         request_id: ConnectionRequestId,
         params: ThreadForkParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        handoff: ForkHandoff,
+    ) -> impl std::future::Future<Output = Result<(), JSONRPCErrorError>> + Send + '_ {
+        Box::pin(self.thread_fork_inner_impl(
+            request_id,
+            params,
+            app_server_client_name,
+            app_server_client_version,
+            client_mcp_extensions,
+            handoff,
+        ))
+    }
+
+    async fn thread_fork_inner_impl(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadForkParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        client_mcp_extensions: ClientMcpExtensions,
+        handoff: ForkHandoff,
     ) -> Result<(), JSONRPCErrorError> {
         if params.experimental_disable_prediction_mcp && !params.experimental_prediction_mode {
             return Err(invalid_request(
@@ -7221,6 +7248,12 @@ impl ThreadRequestProcessor {
                 "`experimentalPredictionMode` requires `ephemeral: true`",
             ));
         }
+        let (imported, export) = match handoff {
+            ForkHandoff::Local => (None, None),
+            ForkHandoff::Export(permit) => (None, Some((params.clone(), permit))),
+            ForkHandoff::Import(imported) => (Some(imported), None),
+        };
+        let imported_settings = imported.as_ref().map(|imported| imported.settings.clone());
         let ThreadForkParams {
             thread_id,
             experimental_prediction_mode,
@@ -7278,18 +7311,22 @@ impl ThreadRequestProcessor {
                 "`experimentalPredictionMode` requires a thread id without a path or turn cutoff",
             ));
         }
-        let source_thread = self
-            .read_stored_thread_for_resume(
-                &thread_id,
-                path.as_ref(),
-                /*include_history*/ false,
-            )
-            .await?;
-        let loaded_parent = self
-            .thread_manager
-            .get_thread(source_thread.thread_id)
-            .await
-            .ok();
+        let source_thread = if let Some(imported) = imported.as_ref() {
+            imported.source.clone()
+        } else {
+            let source = self
+                .read_stored_thread_for_resume(
+                    &thread_id,
+                    path.as_ref(),
+                    /*include_history*/ false,
+                )
+                .await?;
+            self.ensure_selected_rollout(&source).await?;
+            source
+        };
+        let loaded_parent =
+            get_loaded_thread_for_persistence(&self.thread_manager, source_thread.thread_id)
+                .await?;
         let inherited_fork = if experimental_prediction_mode {
             // Keep inherited state and its preparation off the fork handler's stack.
             let (mut options, settings) = Box::pin(async {
@@ -7352,7 +7389,6 @@ impl ThreadRequestProcessor {
             None
         };
         let paginated_source = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
-        self.ensure_selected_rollout(&source_thread).await?;
         if last_turn_id.is_some() && before_turn_id.is_some() {
             return Err(invalid_request(
                 "`beforeTurnId` cannot be combined with `lastTurnId`",
@@ -7382,7 +7418,9 @@ impl ThreadRequestProcessor {
             .and_then(codex_core::util::normalize_thread_name);
         let mut source_approvals_reviewer = None;
         let mut source_token_usage_info = None;
-        let mut prepared_fork = if paginated_source {
+        let mut prepared_fork = if let Some(imported) = imported {
+            Some(imported.prepared)
+        } else if paginated_source {
             let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                 (Some(turn_id), None) => {
                     codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
@@ -7420,7 +7458,9 @@ impl ThreadRequestProcessor {
             let model_context =
                 if latest
                     && let Some(local_store) = local_store
-                    && let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await
+                    && let Some(parent) =
+                        get_loaded_thread_for_persistence(&self.thread_manager, source_thread_id)
+                            .await?
                     && !matches!(parent.agent_status().await, AgentStatus::Running)
                     && parent.flush_rollout().await.is_ok()
                     && let Ok(Some(expected_position)) = local_store
@@ -7555,9 +7595,21 @@ impl ThreadRequestProcessor {
                 }
             }
             Some(prepared)
+        } else if export.is_some() {
+            Some(
+                self.prepare_legacy_handoff(&source_thread, ephemeral)
+                    .await?,
+            )
         } else {
             None
         };
+        if let Some((params, permit)) = export {
+            let prepared = prepared_fork
+                .ok_or_else(|| internal_error("fork preparation returned no snapshot"))?;
+            return self
+                .publish_fork_handoff(request_id, params, source_thread, prepared, permit)
+                .await;
+        }
         let projected_response_turns = prepared_fork
             .as_ref()
             .and_then(|prepared| prepared.projected_response_turns.clone());
@@ -7670,7 +7722,9 @@ impl ThreadRequestProcessor {
             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
         let needs_latest_settings =
             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
-        let loaded_parent_settings = if paginated_source && needs_latest_settings {
+        let loaded_parent_settings = if let Some(settings) = imported_settings {
+            Some(settings)
+        } else if paginated_source && needs_latest_settings {
             if let Some(parent) = loaded_parent.as_ref() {
                 let snapshot = parent.thread_settings_snapshot().await;
                 Some(PersistedResumeSettings {
