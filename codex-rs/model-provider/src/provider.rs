@@ -328,14 +328,9 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         drop(cache);
-        let model_catalog = config_model_catalog
-            .or_else(|| codex_models_manager::bundled_models_response().ok())
-            .unwrap_or_default();
-        Arc::new(StaticModelsManager::new_with_custom_models(
-            self.auth_manager(),
-            model_catalog,
-            custom_models,
-        ))
+        let manager = self.models_manager_without_cache(config_model_catalog);
+        manager.replace_custom_models(custom_models);
+        manager
     }
 }
 

@@ -9,6 +9,7 @@ use codex_analytics::TrackEventsContext;
 use codex_analytics::build_track_events_context;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::ExecutorFileSystem;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
 use codex_otel::SkillInvocationEvent;
@@ -27,8 +28,25 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Implicit skill invocations already reported during one user turn.
 #[derive(Debug, Default)]
-struct ImplicitSkillInvocations(Mutex<HashSet<String>>);
+struct ImplicitSkillInvocations {
+    seen_keys: Mutex<HashSet<String>>,
+}
+
+/// Carries invocation deduplication across a workspace-induced context refresh.
+pub(crate) async fn preserve_implicit_skill_invocations(
+    current: &ExtensionData,
+    refreshed: &ExtensionData,
+) {
+    let Some(current) = current.get::<ImplicitSkillInvocations>() else {
+        return;
+    };
+    let seen_keys = current.seen_keys.lock().await.clone();
+    refreshed.insert(ImplicitSkillInvocations {
+        seen_keys: Mutex::new(seen_keys),
+    });
+}
 
 #[cfg(test)]
 pub(crate) fn skills_load_input_from_config(
@@ -203,7 +221,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         let skill_invocations = turn_context
             .extension_data
             .get_or_init(ImplicitSkillInvocations::default);
-        let mut seen_skills = skill_invocations.0.lock().await;
+        let mut seen_skills = skill_invocations.seen_keys.lock().await;
         seen_skills.insert(seen_key)
     };
     if !inserted {
