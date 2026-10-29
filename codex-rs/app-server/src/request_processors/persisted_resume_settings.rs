@@ -6,7 +6,7 @@ use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_rollout::InitialHistory;
 use codex_rollout::RolloutItem;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct PersistedResumeSettings {
     pub(super) approval_policy: AskForApproval,
     pub(super) approvals_reviewer: Option<ApprovalsReviewer>,
