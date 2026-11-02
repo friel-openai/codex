@@ -243,6 +243,10 @@ pub(super) async fn handle(
         .values()
         .try_for_each(AdditionalContextEntry::validate)
         .map_err(|message| CodexErr::InvalidRequest(message.to_owned()))?;
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("submit turn input")
+        .await
+        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
     let result = match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
@@ -314,6 +318,10 @@ pub(super) async fn handle_recovery(
         request: thread_settings,
         turn_extension_init,
     } = thread_settings.into();
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("recover an interrupted turn")
+        .await
+        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
     let request = TurnInputRequest::user_input(Vec::new())
         .with_thread_settings(thread_settings)
         .on_start(start_options);
