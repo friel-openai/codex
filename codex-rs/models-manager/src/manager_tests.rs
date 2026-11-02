@@ -875,6 +875,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
             routing_profile: None,
             model_context_window: Some(123_456),
             model_auto_compact_token_limit: Some(100_000),
+            trust_candidate_constraints: false,
         },
     );
     let mut remote = remote_model("gpt-real", "Real", /*priority*/ 0);
@@ -925,6 +926,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
                 routing_profile: None,
                 model_context_window: Some(64_000),
                 model_auto_compact_token_limit: Some(48_000),
+                trust_candidate_constraints: false,
             },
         )]),
         model_context_window: Some(32_000),
@@ -942,6 +944,35 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
     assert_eq!(overridden.auto_compact_token_limit, Some(48_000));
     assert!(overridden.include_skills_usage_instructions);
     assert!(!overridden.used_fallback_model_metadata);
+
+    let override_config = ModelsManagerConfig {
+        custom_models: HashMap::from([(
+            "frontier-local".to_string(),
+            CustomModelConfig {
+                model: "gpt-real-config".to_string(),
+                routing_profile: None,
+                model_context_window: Some(64_000),
+                model_auto_compact_token_limit: Some(48_000),
+                trust_candidate_constraints: false,
+            },
+        )]),
+        ..ModelsManagerConfig::default()
+    };
+    assert_eq!(
+        manager
+            .get_model_info("frontier-local", &override_config)
+            .await,
+        ModelInfo {
+            request_model: Some("gpt-real-config".to_string()),
+            context_window: Some(64_000),
+            auto_compact_token_limit: Some(48_000),
+            ..model_info.clone()
+        }
+    );
+    assert_eq!(
+        manager.get_model_info("frontier-local", &config).await,
+        model_info
+    );
 }
 
 #[tokio::test]
@@ -955,6 +986,7 @@ async fn custom_model_overrides_survive_manager_cache_modes() {
             routing_profile: None,
             model_context_window: Some(64_000),
             model_auto_compact_token_limit: Some(48_000),
+            trust_candidate_constraints: false,
         },
     )]);
     let managers = [
@@ -1018,6 +1050,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                 routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
+                trust_candidate_constraints: false,
             },
         ),
         (
@@ -1027,6 +1060,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                 routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
+                trust_candidate_constraints: false,
             },
         ),
     ]);
@@ -1035,6 +1069,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
         ModelsResponse {
             models: vec![remote],
         },
+        ModelOrigin::ExplicitConfig,
         custom_models,
     );
 
@@ -1086,6 +1121,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
             routing_profile: None,
             model_context_window: Some(64_000),
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]);
 
@@ -1168,6 +1204,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
             routing_profile: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]);
     manager.replace_custom_models(replacement.clone());
@@ -1234,6 +1271,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
         routing_profile: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
     };
     let manager = Arc::new(StaticModelsManager::new_with_custom_models(
         /*auth_manager*/ None,

@@ -1653,6 +1653,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                 model_context_window: None,
                 routing_profile: None,
                 model_auto_compact_token_limit: None,
+                trust_candidate_constraints: false,
             },
         )]);
         let mut expected = configured_catalog.clone();
@@ -1751,6 +1752,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                 model_context_window: Some(64_000),
                 routing_profile: None,
                 model_auto_compact_token_limit: Some(48_000),
+                trust_candidate_constraints: false,
             },
         )]);
         let home = tempfile::tempdir().unwrap();
