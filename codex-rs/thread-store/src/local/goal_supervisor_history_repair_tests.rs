@@ -118,7 +118,7 @@ fn compacted_message(ordinal: u64, payload: &str) -> RolloutLine {
 }
 
 fn compacted_message_with_id(ordinal: u64, payload: &str, message_id: &str) -> RolloutLine {
-    serde_json::from_value(serde_json::json!({
+    codex_rollout::decode_rollout_line(serde_json::json!({
         "timestamp": format!("2026-01-01T00:00:{ordinal:02}Z"),
         "ordinal": ordinal,
         "type": "compacted",
@@ -335,7 +335,7 @@ fn selection_repairs_only_consumed_top_level_message() {
 fn selection_applies_inside_compacted_replacement_history() {
     let selected_id = "amsg_01900000-0000-7000-8000-000000000021";
     let excluded_id = "amsg_01900000-0000-7000-8000-000000000022";
-    let compacted = serde_json::from_value(serde_json::json!({
+    let compacted = codex_rollout::decode_rollout_line(serde_json::json!({
         "timestamp": "2026-01-01T00:00:01Z",
         "ordinal": 1,
         "type": "compacted",
