@@ -561,6 +561,7 @@ impl LocalAgentControl {
                 inherited_instructions,
                 inherited_exec_policy,
                 client_mcp_extensions,
+                inherited_thread_state: Default::default(),
             })
             .await
         {
@@ -725,6 +726,7 @@ impl LocalAgentControl {
             disabled_plugin_ids,
             ..StartThreadOptions::new(config.clone())
         };
+        let mut inherited_thread_state = InheritedThreadState::default();
         let fork_context = match (session_source, options.fork_mode.as_ref()) {
             (Some(session_source), Some(_)) => {
                 let fork_context_started_at = Instant::now();
@@ -739,6 +741,17 @@ impl LocalAgentControl {
                 .map_err(|err| err.with_agent_context(AgentErrorContext::ForkHistory))?;
                 start_options.initial_history = initial_history;
                 start_options.history_mode = history_mode;
+                inherited_thread_state = InheritedThreadState::builder()
+                    .prompt_cache_key(
+                        parent_prompt_cache_key_for_source(&state, Some(&session_source)).await,
+                    )
+                    .response_continuation(
+                        parent_response_continuation_for_source(&state, Some(&session_source)).await,
+                    )
+                    .mcp_tool_snapshot(
+                        parent_mcp_tool_snapshot_for_source(&state, Some(&session_source)).await,
+                    )
+                    .build();
                 Some(fork_context_started_at.elapsed())
             }
             (Some(_), None) => {
@@ -760,6 +773,7 @@ impl LocalAgentControl {
                 self.clone(),
                 parent_thread_id,
                 inherited_exec_policy,
+                inherited_thread_state,
             )
             .await
             .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup))?;
@@ -1072,6 +1086,7 @@ impl LocalAgentControl {
                 inherited_instructions: None,
                 inherited_exec_policy,
                 client_mcp_extensions: None,
+                inherited_thread_state: Default::default(),
             })
             .await?;
         let mut agent_metadata = agent_metadata;
