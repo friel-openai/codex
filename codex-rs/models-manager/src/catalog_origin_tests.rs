@@ -96,6 +96,7 @@ async fn static_catalog_records_its_supplied_origin() {
             "local-reviewer".to_string(),
             CustomModelConfig {
                 model: model.slug.clone(),
+                routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
             },
