@@ -204,6 +204,7 @@ pub(super) async fn page_indexed_turn_rows(
         r#"
 SELECT
     turn_id,
+    root_turn_id,
     rollout_ordinal,
     status,
     error_json,

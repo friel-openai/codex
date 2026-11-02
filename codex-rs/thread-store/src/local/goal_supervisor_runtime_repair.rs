@@ -86,6 +86,7 @@ pub(super) struct GoalSupervisorHistoryAccess {
 
 pub(super) struct CertifiedActiveHistorySnapshot {
     pub(super) rollout_path: PathBuf,
+    /// End of the uncompressed JSONL, including when rollout_path is a zstd representation.
     pub(super) end_byte_offset: u64,
     pub(super) head: super::rollout_lineage::RolloutHead,
     pub(super) scan: super::model_context::ActiveModelContextScan,
@@ -714,8 +715,9 @@ async fn scan_root_for_access(
 ///
 /// A certified segment checkpoint makes older active-file records irrelevant to latest-state
 /// reconstruction. Inspecting only that suffix avoids buffering a multi-gigabyte active JSONL on
-/// every resume or latest fork. An invalid or absent checkpoint, a parse rejection, or detected
-/// legacy damage falls back to the complete physical repair scan.
+/// every resume or latest fork. A compressed active segment uses the bounded decoder instead of
+/// ancestry traversal. An invalid or absent checkpoint, a parse rejection, or detected legacy
+/// damage falls back to the complete physical repair scan.
 async fn scan_clean_certified_active_root(
     thread_id: ThreadId,
     rollout_path: &Path,
@@ -726,12 +728,13 @@ async fn scan_clean_certified_active_root(
         .ok_or_else(|| ThreadStoreError::InvalidRequest {
             message: format!("rollout {} does not exist", rollout_path.display()),
         })?;
-    if physical_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+    let plain_path = codex_rollout::plain_rollout_path(&physical_path);
+    if plain_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
         return Ok(None);
     }
     let head = super::rollout_lineage::read_rollout_head(physical_path.as_path()).await?;
     let session_meta = head.session_meta.clone();
-    let Some(scan) = super::model_context::scan_plain_active_model_context_snapshot(
+    let Some(scan) = super::model_context::scan_active_model_context_snapshot(
         physical_path.as_path(),
         session_meta.clone(),
     )
@@ -742,10 +745,9 @@ async fn scan_clean_certified_active_root(
     if !scan.segment_checkpoint {
         return Ok(None);
     }
-    let end_byte_offset = tokio::fs::metadata(physical_path.as_path())
-        .await
-        .map_err(thread_store_io_error)?
-        .len();
+    let Some(end_byte_offset) = scan.source_end_byte_offset else {
+        return Ok(None);
+    };
     let mut bounded_lines = scan.suffix_lines.clone();
     if session_meta.meta.id != thread_id {
         return Ok(None);
@@ -771,7 +773,7 @@ async fn scan_clean_certified_active_root(
         path: codex_rollout::plain_rollout_path(rollout_path),
         end_byte_offset: None,
         source_sha256: String::new(),
-        source_was_compressed: false,
+        source_was_compressed: physical_path != plain_path,
         include_references: false,
         reference_policy,
         needs_repair: false,

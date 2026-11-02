@@ -3366,6 +3366,17 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
 
 #[tokio::test]
 async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::Result<()> {
+    assert_recent_materialization_bounds_deep_reference_chains(false).await
+}
+
+#[tokio::test]
+async fn recent_materialization_bounds_compressed_reference_chains() -> io::Result<()> {
+    assert_recent_materialization_bounds_deep_reference_chains(true).await
+}
+
+async fn assert_recent_materialization_bounds_deep_reference_chains(
+    compressed: bool,
+) -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
     let deepest_segment = SegmentId::new();
@@ -3510,6 +3521,23 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
         ],
     )?;
 
+    if compressed {
+        for path in [
+            &deepest_path,
+            &oldest_path,
+            &older_path,
+            &old_path,
+            &middle_path,
+            &current_path,
+        ] {
+            let source = fs::read(path)?;
+            fs::write(
+                path.with_extension("jsonl.zst"),
+                zstd::stream::encode_all(source.as_slice(), 3)?,
+            )?;
+            fs::remove_file(path)?;
+        }
+    }
     let bounded = materialize_recent_rollout_lines(home.path(), current_path.as_path()).await?;
     assert_eq!(
         event_messages(&bounded),
