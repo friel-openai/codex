@@ -806,6 +806,7 @@ async fn worker_preserves_inherited_acl_through_append() -> anyhow::Result<()> {
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_preserves_alternate_group_through_materialization() -> anyhow::Result<()> {
+    use anyhow::Context;
     use std::os::unix::fs::MetadataExt;
     use std::process::Command;
 
@@ -818,17 +819,45 @@ async fn worker_preserves_alternate_group_through_materialization() -> anyhow::R
     let original_group = fs::metadata(&path)?.gid();
     let groups = Command::new("id").arg("-G").output()?;
     assert!(groups.status.success());
-    let Some(group) = std::str::from_utf8(&groups.stdout)?
+    let groups = std::str::from_utf8(&groups.stdout)?
         .split_whitespace()
         .map(str::parse::<u32>)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .find(|group| *group != original_group)
-    else {
-        eprintln!("skipping ownership regression: no alternate supplementary group");
+        .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(target_os = "linux")]
+    let groups = {
+        let mappings = fs::read_to_string("/proc/self/gid_map")?
+            .lines()
+            .map(|line| -> anyhow::Result<(u64, u64)> {
+                let fields = line
+                    .split_whitespace()
+                    .map(str::parse::<u64>)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let [inside, _outside, count] = fields.as_slice() else {
+                    anyhow::bail!("invalid group mapping row: {line}");
+                };
+                let end = inside
+                    .checked_add(*count)
+                    .context("group mapping overflow")?;
+                anyhow::ensure!(end <= 1_u64 << 32, "invalid group mapping extent");
+                Ok((*inside, end))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        // An overflow GID can appear in supplementary groups without being usable by chown.
+        groups
+            .into_iter()
+            .filter(|group| {
+                mappings
+                    .iter()
+                    .any(|(start, end)| (*start..*end).contains(&u64::from(*group)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let Some(group) = groups.into_iter().find(|group| *group != original_group) else {
+        eprintln!("skipping ownership regression: no mapped alternate supplementary group");
         return Ok(());
     };
-    std::os::unix::fs::chown(&path, /*uid*/ None, Some(group))?;
+    std::os::unix::fs::chown(&path, /*uid*/ None, Some(group))
+        .with_context(|| format!("assign mapped supplementary group {group} to fixture"))?;
     assert_eq!(fs::metadata(&path)?.gid(), group);
 
     worker::run(home.path().to_path_buf(), Startup).await?;
@@ -1023,6 +1052,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_compresses_all_segments_of_one_thread_in_one_run() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let mut paths = Vec::new();
+    let transcript = "shared thread segment\n".repeat(16_384);
+    for _ in 0..16 {
+        let path = archived_rollout_path(home.path(), "2025-01-03T12-00-00", Uuid::new_v4());
+        write_rollout(&path, thread_id, &transcript)?;
+        set_old_mtime(&path)?;
+        paths.push(path);
+    }
+    worker::run(home.path().to_path_buf(), Startup).await?;
+    for path in paths {
+        assert!(
+            !path.exists(),
+            "compression must publish every physical segment of the thread: {path:?}"
+        );
+        assert!(compressed_rollout_path(&path).exists());
+        let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(loaded_id, Some(thread_id));
+        assert_eq!(errors, 0);
+        assert_eq!(items.len(), 2);
     }
     Ok(())
 }
