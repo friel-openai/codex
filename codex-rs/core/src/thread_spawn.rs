@@ -191,6 +191,10 @@ pub(crate) async fn prepare(
     } else {
         None
     };
+    step_context
+        .inherited_environments
+        .to_spawn_selections()
+        .map_err(ThreadSpawnError::Backend)?;
     Ok((
         ChildSpawnSettings {
             config,
