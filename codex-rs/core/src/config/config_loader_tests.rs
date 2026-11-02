@@ -3013,6 +3013,7 @@ statusMessage = "checking"
         Some(cwd),
         &[] as &[(String, TomlValue)],
         ConfigLoadOptions {
+            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             cloud_config_bundle,
             ..Default::default()
         },
