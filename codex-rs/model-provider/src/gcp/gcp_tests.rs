@@ -243,6 +243,7 @@ async fn bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_met
     let manager = provider.models_manager(
         PathBuf::from("unused-codex-home"),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     let bundled_models = codex_models_manager::bundled_models_response()
         .expect("bundled model catalog should deserialize")
@@ -305,11 +306,57 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
         unsupported_model.slug = "gpt-6-sol".to_string();
         let mut unsupported_variant = configured_model.clone();
         unsupported_variant.slug = format!("{model}-extra");
-        let manager = provider.models_manager_without_cache(Some(ModelsResponse {
+        let catalog = ModelsResponse {
             models: vec![unsupported_model, configured_model, unsupported_variant],
-        }));
+        };
+        let manager = provider.models_manager_without_cache(Some(catalog.clone()));
 
-        assert_eq!(manager.get_remote_models().await, vec![expected_model]);
+        assert_eq!(
+            manager.get_remote_models().await,
+            vec![expected_model.clone()]
+        );
+        let aliases = HashMap::from([(
+            "vertex-local".to_string(),
+            CustomModelConfig {
+                model: model.to_string(),
+                model_context_window: None,
+                model_auto_compact_token_limit: None,
+            },
+        )]);
+        let home = tempfile::tempdir().unwrap();
+        let cache = Arc::new(crate::test_support::UnusedModelsCache);
+        for manager in [
+            provider.models_manager(home.path().into(), Some(catalog.clone()), aliases.clone()),
+            provider.models_manager_with_cache(Some(catalog), cache, aliases.clone()),
+        ] {
+            assert_eq!(
+                manager.get_remote_models().await,
+                vec![expected_model.clone()]
+            );
+            assert_eq!(manager.custom_models(), &aliases);
+            let sourced_catalog = manager
+                .model_catalog_with_origins(
+                    codex_models_manager::manager::RefreshStrategy::InMemory,
+                    codex_http_client::HttpClientFactory::new(
+                        codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+                    ),
+                )
+                .await;
+            assert_eq!(sourced_catalog.len(), 1);
+            assert_eq!(
+                sourced_catalog[0].origin,
+                codex_models_manager::ModelOrigin::ExplicitConfig
+            );
+            let alias = manager
+                .get_model_info("vertex-local", &ModelsManagerConfig::default())
+                .await;
+            assert_eq!(alias.request_model.as_deref(), Some(model));
+            assert_eq!(alias.tool_mode, Some(ToolMode::Direct));
+            assert!(!alias.use_responses_lite);
+            assert_eq!(alias.apply_patch_tool_type, None);
+            assert!(!alias.used_fallback_model_metadata);
+        }
+        assert!(!home.path().join("models_cache.json").exists());
     }
 }
 
@@ -322,6 +369,7 @@ async fn unknown_vertex_models_use_static_catalog_fallback() {
     let manager = provider.models_manager(
         PathBuf::from("unused-codex-home"),
         Some(ModelsResponse::default()),
+        /*custom_models*/ HashMap::new(),
     );
 
     let model = manager
