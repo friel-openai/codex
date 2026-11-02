@@ -36,6 +36,8 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_thread_store::ListThreadAttachmentsParams;
 use std::sync::Arc;
@@ -290,6 +292,14 @@ pub(crate) async fn start_prepared(
     }
     let config = effective_spawn_config(&child.thread).await?;
     let status = child.thread.io.agent_status.borrow().clone();
+    let (parent_thread_id, depth) = match &child.thread.session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth,
+            ..
+        }) => (Some(*parent_thread_id), Some(*depth)),
+        _ => (None, None),
+    };
     let _active = invocation
         .map(ToolInvocationContext::lock_active)
         .transpose()?;
@@ -300,9 +310,12 @@ pub(crate) async fn start_prepared(
             thread_id: child.thread_id,
             metadata: AgentMetadata {
                 agent_id: Some(child.thread_id),
+                parent_thread_id,
+                depth,
                 agent_path: Some(task_name.clone()),
                 agent_nickname: child.thread.session_source.get_nickname(),
                 agent_role: child.thread.session_source.get_agent_role(),
+                last_task_message: None,
             },
             status,
         },
