@@ -898,6 +898,7 @@ mod tests {
         let thread_id = ThreadId::default();
         let lineage = RolloutLineage {
             root_rollout_id: thread_id,
+            has_attached_visibility: false,
             segments: vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(10)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(20)),
@@ -924,6 +925,7 @@ mod tests {
         let thread_id = ThreadId::default();
         let lineage = RolloutLineage {
             root_rollout_id: thread_id,
+            has_attached_visibility: false,
             segments: vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(20)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(30)),
