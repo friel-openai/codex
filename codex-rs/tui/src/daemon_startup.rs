@@ -1,8 +1,9 @@
 //! Local daemon launch policy. Explicit embedded launches never discover or start a daemon;
 //! optional attachment may fall back to embedded mode, while automatic launches
-//! require a compatible shared server and a successful connection, except when
-//! the Windows launcher forbids detaching a missing server. Elevated local
-//! Windows sessions use explicit embedded behavior before discovery or startup.
+//! require compatible explicit feature overrides and a successful connection. A different daemon release
+//! always uses this CLI's embedded server without replacing the shared daemon.
+//! A Windows launcher that forbids detaching a missing server also uses embedded mode.
+//! Elevated local Windows sessions use embedded behavior before discovery or startup.
 //! Explicit feature overrides are compared with the daemon's reported
 //! configuration; removed features are inert, and unreported features are assumed disabled.
 
@@ -155,11 +156,21 @@ pub(super) async fn compatibility_warning(
         })
         .collect();
     let mut restart_features = None;
+    let mut version_mismatch = false;
     let check = async {
         // Connect even without overrides so startup can recover from an unreachable daemon.
         let client = app_server_connection::connect(target)
             .await
-            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
+            .map_err(|error| {
+                version_mismatch = error
+                    .downcast_ref::<app_server_connection::LocalDaemonVersionMismatch>()
+                    .is_some();
+                if version_mismatch {
+                    error.to_string()
+                } else {
+                    "could not connect to check daemon feature settings".to_string()
+                }
+            })?;
         if requested.is_empty() {
             let _ = client.shutdown().await;
             return Ok(());
@@ -239,9 +250,13 @@ pub(super) async fn compatibility_warning(
     .await;
     match check {
         Ok(()) => Ok(None),
-        Err(reason) if *allow_embedded_fallback && restart_features.is_none() => Ok(Some(format!(
-            "Running without the shared background server: {reason}."
-        ))),
+        Err(reason)
+            if version_mismatch || (*allow_embedded_fallback && restart_features.is_none()) =>
+        {
+            Ok(Some(format!(
+                "Running without the shared background server: {reason}."
+            )))
+        }
         Err(reason) => Err(CompatibilityError {
             reason,
             restart_features,
