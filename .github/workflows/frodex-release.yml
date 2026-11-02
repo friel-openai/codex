@@ -303,10 +303,10 @@ jobs:
           set -euo pipefail
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             cargo build --jobs 2 --target ${{ matrix.target }} --release --timings \
-              --bin codex --bin codex-code-mode-host
+              --bin codex --bin codex-code-mode-host --bin codex-exec-server
           else
             cargo build --target ${{ matrix.target }} --release --timings \
-              --bin codex --bin codex-code-mode-host
+              --bin codex --bin codex-code-mode-host --bin codex-exec-server
           fi
 
       - name: Upload Cargo timings
@@ -372,6 +372,7 @@ jobs:
             --package-dir "${package}"
             --entrypoint-bin "${binaries}/codex"
             --code-mode-host-bin "${binaries}/codex-code-mode-host"
+            --exec-server-bin "${binaries}/codex-exec-server"
             --archive-output "${dest}/frodex-${{ matrix.target }}.tar.gz"
           )
           if [[ "${{ runner.os }}" == "Linux" ]]; then
