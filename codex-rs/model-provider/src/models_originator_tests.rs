@@ -2,6 +2,8 @@
 
 use super::*;
 use codex_http_client::OutboundProxyPolicy;
+use codex_models_manager::CustomModelConfig;
+use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
@@ -133,6 +135,14 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
         catalogs.push(catalog);
     }
     let client = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+    let aliases = std::collections::HashMap::from([(
+        "local-reviewer".to_string(),
+        CustomModelConfig {
+            model: "gpt-5.5".to_string(),
+            model_context_window: None,
+            model_auto_compact_token_limit: None,
+        },
+    )]);
     for _ in 0..2 {
         let auth =
             AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -141,7 +151,12 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
             Some(Arc::clone(&auth)),
             /*gateway_auth_manager*/ None,
         ));
-        let manager = OpenAiModelsManager::new(home.path().to_path_buf(), endpoint, Some(auth));
+        let manager = OpenAiModelsManager::new_with_custom_models(
+            home.path().to_path_buf(),
+            endpoint,
+            Some(auth),
+            aliases.clone(),
+        );
         let work = manager.for_originator("codex_work_cca").unwrap();
         let chat = manager.for_originator("chatgpt_cca").unwrap();
         assert!(Arc::ptr_eq(
@@ -169,6 +184,16 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
         }
         actual.push(chat_catalog);
         assert_eq!(actual, catalogs);
+        assert_eq!(manager.custom_models(), &aliases);
+        for (child, originator) in [(&work, "codex_work_cca"), (&chat, "chatgpt_cca")] {
+            assert_eq!(child.custom_models(), &aliases);
+            let alias = child
+                .get_model_info("local-reviewer", &ModelsManagerConfig::default())
+                .await;
+            assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
+            assert_eq!(alias.description.as_deref(), Some(originator));
+            assert!(!alias.used_fallback_model_metadata);
+        }
         for originator in [
             "",
             "unknown",

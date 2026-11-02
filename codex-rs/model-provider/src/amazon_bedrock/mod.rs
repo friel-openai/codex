@@ -8,6 +8,7 @@ mod region;
 mod runtime;
 mod runtime_catalog;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,6 +24,8 @@ use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_TERRA_MODEL_ID;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
+use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
@@ -429,17 +432,19 @@ impl ModelProvider for AmazonBedrockModelProvider {
         &self,
         _codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         let origin = if config_model_catalog.is_some() {
             codex_models_manager::ModelOrigin::ExplicitConfig
         } else {
             codex_models_manager::ModelOrigin::Provider
         };
-        Arc::new(StaticModelsManager::new(
+        Arc::new(StaticModelsManager::new_with_custom_models(
             /*auth_manager*/ None,
             config_model_catalog
                 .map_or_else(|| self.default_model_catalog(), normalize_bedrock_catalog),
             origin,
+            custom_models,
         ))
     }
 
@@ -447,7 +452,17 @@ impl ModelProvider for AmazonBedrockModelProvider {
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
-        self.models_manager(PathBuf::new(), config_model_catalog)
+        self.models_manager(PathBuf::new(), config_model_catalog, HashMap::new())
+    }
+
+    fn models_manager_with_cache(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+        cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> SharedModelsManager {
+        drop(cache);
+        self.models_manager(PathBuf::new(), config_model_catalog, custom_models)
     }
 }
 

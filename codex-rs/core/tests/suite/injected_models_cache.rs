@@ -315,7 +315,11 @@ async fn account_switch_during_cache_store_preserves_new_catalog_for_next_turn()
         store_gate: Mutex::new(None),
     });
     let manager = create_model_provider(provider_info.clone(), Some(auth.clone()))
-        .models_manager_with_cache(/*config_model_catalog*/ None, cache.clone());
+        .models_manager_with_cache(
+            /*config_model_catalog*/ None,
+            cache.clone(),
+            Default::default(),
+        );
     let mut old_model = remote_model("gpt-5.4");
     old_model.default_reasoning_summary = ReasoningSummary::Concise;
     let initial = responses::mount_models_once(
