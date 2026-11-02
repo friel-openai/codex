@@ -337,17 +337,17 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index e9bb937171944c95d45e34a7b44de37f1f9b208f..2a5b825079702310e9d4eb3713b844d90617549e 100644
+index ef418d0b0c9fd83eefe378d263d55d1bc4df1700..011a58fc1ce3bcd8a60fe6285ca020025467e144 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -100,6 +100,7 @@ mod guardian_cached_score;
- mod guardian_checkpoint_migration;
+@@ -101,6 +101,7 @@ mod guardian_checkpoint_migration;
  // Uses the same command-approval harness as guardian_review below.
+ mod builtin_model_catalog;
  mod canonical_plugin_connectors;
 +mod child_delegation;
+ mod critical_path_runtime;
  mod gateway_auth;
  mod guardian_connector_trust;
- #[cfg(not(target_os = "windows"))]
 diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
 index 6245636eb8705e5609aae655dceee25d477ea4ea..4b11b5f344b1adadffd417b0bfc4e7d1333807c2 100644
 --- a/codex-rs/core/tests/suite/multi_agent_mode.rs
@@ -1209,6 +1209,172 @@ index b13ef69cfa4be0d20bdf98fb7d9ed7471a2069ce..3243faad7b05c16b27c41b0c2b728ebb
  05:message/developer:
      <MULTI_AGENT_ROLE>
  06:message/developer:
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__mcp_sharing__shared_mcp_keeps_tools_and_model_requested_input_per_chat.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__mcp_sharing__shared_mcp_keeps_tools_and_model_requested_input_per_chat.snap
+index d30a188af065efc85589d5ae50ad1cc4cad8648d..5a503a8cfcf192ceb2dd19e1d497f60258882f6e 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__mcp_sharing__shared_mcp_keeps_tools_and_model_requested_input_per_chat.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__mcp_sharing__shared_mcp_keeps_tools_and_model_requested_input_per_chat.snap
+@@ -1,5 +1,6 @@
+ ---
+ source: core/tests/suite/scenarios_mcp_sharing.rs
++assertion_line: 179
+ expression: "context_snapshot::format_context_snapshot(\"Two unrelated roots isolate MCP processes, expose different tools, and answer simultaneous model-requested questions in reverse order.\",\n&entries,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
+ ---
+ Scenario: Two unrelated roots isolate MCP processes, expose different tools, and answer simultaneous model-requested questions in reverse order.
+@@ -15,54 +16,135 @@ Settings:
+   stream: true
+   text: {"verbosity":"low"}
+   tool_choice: "auto"
+-  tools (11; hash=e4ad6947d6c88cac):
++  tools (13; hash=e91db08448c7fcfa):
+     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
+     - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
+     - function/list_mcp_resources: Lists resources provided by MCP servers. Resources allow servers to share data that provides cont...; args=[cursor, server]; hash=6792edaff13561bd
+     - function/list_mcp_resource_templates: Lists resource templates provided by MCP servers. Parameterized resource templates allow servers ...; args=[cursor, server]; hash=60f17c90ef7a4ebb
+     - function/read_mcp_resource: Read a specific resource from an MCP server given the server name and resource URI.; args=[server, uri]; hash=24246896b39008ae
+     - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
++    - namespace/workspace: Tools for changing the working directory used by the active thread.; hash=d05f60cc92935a0f
++      - function/set_cwd
+     - custom/apply_patch: The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the pat...; hash=dea9f12b0111a4ba
+     - function/view_image: View a local image file from the filesystem when visual inspection is needed. Use this for images...; args=[detail, path]; hash=3b766d5bdec5d50e
+-    - namespace/multi_agent_v1: Tools for spawning and managing sub-agents.; hash=2327142bda177c50
+-      - function/close_agent
+-      - function/resume_agent
+-      - function/send_input
++    - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
++      - function/followup_task
++      - function/interrupt_agent
++      - function/list_agents
++      - function/send_message
+       - function/spawn_agent
+       - function/wait_agent
++    - namespace/frodex: Tools for spawning and managing sub-agents.; hash=481c4ed74d15597a
++      - function/adopt_agent
++      - function/close_agent
++      - function/promote_agent
+     - namespace/mcp__shared: Use these tools to exercise the rmcp test server.; hash=c2583dfa504bbe3f
+       - function/echo
+     - web_search; hash=f103e327c6870a46
+ -- request 1 (turn; creator) --
+ 00:message/developer:
+     <MODEL_INSTRUCTIONS>
+-01:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-02:message/user:
++01:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents for scoped work when the benefit exceeds the cost of briefing, coordination, and integration.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Keep the team small and give each agent a distinct outcome. Available concurrency is a ceiling, not a ta... for related work rather than spawning a replacement. [hash=91e840fce0bdc02c]
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
++03:message/developer:
++    <MULTI_AGENT_MODE>
++04:message/user:
+     <ENVIRONMENT_CONTEXT>
+-03:message/user:
++05:message/user:
+     Ask the user: First task owner?
+ -- request 2 (turn; creator) --
+-04:function_call/mcp__shared.echo:{"message":"First task owner?"}
+-05:function_call_output:Wall time: <DURATION> seconds
++06:function_call/mcp__shared.echo:{"message":"First task owner?"}
++07:function_call_output:Wall time: <DURATION> seconds
+     Output: | Mira
+
+-## Window 2 (after request 2: input diverged at item 03)
++## Window 2 (after request 2: input diverged at item 05)
+ Settings: relative to window 1
+   prompt_cache_key: "<PROMPT_CACHE_KEY 2>"
+-  tools (11; hash=b0f271ad4e160a41):
++  tools (13; hash=4db6d1032165c36b):
+     ~ namespace/mcp__shared: Use these tools to exercise the rmcp test server.; hash=a9e155b340098fac
+       - function/echo_tool
+ -- request 3 (turn; joiner) --
+ 00:message/developer:
+     <MODEL_INSTRUCTIONS>
+-01:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-02:message/user:
++01:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...es not authorize a child to subdivide its assignment. [hash=cb88b9e8dc0e07e4]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 63 LINES; ~1523 TOKENS; hash=5f40ad9247a944e0>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents for scoped work when the benefit exceeds the cost of briefing, coordination, and integration.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Keep the team small and give each agent a distinct outcome. Available concurrency is a ceiling, not a ta... for related work rather than spawning a replacement. [hash=91e840fce0bdc02c]
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
++03:message/developer:
++    <MULTI_AGENT_MODE>
++04:message/user:
+     <ENVIRONMENT_CONTEXT>
+-03:message/user:
++05:message/user:
+     Ask the user: Second task owner?
+ -- request 4 (turn; joiner) --
+-04:function_call/mcp__shared.echo_tool:{"message":"Second task owner?"}
+-05:function_call_output:Wall time: <DURATION> seconds
++06:function_call/mcp__shared.echo_tool:{"message":"Second task owner?"}
++07:function_call_output:Wall time: <DURATION> seconds
+     Output: | Sora
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
 index e7d2ffa51ee7e1a56e3f0173dedb452054d56a6f..0bdfb2c766150f577984e83d51e9990b32fbdaf6 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
@@ -1587,10 +1753,10 @@ index fbee7acd92bf7b2bcc6a7c5709ff6bef4ccc937b..5d664ff45463b739bc951dcc7f2472c0
 +06:function_call/update_plan:{"plan":[{"status":"in_progress","step":"Continue in the new context window"}]}
 +07:function_call_output:Plan updated
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99deeb4bd7 100644
+index 22f86c42b29e3c9ac0469f30ffce3a67d70001cf..ebabb357f4c5cef8ff115e2abea777d6f60c0fd2 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
-@@ -120,7 +120,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
+@@ -129,7 +129,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
  const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
  const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
  const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
@@ -1599,7 +1765,7 @@ index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99
 
  fn body_contains(req: &wiremock::Request, text: &str) -> bool {
      decoded_body(req)
-@@ -1624,7 +1624,7 @@ enum FullHistoryV2ModelSelection {
+@@ -1633,7 +1633,7 @@ enum FullHistoryV2ModelSelection {
  #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
  #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork appends current-time reminders after inherited notices")]
  #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork appends child multi-agent mode instructions")]
@@ -1608,7 +1774,7 @@ index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
      selection: FullHistoryV2ModelSelection,
-@@ -1995,8 +1995,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2004,8 +2004,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              (
                  mode_instruction_count(&parent_request.message_input_texts("developer")),
                  mode_instruction_count(&child_developer_messages),
@@ -1625,7 +1791,7 @@ index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99
          );
      }
      if matches!(
-@@ -2007,10 +2014,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2016,10 +2023,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              .message_input_texts("developer")
              .into_iter()
              .rfind(|message| message.starts_with(MULTI_AGENT_MODE_OPEN_TAG))
@@ -1638,7 +1804,7 @@ index 35578493682d8362c5757dcd1821e3fe13c0bde5..861c219abf766ac29ac8ff2578cf2c99
          assert_eq!(
              (
                  child_developer_messages
-@@ -2030,7 +2037,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2039,7 +2046,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                      .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                      .count(),
              ),

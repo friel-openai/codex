@@ -61,7 +61,7 @@ index 0760cb15d4ac94cddc58c765d70961e7c46d931c..b5ca554b6953cdab0e8b0ed751d1a183
 +    }
  }
 diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
-index bada44de510d3fb2e22b5d8fa5ba25a1aa6896ea..aff0f062414699d197c2d79f7254ddc6d5737df8 100644
+index 82aeaf7f46f92244e59279012bc1033934fbe25a..2d9ea24ce458235e0e4dcee560f8ccb131aa629f 100644
 --- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 @@ -158,17 +158,19 @@ impl ThreadGoalRequestProcessor {
@@ -75,7 +75,7 @@ index bada44de510d3fb2e22b5d8fa5ba25a1aa6896ea..aff0f062414699d197c2d79f7254ddc6
 +            && let Some(thread) = loaded_thread.as_ref()
          {
              self.config_manager
-                 .check_thread_model_provider(thread.config().await.as_ref())
+                 .check_thread_model_provider_for_input(thread.config().await.as_ref())
                  .await
                  .map_err(|error| config_load_error(&error))?;
          }
@@ -130,7 +130,7 @@ index bada44de510d3fb2e22b5d8fa5ba25a1aa6896ea..aff0f062414699d197c2d79f7254ddc6
              Some(thread) => thread.rollout_path().ok_or_else(|| {
                  invalid_request(format!(
 diff --git a/codex-rs/core/BUILD.bazel b/codex-rs/core/BUILD.bazel
-index 662d643ba03952a0203730aeeef279d19bc36e10..387511610f5ccb15482dd19bf76321eafb2fd99e 100644
+index 4c04c5d6b40f7f625e14ce5726b2e59b2e559603..58554b97fec42cf01e1653c9a5f320daa211f179 100644
 --- a/codex-rs/core/BUILD.bazel
 +++ b/codex-rs/core/BUILD.bazel
 @@ -2,7 +2,12 @@ load("//:defs.bzl", "codex_rust_crate")
@@ -148,10 +148,10 @@ index 662d643ba03952a0203730aeeef279d19bc36e10..387511610f5ccb15482dd19bf76321ea
      crate_srcs = glob(["src/**/*.rs"]) + [
          "//codex-rs/ext/guardian-v2:src/sync_reviewer/reviewer_config.rs",
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index e38e1cc4efef56d12f5edf2778416ec90d3822e9..28499b859a104f555acbf2791d01fbe2637fc22a 100644
+index ff98dd021ecf474ab9d7aebb93de92cb1df72783..b8a0132771ccc5c63cbfbfb04f53dbd63d2eb665 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -955,6 +955,9 @@
+@@ -1047,6 +1047,9 @@
              "fast_mode": {
                "type": "boolean"
              },
@@ -161,7 +161,7 @@ index e38e1cc4efef56d12f5edf2778416ec90d3822e9..28499b859a104f555acbf2791d01fbe2
              "goals": {
                "type": "boolean"
              },
-@@ -7574,6 +7577,9 @@
+@@ -7771,6 +7774,9 @@
          "fast_mode": {
            "type": "boolean"
          },
@@ -209,7 +209,7 @@ index 0000000000000000000000000000000000000000..141eec9d0981380eccb34879e229eb41
 +
 +Treat messages from the supervisor as task instructions.
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index dc7d52e0c01ed5e9c38fd43402adee870d9db72e..0576e36575c3802a60c8121a1433aa13fe13e87e 100644
+index b9ea2ce5c633c3ccfd039ae71aa70b13d4d0d28f..6c2e94bc88492a64251a2616dd61de28c1f16ee2 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -39,6 +39,7 @@ use codex_context_fragments::set_annotated_content;
@@ -228,7 +228,7 @@ index dc7d52e0c01ed5e9c38fd43402adee870d9db72e..0576e36575c3802a60c8121a1433aa13
  pub(crate) const UNIFIED_EXEC_PROCESS_WARNING_PREFIX: &str =
      "Warning: The maximum number of unified exec process";
 
-@@ -451,6 +453,7 @@ async fn run_compact_task_inner_impl(
+@@ -455,6 +457,7 @@ async fn run_compact_task_inner_impl(
          }
      };
 
@@ -236,7 +236,7 @@ index dc7d52e0c01ed5e9c38fd43402adee870d9db72e..0576e36575c3802a60c8121a1433aa13
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
      let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
-@@ -473,6 +476,9 @@ async fn run_compact_task_inner_impl(
+@@ -477,6 +480,9 @@ async fn run_compact_task_inner_impl(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -246,7 +246,7 @@ index dc7d52e0c01ed5e9c38fd43402adee870d9db72e..0576e36575c3802a60c8121a1433aa13
      let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
      let (new_history, world_state_baseline) = build_compaction_replacement_history(
-@@ -656,6 +662,71 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
+@@ -660,6 +666,71 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
      message.starts_with(UNIFIED_EXEC_PROCESS_WARNING_PREFIX)
  }
 
@@ -319,7 +319,7 @@ index dc7d52e0c01ed5e9c38fd43402adee870d9db72e..0576e36575c3802a60c8121a1433aa13
      let ResponseItem::Message { role, content, .. } = item else {
          return false;
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 0bcde1192aa924c3ae4649a0da39c41b9cd7a8f1..0b89c5439c41708518b9eee093045daf64c14e5d 100644
+index 9ef7faa708bd7c7087861f1b93720988e1d59a30..b4fc0f70cedb5e84416ce434e4d90864948d821c 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
@@ -338,7 +338,7 @@ index 0bcde1192aa924c3ae4649a0da39c41b9cd7a8f1..0b89c5439c41708518b9eee093045daf
      use codex_protocol::models::ContentItem;
      use codex_protocol::models::ContentItemKind;
      use codex_protocol::models::InternalChatMessageMetadataPassthrough;
-@@ -901,6 +903,64 @@ mod tests {
+@@ -902,6 +904,64 @@ mod tests {
          );
      }
 
@@ -630,7 +630,7 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
          CompactionFallback::Skip => {
              assert!(!installed);
 diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
-index 45509696f8e8b7b0eeb5860f0d79f72bfaa956ee..859afbe0746d36d879678ec5024ef3d7f9b49922 100644
+index 43f48bd3bc94aa6bb6598a97b3ec6d66188a8eb5..7ce5b9fd49b636504da59d72a5fd8cc01ced960c 100644
 --- a/codex-rs/core/src/compact_tests.rs
 +++ b/codex-rs/core/src/compact_tests.rs
 @@ -10,6 +10,7 @@ use codex_history::ResponseItemEnvelope;
@@ -727,10 +727,10 @@ index 45509696f8e8b7b0eeb5860f0d79f72bfaa956ee..859afbe0746d36d879678ec5024ef3d7
      CompactedUserMessage {
          message: text.to_string(),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095d9921924 100644
+index 616b25493f5699ffe95e6f56bbc6c16b8bf5f86e..cad19dcc0481e82173fafda49bed7db66e40b8fa 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -328,7 +328,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
+@@ -327,7 +327,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
  mod rollout_reconstruction_tests;
 
  const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
@@ -742,7 +742,7 @@ index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095
 
  async fn load_agent_prompt_fallback(
      codex_home: &Path,
-@@ -349,10 +353,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
+@@ -348,10 +352,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
      load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
  }
 
@@ -771,7 +771,7 @@ index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095
  fn history_contains_developer_text(
      history: &crate::context_manager::ContextManager,
      expected: &str,
-@@ -379,6 +401,11 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -378,6 +400,11 @@ pub(crate) async fn load_agent_role_prompt(
      }
 
      let role_prompt = match session_source {
@@ -783,7 +783,7 @@ index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095
          SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
          SessionSource::Cli
          | SessionSource::VSCode
-@@ -386,7 +413,19 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -385,7 +412,19 @@ pub(crate) async fn load_agent_role_prompt(
          | SessionSource::Mcp
          | SessionSource::Custom(_)
          | SessionSource::Internal(_)
@@ -804,7 +804,7 @@ index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2835,6 +2874,11 @@ impl Session {
+@@ -2869,6 +2908,11 @@ impl Session {
          }
      }
 
@@ -817,10 +817,10 @@ index a57bd10c70e0b5c2268bd5288792730ea73952cd..218c6eb55bc183f64d1e3453a26d5095
          let state = self.state.lock().await;
          state.session_configuration.provider.info().clone()
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index e9c91ff9ceedc78c570974d26078880a63882444..aafb70274cb12076783338e38c11478bf127dbe2 100644
+index a39c34baf9a9214002dca85ad559568dbf5e4ae5..986dd031553b69c20159d3ce475a451860ecb5e4 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -14982,6 +14982,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -15184,6 +15184,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
      assert!(prompt.contains("Prefer direct execution over coordination"));
  }
 
@@ -915,7 +915,7 @@ index e9c91ff9ceedc78c570974d26078880a63882444..aafb70274cb12076783338e38c11478b
  #[tokio::test]
  async fn subagent_prompt_is_for_regular_subagents_only() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
-@@ -15006,6 +15094,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -15208,6 +15296,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
      )
      .await
      .expect("write subagent override");
@@ -934,7 +934,7 @@ index e9c91ff9ceedc78c570974d26078880a63882444..aafb70274cb12076783338e38c11478b
 
      assert_eq!(
          load_root_agent_prompt(codex_home.path()).await,
-@@ -15015,6 +15115,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -15217,6 +15317,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
          load_subagent_prompt(codex_home.path()).await,
          "custom subagent"
      );
@@ -950,10 +950,10 @@ index e9c91ff9ceedc78c570974d26078880a63882444..aafb70274cb12076783338e38c11478b
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f3473b4cb 100644
+index 49aa14f974ab4122a0cad5a35e19f63586bebf8e..d843321e6db1e0ecfeb702948bc6c7ef560766d5 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -64,6 +64,7 @@ use crate::tasks::emit_compact_metric;
+@@ -66,6 +66,7 @@ use crate::tasks::emit_compact_metric;
  use crate::tools::ToolRouter;
  use crate::tools::context::SharedTurnDiffTracker;
  use crate::tools::handlers::is_set_workspace_cwd_tool;
@@ -961,7 +961,7 @@ index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -3279,11 +3280,12 @@ async fn drain_in_flight(
+@@ -3300,11 +3301,12 @@ async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
      sess: Arc<Session>,
      step_context: &StepContext,
@@ -976,7 +976,7 @@ index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f
                  mark_thread_memory_mode_polluted_if_external_context(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -3297,13 +3299,16 @@ async fn drain_in_flight(
+@@ -3318,13 +3320,16 @@ async fn drain_in_flight(
                  )
                  .await;
              }
@@ -994,16 +994,16 @@ index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f
  }
 
  fn assign_missing_streamed_response_item_id(
-@@ -4344,7 +4349,7 @@ async fn try_run_sampling_request(
+@@ -4382,7 +4387,7 @@ async fn try_run_sampling_request(
      if workspace_cwd_call_seen && tool_call_count != 1 {
          step_context.reject_context_transition_mixed_with_sibling_tool();
      }
 -    if !in_flight.is_empty() {
 +    let terminal_no_response = if !in_flight.is_empty() {
-         let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
-         let _tool_blocking_span = trace_span!(
-             "codex.tool_blocking",
-@@ -4352,11 +4357,16 @@ async fn try_run_sampling_request(
+         let _tool_blocking_timing_guard = turn_context
+             .turn_timing_state
+             .begin_tool_blocking(tool_runtime.batch_timing());
+@@ -4392,11 +4397,16 @@ async fn try_run_sampling_request(
              conversation.id = %sess.thread_id,
              turn.id = %turn_context.sub_id,
          );
@@ -1024,7 +1024,7 @@ index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f
 
      if should_emit_token_count {
          // A tool call such as request_user_input can intentionally pause the turn. Emit token
-@@ -4366,6 +4376,10 @@ async fn try_run_sampling_request(
+@@ -4406,6 +4416,10 @@ async fn try_run_sampling_request(
          sess.send_token_count_event(&turn_context).await;
      }
 
@@ -1036,7 +1036,7 @@ index 824804b68dae202ede3110f8e7d62fddeeeb4546..b9ad94f82209413b98107780a137319f
          return Err(CodexErr::TurnAborted);
      }
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 9987ac98d279c71c5a3cf69baa378948aa2256c0..1b246ab15492d0aaba4564ef98a2208609dfaf93 100644
+index b16379c4b62fe760b6cf4b4d0f5a6b5c2d647f9a..1b246ab15492d0aaba4564ef98a2208609dfaf93 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -2,7 +2,6 @@ use std::pin::Pin;
@@ -1064,8 +1064,17 @@ index 9987ac98d279c71c5a3cf69baa378948aa2256c0..1b246ab15492d0aaba4564ef98a22086
 
  #[derive(Default)]
  pub(crate) struct OutputItemResult {
+@@ -364,7 +364,7 @@ pub(crate) async fn handle_output_item_done(
+                         // The call is already in history; resume needs its output even if we never dispatch.
+                         let output =
+                             ToolCallRuntime::aborted_response(&call, /*elapsed_secs*/ None);
+-                        return Ok(output.into_response());
++                        return Ok(ToolCallResponse::Response(output.into_response()));
+                     }
+                     runtime.handle_tool_call(call, cancellation_token).await
+                 })
 diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
-index d4026533164f8350b6c3baca54bde99e6933c3a3..6a2f41e797ea514fd00c72ebe44862b2d1307f1b 100644
+index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625decd0a7a3 100644
 --- a/codex-rs/core/src/stream_events_utils_tests.rs
 +++ b/codex-rs/core/src/stream_events_utils_tests.rs
 @@ -13,6 +13,7 @@ use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
@@ -1076,7 +1085,7 @@ index d4026533164f8350b6c3baca54bde99e6933c3a3..6a2f41e797ea514fd00c72ebe44862b2
  use crate::tools::parallel::ToolCallRuntime;
  use crate::turn_diff_tracker::TurnDiffTracker;
  use codex_extension_api::ExtensionData;
-@@ -381,7 +382,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -382,7 +383,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
      // Await in reverse order: each result must already own its record before history attachment.
      let mut outputs = Vec::new();
      for (arguments, future) in pending.into_iter().rev() {
@@ -1087,7 +1096,7 @@ index d4026533164f8350b6c3baca54bde99e6933c3a3..6a2f41e797ea514fd00c72ebe44862b2
          let item = &envelope.item;
          let ResponseItem::FunctionCallOutput {
              call_id: output_call_id,
-@@ -436,10 +439,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -437,10 +440,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
      let _ = session
          .refresh_runtime_config(current_config, config.clone())
          .await;
@@ -1103,7 +1112,7 @@ index d4026533164f8350b6c3baca54bde99e6933c3a3..6a2f41e797ea514fd00c72ebe44862b2
      assert!(result.item.executed_tool_call_metadata().is_none());
      session
          .services
-@@ -457,11 +463,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -458,11 +464,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
          .expect("re-enable metadata");
      let current_config = session.get_config().await;
      let _ = session.refresh_runtime_config(current_config, config).await;
@@ -1121,10 +1130,10 @@ index d4026533164f8350b6c3baca54bde99e6933c3a3..6a2f41e797ea514fd00c72ebe44862b2
  }
 
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
-index c80a89ddd1fe2adb5a36b36016cdd5f4a3198b43..2c29b7ecb598ffdc6b0c5b7c95a447a717ca4991 100644
+index fe7de2c90b068c64729304b830849194bfdeb111..8496c7ff7bfb8a5104fd253f14f13b205092b5ce 100644
 --- a/codex-rs/core/src/tools/context.rs
 +++ b/codex-rs/core/src/tools/context.rs
-@@ -303,6 +303,8 @@ pub struct FunctionToolOutput {
+@@ -301,6 +301,8 @@ pub struct FunctionToolOutput {
      pub body: Vec<FunctionCallOutputContentItem>,
      pub success: Option<bool>,
      pub post_tool_use_response: Option<JsonValue>,
@@ -1133,7 +1142,7 @@ index c80a89ddd1fe2adb5a36b36016cdd5f4a3198b43..2c29b7ecb598ffdc6b0c5b7c95a447a7
  }
 
  impl FunctionToolOutput {
-@@ -311,6 +313,7 @@ impl FunctionToolOutput {
+@@ -309,6 +311,7 @@ impl FunctionToolOutput {
              body: vec![FunctionCallOutputContentItem::InputText { text }],
              success,
              post_tool_use_response: None,
@@ -1141,7 +1150,7 @@ index c80a89ddd1fe2adb5a36b36016cdd5f4a3198b43..2c29b7ecb598ffdc6b0c5b7c95a447a7
          }
      }
 
-@@ -322,12 +325,18 @@ impl FunctionToolOutput {
+@@ -320,12 +323,18 @@ impl FunctionToolOutput {
              body: content,
              success,
              post_tool_use_response: None,
@@ -1160,7 +1169,7 @@ index c80a89ddd1fe2adb5a36b36016cdd5f4a3198b43..2c29b7ecb598ffdc6b0c5b7c95a447a7
  }
 
  impl ToolOutput for FunctionToolOutput {
-@@ -339,6 +348,10 @@ impl ToolOutput for FunctionToolOutput {
+@@ -337,6 +346,10 @@ impl ToolOutput for FunctionToolOutput {
          self.success.unwrap_or(true)
      }
 
@@ -1172,10 +1181,10 @@ index c80a89ddd1fe2adb5a36b36016cdd5f4a3198b43..2c29b7ecb598ffdc6b0c5b7c95a447a7
          function_tool_response(call_id, payload, self.body.clone(), self.success)
      }
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa5788637794911ff4bce4 100644
+index ffb17eb8a71ff616509860ac39a606d4831ae8e6..8e39eb1ca7ec985ccdfc6dd4f35323e67366bc94 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
-@@ -32,6 +32,17 @@ use codex_protocol::error::CodexErr;
+@@ -35,6 +35,17 @@ use codex_protocol::error::CodexErr;
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ToolResultMetadata;
 
@@ -1193,7 +1202,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
  struct ToolCallTimingGuard {
      started_at: Option<Instant>,
      execution_started_at: Arc<OnceLock<Instant>>,
-@@ -79,7 +90,7 @@ impl ToolCallRuntime {
+@@ -108,7 +119,7 @@ impl ToolCallRuntime {
          self,
          call: ToolCall,
          cancellation_token: CancellationToken,
@@ -1202,7 +1211,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
          let error_call = call.clone();
          let source = call.direct_source();
          let recorder = self.session.services.executed_tool_calls.clone();
-@@ -104,20 +115,22 @@ impl ToolCallRuntime {
+@@ -133,20 +144,22 @@ impl ToolCallRuntime {
                      {
                          call.set_tool_result_metadata(ToolResultMetadata::new(metadata));
                      }
@@ -1235,10 +1244,10 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
              Ok(response)
          }
      }
-@@ -331,6 +344,14 @@ impl ToolCallRuntime {
- }
+@@ -447,6 +460,14 @@ impl ToolCallRuntime {
+         self.timing.as_ref().map(|timing| timing.batch.clone())
+     }
 
- impl ToolCallRuntime {
 +    fn response_for_tool_result(response: AnyToolResult) -> ToolCallResponse {
 +        if response.result.terminal_no_response() {
 +            ToolCallResponse::TerminalNoResponse
@@ -1250,7 +1259,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
      fn tool_task_join_error(err: JoinError) -> FunctionCallError {
          FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
      }
-@@ -631,6 +652,7 @@ mod tests {
+@@ -802,6 +823,7 @@ mod tests {
          } else {
              Arc::new(ImmediateHandler {
                  tool_name: tool_name.clone(),
@@ -1258,7 +1267,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
              })
          };
          let step_context = StepContext::for_test(Arc::clone(&turn_context));
-@@ -735,6 +757,7 @@ mod tests {
+@@ -913,6 +935,7 @@ mod tests {
 
      struct ImmediateHandler {
          tool_name: codex_tools::ToolName,
@@ -1266,7 +1275,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
      }
 
      impl ToolExecutor<ToolInvocation> for ImmediateHandler {
-@@ -758,10 +781,13 @@ mod tests {
+@@ -936,10 +959,13 @@ mod tests {
              ToolInvocation: 'a,
          {
              Box::pin(async {
@@ -1284,7 +1293,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
              })
          }
      }
-@@ -800,9 +826,12 @@ mod tests {
+@@ -978,9 +1004,12 @@ mod tests {
          }
      }
 
@@ -1299,7 +1308,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
          let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
          let records = Arc::new(std::sync::Mutex::new(Vec::new()));
          let (finish_started_tx, finish_started_rx) = oneshot::channel();
-@@ -821,6 +850,7 @@ mod tests {
+@@ -999,6 +1028,7 @@ mod tests {
          let tool_name = codex_tools::ToolName::plain("test_tool");
          let handler = Arc::new(ImmediateHandler {
              tool_name: tool_name.clone(),
@@ -1307,7 +1316,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
          }) as Arc<dyn CoreToolRuntime>;
          let step_context = StepContext::for_test(Arc::clone(&turn_context));
          let router = Arc::new(ToolRouter::from_parts(
-@@ -865,10 +895,12 @@ mod tests {
+@@ -1043,10 +1073,12 @@ mod tests {
                  success: Some(true),
              },
          };
@@ -1324,7 +1333,7 @@ index cc8beb4e3091eaaa0460eead9b05186af71f5513..641f4cbc0cee533e6ffa578863779491
 
          let actual = records
              .lock()
-@@ -879,6 +911,26 @@ mod tests {
+@@ -1057,6 +1089,26 @@ mod tests {
 
          Ok(())
      }
@@ -1726,7 +1735,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
 +    })
  }
 diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
-index cc881254911dbbec6cb56bead1ab7735b6404f9a..2a9c00f0ec3e8c3c08592f8330f61c5f7ec69166 100644
+index 8faa045d7e02402df53fe4a574469150440fa19a..a7ed9e4fe7220570ad07d3c5e23790cba6a6d54d 100644
 --- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
 +++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
 @@ -24,6 +24,7 @@ use codex_extension_api::ToolCallSource;
@@ -2255,7 +2264,7 @@ index cc881254911dbbec6cb56bead1ab7735b6404f9a..2a9c00f0ec3e8c3c08592f8330f61c5f
      Ok(())
  }
 
-@@ -2101,3 +2256,26 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
+@@ -2102,3 +2257,26 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
          codex_state::ThreadGoalStatus::Complete => ThreadGoalStatus::Complete,
      }
  }
@@ -2283,10 +2292,10 @@ index cc881254911dbbec6cb56bead1ab7735b6404f9a..2a9c00f0ec3e8c3c08592f8330f61c5f
 +        .map_err(anyhow::Error::msg)
 +}
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 953846903bcca760c1b66f299b0104df9612cbbe..a21dcbdb5d5cc89c02cee1d4517bf749638feab1 100644
+index 8e2f00e0f3787190fcca895df11ceb7c4f3b6431..0495258f43180185213a38ba31d3b5899cf756c7 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -412,6 +412,8 @@ pub enum Feature {
+@@ -429,6 +429,8 @@ pub enum Feature {
      GuardianExt,
      /// Enable persisted thread goals and automatic goal continuation.
      Goals,
@@ -2295,7 +2304,7 @@ index 953846903bcca760c1b66f299b0104df9612cbbe..a21dcbdb5d5cc89c02cee1d4517bf749
      /// Add current context-window metadata to model-visible context.
      TokenBudget,
      /// Enables experimental context management.
-@@ -2008,6 +2010,16 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -2073,6 +2075,16 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -2338,10 +2347,10 @@ index d4523e00c6f7f9294f00e6bed086a35a9cf230a7..dcdfccd654fdcc53b2fc1f9ab91fc2b4
  fn apps_require_feature_flag_and_chatgpt_auth() {
      let mut features = Features::with_defaults();
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 980677e884bae54a61fd6fd5ae9d4788b0d19f0f..4184d1c4b90f31d04470542c451caa9159f8daf5 100644
+index fd0dd2aafe256e1c185f33ffc0ba98f7be0e8f15..8e03362c6f0cb19f9bcdcfccd4268a70a2f5d10d 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -4320,7 +4320,15 @@ pub enum ThreadGoalStatus {
+@@ -4393,7 +4393,15 @@ pub enum ThreadGoalStatus {
      Complete,
  }
 
@@ -2358,7 +2367,7 @@ index 980677e884bae54a61fd6fd5ae9d4788b0d19f0f..4184d1c4b90f31d04470542c451caa91
 
  pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
      if value.is_empty() {
-@@ -4331,6 +4339,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
+@@ -4404,6 +4412,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
              "goal objective must be at most {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
          ));
      }
@@ -2386,7 +2395,7 @@ index 980677e884bae54a61fd6fd5ae9d4788b0d19f0f..4184d1c4b90f31d04470542c451caa91
      Ok(())
  }
 
-@@ -4868,6 +4897,35 @@ mod tests {
+@@ -4941,6 +4970,35 @@ mod tests {
          Ok(())
      }
 
@@ -2423,10 +2432,10 @@ index 980677e884bae54a61fd6fd5ae9d4788b0d19f0f..4184d1c4b90f31d04470542c451caa91
      fn feature_thread_source_serializes_as_its_app_owned_label() -> Result<()> {
          let source = ThreadSource::Feature("automation".to_string());
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
-index 78aea77025ff7e4a35267035ccb8a1f2ed273c8f..c1400d295059e3bdb2d787b42c6b11608e4de322 100644
+index 4c9960624facc976c0dd37ec22046395e267e90f..62642803e660cb6af66ebd3df65b93bb3cf7ed4c 100644
 --- a/codex-rs/state/src/lib.rs
 +++ b/codex-rs/state/src/lib.rs
-@@ -81,7 +81,10 @@ pub use model::ThreadRelationFilter;
+@@ -85,7 +85,10 @@ pub use model::ThreadRelationFilter;
  pub use model::ThreadSection;
  pub use model::ThreadSectionAppearance;
  pub use model::ThreadSectionsPage;
@@ -2437,7 +2446,7 @@ index 78aea77025ff7e4a35267035ccb8a1f2ed273c8f..c1400d295059e3bdb2d787b42c6b1160
  pub use runtime::ExternalAgentConfigImportDetailsRecord;
  pub use runtime::ExternalAgentConfigImportFailureRecord;
  pub use runtime::ExternalAgentConfigImportHistoryRecord;
-@@ -90,6 +93,7 @@ pub use runtime::GoalAccountingMode;
+@@ -94,6 +97,7 @@ pub use runtime::GoalAccountingMode;
  pub use runtime::GoalAccountingOutcome;
  pub use runtime::GoalStore;
  pub use runtime::GoalUpdate;
@@ -3202,7 +3211,7 @@ index 223519f50b0eadd2702419949c915185336e8419..88bd68dc542b502d346113d1196bb4dd
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub struct ThreadMetadata {
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index 58dd668469dea74ee73f4bd58e734f59f37c8942..c1aace06b15ae325cab264a933181b4affdab35b 100644
+index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de4bbbadd4 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
 @@ -19,9 +19,11 @@ use crate::model::datetime_to_epoch_millis;
@@ -4549,10 +4558,10 @@ index 9f5855431444216525c145f6c889e740ecbf56f0..18801f78b7a507802f0ea493aeb3fd6a
      async fn deleting_thread_deletes_goal() {
          let runtime = test_runtime().await;
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
-index 28bab10c8978fc2d39143ee0c47b381b67129bbb..acadd3608525bb5c208b4ef3dd48005cd7588b9e 100644
+index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c2207b837a4a 100644
 --- a/codex-rs/state/src/runtime/threads.rs
 +++ b/codex-rs/state/src/runtime/threads.rs
-@@ -217,6 +217,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
+@@ -233,6 +233,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
              .await
      }
 
@@ -4608,7 +4617,7 @@ index 28bab10c8978fc2d39143ee0c47b381b67129bbb..acadd3608525bb5c208b4ef3dd48005c
      /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
      pub async fn find_thread_spawn_child_by_path(
          &self,
-@@ -861,6 +910,103 @@ WHERE id = ?
+@@ -877,6 +926,103 @@ WHERE id = ?
          Ok(result.rows_affected() > 0)
      }
 
@@ -4712,7 +4721,7 @@ index 28bab10c8978fc2d39143ee0c47b381b67129bbb..acadd3608525bb5c208b4ef3dd48005c
      /// Allocate a persisted `updated_at` value for thread-list cursor ordering.
      ///
      /// We keep a process-local high-water mark so hot rollout writes can get unique,
-@@ -3514,6 +3660,153 @@ mod tests {
+@@ -3531,6 +3677,153 @@ mod tests {
          );
      }
 
@@ -4866,7 +4875,7 @@ index 28bab10c8978fc2d39143ee0c47b381b67129bbb..acadd3608525bb5c208b4ef3dd48005c
      #[tokio::test]
      async fn list_threads_orders_and_pages_by_recency_at() {
          let codex_home = unique_temp_dir();
-@@ -3918,6 +4211,161 @@ mod tests {
+@@ -3936,6 +4229,161 @@ mod tests {
          assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
      }
 
@@ -5029,10 +5038,10 @@ index 28bab10c8978fc2d39143ee0c47b381b67129bbb..acadd3608525bb5c208b4ef3dd48005c
      async fn thread_spawn_children_without_status_filter_lists_all_statuses() {
          let codex_home = unique_temp_dir();
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index 18b0a2b72d9dfd3bc1cf237f5f562dae01dafe78..87e15c28b8365bdea9ac8b7cd4aac46a76e28939 100644
+index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6d9ff0583 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -9,10 +9,12 @@
+@@ -10,10 +10,12 @@
  )]
 
  use crate::DbTelemetry;
@@ -5045,7 +5054,7 @@ index 18b0a2b72d9dfd3bc1cf237f5f562dae01dafe78..87e15c28b8365bdea9ac8b7cd4aac46a
  use codex_file_system::LocalLogsDir;
  use codex_utils_absolute_path::AbsolutePathBuf;
  use log::LevelFilter;
-@@ -23,6 +25,8 @@ use sqlx::migrate::Migrator;
+@@ -24,6 +26,8 @@ use sqlx::migrate::Migrator;
  use sqlx::sqlite::SqliteConnectOptions;
  use sqlx::sqlite::SqlitePoolOptions;
  use sqlx::sqlite::SqliteSynchronous;
@@ -5054,7 +5063,7 @@ index 18b0a2b72d9dfd3bc1cf237f5f562dae01dafe78..87e15c28b8365bdea9ac8b7cd4aac46a
  use std::path::Path;
  use std::path::PathBuf;
  use std::sync::Arc;
-@@ -46,6 +50,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+@@ -51,6 +55,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
  const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
  const STATE_DB_FILENAME: &str = "state_5.sqlite";
  const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
@@ -5091,7 +5100,7 @@ index 18b0a2b72d9dfd3bc1cf237f5f562dae01dafe78..87e15c28b8365bdea9ac8b7cd4aac46a
 
  #[derive(Clone, Copy, Eq, PartialEq)]
  enum RecoveryMode {
-@@ -378,7 +412,15 @@ impl SqliteConfig {
+@@ -410,7 +444,15 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {
@@ -5909,7 +5918,7 @@ index 0000000000000000000000000000000000000000..ff81ce71be9320414b53ee5ae642e384
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index e2690f744583bcadb85d2aa5e43420bcf5c8329c..f3173f8de74e8192d2504c6c6e3ca939abcbdb2f 100644
+index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fbc8a0106e 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -129,6 +129,7 @@ use crate::ThreadStoreError;
@@ -5948,7 +5957,7 @@ index e2690f744583bcadb85d2aa5e43420bcf5c8329c..f3173f8de74e8192d2504c6c6e3ca939
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1455,6 +1477,116 @@ mod tests {
+@@ -1469,6 +1491,116 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -6065,7 +6074,7 @@ index e2690f744583bcadb85d2aa5e43420bcf5c8329c..f3173f8de74e8192d2504c6c6e3ca939
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -3146,6 +3278,23 @@ mod tests {
+@@ -3160,6 +3292,23 @@ mod tests {
          }))
      }
 
@@ -6090,7 +6099,7 @@ index e2690f744583bcadb85d2aa5e43420bcf5c8329c..f3173f8de74e8192d2504c6c6e3ca939
          let (items, _, _) = RolloutRecorder::load_rollout_items(path)
              .await
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index dd5666fd0ff295a3974907aec986ef8a7de11540..9583efdfceb2b6886544561179d57ef3ccc15ba3 100644
+index 89b6e9342c898950316714f9302082fd551f98aa..99991fe8c7e6f7299b5b8269b588e2f1aa9118f1 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -60,6 +60,7 @@ use crate::ThreadPage;
@@ -6120,7 +6129,7 @@ index dd5666fd0ff295a3974907aec986ef8a7de11540..9583efdfceb2b6886544561179d57ef3
      fn move_thread_to_section(
          &self,
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index 41408f5f7876e5b0845aa9fbcb457db89f64ecb4..135c6ea9eacb61174674499e1046b0ddfa486bcd 100644
+index 20b59ae2d2859ee87c4e5cc02c2f741b1ffcd005..f0838893f9e665274da30c993fd9756533335131 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -1,5 +1,6 @@
@@ -6149,10 +6158,10 @@ index 41408f5f7876e5b0845aa9fbcb457db89f64ecb4..135c6ea9eacb61174674499e1046b0dd
  #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
  pub struct MoveThreadToSectionParams {
 diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
-index df466a4f397d9b911275d18d40d66a7ef6b7439f..2858b932e4e60004397e281735c14973d0dba66d 100644
+index 3a4c1e87c865cbd03e682d588713788befcc260b..94d83120cbcec17f8531bdbfd08cf9b78e2207d5 100644
 --- a/codex-rs/tools/src/tool_output.rs
 +++ b/codex-rs/tools/src/tool_output.rs
-@@ -21,6 +21,11 @@ pub trait ToolOutput: Send {
+@@ -22,6 +22,11 @@ pub trait ToolOutput: Send {
      /// Called before recording model-visible history; implementations must not measure time here.
      fn set_handler_duration_ms(&mut self, _handler_duration_ms: u64) {}
 
@@ -6164,7 +6173,7 @@ index df466a4f397d9b911275d18d40d66a7ef6b7439f..2858b932e4e60004397e281735c14973
      /// Whether this output contains external context that should disable memory generation when
      /// `memories.disable_on_external_context` is enabled.
      fn contains_external_context(&self) -> bool {
-@@ -82,6 +87,10 @@ where
+@@ -90,6 +95,10 @@ where
          (**self).set_handler_duration_ms(handler_duration_ms);
      }
 

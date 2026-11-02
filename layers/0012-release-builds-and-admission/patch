@@ -255,7 +255,7 @@ index 65432a219e7a0902e5e17eac1a6f5e7f53e24bd5..d771c2cf2d9107b9de4c37d0a81de319
          cwd=workspace_root,
          env=env,
 diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
-index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75015689a2 100644
+index e8a6b530cc4178b99c83fafc9727c53d23e02afb..65577d24ceadcb2a4961945457e994afd89b92fc 100644
 --- a/codex-rs/app-server/tests/common/test_app_server.rs
 +++ b/codex-rs/app-server/tests/common/test_app_server.rs
 @@ -182,6 +182,7 @@ impl TestAppServer {
@@ -266,7 +266,7 @@ index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75
              env_overrides: Vec::new(),
              args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
              exec_server_delay: None,
-@@ -1873,12 +1874,21 @@ pub struct TestAppServerBuilder {
+@@ -1890,12 +1891,21 @@ pub struct TestAppServerBuilder {
      codex_home: Option<PathBuf>,
      environment: TestAppServerEnvironment,
      program: Option<PathBuf>,
@@ -288,7 +288,7 @@ index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75
  enum TestAppServerEnvironment {
      Auto,
      None,
-@@ -1905,6 +1915,20 @@ impl TestAppServerBuilder {
+@@ -1922,6 +1932,20 @@ impl TestAppServerBuilder {
      /// Uses this app-server binary instead of the standard test binary.
      pub fn with_program(mut self, program: &Path) -> Self {
          self.program = Some(program.to_path_buf());
@@ -309,7 +309,7 @@ index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75
          self
      }
 
-@@ -1981,6 +2005,7 @@ impl TestAppServerBuilder {
+@@ -1998,6 +2022,7 @@ impl TestAppServerBuilder {
              codex_home,
              environment,
              program,
@@ -317,7 +317,7 @@ index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75
              mut env_overrides,
              args,
              exec_server_delay,
-@@ -2146,7 +2171,7 @@ impl TestAppServerBuilder {
+@@ -2163,7 +2188,7 @@ impl TestAppServerBuilder {
              .iter()
              .map(|(key, value)| (key.as_str(), value.as_deref()))
              .collect::<Vec<_>>();
@@ -326,7 +326,7 @@ index 3d469cff4df91a422616b77de67f98eea93b55b8..0f520127be858dc1b8786b5058f6ea75
          let mut app_server = TestAppServer::new_with_program_env_and_args(
              &codex_home,
              &program,
-@@ -2163,6 +2188,10 @@ impl TestAppServerBuilder {
+@@ -2180,6 +2205,10 @@ impl TestAppServerBuilder {
      }
  }
 
@@ -730,10 +730,10 @@ index 0000000000000000000000000000000000000000..8dc623b1ec1df1279b1e2722bc5426aa
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 47490c093e5d2e3f6326cdc4a24c789d5a1988d1..9d59a66228b02a634f8c8bcb6a41208bcac4572b 100644
+index 7c57922b4aea47d7c6b7873687240dc896177590..29ea6fd0e31502e5d3d26a11577d0e1f1b00ff6a 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -68,6 +68,7 @@ mod external_agent_config;
+@@ -72,6 +72,7 @@ mod external_agent_config;
  mod external_agent_import_sync;
  mod external_agent_memory_concurrency;
  mod feedback;
@@ -742,7 +742,7 @@ index 47490c093e5d2e3f6326cdc4a24c789d5a1988d1..9d59a66228b02a634f8c8bcb6a41208b
  mod fs;
  #[path = "gateway_oauth_tests.rs"]
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index fac8578b1eaee304b1ce8d61a2ecb1f45979f645..3dbaa7f02e9cf0a80f6ba5bcaf000bf2771dd7bd 100644
+index badfb582df932fc3053d449be76c09cf06fea30c..74eb6c4922c315f3e6f408ca7bf51f9e3520cb89 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -1,3 +1,6 @@

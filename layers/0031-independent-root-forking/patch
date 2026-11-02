@@ -1,6 +1,6 @@
 diff --git a/codex-rs/core/src/independent_thread/fork.rs b/codex-rs/core/src/independent_thread/fork.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..073241ae9c42670ba77aa31c14dbd481a6643d3b
+index 0000000000000000000000000000000000000000..c3bd3c0beb639b090a43f92a264dfb1a6b8869ce
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork.rs
 @@ -0,0 +1,351 @@
@@ -194,7 +194,7 @@ index 0000000000000000000000000000000000000000..073241ae9c42670ba77aa31c14dbd481
 +        let options = StartThreadOptions {
 +            history_mode: Some(turn.history_mode),
 +            session_source: Some(session.session_source().await),
-+            dynamic_tools: turn.dynamic_tools.to_vec(),
++            dynamic_tools: invocation.step_context.dynamic_tools.to_vec(),
 +            inherited_environments: Some(invocation.step_context.environments.clone()),
 +            client_mcp_extensions: session.services.client_mcp_extensions.clone(),
 +            disabled_plugin_ids: Some(turn.disabled_plugin_ids.clone()),
@@ -357,10 +357,10 @@ index 0000000000000000000000000000000000000000..073241ae9c42670ba77aa31c14dbd481
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/fork/section.rs b/codex-rs/core/src/independent_thread/fork/section.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826fc471118
+index 0000000000000000000000000000000000000000..b91d1d2b9a828dd5028c704148b36b10ae60e2cf
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/section.rs
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,333 @@
 +//! Optional Desktop sidebar placement through tools advertised by the client.
 +//!
 +//! Desktop owns section membership and host routing. Native thread-store sections
@@ -431,7 +431,7 @@ index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826
 +            reason: "inherit_section is false".to_string(),
 +        };
 +    }
-+    let tools = &invocation.turn.dynamic_tools;
++    let tools = &invocation.step_context.dynamic_tools;
 +    let (Some(list), Some(move_tool)) = (
 +        advertised_tool(tools, "list_threads"),
 +        advertised_tool(tools, "move_thread_to_sidebar_section"),
@@ -537,8 +537,11 @@ index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826
 +    if let Some(section) = found {
 +        return Ok((section.section_id.clone(), false));
 +    }
-+    let create = advertised_tool(&invocation.turn.dynamic_tools, "create_sidebar_section")
-+        .ok_or_else(|| "Desktop section creation capability is not available".to_string())?;
++    let create = advertised_tool(
++        &invocation.step_context.dynamic_tools,
++        "create_sidebar_section",
++    )
++    .ok_or_else(|| "Desktop section creation capability is not available".to_string())?;
 +    let section: Section = request(invocation, create, json!({"name": name}), "create").await?;
 +    if section.name != name || section.section_id.is_empty() {
 +        return Err("Desktop did not confirm the requested section creation; inspect sections before retrying".to_string());
@@ -693,10 +696,10 @@ index 0000000000000000000000000000000000000000..dd6c995969446d638e016411cbfc3826
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/fork/section_tests.rs b/codex-rs/core/src/independent_thread/fork/section_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e22445d44a267cc78c1f02123e17c4f836a8c8af
+index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b27aeaf9ac
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/section_tests.rs
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,591 @@
 +use super::*;
 +use crate::session::step_context::StepContext;
 +use crate::session::tests::make_session_and_context_with_dynamic_tools_and_rx;
@@ -778,9 +781,13 @@ index 0000000000000000000000000000000000000000..e22445d44a267cc78c1f02123e17c4f8
 +        .await;
 +    *session.active_turn.lock().await = Some(ActiveTurn::default());
 +    let fork = ThreadId::new();
++    let mut step_context = StepContext::for_test(Arc::clone(&turn));
++    Arc::get_mut(&mut step_context)
++        .expect("unshared test step")
++        .dynamic_tools = session.dynamic_tools().await;
 +    let invocation = ToolInvocation {
 +        session: Arc::clone(&session),
-+        step_context: StepContext::for_test(Arc::clone(&turn)),
++        step_context,
 +        turn,
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
@@ -1102,10 +1109,14 @@ index 0000000000000000000000000000000000000000..e22445d44a267cc78c1f02123e17c4f8
 +        .collect();
 +    let (session, turn, events) = make_session_and_context_with_dynamic_tools_and_rx(tools).await;
 +    *session.active_turn.lock().await = Some(ActiveTurn::default());
++    let mut step_context = StepContext::for_test(Arc::clone(&turn));
++    Arc::get_mut(&mut step_context)
++        .expect("unshared test step")
++        .dynamic_tools = session.dynamic_tools().await;
 +    (
 +        ToolInvocation {
 +            session,
-+            step_context: StepContext::for_test(Arc::clone(&turn)),
++            step_context,
 +            turn,
 +            cancellation_token: CancellationToken::new(),
 +            tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
@@ -1282,10 +1293,10 @@ index 0000000000000000000000000000000000000000..e22445d44a267cc78c1f02123e17c4f8
 +}
 diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259bbd2d139
+index 0000000000000000000000000000000000000000..8a50bb4d4abe68e2bd5cbc1c942842a577b2e001
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/tests.rs
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,534 @@
 +//! Deterministic tests of the tool's persisted history and independent lifecycle.
 +
 +use super::*;
@@ -1419,8 +1430,8 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +        turn.config = Arc::new(config.clone());
 +        turn.history_mode = history_mode;
 +        turn.sub_id = "unfinished".to_string();
-+        if placement_fails {
-+            turn.dynamic_tools = ["list_threads", "move_thread_to_sidebar_section"]
++        let dynamic_tools = if placement_fails {
++            ["list_threads", "move_thread_to_sidebar_section"]
 +                .into_iter()
 +                .map(|name| {
 +                    DynamicToolSpec::Function(DynamicToolFunctionSpec {
@@ -1430,8 +1441,10 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +                        defer_loading: false,
 +                    })
 +                })
-+                .collect();
-+        }
++                .collect()
++        } else {
++            Vec::new()
++        };
 +        let state = init_state_db(&config).await.expect("test state database");
 +        let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
 +        let manager = Arc::new(ThreadManager::new(
@@ -1454,7 +1467,7 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +        let source = manager
 +            .start_thread(StartThreadOptions {
 +                history_mode: Some(history_mode),
-+                dynamic_tools: turn.dynamic_tools.to_vec(),
++                dynamic_tools,
 +                thread_extension_init: {
 +                    let mut init = ExtensionDataInit::new();
 +                    init.insert(codex_extension_api::ToolPolicy {
@@ -1509,7 +1522,7 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +            arguments["section"] = json!("Research");
 +            arguments["inherit_section"] = json!(false);
 +        }
-+        let invocation = tool_invocation(&source, turn, arguments);
++        let invocation = tool_invocation(&source, turn, arguments).await;
 +        let expected_model = invocation.step_context.settings.model_info.slug.clone();
 +        let expected_policy = invocation.step_context.settings.approval_policy();
 +        let expected_cwd = invocation.turn.config.cwd.clone();
@@ -1681,11 +1694,14 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +                manager: Arc::downgrade(&manager),
 +            }),
 +        }
-+        .handle_call(tool_invocation(
-+            &source,
-+            Arc::new(turn),
-+            json!({"prompt": "new assignment", "inherit_section": false}),
-+        ))
++        .handle_call(
++            tool_invocation(
++                &source,
++                Arc::new(turn),
++                json!({"prompt": "new assignment", "inherit_section": false}),
++            )
++            .await,
++        )
 +        .await?;
 +        let result: serde_json::Value = serde_json::from_str(&result.log_output())?;
 +        assert_eq!(result["status"], "created_not_started");
@@ -1730,11 +1746,9 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +                manager: Arc::downgrade(&manager),
 +            }),
 +        }
-+        .handle_call(tool_invocation(
-+            &source,
-+            Arc::new(turn),
-+            json!({"prompt": "not started"}),
-+        ))
++        .handle_call(
++            tool_invocation(&source, Arc::new(turn), json!({"prompt": "not started"})).await,
++        )
 +        .await;
 +        let Err(error) = result else {
 +            panic!("subagent must not fork a root")
@@ -1762,14 +1776,18 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +}
 +
 +/// Builds a direct call from a live source and captured turn context.
-+fn tool_invocation(
++async fn tool_invocation(
 +    source: &NewThread,
 +    turn: Arc<TurnContext>,
 +    arguments: serde_json::Value,
 +) -> ToolInvocation {
++    let mut step_context = StepContext::for_test(Arc::clone(&turn));
++    Arc::get_mut(&mut step_context)
++        .expect("unshared test step")
++        .dynamic_tools = source.thread.session.dynamic_tools().await;
 +    ToolInvocation {
 +        session: Arc::clone(&source.thread.session),
-+        step_context: StepContext::for_test(Arc::clone(&turn)),
++        step_context,
 +        turn,
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
@@ -1814,10 +1832,10 @@ index 0000000000000000000000000000000000000000..c9439ac7d98369f2798efb2aa05b5259
 +    )
 +}
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
-index 6a264c623c46370e2b8939925c26409623972cda..1fab84100bd2c288abc929f1d11b18d8d6ba97bd 100644
+index 42156c7556bff5acc34cb25e36d4dfe2b7cefb30..11c0bb3c0637fe5c4dd44d85bec665e86eb9947c 100644
 --- a/codex-rs/core/src/independent_thread/message_tests.rs
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
-@@ -263,6 +263,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
+@@ -264,6 +264,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
              "adopt_agent",
              "promote_agent",
              "close_agent",
@@ -1845,10 +1863,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index fa035c11510783dbbe8f3fe95f3ef57f30a465ac..57892148bcb5197b49b55ffabb8d8af7495c5efb 100644
+index 7ebf27f4a61cacf746a972855f083a4a70bb3d52..58e732e702f5d240e2f322ac45976a9a17e70bce 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1191,6 +1191,11 @@ impl ThreadManager {
+@@ -1247,6 +1247,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1874,7 +1892,7 @@ index 0eac846e05187ab469d9ecc33f295b75e06f7a48..5e5beef1e477f4f265c82d9a2e9dae59
      turn_context: &TurnContext,
      call_id: String,
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 190ca56c4dce66321e152999fdd6baeeb458825d..b4c1c0359ec59578eadfb0a5333fac7898dc65e7 100644
+index 571cfb6456952a4e40fe6839fc19a6b8a521e800..0403333e47d5c4208aafe6a8db24f885c656f71c 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@
@@ -1887,10 +1905,10 @@ index 190ca56c4dce66321e152999fdd6baeeb458825d..b4c1c0359ec59578eadfb0a5333fac78
  mod get_context_remaining;
  pub(crate) mod get_context_remaining_spec;
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index 505508bbeb7fe5ae852e1f140326c7ecf74c1f88..b0b1506fe6d51046939aa7b8818c7a9eb3092f22 100644
+index eb4fe07201c84956093a623d443b98c23b56645f..0a1061f0411290b56e656ad72bb07824dd98a217 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
-@@ -1410,10 +1410,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1447,10 +1447,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
      // A canonical persisted turn begins at `TurnStarted`, before its user response item. Record
      // that boundary so truncation cannot retain the opening event for an excluded turn.
      let mut active_turn_start = None;
@@ -1907,7 +1925,7 @@ index 505508bbeb7fe5ae852e1f140326c7ecf74c1f88..b0b1506fe6d51046939aa7b8818c7a9e
              }
              RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                  event_user_positions.push(active_turn_start.unwrap_or(index));
-@@ -1426,11 +1431,27 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1463,11 +1468,27 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
              RolloutItem::ResponseItem(item) if item.is_user_message() => {
                  response_user_positions.push(active_turn_start.unwrap_or(index));
              }
@@ -1937,7 +1955,7 @@ index 505508bbeb7fe5ae852e1f140326c7ecf74c1f88..b0b1506fe6d51046939aa7b8818c7a9e
                  event_user_positions.truncate(event_user_positions.len().saturating_sub(count));
                  response_user_positions
                      .truncate(response_user_positions.len().saturating_sub(count));
-@@ -1458,7 +1479,14 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1496,7 +1517,14 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
      } else {
          event_user_positions
      };

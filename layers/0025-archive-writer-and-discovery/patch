@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index b274be58b2b6226dc6255142254fd98eb65a6c39..4ec0a1b5e4a0cfe93cc2e3ee191f1b9fb7eba9fa 100644
+index 3448abfa061e996a30fd657470efaca24f4e14bb..15f25709329d30555c9693c192a643ca9a6e7972 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2248,7 +2248,7 @@ impl ThreadRequestProcessor {
+@@ -2291,7 +2291,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index b274be58b2b6226dc6255142254fd98eb65a6c39..4ec0a1b5e4a0cfe93cc2e3ee191f1b9f
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6994,6 +6994,28 @@ impl ThreadRequestProcessor {
+@@ -7012,6 +7012,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,10 +41,10 @@ index b274be58b2b6226dc6255142254fd98eb65a6c39..4ec0a1b5e4a0cfe93cc2e3ee191f1b9f
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 5aa86dea34513d7e308325a40e8882bd25d9c724..36672abbe8598d9c98f1b818710fc0c590dd01a4 100644
+index 2764d5bbecf153a481e866b7f851dd30afa23b99..9b53d6ae50209ed20b4ae5fe1248dca8b9f5ecdb 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -144,6 +144,7 @@ mod skills_list;
+@@ -151,6 +151,7 @@ mod skills_list;
  mod sleep;
  mod sqlite_recovery;
  mod thread_archive;
@@ -53,10 +53,10 @@ index 5aa86dea34513d7e308325a40e8882bd25d9c724..36672abbe8598d9c98f1b818710fc0c5
  mod thread_delete;
  mod thread_environments;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..00c163046421b25948ec603da32ce7bb02686929 100644
+index c28be58304d3b0e8e0c0a9788b4b5f29109ea068..57d0753c3680e75418e26041a6973e552fc02ea1 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-@@ -208,6 +208,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -209,6 +209,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
      let codex_home = TempDir::new()?;
      MockResponsesConfig::new(&server.uri())
          .enable_feature(Feature::Collab)
@@ -64,7 +64,7 @@ index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..00c163046421b25948ec603da32ce7bb
          .write(codex_home.path())?;
      let parent_id = create_fake_paginated_rollout(
          codex_home.path(),
-@@ -236,7 +237,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -237,7 +238,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -73,7 +73,7 @@ index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..00c163046421b25948ec603da32ce7bb
          )
          .await?;
 
-@@ -576,7 +577,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
+@@ -570,7 +571,7 @@ async fn thread_archive_and_unarchive_spawned_descendants(fail_child_restore: bo
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -82,7 +82,7 @@ index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..00c163046421b25948ec603da32ce7bb
          )
          .await?;
      state_db
-@@ -688,7 +689,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+@@ -708,7 +709,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -91,7 +91,7 @@ index b8c58e00cf081ff7eda2c63af2d77ec2146fda00..00c163046421b25948ec603da32ce7bb
          )
          .await?;
      state_db
-@@ -712,6 +713,14 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+@@ -732,6 +733,14 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
      let mut mcp = TestAppServer::builder()
          .with_codex_home(codex_home.path())
          .without_auto_env()
@@ -448,10 +448,10 @@ index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index d61cfd8eb6796cb62074663fff2ae0d73394ce7e..06aa7417e952e7ef3462866f26bddc74d52e1460 100644
+index d055f12ca4e49567b2cfa849d496a48878b744cf..b1f4613b9d121ae67cd405dee4bb0bf4f6c97fa1 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1210,12 +1210,12 @@ async fn select_thread_candidates(
+@@ -1211,12 +1211,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }
@@ -471,10 +471,10 @@ index d61cfd8eb6796cb62074663fff2ae0d73394ce7e..06aa7417e952e7ef3462866f26bddc74
      Ok(selected)
  }
 diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
-index f8db8e86be4cdee1905ea7176e3a76f154434625..7c4197e6ecfe4c90c481caf5b1509db8d04333ae 100644
+index 47957d070176cfd5554a627b5f25744364c62805..fae33e028b3d6f95067c47697999bf75d7664cfc 100644
 --- a/codex-rs/rollout/src/writer_lock_tests.rs
 +++ b/codex-rs/rollout/src/writer_lock_tests.rs
-@@ -235,3 +235,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
+@@ -240,3 +240,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
      );
      assert!(writer.acquire(thread_id).is_ok());
  }
@@ -952,10 +952,10 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index d7c5154c68655d61ff3da53bec318c72f37092b2..3d3f9968c6b25a1c661d856fcd3fbe5318ce48eb 100644
+index 358b815481d7f9b13b07b2fe3afc401594a536cd..d471d4023b52bff4e66d3414f9a3c5f2d4f083ad 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
-@@ -715,6 +715,7 @@ impl LocalThreadStore {
+@@ -738,6 +738,7 @@ impl LocalThreadStore {
          if let Some(selected) = &selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -963,7 +963,7 @@ index d7c5154c68655d61ff3da53bec318c72f37092b2..3d3f9968c6b25a1c661d856fcd3fbe53
          {
              // A stable thread can retain older physical rollouts after a revert. Migrating one of
              // those files would overwrite the selected thread's history mode and migration journal.
-@@ -977,6 +978,7 @@ impl LocalThreadStore {
+@@ -1000,6 +1001,7 @@ impl LocalThreadStore {
          if let Some(selected) = &locked_selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -971,7 +971,7 @@ index d7c5154c68655d61ff3da53bec318c72f37092b2..3d3f9968c6b25a1c661d856fcd3fbe53
          {
              return Ok(None);
          }
-@@ -2056,6 +2058,16 @@ async fn find_current_rollout_path(
+@@ -2079,6 +2081,16 @@ async fn find_current_rollout_path(
          }))
  }
 

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index e4f43ca88d1f5ebf1170550d6f0eda7e437c8363..6af34e7d7fb285524299b9711108be0646e91eaa 100644
+index 733df70ed545b29b7e5ef3ef8a9bf37e474cad0d..4fb441326f3c88641afdced1d9e2b70c7bdae329 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
 @@ -84,6 +84,7 @@ pub(crate) fn thread_extensions(
@@ -11,7 +11,7 @@ index e4f43ca88d1f5ebf1170550d6f0eda7e437c8363..6af34e7d7fb285524299b9711108be06
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 533c61cf20b9b8c248991ad488e5953787f66328..c2b7e69fa916319ea7d906b5700230e3696785ba 100644
+index f0c90edf22fed6924d5b0ffcba37b544d7ae7a24..71bc447983136a00ba793bff8297035af12c29c8 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -17,6 +17,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
@@ -23,7 +23,7 @@ index 533c61cf20b9b8c248991ad488e5953787f66328..c2b7e69fa916319ea7d906b5700230e3
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
-@@ -481,6 +483,7 @@ async fn run_compact_task_inner_impl(
+@@ -485,6 +487,7 @@ async fn run_compact_task_inner_impl(
      let user_messages = collect_annotated_user_messages(history_items);
 
      let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -82,7 +82,7 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 0b89c5439c41708518b9eee093045daf64c14e5d..0a397a529b21d0ae7d10e7e4276df51bebf0d313 100644
+index b4fc0f70cedb5e84416ce434e4d90864948d821c..0fb348a02dd9deaad724677d4941eabe6502fa9a 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
@@ -129,7 +129,7 @@ index 2f15771ab49cfea4fa74ead9e702183a37989977..049845f6e6706c46cf3c0e4bd0b09026
              previous_items,
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 8e03585419b4486560c305d1663629dbecc6f7fc..7f068189d21e42b499fe1120ad85cf11af323a91 100644
+index 694820047cf5fe06e8c82e55a6017d914dd273ed..4489fa7f5682ac05d6007c351f698a6b048718b8 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
 @@ -542,6 +542,11 @@ impl ContextManager {
@@ -361,10 +361,10 @@ index 0000000000000000000000000000000000000000..9074db181b876312df8e7fc24821298a
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6a264c623c46370e2b8939925c26409623972cda
+index 0000000000000000000000000000000000000000..42156c7556bff5acc34cb25e36d4dfe2b7cefb30
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,427 @@
 +use super::*;
 +use crate::CodexAppsToolsCache;
 +use crate::ThreadManager;
@@ -624,6 +624,7 @@ index 0000000000000000000000000000000000000000..6a264c623c46370e2b8939925c264096
 +            false,
 +            &host.turn.extension_data,
 +            None,
++            &step.dynamic_tools,
 +        )?;
 +        let names = router.registered_tool_names_for_test();
 +        for name in [
@@ -1188,7 +1189,7 @@ index 0000000000000000000000000000000000000000..ec21030fe941b331d166492ba9bc1c92
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index c46233768267c2eec7c4ba269bed47710453dc34..f0165be156d590d2247872b51356ef97aa6d8b95 100644
+index 8ed656e7ae1132fa9fbfc1a256092a88b11e623c..d689922541c19ad500b9d8a204426e61a12347d3 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -84,6 +84,8 @@ mod agent_communication;
@@ -1200,11 +1201,56 @@ index c46233768267c2eec7c4ba269bed47710453dc34..f0165be156d590d2247872b51356ef97
  mod attestation;
  mod code_mode_host;
  mod codex_delegate;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 64da3b01a1f913938a8bfe512902833b8b8f8616..f11e05f1d2aaf39977bbecf89f571ca8ef50be97 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -5124,6 +5124,7 @@ impl Session {
+             executor_hook_sources,
+             mcp,
+             required_mcp_servers: required_servers.to_vec(),
++            dynamic_tools,
+             tool_router,
+             loaded_agents_md,
+             context_transition: Default::default(),
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index f228cf6290f88794490c7725c0b7f727d87099a8..ef18abd7ab6c37059a432b5088fbf15f7163b605 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -17,6 +17,7 @@ use codex_file_system::EnvironmentAccess;
+ use codex_mcp::McpBinding;
+ use codex_otel::SessionTelemetry;
+ use codex_plugin::ExecutorPluginHookSource;
++use codex_protocol::dynamic_tools::DynamicToolSpec;
+ use codex_protocol::items::ModelInvocationContext;
+ use codex_protocol::protocol::TurnContextItem;
+ use tokio_util::sync::CancellationToken;
+@@ -48,6 +49,8 @@ pub(crate) struct StepContext {
+     /// A model reroute preserves these names when it rebuilds the step so steering input does not
+     /// lose a server that was not required by the original turn input.
+     pub(crate) required_mcp_servers: Vec<String>,
++    /// The dynamic catalog captured when this sampling request's tools were prepared.
++    pub(crate) dynamic_tools: Arc<[DynamicToolSpec]>,
+     /// The finalized tool plan advertised and executed for this exact sampling request.
+     pub(crate) tool_router: Arc<ToolRouter>,
+     /// The canonical AGENTS.md value observed with this environment snapshot.
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 80983cd4010e423f87e84af382d04196c09eccf4..5142a3c678f7454f55d775a5db6ab9f27737338a 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -315,6 +315,7 @@ impl StepContext {
+                 &turn.config,
+             ))),
+             required_mcp_servers: Vec::new(),
++            dynamic_tools: Arc::default(),
+             tool_router: Arc::new(ToolRouter::from_parts(
+                 ToolRegistry::empty_for_test(),
+                 Vec::new(),
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 4867d4588060a437665e8ea0bcef954f627f526a..ec4db2c91d74b2c283f7121bd5059e84d5a9a7a6 100644
+index 2a0726bab65f4b45957d97ffeecabec7b65e5987..e6d4fdf1cd9ec392942f6b909cc9b4fac2379669 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -157,6 +157,8 @@ pub(crate) fn build_tool_router(
+@@ -158,6 +158,8 @@ pub(crate) fn build_tool_router(
      let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
      add_core_tool_sources(&context, &mut registry);
 
