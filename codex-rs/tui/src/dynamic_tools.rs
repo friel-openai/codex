@@ -1028,6 +1028,8 @@ async fn execute_inner(
                                     | ThreadItemPayload::FunctionCallOutput { .. }
                                     | ThreadItemPayload::HookPrompt { .. }
                                     | ThreadItemPayload::AgentMessage { .. }
+                                    | ThreadItemPayload::InterAgentCommunication { .. }
+                                    | ThreadItemPayload::RawResponseItem { .. }
                                     | ThreadItemPayload::Plan { .. }
                                     | ThreadItemPayload::Reasoning { .. }
                                     | ThreadItemPayload::SubAgentActivity { .. }
@@ -1421,6 +1423,13 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
             }
             ThreadItemPayload::AgentMessage { id, text, phase, .. } => json!({
                 "type": "agentMessage", "id": id, "text": text, "phase": phase
+            }),
+            ThreadItemPayload::InterAgentCommunication { id, communication } => json!({
+                "type": "interAgentCommunication", "id": id,
+                "author": communication.author, "recipient": communication.recipient
+            }),
+            ThreadItemPayload::RawResponseItem { id, .. } => json!({
+                "type": "rawResponseItem", "id": id
             }),
             ThreadItemPayload::Plan { id, text } => json!({
                 "type": "plan", "id": id, "text": truncate(text, DEFAULT_OUTPUT_CHARS)

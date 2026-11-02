@@ -11,6 +11,7 @@ pub(crate) use paragraph::HyperlinkRows;
 pub(crate) use paragraph::HyperlinkText;
 pub(crate) use source::LineWrapPolicy;
 pub(crate) use source::LogicalLineSource;
+pub(crate) use source::UserMessageLayout;
 
 use std::num::NonZeroU16;
 use std::ops::Range;
