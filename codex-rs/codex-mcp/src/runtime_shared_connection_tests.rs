@@ -76,11 +76,14 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         ready_selected_capability_roots: Vec::new(),
         environment_selections: Arc::default(),
         ready_environments: HashMap::new(),
+        shutting_down: AtomicBool::new(false),
         cached_binding: Mutex::new(None),
     }));
     let input = McpRuntimeInput {
         network_policy_metadata: None,
         startup_policy: McpStartupPolicy::Eager,
+        connection_pool: pool.clone(),
+        connection_pool_mode: McpConnectionPoolMode::Reuse,
         config,
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),

@@ -60,10 +60,7 @@ async fn stdio_sharing_follows_protocol_and_enablement_for_loaded_chats() -> Res
         let second = app.start_thread(ThreadStartParams::default()).await?.thread;
         let mut second_processes = call_servers(&mut app, &second.id).await?;
         for name in ["alpha", "beta"] {
-            assert_eq!(
-                first_processes[name] == second_processes[name],
-                name == "alpha" || modern
-            );
+            assert_ne!(first_processes[name], second_processes[name]);
         }
         if modern_without_sharing {
             for sharing in [false, true] {
@@ -71,7 +68,7 @@ async fn stdio_sharing_follows_protocol_and_enablement_for_loaded_chats() -> Res
                 first_processes = call_servers(&mut app, &first.id).await?;
                 second_processes = call_servers(&mut app, &second.id).await?;
                 for name in ["alpha", "beta"] {
-                    assert_eq!(first_processes[name] == second_processes[name], sharing);
+                    assert_ne!(first_processes[name], second_processes[name]);
                 }
             }
         }
