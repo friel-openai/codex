@@ -410,6 +410,24 @@ async fn attachment_owner_deletion_can_retry_after_state_cleanup_fails() {
     let params = DeleteThreadsParams {
         thread_ids: vec![child_id, parent_id],
     };
+    let outcome = store
+        .delete_threads_with_outcome(params.clone())
+        .await
+        .expect("physical deletion result must survive state cleanup failure");
+    assert_eq!(outcome.deleted_thread_ids, params.thread_ids);
+    let failure = outcome.failure.expect("state cleanup failure");
+    assert_eq!(failure.thread_id, None);
+    assert!(matches!(failure.error, ThreadStoreError::Internal { .. }));
+    assert!(rollout_paths.iter().all(|path| !path.exists()));
+    for &owner_id in &params.thread_ids {
+        assert!(
+            runtime
+                .get_thread(owner_id)
+                .await
+                .expect("read retained thread metadata")
+                .is_some()
+        );
+    }
     let error = store
         .delete_threads(params.clone())
         .await
@@ -438,7 +456,21 @@ async fn attachment_owner_deletion_can_retry_after_state_cleanup_fails() {
         .delete_threads(params.clone())
         .await
         .expect("batch retry must tolerate missing rollouts and already-deleted members");
+    assert!(
+        runtime
+            .list_thread_spawn_descendants(parent_id)
+            .await
+            .expect("read removed retry graph")
+            .is_empty()
+    );
     for &owner_id in &params.thread_ids {
+        assert!(
+            runtime
+                .get_thread(owner_id)
+                .await
+                .expect("read deleted thread metadata")
+                .is_none()
+        );
         assert_eq!(
             store
                 .list_thread_attachments(ListThreadAttachmentsParams {

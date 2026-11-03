@@ -57,8 +57,19 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
     ) -> CodexResult<tokio::sync::watch::Receiver<AgentStatus>> {
-        let thread = self.upgrade()?.get_thread(agent_id).await?;
-        Ok(thread.subscribe_status())
+        match self.upgrade()?.get_thread(agent_id).await {
+            Ok(thread) => Ok(thread.subscribe_status()),
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                let status = self
+                    .runtime
+                    .registry
+                    .agent_lifecycle(agent_id)
+                    .and_then(|lifecycle| lifecycle.cold_terminal_status())
+                    .ok_or(err)?;
+                Ok(tokio::sync::watch::channel(status).1)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Submit a shutdown request for a live agent without marking it explicitly closed in
