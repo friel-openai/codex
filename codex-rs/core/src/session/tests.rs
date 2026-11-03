@@ -315,6 +315,7 @@ impl StepContext {
                 &turn.config,
             ))),
             required_mcp_servers: Vec::new(),
+            dynamic_tools: Arc::default(),
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
