@@ -1,4 +1,5 @@
 use super::*;
+use crate::bespoke_event_handling::is_inter_agent_message_item;
 use crate::extensions::send_thread_warning;
 use crate::thread_state::ListenerStateCandidate;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
@@ -553,11 +554,14 @@ async fn start_listener(
                             .then(|| thread_state.turn_summary.clone());
                         (thread_state.experimental_raw_events, terminal)
                     };
-                    if matches!(
-                        &event.msg,
-                        EventMsg::RawResponseItem(_) | EventMsg::RawResponseCompleted(_) | EventMsg::PrivateSessionEvent(_)
-                    ) && !raw_events_enabled
-                    {
+                    let suppress_raw_event = match &event.msg {
+                        EventMsg::RawResponseItem(event) => {
+                            !is_inter_agent_message_item(&event.item)
+                        }
+                        EventMsg::RawResponseCompleted(_) | EventMsg::PrivateSessionEvent(_) => true,
+                        _ => false,
+                    };
+                    if suppress_raw_event && !raw_events_enabled {
                         continue;
                     }
                     let subscribed_connection_ids = thread_state_manager
