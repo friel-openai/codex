@@ -1,6 +1,7 @@
 //! Owns a provisional child until the spawn result can be returned without yielding.
 
 use super::AgentTreeMembership;
+use crate::thread_manager::SharedFullHistorySourceReservation;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::thread_store_error_kind;
 use codex_agent_graph_store::AgentGraphStoreError;
@@ -22,6 +23,7 @@ pub(in crate::agent) struct PendingSpawn {
     pending: Option<(ThreadId, AgentTreeMembership)>,
     edge_write: Option<JoinHandle<()>>,
     owner: SpawnOwner,
+    source_reservation: Option<SharedFullHistorySourceReservation>,
 }
 
 impl PendingSpawn {
@@ -36,11 +38,23 @@ impl PendingSpawn {
             pending: Some((child, membership)),
             edge_write: None,
             owner,
+            source_reservation: None,
         }
     }
 
     pub(super) fn set_edge_write(&mut self, edge_write: JoinHandle<()>) {
         self.edge_write = Some(edge_write);
+    }
+
+    pub(in crate::agent) fn hold_source_reservation(
+        &mut self,
+        reservation: Option<SharedFullHistorySourceReservation>,
+    ) {
+        assert!(
+            self.source_reservation.is_none(),
+            "fork source reservation already set"
+        );
+        self.source_reservation = reservation;
     }
 
     pub(super) async fn wait_for_edge(&mut self) {
@@ -69,6 +83,7 @@ impl Drop for PendingSpawn {
         let state = Arc::clone(&self.state);
         let teardown = membership.into_teardown_guard("child_spawn_cleanup", Some(child));
         let edge_write = self.edge_write.take();
+        let source_reservation = self.source_reservation.take();
         let local_owner = matches!(self.owner, SpawnOwner::Local);
         drop(tokio::spawn(async move {
             if let Some(thread) = state.remove_thread(&child).await {
@@ -109,6 +124,7 @@ impl Drop for PendingSpawn {
                 teardown.record_shutdown_failure("close_spawn_edge", error_kind);
                 warn!("failed to close cancelled child spawn edge: {error}");
             }
+            drop(source_reservation);
             teardown.complete();
         }));
     }

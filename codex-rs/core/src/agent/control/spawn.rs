@@ -10,11 +10,13 @@ use crate::agent::history::prepare_forked_history;
 use crate::agent::role::apply_role_to_config;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
+use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
 use crate::agents_md_manager::SessionInstructions;
 use crate::codex_thread::CodexThread;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::PermissionProfileSnapshot;
+use crate::session::ForkStartupItems;
 use crate::thread_manager::StartThreadOptions;
 use codex_features::Feature;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -729,26 +731,32 @@ impl LocalAgentControl {
             ..StartThreadOptions::new(config.clone())
         };
         let mut inherited_thread_state = InheritedThreadState::default();
+        let mut fork_startup_items = ForkStartupItems::default();
+        let mut fork_source_reservation = None;
         let fork_context = match (session_source, options.fork_mode.as_ref()) {
             (Some(session_source), Some(_)) => {
                 let fork_context_started_at = Instant::now();
-                let (initial_history, history_mode) = prepare_forked_history(
+                let prepared = prepare_forked_history(
                     &state,
                     &session_source,
                     &options,
                     &config,
                     multi_agent_version,
+                    /*allow_rollout_references*/ true,
                 )
                 .await
                 .map_err(|err| err.with_agent_context(AgentErrorContext::ForkHistory))?;
-                start_options.initial_history = initial_history;
-                start_options.history_mode = history_mode;
+                start_options.initial_history = prepared.history;
+                start_options.history_mode = prepared.history_mode;
+                fork_startup_items = prepared.startup_items;
+                fork_source_reservation = prepared.source_reservation;
                 inherited_thread_state = InheritedThreadState::builder()
                     .prompt_cache_key(
                         parent_prompt_cache_key_for_source(&state, Some(&session_source)).await,
                     )
                     .response_continuation(
-                        parent_response_continuation_for_source(&state, Some(&session_source)).await,
+                        parent_response_continuation_for_source(&state, Some(&session_source))
+                            .await,
                     )
                     .mcp_tool_snapshot(
                         parent_mcp_tool_snapshot_for_source(&state, Some(&session_source)).await,
@@ -776,6 +784,8 @@ impl LocalAgentControl {
                 parent_thread_id,
                 inherited_exec_policy,
                 inherited_thread_state,
+                fork_startup_items,
+                fork_source_reservation.clone(),
             )
             .await
             .map_err(|err| err.with_agent_context(AgentErrorContext::ChildStartup))?;
@@ -787,6 +797,7 @@ impl LocalAgentControl {
             membership,
             SpawnOwner::Local,
         );
+        pending_spawn.hold_source_reservation(fork_source_reservation.take());
 
         if let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
@@ -831,6 +842,7 @@ impl LocalAgentControl {
                 new_thread.thread.ensure_rollout_materialized(),
                 pending_spawn.wait_for_edge(),
             );
+            state.flush_fork_or_shutdown(&new_thread).await?;
         } else {
             pending_spawn.wait_for_edge().await;
         }

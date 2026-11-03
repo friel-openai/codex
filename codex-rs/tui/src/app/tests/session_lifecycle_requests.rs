@@ -2917,7 +2917,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     )
     .await
     .map_err(|error| color_eyre::eyre::eyre!(error))?;
-    assert_eq!(exported[0].raw_lines()[0].to_string(), "visible");
+    assert_eq!(exported[0].raw_lines()[0].to_string(), "paginated history");
     assert!(
         recorded_params(&requests, "thread/read")[initial_read_count..]
             .iter()
@@ -4033,7 +4033,7 @@ terminal_visualization_instructions = true
     for mode in [ManagedWorktreeMode::New, ManagedWorktreeMode::Fork] {
         requests.lock().expect("request recorder lock").clear();
         let previous = app.chat_widget.thread_id();
-        let previous_rollout = app.chat_widget.rollout_path().expect("previous rollout");
+        assert!(app.chat_widget.rollout_path().is_some(), "previous rollout");
         app.handle_event(
             &mut tui,
             &mut server,
@@ -4102,13 +4102,22 @@ terminal_visualization_instructions = true
         assert_eq!(metadata.meta.history_base.is_some(), fork);
         if let Some(base) = metadata.meta.history_base {
             assert!(fork, "New must not inherit history");
-            assert_eq!(Some(base.thread_id), previous);
-            let parent = fs::read(&previous_rollout)?;
-            history.extend_from_slice(
-                parent
-                    .get(..usize::try_from(base.end_byte_offset)?)
-                    .expect("valid inherited prefix"),
-            );
+            let parent_thread_id = previous.expect("logical fork parent");
+            assert_eq!(params[0]["threadId"], parent_thread_id.to_string());
+            assert_eq!(metadata.meta.forked_from_id, Some(parent_thread_id));
+            let parent_path = codex_rollout::find_rollout_path_by_rollout_id(
+                app.config.codex_home.as_path(),
+                base.thread_id,
+            )
+            .await?
+            .expect("referenced physical rollout");
+            let parent_metadata = codex_rollout::read_session_meta_line(&parent_path).await?;
+            assert_eq!(parent_metadata.meta.id, parent_thread_id);
+            let prefix_len = usize::try_from(base.end_byte_offset)?;
+            let parent = codex_rollout::read_rollout_prefix(&parent_path, prefix_len)?
+                .expect("regular referenced physical rollout");
+            assert_eq!(parent.len(), prefix_len, "complete inherited prefix");
+            history.extend_from_slice(&parent);
         }
         let history = String::from_utf8(history)?;
         assert!(!history.contains("managed fork history"));
