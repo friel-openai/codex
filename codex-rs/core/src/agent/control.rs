@@ -15,7 +15,9 @@ use crate::config::RolloutBudgetConfig;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
@@ -65,6 +67,9 @@ pub(in crate::agent) use spawn::effective_spawn_config;
 pub(in crate::agent) use spawn::fresh_child_history_and_tools;
 pub(in crate::agent) use spawn_guard::PendingSpawn;
 pub(in crate::agent) use spawn_guard::SpawnOwner;
+
+const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
 mod api;
 mod budget;
@@ -769,6 +774,81 @@ where
     );
     Ok(submission_id)
 }
+
+pub(in crate::agent) async fn parent_prompt_cache_key_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<ThreadId> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .map(|parent_thread| parent_thread.session.prompt_cache_key())
+}
+
+pub(in crate::agent) async fn parent_mcp_tool_snapshot_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<McpToolSnapshot> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+    let binding = parent_thread
+        .session
+        .services
+        .mcp_runtime
+        .current_binding()
+        .await?;
+    Some(McpToolSnapshot {
+        tools: binding.tools().to_vec(),
+    })
+}
+
+fn fork_previous_response_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
+        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+}
+
+fn fork_previous_response_id_value_enabled(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+pub(in crate::agent) async fn parent_response_continuation_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<crate::client::ResponseContinuation> {
+    if !fork_previous_response_id_enabled() {
+        return None;
+    }
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .and_then(|parent_thread| parent_thread.session.response_continuation_for_fork())
+}
+
 #[cfg(test)]
 #[path = "control_tests.rs"]
 mod tests;

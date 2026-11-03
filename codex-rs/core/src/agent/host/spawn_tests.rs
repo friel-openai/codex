@@ -237,6 +237,31 @@ async fn prepared_spawn_captures_policy_after_fork_history() -> anyhow::Result<(
         .append_amendment_and_update(home.path(), &ExecPolicyAmendment::new(command.clone()))
         .await?;
     let prepared = tokio::time::timeout(Duration::from_secs(10), preparation).await??;
+    assert_eq!(
+        prepared
+            .inheritance
+            .inherited_thread_state
+            .prompt_cache_key(),
+        Some(session.prompt_cache_key())
+    );
+    assert_eq!(
+        prepared.thread_options.prompt_cache_key,
+        session.services.model_client.prompt_cache_key_policy()
+    );
+    let inherited_tools = prepared
+        .inheritance
+        .inherited_thread_state
+        .mcp_tool_snapshot()
+        .map(|snapshot| serde_json::to_value(&snapshot.tools))
+        .transpose()?;
+    let parent_tools = session
+        .services
+        .mcp_runtime
+        .current_binding()
+        .await
+        .map(|binding| serde_json::to_value(binding.tools()))
+        .transpose()?;
+    assert_eq!(inherited_tools, parent_tools);
     let later = vec!["after_prepare_policy_test".to_owned()];
     parent_policy
         .append_amendment_and_update(home.path(), &ExecPolicyAmendment::new(later.clone()))
