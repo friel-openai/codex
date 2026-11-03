@@ -273,6 +273,77 @@ index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e
 +    assert!(child_metadata.rollout_path.exists());
 +    Ok(())
 +}
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs b/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs
+index b7a4fce81dd0199be3802d6025a51743131dd786..fe1911f28521f8c9db3277aa575f2cded955c31c 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs
+@@ -66,6 +66,7 @@ async fn adoption_and_promotion_preserve_disk_history_and_configuration(
+         .with_extra_config("[features.multi_agent_v2]\nenabled = true\nenable_thread_adoption = true")
+         .with_extra_config(&format!("[model_providers.original_provider]\nname = \"Original\"\nbase_url = \"{}/v1\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0", server.uri()))
+         .write(home.path())?;
++    select_provider(home.path(), "original_provider")?;
+     let mut client = app(home.path()).await?;
+     let original: ThreadStartResponse = client
+         .request(|request_id| ClientRequest::ThreadStart {
+@@ -189,6 +190,7 @@ async fn adoption_and_promotion_preserve_disk_history_and_configuration(
+             .await?;
+         assert_eq!(loaded["data"], json!([]));
+     }
++    select_provider(home.path(), "mock_provider")?;
+     let parent: ThreadStartResponse = client
+         .request(|request_id| ClientRequest::ThreadStart {
+             request_id,
+@@ -321,6 +323,7 @@ async fn adoption_and_promotion_preserve_disk_history_and_configuration(
+         .context("promotion must materialize original task")?;
+     let durable_bytes = std::fs::read(&durable_path)?;
+     let parent_before = read(&mut client, parent_id).await?;
++    select_provider(home.path(), "original_provider")?;
+     answer(&server, &original_id, "independent answer").await;
+     turn(&mut client, &original_id, "independent task input").await?;
+     assert_eq!(
+@@ -389,6 +392,14 @@ async fn app(home: &Path) -> Result<TestAppServer> {
+         .await
+ }
+
++fn select_provider(home: &Path, provider: &str) -> Result<()> {
++    let path = home.join("config.toml");
++    let mut config = std::fs::read_to_string(&path)?.parse::<toml_edit::DocumentMut>()?;
++    config["model_provider"] = toml_edit::value(provider);
++    std::fs::write(path, config.to_string())?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn promotion_materializes_the_original_ephemeral_child() -> Result<()> {
+     let server = responses::start_mock_server().await;
+@@ -536,6 +547,7 @@ async fn adoption_waits_for_the_active_source_turn_without_interrupting_it() ->
+         .with_extra_config("[features.multi_agent_v2]\nenabled = true\nenable_thread_adoption = true")
+         .with_extra_config(&format!("[model_providers.source]\nname = \"Source\"\nbase_url = \"{}/v1\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0", source_server.uri()))
+         .write(home.path())?;
++    select_provider(home.path(), "source")?;
+     let mut client = app(home.path()).await?;
+     let original: ThreadStartResponse = client
+         .request(|request_id| ClientRequest::ThreadStart {
+@@ -549,7 +561,10 @@ async fn adoption_waits_for_the_active_source_turn_without_interrupting_it() ->
+     let parent: ThreadStartResponse = client
+         .request(|request_id| ClientRequest::ThreadStart {
+             request_id,
+-            params: Default::default(),
++            params: ThreadStartParams {
++                model_provider: Some("mock_provider".to_string()),
++                ..Default::default()
++            },
+         })
+         .await?;
+     let source_turn: TurnStartResponse = client
+@@ -566,6 +581,7 @@ async fn adoption_waits_for_the_active_source_turn_without_interrupting_it() ->
+         })
+         .await?;
+     timeout(TIMEOUT, source_server.wait_for_request_count(1)).await?;
++    select_provider(home.path(), "mock_provider")?;
+     let result = tool(&server, &parent.thread.id, "adopt-active", "frodex", "adopt_agent", json!({"existing_thread_id": original.thread.id, "task_name": "worker", "message": "continue after the original turn"})).await;
+     let _: TurnStartResponse = client
+         .request(|request_id| ClientRequest::TurnStart {
 diff --git a/codex-rs/core/tests/suite/rollout_compression.rs b/codex-rs/core/tests/suite/rollout_compression.rs
 index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763cae0479e 100644
 --- a/codex-rs/core/tests/suite/rollout_compression.rs
@@ -865,26 +936,29 @@ index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd2
 +    assert!(!path.exists());
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
-index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f83061d363 100644
+index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..330346500e828cb3925458cf38fe6a039933e8e3 100644
 --- a/codex-rs/thread-store/src/local/archive_thread.rs
 +++ b/codex-rs/thread-store/src/local/archive_thread.rs
-@@ -1,5 +1,4 @@
+@@ -1,14 +1,16 @@
  use super::LocalThreadStore;
 -use super::helpers::owned_rollout_paths_from_index;
  use super::helpers::restore_rollout_moves;
  use super::helpers::rollout_path_is_archived;
  use super::helpers::scoped_rollout_path;
-@@ -8,7 +7,8 @@ use crate::ArchiveThreadsParams;
+ use super::helpers::validated_rollout_file_name;
++use super::rollout_migration::archive_gate;
+ use crate::ArchiveThreadsParams;
  use crate::ThreadStoreError;
  use crate::ThreadStoreResult;
  use chrono::Utc;
 -use codex_rollout::RolloutReferenceIndex;
 +use codex_rollout::find_all_rollout_paths_by_thread_id;
 +use codex_rollout::read_session_meta_line_exact;
++use std::sync::Arc;
  use tracing::warn;
 
  use super::thread_rollout_resolver;
-@@ -39,21 +39,23 @@ pub(super) async fn archive_threads(
+@@ -39,21 +41,37 @@ pub(super) async fn archive_threads(
          }
      }
      let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
@@ -898,6 +972,7 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
 -        message: format!("failed to scan thread rollout files: {err}"),
 -    })?;
 -
++    let ownership = Arc::new((_writer_guards, _live_writer_guards, _lifecycle_guards));
      let parent_thread_id = thread_ids[0];
      let mut archived_thread_ids = Vec::new();
      for thread_id in thread_ids {
@@ -909,7 +984,20 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
 +            match find_all_rollout_paths_by_thread_id(store.config.codex_home.as_path(), thread_id)
 +                .await
 +            {
-+                Ok(paths) => archive_thread_with_paths(store, thread_id, paths).await,
++                Ok(paths) => {
++                    let store = store.clone();
++                    let ownership = Arc::clone(&ownership);
++                    // A cancelled request must not release publication or writer ownership
++                    // while the renamed files still await their SQLite commit or rollback.
++                    tokio::spawn(async move {
++                        let _ownership = ownership;
++                        archive_thread_with_paths(&store, thread_id, paths).await
++                    })
++                    .await
++                    .map_err(|error| ThreadStoreError::Internal {
++                        message: format!("archive transaction task failed: {error}"),
++                    })?
++                }
 +                Err(err) => Err(ThreadStoreError::Internal {
 +                    message: format!(
 +                        "failed to enumerate rollout files for thread {thread_id}: {err}"
@@ -920,7 +1008,7 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
              Ok(()) => archived_thread_ids.push(thread_id),
              Err(err) if archived_thread_ids.is_empty() => return Err(err),
              Err(err) => warn!(
-@@ -98,6 +100,15 @@ async fn archive_thread_with_paths(
+@@ -98,6 +116,15 @@ async fn archive_thread_with_paths(
              rollout_path.as_path(),
              "sessions",
          )?;
@@ -936,7 +1024,16 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
          let file_name =
              validated_rollout_file_name(canonical_rollout_path.as_path(), rollout_path.as_path())?;
          let destination = archive_folder.join(&file_name);
-@@ -149,6 +160,14 @@ async fn archive_thread_with_paths(
+@@ -115,6 +142,8 @@ async fn archive_thread_with_paths(
+         message: format!("failed to archive selected rollout for thread {thread_id}"),
+     })?;
+
++    let _publication_guard = archive_gate::try_acquire(&store.config.codex_home)?;
++    archive_gate::check_archive(store, thread_id, &rollout_moves).await?;
+     for (index, (source, destination)) in rollout_moves.iter().enumerate() {
+         if let Err(err) = std::fs::rename(source, destination) {
+             if let Err(restore_err) = restore_rollout_moves(&rollout_moves[..index]) {
+@@ -149,6 +178,14 @@ async fn archive_thread_with_paths(
      Ok(())
  }
 
@@ -951,11 +1048,54 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
  #[cfg(test)]
  mod tests {
      use std::time::Duration;
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 516a04b5ac9a642780b8057edb5b18d376780f26..d807fba12c66b17b15d6a0c3048595cd4e537777 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1705,8 +1705,6 @@ impl ThreadStore for LocalThreadStore {
+
+     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move {
+-            self.await_automatic_rollout_migration(params.thread_id)
+-                .await?;
+             archive_thread::archive_threads(
+                 self,
+                 ArchiveThreadsParams {
+@@ -1723,12 +1721,7 @@ impl ThreadStore for LocalThreadStore {
+         &self,
+         params: ArchiveThreadsParams,
+     ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
+-        Box::pin(async move {
+-            if let Some(thread_id) = params.thread_ids.first().copied() {
+-                self.await_automatic_rollout_migration(thread_id).await?;
+-            }
+-            archive_thread::archive_threads(self, params).await
+-        })
++        Box::pin(async move { archive_thread::archive_threads(self, params).await })
+     }
+
+     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 358b815481d7f9b13b07b2fe3afc401594a536cd..d471d4023b52bff4e66d3414f9a3c5f2d4f083ad 100644
+index 358b815481d7f9b13b07b2fe3afc401594a536cd..40e7b8a7629fddab200c71b01c798c9b5f38566e 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
-@@ -738,6 +738,7 @@ impl LocalThreadStore {
+@@ -53,6 +53,7 @@ use super::thread_history::RolloutProjectionStep;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+
++pub(super) mod archive_gate;
+ mod canonical_projection;
+ mod canonicalizer;
+ mod dependencies;
+@@ -134,6 +135,7 @@ use publish::rewrite_subagent_history_boundary;
+ use publish::rewritten_staged_rollout_path;
+ use publish::staged_rollout_path;
+ use publish::sync_parent_directory;
++#[cfg(test)]
+ use publish::write_migration_journal;
+ use rollback_plan::RollbackPlan;
+ use rollback_plan::RollbackPlanner;
+@@ -738,6 +740,7 @@ impl LocalThreadStore {
          if let Some(selected) = &selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -963,7 +1103,7 @@ index 358b815481d7f9b13b07b2fe3afc401594a536cd..d471d4023b52bff4e66d3414f9a3c5f2
          {
              // A stable thread can retain older physical rollouts after a revert. Migrating one of
              // those files would overwrite the selected thread's history mode and migration journal.
-@@ -1000,6 +1001,7 @@ impl LocalThreadStore {
+@@ -1000,6 +1003,7 @@ impl LocalThreadStore {
          if let Some(selected) = &locked_selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
@@ -971,7 +1111,125 @@ index 358b815481d7f9b13b07b2fe3afc401594a536cd..d471d4023b52bff4e66d3414f9a3c5f2
          {
              return Ok(None);
          }
-@@ -2079,6 +2081,16 @@ async fn find_current_rollout_path(
+@@ -1115,27 +1119,38 @@ impl LocalThreadStore {
+             }));
+         }
+         let bytes_before = limiter.bytes_processed;
+-        let result = match self
+-            .migrate_one_rollout(thread_id, &path, legacy_names, limiter, &locks)
+-            .await
+-        {
+-            Ok(()) => Ok(RolloutMigrationStatus::Migrated),
+-            Err(failure) => {
+-                if let Err(cleanup_error) = self
+-                    .cleanup_failed_unpublished_migration(thread_id, &path, &journal_path, &locks)
+-                    .await
+-                {
+-                    Err(RolloutMigrationFailure::new(
+-                        failure.reason,
+-                        migration_error(format!(
+-                            "{}; failed to clean up unpublished migration: {cleanup_error}",
+-                            failure.error
+-                        )),
+-                    ))
+-                } else {
+-                    Err(failure)
++        let started = self
++            .begin_ordinary_migration(thread_id, &path, locked_metadata.meta.history_mode, &locks)
++            .await;
++        let result = match started {
++            Err(failure) => Err(failure),
++            Ok(indexed) => match self
++                .migrate_one_rollout(thread_id, &path, indexed, legacy_names, limiter, &locks)
++                .await
++            {
++                Ok(()) => Ok(RolloutMigrationStatus::Migrated),
++                Err(failure) => {
++                    if let Err(cleanup_error) = self
++                        .cleanup_failed_unpublished_migration(
++                            thread_id,
++                            &path,
++                            &journal_path,
++                            &locks,
++                        )
++                        .await
++                    {
++                        Err(RolloutMigrationFailure::new(
++                            failure.reason,
++                            migration_error(format!(
++                                "{}; failed to clean up unpublished migration: {cleanup_error}",
++                                failure.error
++                            )),
++                        ))
++                    } else {
++                        Err(failure)
++                    }
+                 }
+-            }
++            },
+         };
+         let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
+         Ok(Some(match result {
+@@ -1151,32 +1166,11 @@ impl LocalThreadStore {
+         &self,
+         thread_id: ThreadId,
+         rollout_path: &Path,
++        indexed: codex_state::ThreadMetadata,
+         legacy_names: Option<&HashMap<ThreadId, String>>,
+         limiter: &mut RolloutMigrationRateLimiter,
+         locks: &Arc<MigrationLocks>,
+     ) -> ClassifiedMigrationResult<()> {
+-        let indexed = if let Some(state_db) = &self.state_db {
+-            Some(
+-                with_failure_reason(
+-                    state_db
+-                        .get_thread(thread_id)
+-                        .await
+-                        .map_err(migration_error),
+-                    RolloutMigrationFailureReason::Unknown,
+-                )?
+-                .ok_or_else(|| {
+-                    RolloutMigrationFailure::new(
+-                        RolloutMigrationFailureReason::MissingSqliteMetadata,
+-                        migration_error(format!(
+-                            "thread {thread_id} is missing its SQLite metadata"
+-                        )),
+-                    )
+-                })?,
+-            )
+-        } else {
+-            None
+-        };
+-
+         let rollout_id = migration_rollout_id(rollout_path, thread_id);
+         let compressed = rollout_path_is_compressed(rollout_path);
+         let staged_path = with_failure_reason(
+@@ -1189,15 +1183,7 @@ impl LocalThreadStore {
+                 .transpose(),
+             RolloutMigrationFailureReason::Unknown,
+         )?;
+-        with_failure_reason(
+-            thread_history::delete_thread(self, rollout_id).await,
+-            RolloutMigrationFailureReason::SqliteMaterializationFailed,
+-        )?;
+         let journal_path = migration_journal_path(&self.config.codex_home, thread_id);
+-        with_failure_reason(
+-            write_migration_journal(&journal_path, locks).await,
+-            RolloutMigrationFailureReason::RolloutPublishFailed,
+-        )?;
+
+         #[cfg(test)]
+         {
+@@ -1252,7 +1238,7 @@ impl LocalThreadStore {
+             ));
+         };
+         let (session_source, thread_source) =
+-            session_metadata::current_sources(&metadata.meta, indexed.as_ref());
++            session_metadata::current_sources(&metadata.meta, Some(&indexed));
+         let kind = RolloutMigrationKind::from_sources(&session_source, thread_source.as_ref());
+
+         let canonicalization_source = CanonicalizationSource {
+@@ -2079,6 +2065,16 @@ async fn find_current_rollout_path(
          }))
  }
 
@@ -988,6 +1246,1319 @@ index 358b815481d7f9b13b07b2fe3afc401594a536cd..d471d4023b52bff4e66d3414f9a3c5f2
  fn matches_selection(selected: &[ThreadId], actual: Option<ThreadId>) -> bool {
      selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
  }
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/archive_gate.rs b/codex-rs/thread-store/src/local/rollout_migration/archive_gate.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..941bac20ea7f92616b32b8c6089fdb980b158ee2
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_migration/archive_gate.rs
+@@ -0,0 +1,350 @@
++//! Serializes archive moves with publication of new durable migration dependencies.
++
++use std::collections::HashSet;
++use std::fs::File;
++use std::io;
++use std::path::Path;
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ThreadHistoryMode;
++
++use super::ClassifiedMigrationResult;
++use super::LocalThreadStore;
++use super::MigrationLocks;
++use super::RolloutMigrationFailure;
++use super::RolloutMigrationFailureReason;
++use super::lineage_journal::LineageMigrationJournal;
++use super::lineage_journal::parse_lineage_migration_journal;
++use super::migration_error;
++use super::publish::migration_journal_path;
++use super::publish::pending_migration_thread_ids;
++use super::publish::write_migration_journal_guarded;
++use super::thread_history;
++use super::with_failure_reason;
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++
++pub(in crate::local) struct ArchivePublicationGuard(File);
++
++impl Drop for ArchivePublicationGuard {
++    fn drop(&mut self) {
++        if let Err(error) = self.0.unlock() {
++            tracing::warn!(%error, "failed to release archive publication lock");
++        }
++    }
++}
++
++pub(in crate::local) fn try_acquire(home: &Path) -> ThreadStoreResult<ArchivePublicationGuard> {
++    let directory = home.join(".tmp");
++    std::fs::create_dir_all(&directory).map_err(migration_error)?;
++    let file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(directory.join("rollout-archive-publication.lock"))
++        .map_err(migration_error)?;
++    match file.try_lock() {
++        Ok(()) => Ok(ArchivePublicationGuard(file)),
++        Err(std::fs::TryLockError::WouldBlock) => Err(ThreadStoreError::Conflict {
++            message: "rollout archive or migration journal publication is busy".to_string(),
++        }),
++        Err(std::fs::TryLockError::Error(error)) => Err(migration_error(error)),
++    }
++}
++
++pub(super) fn pins(journal: &LineageMigrationJournal) -> HashSet<(ThreadId, PathBuf)> {
++    journal
++        .sources
++        .iter()
++        .chain(&journal.authentication_sources)
++        .map(|source| (source.thread_id, source.path.clone()))
++        .chain(
++            journal
++                .history_bases
++                .iter()
++                .map(|source| (source.thread_id, source.path.clone())),
++        )
++        .chain(
++            journal
++                .reference_dependencies
++                .iter()
++                .map(|source| (source.thread_id, source.path.clone())),
++        )
++        .chain(
++            journal
++                .targets
++                .iter()
++                .chain(journal.review_input_target.iter())
++                .map(|target| (target.thread_id, target.path.clone())),
++        )
++        .collect()
++}
++
++fn physical_path(path: &Path) -> ThreadStoreResult<PathBuf> {
++    match std::fs::canonicalize(path) {
++        Ok(path) => Ok(codex_rollout::plain_rollout_path(&path)),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => {
++            // Targets need not exist yet. Resolve existing parents so SQLite aliases and
++            // compressed/plain names still compare to the exact files archive will move.
++            let mut missing = Vec::new();
++            let mut parent = path;
++            loop {
++                match std::fs::canonicalize(parent) {
++                    Ok(mut resolved) => {
++                        for component in missing.into_iter().rev() {
++                            resolved.push(component);
++                        }
++                        return Ok(codex_rollout::plain_rollout_path(&resolved));
++                    }
++                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
++                        missing.push(parent.file_name().ok_or_else(|| {
++                            migration_error("migration journal path has no resolvable parent")
++                        })?);
++                        parent = parent.parent().ok_or_else(|| {
++                            migration_error("migration journal path has no parent")
++                        })?;
++                    }
++                    Err(error) => return Err(migration_error(error)),
++                }
++            }
++        }
++        Err(error) => Err(migration_error(error)),
++    }
++}
++
++async fn selected_physical_path(path: &Path) -> ThreadStoreResult<Option<PathBuf>> {
++    let plain = codex_rollout::plain_rollout_path(path);
++    let mut compressed_filename = plain
++        .file_name()
++        .ok_or_else(|| migration_error("selected rollout has no filename"))?
++        .to_os_string();
++    compressed_filename.push(".zst");
++    let compressed = plain.with_file_name(compressed_filename);
++    for candidate in [plain, compressed] {
++        match tokio::fs::symlink_metadata(&candidate).await {
++            Ok(_) => {
++                return tokio::fs::canonicalize(candidate)
++                    .await
++                    .map(Some)
++                    .map_err(migration_error);
++            }
++            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
++            Err(error) => return Err(migration_error(error)),
++        }
++    }
++    Ok(None)
++}
++
++pub(in crate::local) async fn check_archive(
++    store: &super::LocalThreadStore,
++    thread_id: ThreadId,
++    moves: &[(PathBuf, PathBuf)],
++) -> ThreadStoreResult<()> {
++    let home = &store.config.codex_home;
++    let paths = moves
++        .iter()
++        .flat_map(|(source, destination)| [source, destination])
++        .map(|path| physical_path(path))
++        .collect::<ThreadStoreResult<HashSet<_>>>()?;
++    for owner in pending_migration_thread_ids(home).await? {
++        let bytes = match tokio::fs::read(migration_journal_path(home, owner)).await {
++            Ok(bytes) => bytes,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
++            Err(error) => return Err(migration_error(error)),
++        };
++        let affected = if bytes.is_empty() && owner == thread_id {
++            true
++        } else if bytes.is_empty() {
++            let state = store.state_db().await.ok_or_else(|| {
++                migration_error("cannot authenticate a pending migration without SQLite metadata")
++            })?;
++            let metadata = state
++                .get_thread(owner)
++                .await
++                .map_err(migration_error)?
++                .ok_or_else(|| {
++                    migration_error("pending migration has no selected SQLite rollout")
++                })?;
++            match selected_physical_path(&metadata.rollout_path).await? {
++                Some(selected) => paths.contains(&codex_rollout::plain_rollout_path(&selected)),
++                None => {
++                    // An empty marker cannot persist a moved path. With both old forms absent,
++                    // protect this exact physical filename without selecting a replacement.
++                    let selected = codex_rollout::plain_rollout_path(&metadata.rollout_path);
++                    paths
++                        .iter()
++                        .any(|path| path.file_name() == selected.file_name())
++                }
++            }
++        } else {
++            let journal = parse_lineage_migration_journal(&bytes)?;
++            if journal.selected_thread_id != owner {
++                return Err(migration_error(
++                    "migration journal filename does not match its owner",
++                ));
++            }
++            let mut affected = owner == thread_id;
++            for (dependency, path) in pins(&journal) {
++                affected |= dependency == thread_id || paths.contains(&physical_path(&path)?);
++            }
++            affected
++        };
++        if affected {
++            return Err(ThreadStoreError::Conflict {
++                message: format!(
++                    "thread {thread_id} is needed by pending rollout migration {owner}"
++                ),
++            });
++        }
++    }
++    Ok(())
++}
++
++pub(super) async fn validate_new_source_paths(
++    journal: &LineageMigrationJournal,
++) -> ThreadStoreResult<()> {
++    let sources = journal
++        .sources
++        .iter()
++        .chain(&journal.authentication_sources)
++        .map(|source| (source.thread_id, Some(source.segment_id), &source.path))
++        .chain(
++            journal
++                .history_bases
++                .iter()
++                .map(|source| (source.thread_id, None, &source.path)),
++        )
++        .chain(journal.reference_dependencies.iter().map(|source| {
++            (
++                source.thread_id,
++                Some(Some(source.segment_id)),
++                &source.path,
++            )
++        }));
++    for (thread_id, segment_id, path) in sources {
++        let metadata = codex_rollout::read_session_meta_line_exact(path)
++            .await
++            .map_err(|error| ThreadStoreError::Conflict {
++                message: format!("migration source moved before journal publication: {error}"),
++            })?;
++        if metadata.meta.id != thread_id
++            || segment_id.is_some_and(|expected| metadata.meta.segment_id != expected)
++        {
++            return Err(ThreadStoreError::Conflict {
++                message: "migration source identity changed before journal publication".to_string(),
++            });
++        }
++    }
++    Ok(())
++}
++
++impl LocalThreadStore {
++    pub(super) async fn begin_ordinary_migration(
++        &self,
++        thread_id: ThreadId,
++        path: &Path,
++        expected_mode: ThreadHistoryMode,
++        locks: &Arc<MigrationLocks>,
++    ) -> ClassifiedMigrationResult<codex_state::ThreadMetadata> {
++        let store = self.clone();
++        let path = path.to_path_buf();
++        let locks = Arc::clone(locks);
++        tokio::spawn(async move {
++            let gate = Arc::new(try_acquire(&store.config.codex_home)?);
++            let pending = migration_journal_path(&store.config.codex_home, thread_id);
++            // No cleanup is eligible until all nonmutating checks have accepted this exact source.
++            let indexed =
++                preflight_ordinary_marker(&store, thread_id, &path, expected_mode, &pending)
++                    .await?;
++            let rollout_id = super::migration_rollout_id(&path, thread_id);
++            let started = async {
++                with_failure_reason(
++                    thread_history::delete_thread(&store, rollout_id).await,
++                    RolloutMigrationFailureReason::SqliteMaterializationFailed,
++                )?;
++                with_failure_reason(
++                    write_migration_journal_guarded(&pending, &locks, Arc::clone(&gate)).await,
++                    RolloutMigrationFailureReason::RolloutPublishFailed,
++                )?;
++                Ok::<_, RolloutMigrationFailure>(())
++            }
++            .await;
++            if let Err(failure) = started {
++                return match store
++                    .cleanup_failed_unpublished_migration(thread_id, &path, &pending, &locks)
++                    .await
++                {
++                    Ok(()) => Err(failure),
++                    Err(cleanup) => Err(RolloutMigrationFailure::new(
++                        failure.reason,
++                        migration_error(format!(
++                            "{}; failed to clean up started migration: {cleanup}",
++                            failure.error
++                        )),
++                    )),
++                };
++            }
++            Ok(indexed)
++        })
++        .await
++        .map_err(|error| RolloutMigrationFailure::from(migration_error(error)))?
++    }
++}
++
++async fn preflight_ordinary_marker(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    path: &Path,
++    expected_mode: ThreadHistoryMode,
++    pending: &Path,
++) -> ThreadStoreResult<codex_state::ThreadMetadata> {
++    let conflict = || ThreadStoreError::Conflict {
++        message: "ordinary migration source changed before journal publication".to_string(),
++    };
++    let metadata = codex_rollout::read_session_meta_line_exact(path)
++        .await
++        .map_err(|_| conflict())?;
++    if metadata.meta.id != thread_id || metadata.meta.history_mode != expected_mode {
++        return Err(conflict());
++    }
++    let state = store.state_db().await.ok_or_else(conflict)?;
++    let indexed = state
++        .get_thread(thread_id)
++        .await
++        .map_err(migration_error)?
++        .ok_or_else(conflict)?;
++    match selected_physical_path(&indexed.rollout_path).await? {
++        Some(selected) if selected != std::fs::canonicalize(path).map_err(|_| conflict())? => {
++            return Err(conflict());
++        }
++        None => {
++            // Preserve same_rollout_moved's filename binding, but distinguish true absence
++            // of both old compression forms from lookup errors. The caller already resolved
++            // this readable current file; do not select another path or repair SQLite here.
++            if codex_rollout::plain_rollout_path(&indexed.rollout_path).file_name()
++                != codex_rollout::plain_rollout_path(path).file_name()
++            {
++                return Err(conflict());
++            }
++        }
++        Some(_) => {}
++    }
++    match tokio::fs::read(pending).await {
++        Ok(bytes) if bytes.is_empty() => {}
++        Ok(_) => {
++            return Err(ThreadStoreError::Conflict {
++                message: "ordinary migration cannot replace a nonempty pending journal".to_string(),
++            });
++        }
++        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
++        Err(error) => return Err(migration_error(error)),
++    }
++    Ok(indexed)
++}
++
++#[cfg(test)]
++#[path = "archive_gate_tests.rs"]
++mod tests;
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/archive_gate_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/archive_gate_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b5956ca327b1d39416970bcec18ced84be5188c
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_migration/archive_gate_tests.rs
+@@ -0,0 +1,790 @@
++use std::fs;
++use std::path::Path;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use pretty_assertions::assert_eq;
++
++use super::super::lineage::plan_legacy_lineage;
++use super::super::lineage_journal::write_lineage_migration_journal;
++use super::super::tests::indexed_store;
++use super::super::tests::segment_reference;
++use super::super::tests::user_message;
++use super::super::tests::write_legacy_segment;
++use super::super::tests::write_rollout;
++use super::*;
++use crate::ArchiveThreadParams;
++use crate::ThreadStore;
++
++async fn journal(home: &Path, path: &Path) -> LineageMigrationJournal {
++    LineageMigrationJournal::from_plan(
++        &plan_legacy_lineage(home, path)
++            .await
++            .expect("authenticated lineage plan"),
++    )
++}
++
++#[tokio::test]
++async fn archive_preserves_legacy_bytes_while_migration_job_is_held() {
++    let home = tempfile::tempdir().expect("home");
++    let id = ThreadId::new();
++    let path = write_rollout(
++        home.path(),
++        id,
++        SessionSource::Cli,
++        vec![user_message("legacy")],
++    );
++    let original = fs::read(&path).expect("original bytes");
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    let _job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())
++        .expect("job lock")
++        .expect("uncontended job");
++    tokio::time::timeout(
++        Duration::from_secs(2),
++        store.archive_thread(ArchiveThreadParams { thread_id: id }),
++    )
++    .await
++    .expect("archive must not wait for history conversion")
++    .expect("archive");
++    let metadata = store
++        .state_db()
++        .await
++        .expect("state")
++        .get_thread(id)
++        .await
++        .expect("metadata")
++        .expect("thread");
++    assert!(metadata.archived_at.is_some());
++    assert_eq!(metadata.history_mode, ThreadHistoryMode::Legacy);
++    assert_eq!(
++        fs::read(metadata.rollout_path).expect("archived bytes"),
++        original
++    );
++    assert!(!path.exists());
++}
++
++#[tokio::test]
++async fn archive_rejects_own_pending_marker_without_moving_files_or_metadata() {
++    let home = tempfile::tempdir().expect("home");
++    let id = ThreadId::new();
++    let path = write_rollout(
++        home.path(),
++        id,
++        SessionSource::Cli,
++        vec![user_message("legacy")],
++    );
++    let store = indexed_store(home.path()).await;
++    let original = fs::read(&path).expect("original bytes");
++    let pending = migration_journal_path(home.path(), id);
++    fs::create_dir_all(pending.parent().expect("journal directory")).expect("directory");
++    fs::write(&pending, []).expect("interrupted ordinary migration marker");
++    assert!(matches!(
++        store
++            .archive_thread(ArchiveThreadParams { thread_id: id })
++            .await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert_eq!(fs::read(&path).expect("unchanged rollout"), original);
++    assert_eq!(
++        fs::read(&pending).expect("retained marker"),
++        Vec::<u8>::new()
++    );
++    let metadata = store
++        .state_db()
++        .await
++        .expect("state")
++        .get_thread(id)
++        .await
++        .expect("metadata")
++        .expect("thread");
++    assert_eq!(metadata.rollout_path, path);
++    assert!(metadata.archived_at.is_none());
++}
++
++#[tokio::test]
++async fn published_cross_thread_journal_blocks_damaged_sqlite_alias_but_not_disjoint_archive() {
++    let home = tempfile::tempdir().expect("home");
++    let owner = ThreadId::new();
++    let dependency = ThreadId::new();
++    let alias_owner = ThreadId::new();
++    let disjoint = ThreadId::new();
++    let source = write_rollout(
++        home.path(),
++        owner,
++        SessionSource::Cli,
++        vec![user_message("owner")],
++    );
++    let alias = write_rollout(
++        home.path(),
++        dependency,
++        SessionSource::Cli,
++        vec![user_message("dependency")],
++    );
++    let unrelated = write_rollout(
++        home.path(),
++        disjoint,
++        SessionSource::Cli,
++        vec![user_message("unrelated")],
++    );
++    let store = indexed_store(home.path()).await;
++    let mut manifest = journal(home.path(), &source).await;
++    manifest
++        .authentication_sources
++        .extend(journal(home.path(), &alias).await.sources);
++    let locks = store
++        .acquire_migration_locks_for_test(owner)
++        .await
++        .expect("migration ownership");
++    let pending = migration_journal_path(home.path(), owner);
++    write_lineage_migration_journal(&pending, &manifest, &locks)
++        .await
++        .expect("publish journal first");
++    drop(locks);
++    let journal_bytes = fs::read(&pending).expect("durable journal");
++    let damaged = b"{damaged session metadata\n";
++    fs::write(&alias, damaged).expect("damaged selected alias");
++    let state = store.state_db().await.expect("state");
++    let metadata = codex_state::ThreadMetadataBuilder::new(
++        alias_owner,
++        alias.clone(),
++        chrono::Utc::now(),
++        SessionSource::Cli,
++    )
++    .build(&store.config.default_model_provider_id);
++    state
++        .upsert_thread(&metadata)
++        .await
++        .expect("SQLite selects another owner's alias");
++    assert!(matches!(
++        store
++            .archive_thread(ArchiveThreadParams {
++                thread_id: alias_owner
++            })
++            .await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert_eq!(fs::read(&alias).expect("retained alias"), damaged);
++    assert_eq!(fs::read(&pending).expect("retained journal"), journal_bytes);
++    let current = state
++        .get_thread(alias_owner)
++        .await
++        .expect("metadata")
++        .expect("alias owner");
++    assert_eq!(current.rollout_path, alias);
++    assert!(current.archived_at.is_none());
++
++    let unrelated_bytes = fs::read(&unrelated).expect("unrelated bytes");
++    store
++        .archive_thread(ArchiveThreadParams {
++            thread_id: disjoint,
++        })
++        .await
++        .expect("disjoint journal does not block");
++    let current = state
++        .get_thread(disjoint)
++        .await
++        .expect("metadata")
++        .expect("disjoint thread");
++    assert!(current.archived_at.is_some());
++    assert_eq!(
++        fs::read(current.rollout_path).expect("archived unrelated bytes"),
++        unrelated_bytes
++    );
++    assert_eq!(
++        fs::read(&pending).expect("unchanged unrelated journal"),
++        journal_bytes
++    );
++}
++
++#[tokio::test]
++async fn archive_first_prevents_publication_of_stale_dependency_paths() {
++    let home = tempfile::tempdir().expect("home");
++    let owner = ThreadId::new();
++    let dependency = ThreadId::new();
++    let source = write_rollout(
++        home.path(),
++        owner,
++        SessionSource::Cli,
++        vec![user_message("owner")],
++    );
++    let dependency_path = write_rollout(
++        home.path(),
++        dependency,
++        SessionSource::Cli,
++        vec![user_message("dependency")],
++    );
++    let store = indexed_store(home.path()).await;
++    let mut manifest = journal(home.path(), &source).await;
++    manifest
++        .authentication_sources
++        .extend(journal(home.path(), &dependency_path).await.sources);
++    let locks = store
++        .acquire_migration_locks_for_test(owner)
++        .await
++        .expect("migration owns selected thread only");
++    store
++        .archive_thread(ArchiveThreadParams {
++            thread_id: dependency,
++        })
++        .await
++        .expect("archive wins before publication");
++    let pending = migration_journal_path(home.path(), owner);
++    assert!(matches!(
++        write_lineage_migration_journal(&pending, &manifest, &locks).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert!(
++        !pending.exists(),
++        "a stale plan must not become a durable recovery obligation"
++    );
++    assert!(manifest.targets.iter().all(|target| !target.path.exists()));
++    let metadata = store
++        .state_db()
++        .await
++        .expect("state")
++        .get_thread(dependency)
++        .await
++        .expect("metadata")
++        .expect("dependency");
++    assert!(metadata.archived_at.is_some());
++    assert!(metadata.rollout_path.exists());
++}
++
++#[tokio::test]
++async fn archived_target_alias_prevents_publication_without_moving_sources() {
++    for compressed in [false, true] {
++        let home = tempfile::tempdir().expect("home");
++        let owner = ThreadId::new();
++        let alias_owner = ThreadId::new();
++        let source = write_rollout(
++            home.path(),
++            owner,
++            SessionSource::Cli,
++            vec![user_message("owner")],
++        );
++        let predecessor_id = codex_protocol::SegmentId::new();
++        let predecessor = home
++            .path()
++            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++            .join(owner.to_string())
++            .join(predecessor_id.to_string())
++            .join(source.file_name().expect("source filename"));
++        write_legacy_segment(
++            &predecessor,
++            home.path(),
++            owner,
++            predecessor_id,
++            vec![user_message("predecessor")],
++        );
++        write_legacy_segment(
++            &source,
++            home.path(),
++            owner,
++            codex_protocol::SegmentId::new(),
++            vec![
++                segment_reference(predecessor.clone(), owner, predecessor_id),
++                user_message("owner"),
++            ],
++        );
++        let store = indexed_store(home.path()).await;
++        let manifest = journal(home.path(), &source).await;
++        let target = &manifest.targets[0];
++        assert!(!target.selected);
++        assert!(
++            target.path.starts_with(
++                home.path()
++                    .join(codex_rollout::SESSIONS_SUBDIR)
++                    .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
++            )
++        );
++        let target_path = if compressed {
++            target.path.with_extension("jsonl.zst")
++        } else {
++            target.path.clone()
++        };
++        fs::create_dir_all(target_path.parent().expect("target directory")).expect("directory");
++        let damaged = b"{damaged target selected through another SQLite owner\n";
++        let target_bytes = if compressed {
++            zstd::stream::encode_all(&damaged[..], 0).expect("compressed damaged target")
++        } else {
++            damaged.to_vec()
++        };
++        fs::write(&target_path, &target_bytes).expect("existing target alias");
++        let state = store.state_db().await.expect("state");
++        let alias = codex_state::ThreadMetadataBuilder::new(
++            alias_owner,
++            target_path.clone(),
++            chrono::Utc::now(),
++            SessionSource::Cli,
++        )
++        .build(&store.config.default_model_provider_id);
++        state
++            .upsert_thread(&alias)
++            .await
++            .expect("selected target alias");
++        let originals = manifest
++            .sources
++            .iter()
++            .map(|input| {
++                (
++                    input.path.clone(),
++                    fs::read(&input.path).expect("source bytes"),
++                )
++            })
++            .collect::<Vec<_>>();
++        let locks = store
++            .acquire_migration_locks_for_test(owner)
++            .await
++            .expect("original migration writer");
++        store
++            .archive_thread(ArchiveThreadParams {
++                thread_id: alias_owner,
++            })
++            .await
++            .expect("only the different-ID target alias moves");
++        let archived = home
++            .path()
++            .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
++            .join(target_path.file_name().expect("target filename"));
++        let alias = state
++            .get_thread(alias_owner)
++            .await
++            .expect("metadata")
++            .expect("alias");
++        assert!(alias.archived_at.is_some());
++        assert_eq!(alias.rollout_path, archived);
++        assert_eq!(
++            fs::read(&archived).expect("archived target bytes"),
++            target_bytes
++        );
++        let pending = migration_journal_path(home.path(), owner);
++        assert!(matches!(
++            write_lineage_migration_journal(&pending, &manifest, &locks).await,
++            Err(ThreadStoreError::Conflict { .. })
++        ));
++        assert!(!pending.exists());
++        assert!(!target_path.exists());
++        assert!(manifest.targets.iter().all(|target| !target.path.exists()));
++        for (path, bytes) in originals {
++            assert_eq!(fs::read(path).expect("unmoved source bytes"), bytes);
++        }
++        assert_eq!(
++            fs::read(&archived).expect("retained archived target"),
++            target_bytes
++        );
++    }
++}
++
++#[tokio::test]
++async fn publication_contention_is_nonblocking_and_corrupt_journals_fail_closed() {
++    let home = tempfile::tempdir().expect("home");
++    let id = ThreadId::new();
++    let source = write_rollout(
++        home.path(),
++        id,
++        SessionSource::Cli,
++        vec![user_message("owner")],
++    );
++    let store = indexed_store(home.path()).await;
++    let manifest = journal(home.path(), &source).await;
++    let locks = store
++        .acquire_migration_locks_for_test(id)
++        .await
++        .expect("writer");
++    let gate = try_acquire(home.path()).expect("archive owns publication boundary");
++    let pending = migration_journal_path(home.path(), id);
++    assert!(matches!(
++        write_lineage_migration_journal(&pending, &manifest, &locks).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert!(!pending.exists());
++    drop(gate);
++    drop(locks);
++    fs::create_dir_all(pending.parent().expect("parent")).expect("directory");
++    fs::write(&pending, b"{invalid journal").expect("corrupt interrupted journal");
++    let before = fs::read(&source).expect("source");
++    assert!(
++        store
++            .archive_thread(ArchiveThreadParams { thread_id: id })
++            .await
++            .is_err()
++    );
++    assert_eq!(fs::read(&source).expect("retained source"), before);
++    assert_eq!(
++        fs::read(&pending).expect("retained journal"),
++        b"{invalid journal"
++    );
++}
++
++#[tokio::test]
++async fn cancelled_archive_retains_gate_and_writer_until_sqlite_commit() {
++    let home = tempfile::tempdir().expect("home");
++    let id = ThreadId::new();
++    let source = write_rollout(
++        home.path(),
++        id,
++        SessionSource::Cli,
++        vec![user_message("owner")],
++    );
++    let store = indexed_store(home.path()).await;
++    let original = fs::read(&source).expect("source");
++    let pool = store
++        .config
++        .sqlite
++        .open_read_write_pool(&store.config.sqlite.state_db_path())
++        .await
++        .expect("independent SQLite connection");
++    let transaction = pool
++        .begin_with("BEGIN IMMEDIATE")
++        .await
++        .expect("hold SQLite commit boundary");
++    let archive_store = store.clone();
++    let request = tokio::spawn(async move {
++        archive_store
++            .archive_thread(ArchiveThreadParams { thread_id: id })
++            .await
++    });
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while source.exists() {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("archive reaches renamed but uncommitted state");
++    request.abort();
++    assert!(request.await.expect_err("cancelled caller").is_cancelled());
++    assert!(matches!(
++        try_acquire(home.path()),
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert!(matches!(
++        store.acquire_writer_lock(id),
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    transaction.commit().await.expect("release SQLite writer");
++    tokio::time::timeout(Duration::from_secs(2), async {
++        loop {
++            match try_acquire(home.path()) {
++                Ok(guard) => {
++                    drop(guard);
++                    break;
++                }
++                Err(ThreadStoreError::Conflict { .. }) => tokio::task::yield_now().await,
++                Err(error) => panic!("gate error: {error}"),
++            }
++        }
++    })
++    .await
++    .expect("owned archive finishes after caller cancellation");
++    let metadata = store
++        .state_db()
++        .await
++        .expect("state")
++        .get_thread(id)
++        .await
++        .expect("metadata")
++        .expect("thread");
++    assert!(metadata.archived_at.is_some());
++    assert_eq!(
++        fs::read(metadata.rollout_path).expect("archived bytes"),
++        original
++    );
++    drop(
++        store
++            .acquire_writer_lock(id)
++            .expect("writer released after commit"),
++    );
++}
++
++#[test]
++fn cancelled_journal_publication_retains_gate_through_physical_sync() {
++    use std::future::Future;
++    use std::task::Poll;
++
++    let runtime = tokio::runtime::Builder::new_current_thread()
++        .enable_all()
++        .max_blocking_threads(1)
++        .build()
++        .expect("isolated runtime");
++    runtime.block_on(async {
++        for ordinary in [false, true] {
++            let home = tempfile::tempdir().expect("home");
++            let id = ThreadId::new();
++            let source = write_rollout(
++                home.path(),
++                id,
++                SessionSource::Cli,
++                vec![user_message("owner")],
++            );
++            let store = indexed_store(home.path()).await;
++            let manifest = journal(home.path(), &source).await;
++            let locks = store
++                .acquire_migration_locks_for_test(id)
++                .await
++                .expect("writer");
++            let gate = try_acquire(home.path()).expect("publication gate");
++            validate_new_source_paths(&manifest)
++                .await
++                .expect("authenticate paths under gate");
++            let pending = migration_journal_path(home.path(), id);
++            let bytes = serde_json::to_vec(&manifest).expect("journal bytes");
++            let (release, wait) = std::sync::mpsc::channel();
++            let (started, ready) = tokio::sync::oneshot::channel();
++            let blocker = tokio::task::spawn_blocking(move || {
++                started.send(()).expect("occupied blocking worker");
++                wait.recv().expect("release blocking worker");
++            });
++            ready.await.expect("blocking worker occupied");
++            let mut publication = Box::pin(async {
++                if ordinary {
++                    super::super::publish::write_migration_journal_guarded(
++                        &pending,
++                        &locks,
++                        Arc::new(gate),
++                    )
++                    .await
++                } else {
++                    super::super::lineage_journal::publish_journal(
++                        &pending,
++                        bytes,
++                        &locks,
++                        Some(gate),
++                    )
++                    .await
++                }
++            });
++            std::future::poll_fn(|cx| {
++                assert!(publication.as_mut().poll(cx).is_pending());
++                Poll::Ready(())
++            })
++            .await;
++            drop(publication);
++            drop(locks);
++            assert!(!pending.exists());
++            assert!(matches!(
++                try_acquire(home.path()),
++                Err(ThreadStoreError::Conflict { .. })
++            ));
++            assert!(matches!(
++                store.acquire_writer_lock(id),
++                Err(ThreadStoreError::Conflict { .. })
++            ));
++            release.send(()).expect("release physical publication");
++            blocker.await.expect("blocking worker joined");
++            tokio::time::timeout(Duration::from_secs(2), async {
++                loop {
++                    if let Ok(gate) = try_acquire(home.path()) {
++                        drop(gate);
++                        if let Ok(writer) = store.acquire_writer_lock(id) {
++                            drop(writer);
++                            break;
++                        }
++                    }
++                    tokio::task::yield_now().await;
++                }
++            })
++            .await
++            .expect("physical publication releases both leases");
++            if ordinary {
++                assert_eq!(
++                    fs::read(pending).expect("published empty marker"),
++                    Vec::<u8>::new()
++                );
++            } else {
++                assert_eq!(
++                    parse_lineage_migration_journal(&fs::read(pending).expect("published journal"))
++                        .expect("typed journal"),
++                    manifest
++                );
++            }
++        }
++    });
++}
++
++#[tokio::test]
++async fn ordinary_marker_first_protects_a_damaged_sqlite_alias() {
++    for relocated in [false, true] {
++        let home = tempfile::tempdir().expect("home");
++        let owner = ThreadId::new();
++        let alias_owner = ThreadId::new();
++        let selected = write_rollout(
++            home.path(),
++            owner,
++            SessionSource::Cli,
++            vec![user_message("owner")],
++        );
++        let store = indexed_store(home.path()).await;
++        let source = if relocated {
++            let directory = home.path().join("sessions/relocated");
++            fs::create_dir_all(&directory).expect("relocated directory");
++            let current = directory.join(selected.file_name().expect("selected filename"));
++            fs::rename(&selected, &current).expect("move selected file without repairing SQLite");
++            current
++        } else {
++            selected.clone()
++        };
++        let locks = store
++            .acquire_migration_locks_for_test(owner)
++            .await
++            .expect("writer");
++        assert!(
++            store
++                .begin_ordinary_migration(owner, &source, ThreadHistoryMode::Legacy, &locks)
++                .await
++                .is_ok()
++        );
++        drop(locks);
++        let pending = migration_journal_path(home.path(), owner);
++        assert_eq!(
++            fs::read(&pending).expect("ordinary empty marker"),
++            Vec::<u8>::new()
++        );
++        let damaged = b"{damaged selected alias\n";
++        fs::write(&source, damaged).expect("damaged header");
++        let state = store.state_db().await.expect("state");
++        let alias = codex_state::ThreadMetadataBuilder::new(
++            alias_owner,
++            source.clone(),
++            chrono::Utc::now(),
++            SessionSource::Cli,
++        )
++        .build(&store.config.default_model_provider_id);
++        state.upsert_thread(&alias).await.expect("selected alias");
++        assert!(matches!(
++            store
++                .archive_thread(ArchiveThreadParams {
++                    thread_id: alias_owner
++                })
++                .await,
++            Err(ThreadStoreError::Conflict { .. })
++        ));
++        assert_eq!(fs::read(&source).expect("unmoved alias"), damaged);
++        assert_eq!(
++            fs::read(&pending).expect("retained ordinary marker"),
++            Vec::<u8>::new()
++        );
++        for (id, expected_path) in [(owner, &selected), (alias_owner, &source)] {
++            let row = state
++                .get_thread(id)
++                .await
++                .expect("metadata")
++                .expect("owner");
++            assert_eq!(&row.rollout_path, expected_path);
++            assert!(row.archived_at.is_none());
++        }
++    }
++}
++
++#[tokio::test]
++async fn ordinary_move_first_and_rejected_publications_leave_history_and_journals_unchanged() {
++    let home = tempfile::tempdir().expect("home");
++    let owner = ThreadId::new();
++    let source = write_rollout(
++        home.path(),
++        owner,
++        SessionSource::Cli,
++        vec![user_message("owner")],
++    );
++    let store = indexed_store(home.path()).await;
++    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
++        .await
++        .expect("history");
++    sqlx::query("INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, 42, 3)")
++        .bind(owner.to_string()).execute(&pool).await.expect("retained history sentinel");
++    let manifest = journal(home.path(), &source).await;
++    let pending = migration_journal_path(home.path(), owner);
++    let locks = store
++        .acquire_migration_locks_for_test(owner)
++        .await
++        .expect("writer");
++    let gate = try_acquire(home.path()).expect("archive boundary");
++    let rejected = store
++        .begin_ordinary_migration(owner, &source, ThreadHistoryMode::Legacy, &locks)
++        .await;
++    assert!(matches!(
++        rejected,
++        Err(super::super::RolloutMigrationFailure {
++            error: ThreadStoreError::Conflict { .. },
++            ..
++        })
++    ));
++    assert!(!pending.exists());
++    drop(gate);
++    write_lineage_migration_journal(&pending, &manifest, &locks)
++        .await
++        .expect("existing typed journal");
++    let bytes = fs::read(&pending).expect("typed journal bytes");
++    let rejected = store
++        .begin_ordinary_migration(owner, &source, ThreadHistoryMode::Legacy, &locks)
++        .await;
++    assert!(matches!(
++        rejected,
++        Err(super::super::RolloutMigrationFailure {
++            error: ThreadStoreError::Conflict { .. },
++            ..
++        })
++    ));
++    assert_eq!(fs::read(&pending).expect("typed journal retained"), bytes);
++    fs::remove_file(&pending).expect("test completes pending transaction before archive");
++    let alias_owner = ThreadId::new();
++    let damaged = b"{damaged selected alias\n";
++    fs::write(&source, damaged).expect("damaged header");
++    let state = store.state_db().await.expect("state");
++    let alias = codex_state::ThreadMetadataBuilder::new(
++        alias_owner,
++        source.clone(),
++        chrono::Utc::now(),
++        SessionSource::Cli,
++    )
++    .build(&store.config.default_model_provider_id);
++    state.upsert_thread(&alias).await.expect("selected alias");
++    // The different SQLite owner can move this file while the migration writer is held.
++    store
++        .archive_thread(ArchiveThreadParams {
++            thread_id: alias_owner,
++        })
++        .await
++        .expect("alias archive wins despite original migration writer");
++    let rejected = store
++        .begin_ordinary_migration(owner, &source, ThreadHistoryMode::Legacy, &locks)
++        .await;
++    assert!(matches!(
++        rejected,
++        Err(super::super::RolloutMigrationFailure {
++            error: ThreadStoreError::Conflict { .. },
++            ..
++        })
++    ));
++    assert!(!pending.exists());
++    let retained = sqlx::query_as::<_, (i64, i64)>("SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?")
++        .bind(owner.to_string()).fetch_one(&pool).await.expect("unchanged history projection");
++    assert_eq!(retained, (42, 3));
++    let owner_row = state
++        .get_thread(owner)
++        .await
++        .expect("metadata")
++        .expect("owner");
++    assert_eq!(owner_row.rollout_path, source);
++    assert!(owner_row.archived_at.is_none());
++    assert!(!source.exists());
++    let alias_row = state
++        .get_thread(alias_owner)
++        .await
++        .expect("metadata")
++        .expect("alias owner");
++    assert!(alias_row.archived_at.is_some());
++    assert_eq!(
++        alias_row.rollout_path,
++        home.path()
++            .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
++            .join(source.file_name().expect("source filename"))
++    );
++    assert_eq!(
++        fs::read(&alias_row.rollout_path).expect("archived alias"),
++        damaged
++    );
++    assert!(manifest.targets.iter().all(|target| !target.path.exists()));
++}
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage_journal.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage_journal.rs
+index 49a56055abbe5c5cad5bf748010a2435bbc428d2..1f53c33faa6f1c18965b57267b4f3be935f0a63d 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/lineage_journal.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/lineage_journal.rs
+@@ -588,12 +588,88 @@ pub(super) async fn write_lineage_migration_journal(
+     path: &Path,
+     journal: &LineageMigrationJournal,
+     locks: &Arc<MigrationLocks>,
++) -> ThreadStoreResult<()> {
++    let path = path.to_path_buf();
++    let journal = journal.clone();
++    let locks = Arc::clone(locks);
++    // Revalidation can await filesystem work too; retain the existing lease before that await.
++    tokio::spawn(
++        async move { write_lineage_migration_journal_owned(&path, &journal, &locks).await },
++    )
++    .await
++    .map_err(migration_error)?
++}
++
++async fn write_lineage_migration_journal_owned(
++    path: &Path,
++    journal: &LineageMigrationJournal,
++    locks: &Arc<MigrationLocks>,
+ ) -> ThreadStoreResult<()> {
+     journal.validate_review_input_target()?;
++    let previous = match tokio::fs::read(path).await {
++        Ok(bytes) => Some(parse_lineage_migration_journal(&bytes)?),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
++        Err(error) => return Err(migration_error(error)),
++    };
++    let introduces_pins = previous.as_ref().is_none_or(|previous| {
++        previous.selected_thread_id != journal.selected_thread_id
++            || super::archive_gate::pins(previous) != super::archive_gate::pins(journal)
++    });
++    let publication_guard = if introduces_pins {
++        let home = path
++            .parent()
++            .and_then(Path::parent)
++            .ok_or_else(|| migration_error("migration journal has no Codex home"))?;
++        let guard = super::archive_gate::try_acquire(home)?;
++        super::archive_gate::validate_new_source_paths(journal).await?;
++        let sessions = home.join(codex_rollout::SESSIONS_SUBDIR);
++        for target in &journal.targets {
++            if !target.path.starts_with(&sessions) {
++                continue;
++            }
++            let plain = codex_rollout::plain_rollout_path(&target.path);
++            let filename = plain
++                .file_name()
++                .ok_or_else(|| migration_error("migration target has no filename"))?;
++            let archived = home
++                .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
++                .join(filename);
++            let mut compressed_filename = filename.to_os_string();
++            compressed_filename.push(".zst");
++            let compressed = archived.with_file_name(compressed_filename);
++            // An existing counterpart is ambiguous even if an active copy also exists.
++            // Do not recreate a target that archive moved before this manifest was pinned.
++            for counterpart in [archived, compressed] {
++                match tokio::fs::symlink_metadata(&counterpart).await {
++                    Ok(_) => {
++                        return Err(crate::ThreadStoreError::Conflict {
++                            message: "migration target has an archived counterpart".to_string(),
++                        });
++                    }
++                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
++                    Err(error) => return Err(migration_error(error)),
++                }
++            }
++        }
++        Some(guard)
++    } else {
++        None
++    };
+     let mut bytes = serde_json::to_vec(journal).map_err(migration_error)?;
+     bytes.push(b'\n');
++    publish_journal(path, bytes, locks, publication_guard).await
++}
++
++pub(super) async fn publish_journal(
++    path: &Path,
++    bytes: Vec<u8>,
++    locks: &Arc<MigrationLocks>,
++    publication_guard: Option<super::archive_gate::ArchivePublicationGuard>,
++) -> ThreadStoreResult<()> {
+     let path = path.to_path_buf();
+     physical_io::run(locks, move || {
++        // The physical worker, not its cancellable caller, owns publication through fsync.
++        let _publication_guard = publication_guard;
+         let parent = path
+             .parent()
+             .ok_or_else(|| io::Error::other("lineage migration journal has no parent directory"))?;
+@@ -622,8 +698,14 @@ pub(super) async fn read_lineage_migration_journal(
+     path: &Path,
+ ) -> ThreadStoreResult<LineageMigrationJournal> {
+     let bytes = tokio::fs::read(path).await.map_err(migration_error)?;
+-    let journal = serde_json::from_slice::<LineageMigrationJournal>(bytes.as_slice())
+-        .map_err(migration_error)?;
++    parse_lineage_migration_journal(&bytes)
++}
++
++pub(super) fn parse_lineage_migration_journal(
++    bytes: &[u8],
++) -> ThreadStoreResult<LineageMigrationJournal> {
++    let journal =
++        serde_json::from_slice::<LineageMigrationJournal>(bytes).map_err(migration_error)?;
+     if journal.version != LINEAGE_MIGRATION_JOURNAL_VERSION
+         && !PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS.contains(&journal.version)
+     {
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/publish.rs b/codex-rs/thread-store/src/local/rollout_migration/publish.rs
+index f29c26a2491fe29b48de133cfae37c91ed6c0830..16c23b4baaf30b40dc6dc6dd98c843e422088643 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/publish.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/publish.rs
+@@ -211,12 +211,30 @@ pub(super) async fn remove_file_if_present(
+     .map_err(migration_error)
+ }
+
++#[cfg(test)]
+ pub(super) async fn write_migration_journal(
+     path: &Path,
+     locks: &Arc<MigrationLocks>,
++) -> ThreadStoreResult<()> {
++    write_migration_marker(path, locks, None).await
++}
++
++pub(super) async fn write_migration_journal_guarded(
++    path: &Path,
++    locks: &Arc<MigrationLocks>,
++    guard: Arc<super::archive_gate::ArchivePublicationGuard>,
++) -> ThreadStoreResult<()> {
++    write_migration_marker(path, locks, Some(guard)).await
++}
++
++async fn write_migration_marker(
++    path: &Path,
++    locks: &Arc<MigrationLocks>,
++    guard: Option<Arc<super::archive_gate::ArchivePublicationGuard>>,
+ ) -> ThreadStoreResult<()> {
+     let path = path.to_path_buf();
+     physical_io::run(locks, move || {
++        let _publication_guard = guard;
+         let parent = path
+             .parent()
+             .ok_or_else(|| io::Error::other("rollout migration journal has no parent directory"))?;
+@@ -227,9 +245,14 @@ pub(super) async fn write_migration_journal(
+         }
+         let file = std::fs::OpenOptions::new()
+             .create(true)
+-            .truncate(true)
++            .truncate(false)
+             .write(true)
+             .open(&path)?;
++        if file.metadata()?.len() != 0 {
++            return Err(io::Error::other(
++                "refusing to replace a nonempty migration journal",
++            ));
++        }
+         file.sync_all()?;
+         drop(file);
+         physical_io::sync_parent_directory_blocking(&path)
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
 index f68ea6d94971ac625d8c975868ac9eba7f937d77..72c37e0aab7692daf8b7fc1e2dcb6db335181863 100644
 --- a/codex-rs/thread-store/src/local/segment.rs

@@ -7135,10 +7135,10 @@ index 0000000000000000000000000000000000000000..b8289d4441c13a971579aa7d6c175be0
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs b/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743131dd786
+index 0000000000000000000000000000000000000000..fe1911f28521f8c9db3277aa575f2cded955c31c
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_ownership_restoration.rs
-@@ -0,0 +1,795 @@
+@@ -0,0 +1,811 @@
 +//! Ownership changes must retain the original task and its durable configuration.
 +
 +use anyhow::Context;
@@ -7207,6 +7207,7 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +        .with_extra_config("[features.multi_agent_v2]\nenabled = true\nenable_thread_adoption = true")
 +        .with_extra_config(&format!("[model_providers.original_provider]\nname = \"Original\"\nbase_url = \"{}/v1\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0", server.uri()))
 +        .write(home.path())?;
++    select_provider(home.path(), "original_provider")?;
 +    let mut client = app(home.path()).await?;
 +    let original: ThreadStartResponse = client
 +        .request(|request_id| ClientRequest::ThreadStart {
@@ -7330,6 +7331,7 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +            .await?;
 +        assert_eq!(loaded["data"], json!([]));
 +    }
++    select_provider(home.path(), "mock_provider")?;
 +    let parent: ThreadStartResponse = client
 +        .request(|request_id| ClientRequest::ThreadStart {
 +            request_id,
@@ -7462,6 +7464,7 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +        .context("promotion must materialize original task")?;
 +    let durable_bytes = std::fs::read(&durable_path)?;
 +    let parent_before = read(&mut client, parent_id).await?;
++    select_provider(home.path(), "original_provider")?;
 +    answer(&server, &original_id, "independent answer").await;
 +    turn(&mut client, &original_id, "independent task input").await?;
 +    assert_eq!(
@@ -7528,6 +7531,14 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +        .without_auto_env()
 +        .build_initialized()
 +        .await
++}
++
++fn select_provider(home: &Path, provider: &str) -> Result<()> {
++    let path = home.join("config.toml");
++    let mut config = std::fs::read_to_string(&path)?.parse::<toml_edit::DocumentMut>()?;
++    config["model_provider"] = toml_edit::value(provider);
++    std::fs::write(path, config.to_string())?;
++    Ok(())
 +}
 +
 +#[tokio::test]
@@ -7677,6 +7688,7 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +        .with_extra_config("[features.multi_agent_v2]\nenabled = true\nenable_thread_adoption = true")
 +        .with_extra_config(&format!("[model_providers.source]\nname = \"Source\"\nbase_url = \"{}/v1\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0", source_server.uri()))
 +        .write(home.path())?;
++    select_provider(home.path(), "source")?;
 +    let mut client = app(home.path()).await?;
 +    let original: ThreadStartResponse = client
 +        .request(|request_id| ClientRequest::ThreadStart {
@@ -7690,7 +7702,10 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +    let parent: ThreadStartResponse = client
 +        .request(|request_id| ClientRequest::ThreadStart {
 +            request_id,
-+            params: Default::default(),
++            params: ThreadStartParams {
++                model_provider: Some("mock_provider".to_string()),
++                ..Default::default()
++            },
 +        })
 +        .await?;
 +    let source_turn: TurnStartResponse = client
@@ -7707,6 +7722,7 @@ index 0000000000000000000000000000000000000000..b7a4fce81dd0199be3802d6025a51743
 +        })
 +        .await?;
 +    timeout(TIMEOUT, source_server.wait_for_request_count(1)).await?;
++    select_provider(home.path(), "mock_provider")?;
 +    let result = tool(&server, &parent.thread.id, "adopt-active", "frodex", "adopt_agent", json!({"existing_thread_id": original.thread.id, "task_name": "worker", "message": "continue after the original turn"})).await;
 +    let _: TurnStartResponse = client
 +        .request(|request_id| ClientRequest::TurnStart {
