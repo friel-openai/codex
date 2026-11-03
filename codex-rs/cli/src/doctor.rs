@@ -2472,6 +2472,12 @@ fn websocket_error_detail(err: &ApiError) -> String {
         | ApiError::FlexUnavailable
         | ApiError::ServerOverloaded { .. }
         | ApiError::PolicyCapacityUnavailable { .. } => format!("handshake error: {err}"),
+        ApiError::UsageLimitReached(_) => {
+            "handshake error: usage limit reached: [redacted]".to_string()
+        }
+        ApiError::ModelUnavailable { .. } => {
+            "handshake error: model unavailable: [redacted]".to_string()
+        }
         ApiError::Retryable { .. } => "handshake error: retryable error: [redacted]".to_string(),
         ApiError::RateLimitExceeded { .. } => {
             "handshake error: rate limit exceeded: [redacted]".to_string()
@@ -3327,6 +3333,15 @@ mod tests {
                 message: message(),
                 misalignment: None,
             },
+            ApiError::UsageLimitReached(codex_protocol::error::UsageLimitReachedError {
+                plan_type: None,
+                resets_at: None,
+                limit_window_minutes: None,
+                rate_limits: None,
+                promo_message: Some(message()),
+                rate_limit_reached_type: None,
+            }),
+            ApiError::ModelUnavailable { message: message() },
         ];
         let details = cases.iter().map(websocket_error_detail).collect::<Vec<_>>();
         assert!(!details.join("\n").contains(secret));
@@ -3348,6 +3363,8 @@ mod tests {
                 "handshake error: cyber policy: [redacted]",
                 "handshake error: bio policy: [redacted]",
                 "handshake error: misalignment policy violation: [redacted]",
+                "handshake error: usage limit reached: [redacted]",
+                "handshake error: model unavailable: [redacted]",
             ]
         );
     }
