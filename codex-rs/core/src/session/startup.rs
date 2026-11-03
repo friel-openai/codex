@@ -10,6 +10,7 @@ use std::sync::PoisonError;
 
 use crate::agent::control::AgentTreeMembership;
 use crate::agent::control::AgentTreeTeardownGuard;
+use crate::thread_manager::SharedFullHistorySourceReservation;
 use crate::thread_manager::thread_store_error_kind;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrKind;
@@ -24,12 +25,34 @@ use super::session::Session;
 #[derive(Default)]
 pub(crate) struct SessionStartup {
     teardown: StdMutex<Option<AgentTreeTeardownGuard>>,
+    fork_source_reservation: StdMutex<Option<SharedFullHistorySourceReservation>>,
     pub(crate) persistence: Mutex<LiveThreadInitGuard>,
     pub(crate) session: OnceLock<Arc<Session>>,
     pub(crate) io: OnceLock<SessionIo>,
 }
 
 impl SessionStartup {
+    pub(crate) fn hold_fork_source_reservation(
+        &self,
+        reservation: Option<SharedFullHistorySourceReservation>,
+    ) {
+        if let Some(reservation) = reservation {
+            let previous = self
+                .fork_source_reservation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(reservation);
+            assert!(previous.is_none(), "fork source reservation already set");
+        }
+    }
+
+    pub(crate) fn release_fork_source_reservation(&self) {
+        self.fork_source_reservation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
     fn lock_teardown(&self) -> MutexGuard<'_, Option<AgentTreeTeardownGuard>> {
         self.teardown.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -105,6 +128,7 @@ impl SessionStartup {
                 );
             }
         }
+        self.release_fork_source_reservation();
         if let Some(teardown) = teardown {
             teardown.complete();
         }

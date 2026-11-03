@@ -4,7 +4,9 @@ use crate::agent::api::AgentControl;
 use crate::agents_md_manager::SessionInstructions;
 use crate::exec_policy::ExecPolicyManager;
 use crate::inherited_thread_state::InheritedThreadState;
+use crate::session::ForkStartupItems;
 use crate::session::session::AppServerClientMetadata;
+use crate::thread_manager::SharedFullHistorySourceReservation;
 use crate::thread_manager::StartThreadOptions;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
@@ -49,4 +51,6 @@ pub(crate) struct PreparedChildInheritance {
     pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) originator: String,
     pub(crate) attachment_source: Option<ThreadId>,
+    pub(crate) fork_startup_items: ForkStartupItems,
+    pub(crate) fork_source_reservation: Option<SharedFullHistorySourceReservation>,
 }
