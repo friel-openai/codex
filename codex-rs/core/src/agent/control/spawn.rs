@@ -679,6 +679,9 @@ impl LocalAgentControl {
         };
         let mut options = options;
         if options.environments.is_none() {
+            if let Some(environments) = &inheritance.environments {
+                environments.to_spawn_selections()?;
+            }
             options.environments = inheritance.environments.clone();
         }
         let (session_source, mut agent_metadata) = match session_source {

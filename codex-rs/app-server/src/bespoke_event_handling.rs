@@ -1561,16 +1561,16 @@ pub(crate) fn is_inter_agent_message_item(item: &codex_protocol::models::Respons
 fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Option<ThreadItem> {
     let display = inter_agent_message_display_from_response_item(item)?;
     let text = display.text();
-    Some(ThreadItem::AgentMessage {
+    Some(ThreadItem::untimed(ThreadItemPayload::AgentMessage {
         id: display
             .item_id
             .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
         text,
         phase: Some(MessagePhase::Commentary),
-        memory_citation: None,
         delivery: None,
         questions: None,
-    })
+        memory_citation: None,
+    }))
 }
 
 async fn find_and_remove_turn_summary(
@@ -2232,6 +2232,7 @@ mod tests {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::GuardianAssessmentEvent;
     use codex_protocol::protocol::GuardianAssessmentStatus;
+    use codex_protocol::protocol::InterAgentCommunication;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
@@ -4068,14 +4069,16 @@ mod tests {
             ServerNotification::ItemCompleted(notification) => {
                 assert_eq!(notification.thread_id, conversation_id.to_string());
                 assert_eq!(notification.turn_id, "turn-1");
-                let ThreadItem::AgentMessage {
+                assert_eq!(notification.item.started_at_ms, None);
+                assert_eq!(notification.item.completed_at_ms, None);
+                let ThreadItemPayload::AgentMessage {
                     id,
                     text,
                     phase,
-                    memory_citation,
                     delivery,
                     questions,
-                } = notification.item
+                    memory_citation,
+                } = notification.item.payload
                 else {
                     bail!("unexpected item");
                 };
@@ -4085,8 +4088,8 @@ mod tests {
                     "Agent message: ready for review from /root/goal_supervisor"
                 );
                 assert_eq!(phase, Some(MessagePhase::Commentary));
-                assert_eq!(memory_citation, None);
                 assert_eq!(delivery, None);
+                assert_eq!(memory_citation, None);
                 assert_eq!(questions, None);
             }
             other => bail!("unexpected message: {other:?}"),
