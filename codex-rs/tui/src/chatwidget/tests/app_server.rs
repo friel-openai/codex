@@ -781,6 +781,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -800,6 +802,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -831,9 +835,69 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
 }
 
 #[tokio::test]
+async fn cold_collab_replay_uses_and_merges_inline_receiver_metadata() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id = ThreadId::new();
+    let receiver_thread_id = ThreadId::new();
+
+    for item in [
+        AppServerThreadItemPayload::CollabAgentToolCall {
+            id: "send-1".to_string(),
+            tool: AppServerCollabAgentTool::SendInput,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![receiver_thread_id.to_string()],
+            receiver_agent_nickname: Some("Robie".to_string()),
+            receiver_agent_role: None,
+            prompt: Some("Continue".to_string()),
+            model: None,
+            reasoning_effort: None,
+            agents_states: HashMap::new(),
+        },
+        AppServerThreadItemPayload::CollabAgentToolCall {
+            id: "close-1".to_string(),
+            tool: AppServerCollabAgentTool::CloseAgent,
+            status: AppServerCollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![receiver_thread_id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: Some("explorer".to_string()),
+            prompt: None,
+            model: None,
+            reasoning_effort: None,
+            agents_states: HashMap::new(),
+        },
+    ] {
+        chat.handle_server_notification(
+            ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+                "thread-1".to_string(),
+                "turn-1".to_string(),
+                item,
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0,
+            )),
+            Some(ReplayKind::ThreadSnapshot),
+        );
+    }
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Sent input to Robie"), "got {rendered:?}");
+    assert!(
+        rendered.contains("Closed Robie [explorer]"),
+        "partial inline metadata should merge across replayed items: {rendered:?}"
+    );
+}
+
+#[tokio::test]
 async fn sub_agent_activity_renders_only_on_completion() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let item = AppServerThreadItemPayload::SubAgentActivity {
+        model: None,
+        reasoning_effort: None,
         id: "activity-1".to_string(),
         kind: SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new().to_string(),
@@ -894,6 +958,53 @@ async fn live_app_server_inter_agent_message_renders_agent_message_cell() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_chatwidget_snapshot!("live_app_server_inter_agent_message", rendered);
+}
+
+#[tokio::test]
+async fn live_encrypted_inter_agent_message_does_not_render_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ciphertext".to_string(),
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_model_input_item(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn live_child_completion_envelope_does_not_render_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nanalysis complete"
+            .to_string(),
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_model_input_item(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
 }
 
 #[tokio::test]
@@ -1665,6 +1776,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1688,6 +1801,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1740,6 +1855,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -1760,6 +1877,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
