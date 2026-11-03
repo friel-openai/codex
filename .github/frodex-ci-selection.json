@@ -145,7 +145,15 @@
         "suite::v2::workspace_cwd::workspace_cwd_allows_next_client_turn::legacy",
         "suite::v2::workspace_cwd::workspace_cwd_allows_next_client_turn::paginated",
         "suite::v2::workspace_cwd::workspace_cwd_preserves_refreshed_context_during_steering::legacy",
-        "suite::v2::workspace_cwd::workspace_cwd_preserves_refreshed_context_during_steering::paginated"
+        "suite::v2::workspace_cwd::workspace_cwd_preserves_refreshed_context_during_steering::paginated",
+        "suite::v2::thread_ownership_restoration::adoption_and_promotion_preserve_disk_history_and_configuration::descendants_and_ancestor_cycle",
+        "suite::v2::thread_ownership_restoration::adoption_and_promotion_preserve_disk_history_and_configuration::ephemeral",
+        "suite::v2::thread_ownership_restoration::adoption_and_promotion_preserve_disk_history_and_configuration::loaded",
+        "suite::v2::thread_ownership_restoration::adoption_and_promotion_preserve_disk_history_and_configuration::stored",
+        "suite::v2::thread_ownership_restoration::adoption_waits_for_the_active_source_turn_without_interrupting_it",
+        "suite::v2::model_provider_enforcement::provider_selection_can_be_restored_for_existing_threads",
+        "suite::v2::thread_archive::thread_archive_indexed_legacy_subtree_does_not_wait_for_migration",
+        "suite::v2::thread_archive::thread_archive_rejects_owned_unmaterialized_paginated_descendant"
       ]
     },
     {
@@ -996,7 +1004,23 @@
         "local::thread_history_materialization::tests::unknown_rollout_lines_leave_ordinals_pending_for_valid_retries",
         "local::unarchive_thread::tests::unarchive_thread_deduplicates_rollout_paths_and_updates_sqlite_metadata",
         "local::unarchive_thread::tests::unarchive_thread_rejects_a_cross_process_writer",
-        "local::unarchive_thread::tests::unarchive_thread_restores_rollout_and_returns_updated_thread"
+        "local::unarchive_thread::tests::unarchive_thread_restores_rollout_and_returns_updated_thread",
+        "local::rollout_migration::physical_io::tests::cancelled_publication_workers_retain_migration_ownership",
+        "local::rollout_migration::startup::tests::retries_busy_rollouts_after_archive_and_compression_move",
+        "local::rollout_migration::tests::migration_preserves_compressed_rollouts_during_publish_and_recovery",
+        "local::rollout_migration::tests::automatic_migration_recovers_an_appended_source_before_selection",
+        "local::rollout_migration::tests::migration_recovers_same_thread_lineage_from_every_durable_phase",
+        "local::rollout_migration::tests::native_history_base_migration_recovers_from_every_durable_phase",
+        "local::rollout_migration::archive_gate::tests::archive_preserves_legacy_bytes_while_migration_job_is_held",
+        "local::rollout_migration::archive_gate::tests::archive_rejects_own_pending_marker_without_moving_files_or_metadata",
+        "local::rollout_migration::archive_gate::tests::published_cross_thread_journal_blocks_damaged_sqlite_alias_but_not_disjoint_archive",
+        "local::rollout_migration::archive_gate::tests::archive_first_prevents_publication_of_stale_dependency_paths",
+        "local::rollout_migration::archive_gate::tests::archived_target_alias_prevents_publication_without_moving_sources",
+        "local::rollout_migration::archive_gate::tests::publication_contention_is_nonblocking_and_corrupt_journals_fail_closed",
+        "local::rollout_migration::archive_gate::tests::cancelled_archive_retains_gate_and_writer_until_sqlite_commit",
+        "local::rollout_migration::archive_gate::tests::cancelled_journal_publication_retains_gate_through_physical_sync",
+        "local::rollout_migration::archive_gate::tests::ordinary_marker_first_protects_a_damaged_sqlite_alias",
+        "local::rollout_migration::archive_gate::tests::ordinary_move_first_and_rejected_publications_leave_history_and_journals_unchanged"
       ]
     },
     {
