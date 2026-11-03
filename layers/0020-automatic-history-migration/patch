@@ -2266,7 +2266,7 @@ index fdeb1571ee24aa1ed1a57bbe49055f41670c6bce..2f04e721b083d5bde762cce66f0fad66
              .await?;
          let ThreadListResponse { data, .. } =
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index eec460ed4f528e25b0ca90648bff13c4671c4d85..d8c704e4ebb74246baca79a5d90d80573001fd5c 100644
+index eec460ed4f528e25b0ca90648bff13c4671c4d85..f044f9f811fb2a4333cd8d713bfb8ecf207fd18d 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
 @@ -63,6 +63,7 @@ use codex_config::LoaderOverrides;
@@ -2486,6 +2486,15 @@ index eec460ed4f528e25b0ca90648bff13c4671c4d85..d8c704e4ebb74246baca79a5d90d8057
      let thread_id = codex_protocol::ThreadId::new();
      let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
      let store = LocalThreadStore::new(
+@@ -3828,7 +3942,7 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
+                 turn_id: turn.id.clone(),
+                 item,
+                 started_at_ms: None,
+-                completed_at_ms: Some(1_736_078_400_000),
++                completed_at_ms: None,
+             })
+             .collect::<Vec<_>>()
+     );
 @@ -3840,7 +3954,9 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
  async fn thread_turns_list_rejects_cursor_when_anchor_turn_is_rolled_back() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
