@@ -854,6 +854,141 @@ async fn get_model_info_uses_custom_catalog() {
 }
 
 #[tokio::test]
+async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+    let mut custom_models = HashMap::new();
+    custom_models.insert(
+        "frontier-local".to_string(),
+        CustomModelConfig {
+            model: "gpt-real-preview".to_string(),
+            model_context_window: Some(123_456),
+            model_auto_compact_token_limit: Some(100_000),
+        },
+    );
+    let mut remote = remote_model("gpt-real", "Real", /*priority*/ 0);
+    remote.include_skills_usage_instructions = true;
+    let manager = StaticModelsManager::new_with_custom_models(
+        /*auth_manager*/ None,
+        ModelsResponse {
+            models: vec![remote],
+        },
+        ModelOrigin::ExplicitConfig,
+        custom_models,
+    );
+    let config = ModelsManagerConfig::default();
+
+    let model_info = manager.get_model_info("frontier-local", &config).await;
+
+    assert_eq!(model_info.slug, "frontier-local");
+    assert_eq!(
+        model_info.request_model.as_deref(),
+        Some("gpt-real-preview")
+    );
+    assert_eq!(model_info.display_name, "frontier-local");
+    assert_eq!(model_info.context_window, Some(123_456));
+    assert_eq!(model_info.auto_compact_token_limit, Some(100_000));
+    assert!(model_info.include_skills_usage_instructions);
+    assert!(!model_info.used_fallback_model_metadata);
+
+    let available = manager
+        .list_models(RefreshStrategy::Offline, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert!(
+        available
+            .iter()
+            .any(|preset| preset.model == "frontier-local")
+    );
+    let catalog = manager
+        .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].model.slug, "gpt-real");
+    assert_eq!(catalog[0].origin, ModelOrigin::ExplicitConfig);
+
+    let override_config = ModelsManagerConfig {
+        custom_models: HashMap::from([(
+            "frontier-local".to_string(),
+            CustomModelConfig {
+                model: "gpt-real-overridden".to_string(),
+                model_context_window: Some(64_000),
+                model_auto_compact_token_limit: Some(48_000),
+            },
+        )]),
+        model_context_window: Some(32_000),
+        model_auto_compact_token_limit: Some(24_000),
+        ..Default::default()
+    };
+    let overridden = manager
+        .get_model_info("frontier-local", &override_config)
+        .await;
+    assert_eq!(
+        overridden.request_model.as_deref(),
+        Some("gpt-real-overridden")
+    );
+    assert_eq!(overridden.context_window, Some(64_000));
+    assert_eq!(overridden.auto_compact_token_limit, Some(48_000));
+    assert!(overridden.include_skills_usage_instructions);
+    assert!(!overridden.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn custom_model_overrides_survive_manager_cache_modes() {
+    let home = tempdir().unwrap();
+    let endpoint = TestModelsEndpoint::new(Vec::new());
+    let aliases = HashMap::from([(
+        "frontier-local".to_string(),
+        CustomModelConfig {
+            model: "gpt-5.5".to_string(),
+            model_context_window: Some(64_000),
+            model_auto_compact_token_limit: Some(48_000),
+        },
+    )]);
+    let managers = [
+        OpenAiModelsManager::new_with_custom_models(
+            home.path().into(),
+            endpoint.clone(),
+            /*auth_manager*/ None,
+            aliases.clone(),
+        ),
+        OpenAiModelsManager::new_without_cache_and_custom_models(
+            endpoint.clone(),
+            /*auth_manager*/ None,
+            aliases.clone(),
+        ),
+        OpenAiModelsManager::new_with_cache_and_custom_models(
+            Arc::new(TestModelsCache::default()),
+            endpoint.clone(),
+            /*auth_manager*/ None,
+            aliases.clone(),
+        ),
+    ];
+    for manager in managers {
+        assert_eq!(manager.custom_models(), &aliases);
+        let alias = manager
+            .get_model_info("frontier-local", &ModelsManagerConfig::default())
+            .await;
+        assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(alias.context_window, Some(64_000));
+        assert_eq!(alias.auto_compact_token_limit, Some(48_000));
+        assert!(!alias.used_fallback_model_metadata);
+        let catalog = manager
+            .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+        assert!(
+            catalog
+                .iter()
+                .all(|entry| entry.origin == ModelOrigin::Bundled)
+        );
+        assert!(
+            catalog
+                .iter()
+                .all(|entry| entry.model.slug != "frontier-local")
+        );
+    }
+    assert_eq!(endpoint.fetch_count(), 0);
+    assert!(!home.path().join(MODEL_CACHE_FILE).exists());
+}
+
+#[tokio::test]
 async fn get_model_info_matches_namespaced_suffix() {
     let config = ModelsManagerConfig::default();
     let mut remote = remote_model("gpt-image", "Image", /*priority*/ 0);

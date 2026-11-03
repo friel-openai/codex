@@ -448,6 +448,14 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
     config.model_context_window = Some(160_000);
     config.model_auto_compact_token_limit = Some(70_000);
     config.tool_output_token_limit = Some(777);
+    config.custom_models.insert(
+        "thread-alias".to_string(),
+        CustomModelConfig {
+            model: "model-b".to_string(),
+            model_context_window: Some(64_000),
+            model_auto_compact_token_limit: Some(48_000),
+        },
+    );
     config.base_instructions = Some(configured_instructions.to_string());
     let explicit_instructions = matches!(&provenance, BaseInstructionsProvenance::Custom);
     config.base_instructions_provenance = Some(provenance);
@@ -485,6 +493,27 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
             } else {
                 catalog_instructions
             },
+        );
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("thread-alias".to_string()),
+            /*effort*/ None,
+            /*developer_instructions*/ None,
+        );
+        let alias = settings
+            .resolve_model_info(&models_manager, &overrides)
+            .await;
+        assert_eq!(
+            alias,
+            models_manager
+                .get_model_info("thread-alias", &config.to_models_manager_config())
+                .await
+        );
+        assert_eq!(alias.request_model.as_deref(), Some("model-b"));
+        assert_eq!(alias.context_window, Some(64_000));
+        assert_eq!(alias.auto_compact_token_limit, Some(48_000));
+        assert_eq!(
+            render_model_instructions(&alias),
+            render_model_instructions(&resolved)
         );
     }
 }
