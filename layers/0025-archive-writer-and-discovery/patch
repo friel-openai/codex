@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 3448abfa061e996a30fd657470efaca24f4e14bb..15f25709329d30555c9693c192a643ca9a6e7972 100644
+index e7238e6405e293045047305267330349744fdb0a..9439e30a4ef64a8d890782360671773f621686dc 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2291,7 +2291,7 @@ impl ThreadRequestProcessor {
+@@ -2299,7 +2299,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index 3448abfa061e996a30fd657470efaca24f4e14bb..15f25709329d30555c9693c192a643ca
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -7012,6 +7012,28 @@ impl ThreadRequestProcessor {
+@@ -7019,6 +7019,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,10 +41,10 @@ index 3448abfa061e996a30fd657470efaca24f4e14bb..15f25709329d30555c9693c192a643ca
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 2764d5bbecf153a481e866b7f851dd30afa23b99..9b53d6ae50209ed20b4ae5fe1248dca8b9f5ecdb 100644
+index a59d8a1af9929ddbe0dc7c86bf9a261a2066b031..1e4bc4fd01e3b9f1c6feb029e88d5943f023ccb3 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -151,6 +151,7 @@ mod skills_list;
+@@ -152,6 +152,7 @@ mod skills_list;
  mod sleep;
  mod sqlite_recovery;
  mod thread_archive;

@@ -2439,7 +2439,7 @@ index 25ee11d79e79e1927d0e4f40b0e90a9fccb926dc..d2cd9dfd6287637c0466495ea10f2113
      let owner_counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
          "SELECT (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)",
 diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
-index 144ee65121e2ad1dc47526edf09c9f7ae27c2d22..00d530d4e32c2f792d445184d9916052288b5a7d 100644
+index e6c6bc601b1ae00417a0c20e87080ed1eed424ed..8043966b61b50f1eee598a2b49f5c4fca9956e23 100644
 --- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 @@ -204,6 +204,7 @@ pub(super) async fn page_indexed_turn_rows(

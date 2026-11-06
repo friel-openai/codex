@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index a002c9017ac7534623f00a4bf70a1d5efaaf5180..97ba20ed1815ec8c13aa86d22ac5816c6862770a 100644
+index 226ad3611448b91720d5199b96f491bc774e896e..d3ee4665e55d0888f83ccc202196ef866d274cbd 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2172,6 +2172,7 @@ dependencies = [
@@ -20,10 +20,10 @@ index 1a9570c5dd88ab21338f3b46d9664c769dd3c8be..fb79f3d524522300ca2b75f22a8d7a3a
  wiremock = { workspace = true }
 +zstd = { workspace = true }
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 8449ad3b7940a4a3f72c4054cb72771d30db43a1..589931dbefb0bdba1fea50f94f871d97d2c9cbe3 100644
+index 9d9aed23d26292df74d325f0933592fe3da91bd4..e902db818047e3bc5057f0411a852477c2e1668e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -6974,10 +6974,7 @@ impl ThreadRequestProcessor {
+@@ -6981,10 +6981,7 @@ impl ThreadRequestProcessor {
                  .await
                  .map_err(thread_store_resume_read_error)?;
              if let Some(current_path) = current_thread.rollout_path.as_ref()
@@ -35,7 +35,7 @@ index 8449ad3b7940a4a3f72c4054cb72771d30db43a1..589931dbefb0bdba1fea50f94f871d97
              {
                  return Err(invalid_request(format!(
                      "cannot resume paginated thread {} with stale path: requested {}, current {}; omit path and resume by thread id",
-@@ -7018,7 +7015,16 @@ impl ThreadRequestProcessor {
+@@ -7025,7 +7022,16 @@ impl ThreadRequestProcessor {
              .rollout_path
              .as_deref()
              .map(codex_rollout::plain_rollout_path);
@@ -54,10 +54,10 @@ index 8449ad3b7940a4a3f72c4054cb72771d30db43a1..589931dbefb0bdba1fea50f94f871d97
                  "rollout path does not select the current rollout for thread {}",
                  stored_thread.thread_id
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index ae02bbed089829b81c0581908474a1e46570be1b..2764d5bbecf153a481e866b7f851dd30afa23b99 100644
+index 0d3fb58ccb469e8099526384630d242a68d5a52c..a59d8a1af9929ddbe0dc7c86bf9a261a2066b031 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -155,6 +155,7 @@ mod thread_attachments;
+@@ -156,6 +156,7 @@ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
  mod thread_fork;
@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 53ec41ffa9b571471d49d281b913b6e799809cdf..183c637798aae4b662a9fa9cefc53fabc83e0c29 100644
+index 4b80d349f5ccb61a3f153da2caeefc2bb9309729..7f80cb2be3604b684bb7cee9930c7ad3c6ffba94 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -10533,6 +10533,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -10574,6 +10574,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,10 +271,10 @@ index 53ec41ffa9b571471d49d281b913b6e799809cdf..183c637798aae4b662a9fa9cefc53fab
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 79cd2792e7da215c85299c736399120727da7010..c6b1b806297e892b8c8841ee791cd171a472eaef 100644
+index d1aad8a8ed17eafdaf82b776643f56eaa385e194..dfc1119b3345fc994b44a8d8b524b58a86db8f3b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3763,7 +3763,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
+@@ -3772,7 +3772,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
  async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
      let codex_home = tempfile::tempdir().expect("create Codex home");
      let source_thread_id = ThreadId::default();
@@ -288,10 +288,10 @@ index 79cd2792e7da215c85299c736399120727da7010..c6b1b806297e892b8c8841ee791cd171
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 38be26221b59959f5d826d5ebfd3fad3f8f49c4e..70ff774589e452dd355b4e8ad7ea564b8053a4c6 100644
+index b656a9cac7dab211092b3aabda62fc9170248bb4..d1fac021c3e9e24d37323a67245e2585ccd20cc3 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1961,7 +1961,6 @@ impl ThreadManager {
+@@ -1990,7 +1990,6 @@ impl ThreadManager {
          &self,
          rollout_path: PathBuf,
      ) -> CodexResult<InitialHistory> {
@@ -299,7 +299,7 @@ index 38be26221b59959f5d826d5ebfd3fad3f8f49c4e..70ff774589e452dd355b4e8ad7ea564b
          let stored_thread = self
              .state
              .thread_store
-@@ -1972,7 +1971,7 @@ impl ThreadManager {
+@@ -2001,7 +2000,7 @@ impl ThreadManager {
              })
              .await
              .map_err(thread_store_rollout_read_error)?;

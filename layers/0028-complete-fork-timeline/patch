@@ -2813,7 +2813,7 @@ index 0000000000000000000000000000000000000000..df7a7bdebb66cb789fc04ef923d0f4c2
 +    })
 +}
 diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
-index 807b1c046342e8f7e29a7a7065dbfcc2a8633d74..144ee65121e2ad1dc47526edf09c9f7ae27c2d22 100644
+index 3b45c320a4e233c4e7026efb7210810a0348f325..e6c6bc601b1ae00417a0c20e87080ed1eed424ed 100644
 --- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 @@ -898,6 +898,7 @@ mod tests {

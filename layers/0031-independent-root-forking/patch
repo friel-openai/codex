@@ -696,10 +696,10 @@ index 0000000000000000000000000000000000000000..b91d1d2b9a828dd5028c704148b36b10
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/fork/section_tests.rs b/codex-rs/core/src/independent_thread/fork/section_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b27aeaf9ac
+index 0000000000000000000000000000000000000000..fc8153999fcdb650a80b696f55dd2c6e7e0c9c34
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/section_tests.rs
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,596 @@
 +use super::*;
 +use crate::session::step_context::StepContext;
 +use crate::session::tests::make_session_and_context_with_dynamic_tools_and_rx;
@@ -792,6 +792,7 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "placement-test".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1121,6 +1122,7 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +            cancellation_token: CancellationToken::new(),
 +            tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +            call_id: "explicit-section-test".to_string(),
++            native_call: None,
 +            environments: ToolEnvironments::All,
 +            tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +            source: ToolCallSource::Direct,
@@ -1179,6 +1181,7 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "timeout-test".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1230,6 +1233,7 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "opt-out-test".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1262,6 +1266,7 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "ended-turn-test".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1293,10 +1298,10 @@ index 0000000000000000000000000000000000000000..b6bfb883968c7dd1cc7575cdbf2d58b2
 +}
 diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a50bb4d4abe68e2bd5cbc1c942842a577b2e001
+index 0000000000000000000000000000000000000000..96b1079242a8cd7e9a8229cddedcb2b704333b5c
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/fork/tests.rs
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,536 @@
 +//! Deterministic tests of the tool's persisted history and independent lifecycle.
 +
 +use super::*;
@@ -1384,6 +1389,7 @@ index 0000000000000000000000000000000000000000..8a50bb4d4abe68e2bd5cbc1c942842a5
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "blank-section".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1792,6 +1798,7 @@ index 0000000000000000000000000000000000000000..8a50bb4d4abe68e2bd5cbc1c942842a5
 +        cancellation_token: CancellationToken::new(),
 +        tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +        call_id: "fork-call".to_string(),
++        native_call: None,
 +        environments: ToolEnvironments::All,
 +        tool_name: ToolName::namespaced("frodex", "fork_thread"),
 +        source: ToolCallSource::Direct,
@@ -1832,7 +1839,7 @@ index 0000000000000000000000000000000000000000..8a50bb4d4abe68e2bd5cbc1c942842a5
 +    )
 +}
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
-index 42156c7556bff5acc34cb25e36d4dfe2b7cefb30..11c0bb3c0637fe5c4dd44d85bec665e86eb9947c 100644
+index 1bed11502099bb6650f4da180d68d4730c7c1025..3f5c35dd47db7fdb2f51d6eb11670e34a2db8752 100644
 --- a/codex-rs/core/src/independent_thread/message_tests.rs
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
 @@ -264,6 +264,7 @@ fn independent_and_ownership_tools_share_strict_frodex_namespace() -> anyhow::Re
@@ -1863,10 +1870,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 7ebf27f4a61cacf746a972855f083a4a70bb3d52..58e732e702f5d240e2f322ac45976a9a17e70bce 100644
+index e5b66669b9cb10ceb56656d082c8b2ab5660a80f..d9044baff99aff3d3897f01c7621570764ec9178 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1247,6 +1247,11 @@ impl ThreadManager {
+@@ -1297,6 +1297,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1892,7 +1899,7 @@ index 0eac846e05187ab469d9ecc33f295b75e06f7a48..5e5beef1e477f4f265c82d9a2e9dae59
      turn_context: &TurnContext,
      call_id: String,
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 571cfb6456952a4e40fe6839fc19a6b8a521e800..0403333e47d5c4208aafe6a8db24f885c656f71c 100644
+index 8c1654a2937652ff7ef1b3670dcd90a8d948d572..4a15e4c6de4a5868f72ba6e1c37f5e100264dc65 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@

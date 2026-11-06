@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index fd3fcf355a55a37ec1798bf0b22d42c15bd571bc..c9637ef2ae8d5773fbb49769f0bf99aca00f8468 100644
+index 8891777b0db236f41b287e0554ca6a4fa5f48dec..4336f770c1c49170d99a2b551bb29ede12cd0124 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -4963,6 +4963,7 @@ dependencies = [
+@@ -4991,6 +4991,7 @@ dependencies = [
  name = "codex-thread-store"
  version = "0.154.0"
  dependencies = [
@@ -649,10 +649,10 @@ index b267ccd018aa6de5687b77ee42860bdcd625c936..2a1c379553f791dea746590c61239cd6
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db451c23ae 100644
+index 6dc3865b265a71e17670d75aa251de4c969091b6..5a16fde2881b78a3d75ad8c19e8da1696fed39b6 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -479,6 +479,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -482,6 +482,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
          .get_thread(helper_thread_id)
          .await
          .expect("supervisor helper should be registered");
@@ -660,7 +660,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
      assert_eq!(
          helper_thread.session.prompt_cache_key(),
          parent.thread.session.prompt_cache_key(),
-@@ -534,31 +535,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -537,31 +538,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
              if name == "list_agents" && call_id == SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID
      )));
 
@@ -700,7 +700,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
  }
 
  fn spawn_agent_call(call_id: &str) -> ResponseItem {
-@@ -818,6 +802,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -821,6 +805,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          .get_thread(helper_thread_id)
          .await
          .expect("goal supervisor helper should be registered");
@@ -708,7 +708,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
      let helper_snapshot = helper_thread.config_snapshot().await;
      let helper_source = helper_snapshot.session_source.clone();
      let expected_path = AgentPath::root()
-@@ -848,32 +833,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -851,32 +836,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          &supervisor_prompt,
          GENERIC_SUBAGENT_HINT,
      );
@@ -750,7 +750,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -8500,18 +8469,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -8541,18 +8510,70 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .await
          .expect("child thread should archive");
 
@@ -822,7 +822,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
  }
 
  #[test_case::test_case(vec!["child-plugin".to_string()]; "saved disabled plugin")]
-@@ -10758,18 +10779,52 @@ while True:
+@@ -10799,18 +10820,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -877,7 +877,7 @@ index 05e84a9cd0a90ca62c7da09cce820948e2dfeef7..14bf02387ac0608ec407b50bd930a7db
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -10780,13 +10835,8 @@ while True:
+@@ -10821,13 +10876,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -11796,7 +11796,7 @@ index e468ae57c1b9f856d74566d98a8b8640ee5bc8b1..07772ac63ce7de7ba4c15010055d2ec7
                  filter_texts: Vec::new(),
              },
 diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
-index 89be923c71517a59c663df37c5f9b357f3cb1dcd..e8d74405292207761c3fb662b1f32e809b6a1ca4 100644
+index 43301842b75e0515e0131bcf589bd31cfa8d0cb5..15a8b28defb6261eee1b701f39ac1023c9fb0bf4 100644
 --- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
 @@ -950,6 +950,7 @@ mod tests {

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/common/models_cache.rs b/codex-rs/app-server/tests/common/models_cache.rs
-index 9aec5a1bca1858d77754814eb2b6e2b2410ff604..f705be5157c9bb46658fd2461d045c4570c4493f 100644
+index 582692b76c28632e089dc82ad1d5c92be03ec0f4..e6a1d4bd830978f0c6010de048c856f3883ad92f 100644
 --- a/codex-rs/app-server/tests/common/models_cache.rs
 +++ b/codex-rs/app-server/tests/common/models_cache.rs
 @@ -13,6 +13,7 @@ use std::path::Path;
@@ -11,7 +11,7 @@ index 9aec5a1bca1858d77754814eb2b6e2b2410ff604..f705be5157c9bb46658fd2461d045c45
          description: Some(preset.description.clone()),
          default_reasoning_level: Some(preset.default_reasoning_effort.clone()),
 diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
-index b284a8db6f9d05219ac2173764952af6add94bc6..dff8847db01fb25282b0abe68bdb9fd4474dc5dd 100644
+index 05d1806c1f7e60ea0d613062bb59de1104372cb6..0e75f33c3b8f028e8c83d9d1cdd2ead3b72e91e4 100644
 --- a/codex-rs/codex-api/tests/models_integration.rs
 +++ b/codex-rs/codex-api/tests/models_integration.rs
 @@ -111,6 +111,7 @@ async fn models_client_hits_models_endpoint() {
@@ -23,7 +23,7 @@ index b284a8db6f9d05219ac2173764952af6add94bc6..dff8847db01fb25282b0abe68bdb9fd4
              description: Some("desc".to_string()),
              default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 2578c59d9c07d78b11cda00be940dfe2d19e0a58..4c6538493d878180a79f3b1aba5f605460dca42b 100644
+index cd1c40056e191533b5ba5d1ea22c1940d6738177..f0ec40ff65680d78755cb85bc70bcd93e9563344 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -333,6 +333,10 @@ pub struct ConfigToml {
@@ -37,7 +37,7 @@ index 2578c59d9c07d78b11cda00be940dfe2d19e0a58..4c6538493d878180a79f3b1aba5f6054
      /// Maximum total bytes of project instruction content across all selected environments.
      #[serde(default = "default_project_doc_max_bytes")]
      pub project_doc_max_bytes: Option<usize>,
-@@ -1007,6 +1011,19 @@ pub fn validate_model_providers(
+@@ -1017,6 +1021,19 @@ pub fn validate_model_providers(
      Ok(())
  }
 
@@ -58,7 +58,7 @@ index 2578c59d9c07d78b11cda00be940dfe2d19e0a58..4c6538493d878180a79f3b1aba5f6054
      deserializer: D,
  ) -> Result<HashMap<String, ModelProviderInfo>, D::Error>
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 0e741b619f29ca531575accba1a2d6d18ebc7403..c562c5bec8772c308c3a546822aa69fcb707dfee 100644
+index f5149c6efdf7ab9f1550aa0639dd5f2401205f25..0e8877c8cfdae23a4f198c1d0104f2f7d6fa21e4 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -839,6 +839,9 @@
@@ -71,7 +71,7 @@ index 0e741b619f29ca531575accba1a2d6d18ebc7403..c562c5bec8772c308c3a546822aa69fc
              "analytics_plan_history": {
                "type": "boolean"
              },
-@@ -1700,6 +1703,34 @@
+@@ -1721,6 +1724,34 @@
        ],
        "type": "string"
      },
@@ -106,7 +106,7 @@ index 0e741b619f29ca531575accba1a2d6d18ebc7403..c562c5bec8772c308c3a546822aa69fc
      "ExperimentalRequestUserInput": {
        "additionalProperties": false,
        "properties": {
-@@ -7419,6 +7450,14 @@
+@@ -7481,6 +7512,14 @@
      "computer_use": {
        "$ref": "#/definitions/ComputerUseConfigToml"
      },
@@ -121,7 +121,7 @@ index 0e741b619f29ca531575accba1a2d6d18ebc7403..c562c5bec8772c308c3a546822aa69fc
      "daybreak": {
        "description": "Default Daybreak preference for new threads and non-interactive turns.",
        "type": "boolean"
-@@ -7488,6 +7527,9 @@
+@@ -7550,6 +7589,9 @@
          "agent_message_board": {
            "type": "boolean"
          },
@@ -194,10 +194,10 @@ index 2ad575051e6ef05b368642a8696a376b5c1d3cf5..31f9535997f6d72520a08e1b38fc6240
          .await
          .expect("spawn v2 subagent")
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 9a6edd5d1dc0948f19cef713f235842bc5771c41..04ff10f1a447cf455104b0cf2b99c40c5cd7083b 100644
+index 5d8d73b7fb35ab74f9180158f6e3a349181fe1a8..33e514ab8342350e03620062cbf115994ff5428a 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -1026,7 +1026,7 @@ impl ModelClient {
+@@ -1028,7 +1028,7 @@ impl ModelClient {
                  .with_telemetry(Some(request_telemetry));
 
          let payload = ApiMemorySummarizeInput {
@@ -206,7 +206,7 @@ index 9a6edd5d1dc0948f19cef713f235842bc5771c41..04ff10f1a447cf455104b0cf2b99c40c
              raw_memories,
              reasoning: effort
                  .map(|effort| model_info.resolve_reasoning_effort(effort))
-@@ -1285,7 +1285,7 @@ impl ModelClient {
+@@ -1287,7 +1287,7 @@ impl ModelClient {
          }
          let client_metadata = responses_metadata.client_metadata(include_internal);
          let request = ResponsesApiRequest {
@@ -216,7 +216,7 @@ index 9a6edd5d1dc0948f19cef713f235842bc5771c41..04ff10f1a447cf455104b0cf2b99c40c
              tools,
              tool_choice: "auto".to_string(),
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 12149af942bd691786ac86e05fa41b7a9ba4568d..c05973fa6d75b3fea23036e92c0e3de79ce74643 100644
+index 3242be94b87fd581798a8042355413d7e9a69a86..567b3a1dffbcfdbdfacaa45300e3dfbb36b575f7 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -47,6 +47,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
@@ -247,7 +247,7 @@ index 12149af942bd691786ac86e05fa41b7a9ba4568d..c05973fa6d75b3fea23036e92c0e3de7
      }
  }
 
-@@ -2422,8 +2426,10 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -2484,8 +2488,10 @@ impl ModelProvider for TestRecoveryProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -260,7 +260,7 @@ index 12149af942bd691786ac86e05fa41b7a9ba4568d..c05973fa6d75b3fea23036e92c0e3de7
  }
 
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 309e2d3d5442b8a98397a942919aa1c6b37616d2..78a35f4ee428a61ef5b2222e60d6aa54eb80edcd 100644
+index 8b2548f7eaad0aebdc70e3be691bfc70b6868f85..d97aeb37a3aa1735729b085d15266c57781e1b8d 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -21,6 +21,7 @@ use codex_config::config_toml::AgentRoleToml;
@@ -271,7 +271,7 @@ index 309e2d3d5442b8a98397a942919aa1c6b37616d2..78a35f4ee428a61ef5b2222e60d6aa54
  use codex_config::config_toml::ExperimentalRequestUserInput;
  use codex_config::config_toml::ProjectConfig;
  use codex_config::config_toml::RealtimeConfig;
-@@ -10222,6 +10223,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
+@@ -10333,6 +10334,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
      Ok(())
  }
 
@@ -343,7 +343,7 @@ index 309e2d3d5442b8a98397a942919aa1c6b37616d2..78a35f4ee428a61ef5b2222e60d6aa54
      let toml = r#"
  model = "o3"
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index eb949b8a461575cf3260669cb3dbe24ffd40ae71..51ffff386661d42334dcef1cecbb656fbf9c15b8 100644
+index 8d93436455c461e1cd79753e369e116bc79f326a..8aec9eaaf006aade6802f09def902f67ec81565f 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -98,6 +98,7 @@ use codex_model_provider_info::ModelProviderInfo;
@@ -372,7 +372,7 @@ index eb949b8a461575cf3260669cb3dbe24ffd40ae71..51ffff386661d42334dcef1cecbb656f
          }
      }
 
-@@ -4045,6 +4050,25 @@ impl Config {
+@@ -4047,6 +4052,25 @@ impl Config {
              apply_default_gcp_auth(provider, &resolved_cwd);
          }
 
@@ -398,7 +398,7 @@ index eb949b8a461575cf3260669cb3dbe24ffd40ae71..51ffff386661d42334dcef1cecbb656f
          let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
              .or(model_provider)
              .or(cfg.model_provider)
-@@ -4602,6 +4626,7 @@ impl Config {
+@@ -4604,6 +4628,7 @@ impl Config {
                  .map(Duration::from_millis)
                  .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
              model_providers,
@@ -407,7 +407,7 @@ index eb949b8a461575cf3260669cb3dbe24ffd40ae71..51ffff386661d42334dcef1cecbb656f
              project_doc_fallback_filenames: cfg
                  .project_doc_fallback_filenames
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 7d471cac2949524310326f055fb2601941ceea54..cb81d8c4e4f9474cd98d080a6fdd07cdc96f1c2c 100644
+index 672bd996915a1c2bd21a71cda0cdec89e22a134e..4a92bb48edb2222c2c5599dfcdaca2358ad681bb 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -311,6 +311,75 @@ use self::turn_context::TurnContext;
@@ -486,7 +486,7 @@ index 7d471cac2949524310326f055fb2601941ceea54..cb81d8c4e4f9474cd98d080a6fdd07cd
  use crate::exec_policy::ExecPolicyUpdateError;
  use crate::guardian::GuardianReviewSessionManager;
  use crate::mcp::McpEnvironmentScope;
-@@ -372,6 +441,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+@@ -373,6 +442,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
  use codex_protocol::config_types::Settings;
  use codex_protocol::config_types::WindowsSandboxLevel;
  use codex_protocol::mcp::ClientMcpExtensions;
@@ -494,7 +494,7 @@ index 7d471cac2949524310326f055fb2601941ceea54..cb81d8c4e4f9474cd98d080a6fdd07cd
  use codex_protocol::models::LocalImagePreparation;
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ResponseItem;
-@@ -4725,13 +4795,20 @@ impl Session {
+@@ -4802,13 +4872,20 @@ impl Session {
          let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
          let mut separate_developer_messages = Vec::<ResponseItem>::new();
          let mut context_window_hints = Vec::new();
@@ -517,7 +517,7 @@ index 7d471cac2949524310326f055fb2601941ceea54..cb81d8c4e4f9474cd98d080a6fdd07cd
              crate::guardian::is_basic_session_source(&session_source);
          // Keep the guardian policy prompt out of the aggregated developer bundle so it
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 094b59de58daba57b7f3cbc3fba9d05c2e77f011..c6b8cb9b99ba2b2727a7dacc339e764eeecdea3e 100644
+index 71923d1a154140e0998cdefcef739eeeb28be46a..9a17fb6adbcda8b53cc6308df68bcc2e3c43ef0d 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -25,6 +25,7 @@ use codex_extension_api::ThreadInstructionsProvider;
@@ -528,7 +528,7 @@ index 094b59de58daba57b7f3cbc3fba9d05c2e77f011..c6b8cb9b99ba2b2727a7dacc339e764e
  use codex_models_manager::ModelsManagerConfig;
  use codex_models_manager::bundled_models_response;
  use codex_models_manager::manager::ModelsManager;
-@@ -378,6 +379,10 @@ impl ModelsManager for GatedModelsManager {
+@@ -380,6 +381,10 @@ impl ModelsManager for GatedModelsManager {
          self.inner.auth_manager()
      }
 
@@ -540,7 +540,7 @@ index 094b59de58daba57b7f3cbc3fba9d05c2e77f011..c6b8cb9b99ba2b2727a7dacc339e764e
          self.inner.list_collaboration_modes()
      }
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index b66fb1931dde38aa01bbb777350e618bea870255..ac9cbd3e422ec61b4235aa2fe042546bcc2d0cbc 100644
+index 3a75062ab55e2d8a7e8ebb447294066a0dcb77cf..f848828ca72ec6ec8275417fd8b8939e3b6299c7 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
 @@ -5,6 +5,7 @@ use crate::config::ConstraintError;
@@ -552,7 +552,7 @@ index b66fb1931dde38aa01bbb777350e618bea870255..ac9cbd3e422ec61b4235aa2fe042546b
  use codex_models_manager::manager::ModelsManager;
  use codex_otel::SessionTelemetry;
 @@ -17,6 +18,7 @@ use codex_protocol::config_types::ServiceTier;
- use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::CatalogModel;
  use codex_protocol::openai_models::ReasoningEffort;
  use codex_protocol::protocol::AskForApproval;
 +use std::collections::HashMap;
@@ -640,10 +640,10 @@ index 049ca1b4282d8d990b54e3bb5b0dc7a71d92dfbc..c0591c926f91c1a059b9ad036cc80937
      }
  }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c801af15c 100644
+index 520601b0563f090ddfc83a156861d47c3f5fa34e..604e5fde9b0cd057c798587a441b851797a9bc7b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3379,12 +3379,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
+@@ -3388,12 +3388,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
      let history_before_seed = session.state.lock().await.clone_history();
      assert_eq!(expected, raw_history_items(&history_before_seed));
 
@@ -659,7 +659,7 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
      expected.extend(initial_context);
      let history_after_seed = session.clone_history().await;
      assert_eq!(
-@@ -4425,6 +4427,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
+@@ -4435,6 +4437,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
      let mut builder = test_codex().with_config(|config| {
          config.update_plan_enabled = true;
@@ -672,7 +672,7 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
          config.permissions.approval_policy =
              codex_config::Constrained::allow_any(AskForApproval::OnRequest);
      });
-@@ -11389,12 +11397,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
+@@ -11428,12 +11436,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
      let (session, turn_context) = make_session_and_context().await;
      let turn_context = Arc::new(turn_context);
      let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -686,7 +686,7 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
      assert_eq!(
          strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
          strip_response_item_ids(&strip_metadata_from_items(&initial_context))
-@@ -11447,6 +11455,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+@@ -11486,6 +11494,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
          )
          .await;
 
@@ -694,7 +694,7 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
      session
          .record_context_updates_and_set_reference_context_item(&step_context)
          .await
-@@ -11454,7 +11463,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+@@ -11493,7 +11502,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 
      let history = session.clone_history().await;
      let mut expected_history = vec![compacted_summary];
@@ -702,7 +702,7 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
      expected_history.extend(initial_context);
      assert_eq!(
          strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
-@@ -13782,3 +13790,119 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
+@@ -13823,3 +13831,119 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
          "rejection must not permit same-name ordinary-auth replacement in this session"
      );
  }
@@ -823,10 +823,10 @@ index 906fc3157f7d542a2aaeab55fbf2638a692a631f..ebd78a177f6e825214eba4f4cb75e77c
 +    assert!(prompt.contains("## Subagent Responsibilities"));
 +}
 diff --git a/codex-rs/core/src/test_support.rs b/codex-rs/core/src/test_support.rs
-index b9f94b7eb18f043396f098d968b036b851c0e342..4450eeb6b54e59044f6bf3fde9b571c0a89fddb5 100644
+index 2c33f0c78eccbe9a10be400965729188ebe95267..30025b0d1175ed891b7d2e05781c171d68b2ca8c 100644
 --- a/codex-rs/core/src/test_support.rs
 +++ b/codex-rs/core/src/test_support.rs
-@@ -229,7 +229,11 @@ pub fn models_manager_with_provider(
+@@ -230,7 +230,11 @@ pub fn models_manager_with_provider(
      provider: ModelProviderInfo,
  ) -> SharedModelsManager {
      let provider = create_model_provider(provider, Some(auth_manager));
@@ -840,10 +840,10 @@ index b9f94b7eb18f043396f098d968b036b851c0e342..4450eeb6b54e59044f6bf3fde9b571c0
 
  pub fn default_http_client_factory() -> HttpClientFactory {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 81f7496e72ea817040ed7a1977d1a9584b36f44a..bee2162c7bc1b474b69b0027b7ce6c2e189cfb1e 100644
+index e9fc0925f6f2f83b3558dfee0655b94616ff05a1..1580faac3e719704235c8d5ca77a2906b2e83bef 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -518,6 +518,7 @@ pub fn build_models_manager(
+@@ -559,6 +559,7 @@ pub fn build_models_manager(
      let manager = provider.models_manager(
          config.codex_home.to_path_buf(),
          config.model_catalog.clone(),
@@ -851,7 +851,7 @@ index 81f7496e72ea817040ed7a1977d1a9584b36f44a..bee2162c7bc1b474b69b0027b7ce6c2e
      );
      manager.set_api_key_model_discovery_enabled(
          config.features.enabled(Feature::ApiKeyModelDiscovery),
-@@ -860,7 +861,11 @@ impl ThreadManager {
+@@ -910,7 +911,11 @@ impl ThreadManager {
                  thread_id_generator: default_thread_id_generator(),
                  agent_control_factory: None,
                  models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -894,7 +894,7 @@ index 729c704c1ef6c26da85814055009a7562c455241..c6607550d5060c6c5740b957571efa79
          });
      let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/auto_review.rs b/codex-rs/core/tests/suite/auto_review.rs
-index bd970ce7122d5fe733e06d3e70dff873795f62f7..a345fceb44f9a7b677e5dfe259232a42d96ee574 100644
+index 2eae76fcc9b64aa2cad9d01d59c4c425efa5d95c..23ecb6a9b611907b268ea7eb650cdb9d879b443e 100644
 --- a/codex-rs/core/tests/suite/auto_review.rs
 +++ b/codex-rs/core/tests/suite/auto_review.rs
 @@ -634,6 +634,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
@@ -906,7 +906,7 @@ index bd970ce7122d5fe733e06d3e70dff873795f62f7..a345fceb44f9a7b677e5dfe259232a42
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d1449ddb9a1 100644
+index b522e2dedbbf125ce6ac220e18fa6a6bbaaff591..039688e2d6f844a79f272508bce843cca9a2a033 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
 @@ -1814,10 +1814,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
@@ -922,7 +922,7 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
          assert_eq!(user_message_received, user_message);
          assert_eq!(
              summary_message, expected_summary,
-@@ -5822,17 +5822,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5892,17 +5892,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
          ev_assistant_message("m1", FIRST_REPLY),
          ev_completed_with_tokens("r1", /*total_tokens*/ 500),
      ]);
@@ -954,7 +954,7 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
 
      let mut model_provider = non_openai_model_provider(&server);
      model_provider.stream_max_retries = Some(0);
-@@ -5872,10 +5876,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5942,10 +5946,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
      wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
      let requests = request_log.requests();
@@ -967,7 +967,7 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
 
      insta::assert_snapshot!(
          "pre_turn_compaction_context_window_exceeded_shapes",
-@@ -5883,7 +5885,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5953,7 +5955,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
              "Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
              &[(
                  "Local Compaction Request (Incoming User Excluded)",
@@ -976,7 +976,7 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
              ),]
          )
      );
-@@ -6069,6 +6071,10 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
+@@ -6139,6 +6141,10 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
              config.model_provider = provider;
              config.model_context_window = Some(100);
              config.model_auto_compact_token_limit = Some(90);
@@ -987,7 +987,7 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
          });
      let test = builder.build(&server).await?;
 
-@@ -6095,6 +6101,17 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
+@@ -6165,6 +6171,17 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
      assert_single_instruction_fragment(&requests[0], &expected_fragment);
      assert_single_instruction_fragment(&requests[1], &expected_fragment);
      assert_single_instruction_fragment(&requests[2], &expected_fragment);
@@ -1006,10 +1006,10 @@ index c480acee0cf1a7ad51326d82241cc36f48ac4ac4..528b1e189512d604b0a91ecfa50f3d14
          test.codex.instruction_sources().await,
          vec![PathUri::from_abs_path(&new_source)],
 diff --git a/codex-rs/core/tests/suite/injected_models_cache.rs b/codex-rs/core/tests/suite/injected_models_cache.rs
-index 8d2ab86bd87a9e3b6309541e74a4e9387a930af0..7025c52b731ff58c69dbd6107ebad45642652acd 100644
+index e206437c9062d92321ce35e8b40dfb51c70ebe80..79913b9a6f02defadd053cf0b270a71434667dea 100644
 --- a/codex-rs/core/tests/suite/injected_models_cache.rs
 +++ b/codex-rs/core/tests/suite/injected_models_cache.rs
-@@ -315,7 +315,11 @@ async fn account_switch_during_cache_store_preserves_new_catalog_for_next_turn()
+@@ -314,7 +314,11 @@ async fn account_switch_during_cache_store_preserves_new_catalog_for_next_turn()
          store_gate: Mutex::new(None),
      });
      let manager = create_model_provider(provider_info.clone(), Some(auth.clone()))
@@ -1023,7 +1023,7 @@ index 8d2ab86bd87a9e3b6309541e74a4e9387a930af0..7025c52b731ff58c69dbd6107ebad456
      old_model.default_reasoning_summary = ReasoningSummary::Concise;
      let initial = responses::mount_models_once(
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
-index 2fe59dd372ce01a357079301f45a2bdac62b32d7..f76bcf932f6c4ba76d45be4d509c011131d22439 100644
+index 7f580eedaa72ea72357610cbb59a6174e7664619..77bbeaa8ea236b33f4faaa33992fab3faf1da1d1 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
 +++ b/codex-rs/core/tests/suite/model_switching.rs
 @@ -7,6 +7,7 @@ use codex_core::config::Constrained;
@@ -1034,7 +1034,7 @@ index 2fe59dd372ce01a357079301f45a2bdac62b32d7..f76bcf932f6c4ba76d45be4d509c0111
  use codex_models_manager::bundled_models_response;
  use codex_models_manager::manager::RefreshStrategy;
  use codex_prompts::render_model_instructions;
-@@ -111,6 +112,7 @@ fn test_model_info(
+@@ -112,6 +113,7 @@ fn test_model_info(
  ) -> ModelInfo {
      ModelInfo {
          slug: slug.to_string(),
@@ -1090,7 +1090,7 @@ index 2fe59dd372ce01a357079301f45a2bdac62b32d7..f76bcf932f6c4ba76d45be4d509c0111
  #[derive(Clone, Copy)]
  enum MediaHistorySource {
      Live,
-@@ -1244,6 +1287,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
+@@ -1246,6 +1289,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
 
      let base_model = ModelInfo {
          slug: large_model_slug.to_string(),
@@ -1099,7 +1099,7 @@ index 2fe59dd372ce01a357079301f45a2bdac62b32d7..f76bcf932f6c4ba76d45be4d509c0111
          description: Some("larger context window model".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/models_cache_ttl.rs b/codex-rs/core/tests/suite/models_cache_ttl.rs
-index e2e4a17a1a761c16da0bf6e7712351a5da796ef2..edd9d878748085485f740a476ff61f6e64ad06ef 100644
+index a160daf644142b7c3d8620e70328cfbea939d2cd..a853dc9801ce01348093405b4b6fb510d51176b2 100644
 --- a/codex-rs/core/tests/suite/models_cache_ttl.rs
 +++ b/codex-rs/core/tests/suite/models_cache_ttl.rs
 @@ -620,6 +620,7 @@ struct ModelsCache {
@@ -1111,7 +1111,7 @@ index e2e4a17a1a761c16da0bf6e7712351a5da796ef2..edd9d878748085485f740a476ff61f6e
          description: Some("remote model".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/remote_models.rs b/codex-rs/core/tests/suite/remote_models.rs
-index b0f39afc77871f1bf7bbfb78b6b5789a677fe369..97cc550abc3a67f8666996a9e663a0a256c4ecbd 100644
+index 6edb1cb3ad65daa38aed6ee9c4b6a8a95ee5410b..23ac5080527d6dfacda79fe804b603227c0cea36 100644
 --- a/codex-rs/core/tests/suite/remote_models.rs
 +++ b/codex-rs/core/tests/suite/remote_models.rs
 @@ -568,6 +568,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
@@ -1122,7 +1122,7 @@ index b0f39afc77871f1bf7bbfb78b6b5789a677fe369..97cc550abc3a67f8666996a9e663a0a2
          display_name: "Remote Test".to_string(),
          description: Some("A remote model that requires the test shell".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -843,6 +844,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()>
+@@ -842,6 +843,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()>
      let remote_instructions = "Use the remote instructions template only.";
      let remote_model = ModelInfo {
          slug: model.to_string(),
@@ -1130,7 +1130,7 @@ index b0f39afc77871f1bf7bbfb78b6b5789a677fe369..97cc550abc3a67f8666996a9e663a0a2
          display_name: "Parallel Remote".to_string(),
          description: Some("A remote model with custom instructions".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -1432,6 +1434,7 @@ fn test_remote_model_with_policy(
+@@ -1430,6 +1432,7 @@ fn test_remote_model_with_policy(
  ) -> ModelInfo {
      ModelInfo {
          slug: slug.to_string(),
@@ -1139,10 +1139,10 @@ index b0f39afc77871f1bf7bbfb78b6b5789a677fe369..97cc550abc3a67f8666996a9e663a0a2
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/rmcp_client.rs b/codex-rs/core/tests/suite/rmcp_client.rs
-index 54e8a4b4614a5d5d95fe548467fc84b484cb3d68..d7b241755c4b6b0cc5fa72e91072345126656df3 100644
+index 64900ec0224a3e33be57a4b069a8e6bafc501bac..0e60c3f6f14960b19d9d60bc9b9b949ae67140ac 100644
 --- a/codex-rs/core/tests/suite/rmcp_client.rs
 +++ b/codex-rs/core/tests/suite/rmcp_client.rs
-@@ -3558,6 +3558,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
+@@ -3635,6 +3635,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
          ModelsResponse {
              models: vec![ModelInfo {
                  slug: text_only_model_slug.to_string(),
@@ -1151,7 +1151,7 @@ index 54e8a4b4614a5d5d95fe548467fc84b484cb3d68..d7b241755c4b6b0cc5fa72e910723451
                  description: Some("Test model without image input support".to_string()),
                  default_reasoning_level: None,
 diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
-index d536a9cf8e719d5a159f50255bfaf1669d222214..750ab9286f564f41fade241940be77e0b9e4d0fc 100644
+index e4f3a20703d1898e7f0c860f9ac0db626a9585af..d685525d8a975b1309e223dce54e95703b857a77 100644
 --- a/codex-rs/core/tests/suite/spawn_agent_description.rs
 +++ b/codex-rs/core/tests/suite/spawn_agent_description.rs
 @@ -82,6 +82,7 @@ fn test_model_info(
@@ -1163,7 +1163,7 @@ index d536a9cf8e719d5a159f50255bfaf1669d222214..750ab9286f564f41fade241940be77e0
          description: Some(description.to_string()),
          default_reasoning_level: Some(default_reasoning_level),
 diff --git a/codex-rs/core/tests/suite/view_image.rs b/codex-rs/core/tests/suite/view_image.rs
-index 6a04080fdc1ee9c8d0182c7382cbd2f0ed4454ec..7978181768833619748af86827aa061e6c86c78a 100644
+index 1b0eeb2fdca205991fb6456adb463c8b114fea2f..6e5df1e5905379493cc83b89b292adf5c405cb2c 100644
 --- a/codex-rs/core/tests/suite/view_image.rs
 +++ b/codex-rs/core/tests/suite/view_image.rs
 @@ -1610,6 +1610,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
@@ -1175,7 +1175,7 @@ index 6a04080fdc1ee9c8d0182c7382cbd2f0ed4454ec..7978181768833619748af86827aa061e
          description: Some("Remote model for view_image unsupported-path coverage".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/wake_reservation.rs b/codex-rs/core/tests/suite/wake_reservation.rs
-index 6ede021843ea9783386ba24a794d3de5c7727584..8e5a84112e02d760d8c4819d082bc611d3daf147 100644
+index 9bfcbfa98a8756d9690b68df3595003e200efbb5..4422703de5af9cd1903aa43ba8590e457f88d9bd 100644
 --- a/codex-rs/core/tests/suite/wake_reservation.rs
 +++ b/codex-rs/core/tests/suite/wake_reservation.rs
 @@ -1,5 +1,6 @@
@@ -1205,10 +1205,10 @@ index 6ede021843ea9783386ba24a794d3de5c7727584..8e5a84112e02d760d8c4819d082bc611
          self.inner.list_collaboration_modes()
      }
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 129b09668c31e6dbe661a04ba7f119f1d0e39bb5..34799f26ea53c503ee48806bd97f59f9da893ed4 100644
+index 8a9a0975edee02d4fa4e2aeee0d69b2d849e7a97..2d026ceaea0b1bf3eb97922710c4a4db343f923d 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -257,6 +257,8 @@ pub enum Feature {
+@@ -263,6 +263,8 @@ pub enum Feature {
      AgentMessageBoard,
      /// Removed compatibility flag retained as a no-op.
      MultiAgentMode,
@@ -1217,7 +1217,7 @@ index 129b09668c31e6dbe661a04ba7f119f1d0e39bb5..34799f26ea53c503ee48806bd97f59f9
      /// Removed compatibility flag for the deleted agent-job tools.
      SpawnCsv,
      /// Enable apps.
-@@ -1613,6 +1615,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1649,6 +1651,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Removed,
          default_enabled: false,
      },
@@ -1231,7 +1231,7 @@ index 129b09668c31e6dbe661a04ba7f119f1d0e39bb5..34799f26ea53c503ee48806bd97f59f9
          id: Feature::SpawnCsv,
          key: "enable_fanout",
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index c791fb4684d255720271ba0b7731dd199ce6236f..d4523e00c6f7f9294f00e6bed086a35a9cf230a7 100644
+index 4ccb68604befd42eb3eee0b3361f2d62afe420d1..df4162f8eaadf1b60c8538a054614f457bc8f74f 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
 @@ -567,6 +567,20 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
@@ -1374,10 +1374,10 @@ index a441d2704af9e45df797f22dec2a996ec52fddb6..6ac186901e3bc471c9619e5239939265
  }
 
 diff --git a/codex-rs/model-provider/src/gcp/gcp_tests.rs b/codex-rs/model-provider/src/gcp/gcp_tests.rs
-index c45f775802bf68ba303d7d36c50ea423d1749bd5..c9f48b4a5f5fc0d656b52e160ff2b41cc76bfba8 100644
+index 08a9c2d325a78320c28d5f65acf599f07210ac4d..f9785ed16da9394ed55785a32e5f4943ce39ffe8 100644
 --- a/codex-rs/model-provider/src/gcp/gcp_tests.rs
 +++ b/codex-rs/model-provider/src/gcp/gcp_tests.rs
-@@ -243,6 +243,7 @@ async fn bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_met
+@@ -244,6 +244,7 @@ async fn bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_met
      let manager = provider.models_manager(
          PathBuf::from("unused-codex-home"),
          /*config_model_catalog*/ None,
@@ -1385,7 +1385,7 @@ index c45f775802bf68ba303d7d36c50ea423d1749bd5..c9f48b4a5f5fc0d656b52e160ff2b41c
      );
      let bundled_models = codex_models_manager::bundled_models_response()
          .expect("bundled model catalog should deserialize")
-@@ -305,11 +306,57 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
+@@ -306,11 +307,60 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
          unsupported_model.slug = "gpt-6-sol".to_string();
          let mut unsupported_variant = configured_model.clone();
          unsupported_variant.slug = format!("{model}-extra");
@@ -1440,13 +1440,16 @@ index c45f775802bf68ba303d7d36c50ea423d1749bd5..c9f48b4a5f5fc0d656b52e160ff2b41c
 +            assert_eq!(alias.tool_mode, Some(ToolMode::Direct));
 +            assert!(!alias.use_responses_lite);
 +            assert_eq!(alias.apply_patch_tool_type, None);
-+            assert!(!alias.used_fallback_model_metadata);
++            assert_eq!(
++                alias.origin,
++                codex_models_manager::ModelOrigin::ExplicitConfig
++            );
 +        }
 +        assert!(!home.path().join("models_cache.json").exists());
      }
  }
 
-@@ -322,6 +369,7 @@ async fn unknown_vertex_models_use_static_catalog_fallback() {
+@@ -323,6 +373,7 @@ async fn unknown_vertex_models_use_static_catalog_fallback() {
      let manager = provider.models_manager(
          PathBuf::from("unused-codex-home"),
          Some(ModelsResponse::default()),
@@ -1522,7 +1525,7 @@ index 1367b24033400464e1e4e8e4e96b8bced979eea6..259ae3655d3452716e102a8496d2417a
 
  fn vertex_base_url(
 diff --git a/codex-rs/model-provider/src/models_originator_tests.rs b/codex-rs/model-provider/src/models_originator_tests.rs
-index 392d3c4ebefefc756b153f484d0fc9c040892f15..9074ae7453b8d007c5898c7f6ad6a5a0bae6b7ca 100644
+index 397944674279441b0dcd632ad52ba50602cdd4dc..486bd5eab9e0a3605382071dd3f33f84c4678022 100644
 --- a/codex-rs/model-provider/src/models_originator_tests.rs
 +++ b/codex-rs/model-provider/src/models_originator_tests.rs
 @@ -2,6 +2,8 @@
@@ -1575,13 +1578,13 @@ index 392d3c4ebefefc756b153f484d0fc9c040892f15..9074ae7453b8d007c5898c7f6ad6a5a0
 +                .await;
 +            assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
 +            assert_eq!(alias.description.as_deref(), Some(originator));
-+            assert!(!alias.used_fallback_model_metadata);
++            assert_eq!(alias.origin, codex_models_manager::ModelOrigin::Provider);
 +        }
          for originator in [
              "",
              "unknown",
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783be8f6a2b 100644
+index c72dda1702111fe827d7c88b5a9bbd4eca44389c..8191842428cde40ac910d48ae16797894bb9fb9f 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
 @@ -1,3 +1,4 @@
@@ -1799,7 +1802,7 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
              ] {
                  let catalog = manager
                      .raw_model_catalog(
-@@ -1621,10 +1708,88 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
+@@ -1621,10 +1708,94 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                      )
                      .await;
                  assert_eq!(catalog, expected);
@@ -1832,7 +1835,10 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
 +                        alias.web_search_tool_type,
 +                        expected.models[0].web_search_tool_type
 +                    );
-+                    assert!(!alias.used_fallback_model_metadata);
++                    assert_eq!(
++                        alias.origin,
++                        codex_models_manager::ModelOrigin::ExplicitConfig
++                    );
 +                }
              }
          }
@@ -1869,7 +1875,7 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
 +                )
 +                .await;
 +            assert_eq!(sourced_catalog.len(), 1);
-+            assert_eq!(sourced_catalog[0].model, catalog.models[0]);
++            assert_eq!(sourced_catalog[0].model.as_ref(), &catalog.models[0]);
 +            assert_eq!(
 +                sourced_catalog[0].origin,
 +                codex_models_manager::ModelOrigin::ExplicitConfig
@@ -1880,7 +1886,10 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
 +            assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
 +            assert_eq!(alias.context_window, Some(64_000));
 +            assert_eq!(alias.auto_compact_token_limit, Some(48_000));
-+            assert!(!alias.used_fallback_model_metadata);
++            assert_eq!(
++                alias.origin,
++                codex_models_manager::ModelOrigin::ExplicitConfig
++            );
 +        }
 +        assert!(!home.path().join("models_cache.json").exists());
 +    }
@@ -1888,7 +1897,7 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
      #[tokio::test]
      async fn configured_provider_models_manager_uses_provider_bearer_token() {
          let server = MockServer::start().await;
-@@ -1661,8 +1826,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
+@@ -1661,8 +1832,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                      provider_info.clone(),
                      auth.clone().map(AuthManager::from_auth_for_testing),
                  );
@@ -1903,7 +1912,7 @@ index f455ab60b6fef1929f69ab56137892f0fb756727..f0f594a663e9eb4ced2589c3b37ea783
                  let refresh_strategy = if enabled {
                      RefreshStrategy::Online
 diff --git a/codex-rs/model-provider/src/shared_state_tests.rs b/codex-rs/model-provider/src/shared_state_tests.rs
-index df75e49c83c64aa84804017fb1076d3918e1a348..3b03c0814bedc01296a1fecea3f86fe94ccb77b4 100644
+index 7d06dfea343ddd3a4f84a5975303f49df3e1844d..efe22ce0378d2cf49bc47d6db9dcef3f50cf1add 100644
 --- a/codex-rs/model-provider/src/shared_state_tests.rs
 +++ b/codex-rs/model-provider/src/shared_state_tests.rs
 @@ -29,6 +29,7 @@ use http::HeaderName;
@@ -1914,7 +1923,7 @@ index df75e49c83c64aa84804017fb1076d3918e1a348..3b03c0814bedc01296a1fecea3f86fe9
  use wiremock::Mock;
  use wiremock::MockServer;
  use wiremock::ResponseTemplate;
-@@ -444,6 +445,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
+@@ -448,6 +449,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
              let models = provider.models_manager(
                  home.path().to_path_buf(),
                  /*config_model_catalog*/ None,
@@ -1922,7 +1931,7 @@ index df75e49c83c64aa84804017fb1076d3918e1a348..3b03c0814bedc01296a1fecea3f86fe9
              );
              models.set_api_key_model_discovery_enabled(/*enabled*/ true);
              let catalog = models
-@@ -684,6 +686,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
+@@ -691,6 +693,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
      let models = provider.models_manager(
          home.path().to_path_buf(),
          /*config_model_catalog*/ None,
@@ -1930,7 +1939,7 @@ index df75e49c83c64aa84804017fb1076d3918e1a348..3b03c0814bedc01296a1fecea3f86fe9
      );
      models.set_api_key_model_discovery_enabled(/*enabled*/ true);
      let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
-@@ -724,6 +727,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
+@@ -731,6 +734,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
      let restarted = provider.models_manager(
          home.path().to_path_buf(),
          /*config_model_catalog*/ None,
@@ -1991,21 +2000,31 @@ index f61820a114dbc99b76edc848fcb8892ed56d4a6d..ca30c6838f759ae5424d433da3ebe7fa
 +    }
 +}
 diff --git a/codex-rs/models-manager/src/catalog_origin_tests.rs b/codex-rs/models-manager/src/catalog_origin_tests.rs
-index eb7f2fa3f99757cdd226fb88dcf6a6d3896fe629..1e2f8fe959fe88defca7ac349bc8d9616df0007d 100644
+index 3f40572d3f9f98dab2e9d92db09ae5d250309a49..d9861b29e7f00b6fdb1e01180b6808fb24a4370c 100644
 --- a/codex-rs/models-manager/src/catalog_origin_tests.rs
 +++ b/codex-rs/models-manager/src/catalog_origin_tests.rs
-@@ -92,5 +92,37 @@ async fn static_catalog_records_its_supplied_origin() {
+@@ -125,5 +125,53 @@ async fn static_catalog_records_its_supplied_origin() {
                  origin
              }]
          );
-+        let aliases = HashMap::from([(
-+            "local-reviewer".to_string(),
-+            CustomModelConfig {
-+                model: model.slug.clone(),
-+                model_context_window: None,
-+                model_auto_compact_token_limit: None,
-+            },
-+        )]);
++        let aliases = HashMap::from([
++            (
++                "local-reviewer".to_string(),
++                CustomModelConfig {
++                    model: model.slug.clone(),
++                    model_context_window: None,
++                    model_auto_compact_token_limit: None,
++                },
++            ),
++            (
++                "local-missing".to_string(),
++                CustomModelConfig {
++                    model: "missing-backing-model".to_string(),
++                    model_context_window: None,
++                    model_auto_compact_token_limit: None,
++                },
++            ),
++        ]);
 +        let aliased_manager = StaticModelsManager::new_with_custom_models(
 +            /*auth_manager*/ None,
 +            ModelsResponse {
@@ -2019,17 +2038,23 @@ index eb7f2fa3f99757cdd226fb88dcf6a6d3896fe629..1e2f8fe959fe88defca7ac349bc8d961
 +                .model_catalog_with_origins(RefreshStrategy::Offline, DEFAULT_HTTP_CLIENT_FACTORY)
 +                .await,
 +            vec![CatalogModel {
-+                model: model.clone(),
++                model: model.clone().into(),
 +                origin
 +            }]
 +        );
++        let alias = aliased_manager
++            .get_model_info("local-reviewer", &ModelsManagerConfig::default())
++            .await;
++        assert_eq!(alias.request_model.as_deref(), Some(model.slug.as_str()));
++        assert_eq!(alias.origin, origin);
++        let missing = aliased_manager
++            .get_model_info("local-missing", &ModelsManagerConfig::default())
++            .await;
 +        assert_eq!(
-+            aliased_manager
-+                .get_model_info("local-reviewer", &ModelsManagerConfig::default())
-+                .await
-+                .request_model,
-+            Some(model.slug.clone())
++            missing.request_model.as_deref(),
++            Some("missing-backing-model")
 +        );
++        assert_eq!(missing.origin, ModelOrigin::Synthetic);
      }
  }
 diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
@@ -2069,7 +2094,7 @@ index a35deb042f67a19b64363fdee3f3bc94c61c845b..b40bb8547e117d6352cbefc9d49afead
  pub use originator::ModelCatalogOriginator;
 
 diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
-index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e09225df1f04 100644
+index 4cfef20232ef39faa90d727a1529ab11cf249b1a..356883e65af57aab89951fc0eefdab371207f2b9 100644
 --- a/codex-rs/models-manager/src/manager.rs
 +++ b/codex-rs/models-manager/src/manager.rs
 @@ -7,6 +7,7 @@ use crate::catalog::CatalogState;
@@ -2088,7 +2113,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
  use std::fmt;
  use std::future::Future;
  use std::path::PathBuf;
-@@ -211,11 +213,26 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -211,11 +213,27 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
      /// Return the auth manager used for picker filtering.
      fn auth_manager(&self) -> Option<&AuthManager>;
 
@@ -2108,7 +2133,8 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
 +            .iter()
 +            .filter(|(alias, _custom_model)| existing_models.insert((*alias).clone()))
 +            .map(|(alias, custom_model)| {
-+                construct_model_info_for_custom_alias(alias, custom_model, &remote_models).into()
++                let backing = find_model_from_candidates(&custom_model.model, &remote_models);
++                construct_model_info_for_custom_alias(alias, custom_model, backing).into()
 +            })
 +            .collect::<Vec<ModelPreset>>();
 +        custom_presets.sort_by(|left, right| left.model.cmp(&right.model));
@@ -2116,25 +2142,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
          let uses_codex_backend = self
              .auth_manager()
              .is_some_and(AuthManager::current_auth_uses_codex_backend);
-@@ -281,7 +298,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
-         Box::pin(
-             async move {
-                 let remote_models = self.get_remote_models().await;
--                construct_model_info_from_candidates(model, &remote_models, config)
-+                let custom_model = config
-+                    .custom_models
-+                    .get(model)
-+                    .or_else(|| self.custom_models().get(model));
-+                construct_model_info_from_candidates_with_custom(
-+                    model,
-+                    &remote_models,
-+                    config,
-+                    custom_model,
-+                )
-             }
-             .instrument(tracing::info_span!("get_model_info", model = model)),
-         )
-@@ -331,6 +357,7 @@ impl CatalogSource {
+@@ -323,6 +341,7 @@ impl CatalogSource {
  pub struct OpenAiModelsManager {
      originator_managers: std::sync::Mutex<HashMap<ModelCatalogOriginator, SharedModelsManager>>,
      remote_models: RwLock<CatalogState>,
@@ -2142,7 +2150,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      cache: Option<Arc<dyn ModelsCache>>,
      endpoint_client: SharedModelsEndpointClient,
      catalog_source: CatalogSource,
-@@ -342,6 +369,7 @@ pub struct OpenAiModelsManager {
+@@ -334,6 +353,7 @@ pub struct OpenAiModelsManager {
  #[derive(Debug)]
  pub struct StaticModelsManager {
      remote_models: Vec<ModelInfo>,
@@ -2150,7 +2158,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      auth_manager: Option<Arc<AuthManager>>,
      origin: ModelOrigin,
  }
-@@ -352,6 +380,15 @@ impl OpenAiModelsManager {
+@@ -344,6 +364,15 @@ impl OpenAiModelsManager {
          codex_home: PathBuf,
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
@@ -2166,7 +2174,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      ) -> Self {
          let cache_path = codex_home.join(MODEL_CACHE_FILE);
          Self::new_with_optional_cache(
-@@ -361,6 +398,7 @@ impl OpenAiModelsManager {
+@@ -353,6 +382,7 @@ impl OpenAiModelsManager {
              ))),
              endpoint_client,
              auth_manager,
@@ -2174,7 +2182,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
          )
      }
 
-@@ -369,7 +407,20 @@ impl OpenAiModelsManager {
+@@ -361,7 +391,20 @@ impl OpenAiModelsManager {
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
      ) -> Self {
@@ -2196,7 +2204,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      }
 
      /// Constructs an OpenAI-compatible model manager with a caller-provided cache.
-@@ -381,13 +432,23 @@ impl OpenAiModelsManager {
+@@ -373,13 +416,23 @@ impl OpenAiModelsManager {
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
      ) -> Self {
@@ -2221,7 +2229,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      ) -> Self {
          Self {
              originator_managers: std::sync::Mutex::new(HashMap::new()),
-@@ -398,6 +459,7 @@ impl OpenAiModelsManager {
+@@ -390,6 +443,7 @@ impl OpenAiModelsManager {
                  identity: endpoint_client.identity(),
                  models: load_remote_models_from_file().unwrap_or_default(),
              })),
@@ -2229,7 +2237,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
              cache,
              api_key_model_discovery_enabled: Arc::new(AtomicBool::new(false)),
              endpoint_client,
-@@ -421,9 +483,19 @@ impl StaticModelsManager {
+@@ -413,9 +467,19 @@ impl StaticModelsManager {
          auth_manager: Option<Arc<AuthManager>>,
          model_catalog: ModelsResponse,
          origin: ModelOrigin,
@@ -2249,7 +2257,7 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
              auth_manager,
              origin,
          }
-@@ -463,7 +535,12 @@ impl ModelsManager for OpenAiModelsManager {
+@@ -455,7 +519,12 @@ impl ModelsManager for OpenAiModelsManager {
              .cache
              .as_ref()
              .and_then(|cache| cache.for_originator(originator));
@@ -2263,26 +2271,23 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
          if matches!(self.catalog_source, CatalogSource::ExplicitProvider(_)) {
              manager = manager.with_provider_catalog();
          }
-@@ -540,6 +617,18 @@ impl ModelsManager for OpenAiModelsManager {
-             let remote = {
-                 let entry = self.remote_models.read().await;
-                 let models = self.models_for_entry(&entry.entry).into_models();
-+                let custom_model = config
+@@ -536,6 +605,15 @@ impl ModelsManager for OpenAiModelsManager {
+                     SelectedCatalog::CurrentSnapshot(models)
+                     | SelectedCatalog::Fallback(models) => models,
+                 };
++                if let Some(custom_model) = config
 +                    .custom_models
 +                    .get(model)
-+                    .or_else(|| self.custom_models().get(model));
-+                if custom_model.is_some() {
-+                    return construct_model_info_from_candidates_with_custom(
-+                        model,
-+                        &models,
-+                        config,
-+                        custom_model,
-+                    );
++                    .or_else(|| self.custom_models().get(model))
++                {
++                    return resolve_custom_alias(model, models, config, custom_model, |slug| {
++                        entry.model_origin(&selected, slug)
++                    });
 +                }
-                 match &self.catalog_source {
-                     CatalogSource::Default => find_model_from_candidates(model, &models),
+                 let model = match &self.catalog_source {
+                     CatalogSource::Default => find_model_from_candidates(model, models),
                      CatalogSource::ExplicitProvider(_) => models
-@@ -552,6 +641,10 @@ impl ModelsManager for OpenAiModelsManager {
+@@ -552,6 +630,10 @@ impl ModelsManager for OpenAiModelsManager {
          })
      }
 
@@ -2293,29 +2298,27 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
          builtin_collaboration_mode_presets()
      }
-@@ -878,9 +971,18 @@ impl ModelsManager for StaticModelsManager {
-         model: &'a str,
+@@ -879,6 +961,19 @@ impl ModelsManager for StaticModelsManager {
          config: &'a ModelsManagerConfig,
-     ) -> ModelsManagerFuture<'a, ModelInfo> {
--        Box::pin(
--            async move { construct_model_info_from_candidates(model, &self.remote_models, config) },
--        )
-+        Box::pin(async move {
-+            let custom_model = config
+     ) -> ModelsManagerFuture<'a, CatalogModel> {
+         Box::pin(async move {
++            if let Some(custom_model) = config
 +                .custom_models
 +                .get(model)
-+                .or_else(|| self.custom_models().get(model));
-+            construct_model_info_from_candidates_with_custom(
-+                model,
-+                &self.remote_models,
-+                config,
-+                custom_model,
-+            )
-+        })
++                .or_else(|| self.custom_models().get(model))
++            {
++                return resolve_custom_alias(
++                    model,
++                    &self.remote_models,
++                    config,
++                    custom_model,
++                    |_| self.origin,
++                );
++            }
+             construct_model_info_from_candidates(model, &self.remote_models, self.origin, config)
+         })
      }
-
-     fn get_default_model<'a>(
-@@ -931,6 +1033,10 @@ impl ModelsManager for StaticModelsManager {
+@@ -931,6 +1026,10 @@ impl ModelsManager for StaticModelsManager {
          self.auth_manager.as_deref()
      }
 
@@ -2326,57 +2329,64 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
      fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
          builtin_collaboration_mode_presets()
      }
-@@ -1018,6 +1124,32 @@ pub(crate) fn construct_model_info_from_candidates(
-     candidates: &[ModelInfo],
+@@ -1019,6 +1118,9 @@ pub(crate) fn construct_model_info_from_candidates(
+     origin: ModelOrigin,
      config: &ModelsManagerConfig,
- ) -> ModelInfo {
-+    construct_model_info_from_candidates_with_custom(
-+        model,
-+        candidates,
-+        config,
-+        config.custom_models.get(model),
-+    )
-+}
-+
-+fn construct_model_info_from_candidates_with_custom(
-+    model: &str,
-+    candidates: &[ModelInfo],
-+    config: &ModelsManagerConfig,
-+    custom_model: Option<&CustomModelConfig>,
-+) -> ModelInfo {
-+    if let Some(custom_model) = custom_model {
-+        let mut config = config.clone();
-+        config.model_context_window = custom_model
-+            .model_context_window
-+            .or(config.model_context_window);
-+        config.model_auto_compact_token_limit = custom_model
-+            .model_auto_compact_token_limit
-+            .or(config.model_auto_compact_token_limit);
-+        let model_info = construct_model_info_for_custom_alias(model, custom_model, candidates);
-+        return model_info::with_config_overrides(model_info, &config);
+ ) -> CatalogModel {
++    if let Some(custom_model) = config.custom_models.get(model) {
++        return resolve_custom_alias(model, candidates, config, custom_model, |_| origin);
 +    }
-+
-     let remote = find_model_from_candidates(model, candidates);
+     let remote = find_model_from_candidates(model, candidates).map(|model| CatalogModel {
+         model: model.into(),
+         origin,
+@@ -1026,6 +1128,32 @@ pub(crate) fn construct_model_info_from_candidates(
      construct_model_info(model, remote, config)
  }
-@@ -1039,6 +1171,30 @@ fn construct_model_info(
-     model_info::with_config_overrides(model_info, config)
+
++fn resolve_custom_alias(
++    alias: &str,
++    candidates: &[ModelInfo],
++    config: &ModelsManagerConfig,
++    custom_model: &CustomModelConfig,
++    origin_for_slug: impl FnOnce(&str) -> ModelOrigin,
++) -> CatalogModel {
++    let backing = find_model_from_candidates(&custom_model.model, candidates);
++    // Use the backing slug before rewriting it to the alias.
++    let origin = backing
++        .as_ref()
++        .map_or(ModelOrigin::Synthetic, |model| origin_for_slug(&model.slug));
++    let mut config = config.clone();
++    config.model_context_window = custom_model
++        .model_context_window
++        .or(config.model_context_window);
++    config.model_auto_compact_token_limit = custom_model
++        .model_auto_compact_token_limit
++        .or(config.model_auto_compact_token_limit);
++    let metadata = construct_model_info_for_custom_alias(alias, custom_model, backing);
++    CatalogModel {
++        model: model_info::with_config_overrides(metadata, &config).into(),
++        origin,
++    }
++}
++
+ fn construct_model_info(
+     model: &str,
+     remote: Option<CatalogModel>,
+@@ -1041,6 +1169,27 @@ fn construct_model_info(
+     resolved
  }
 
 +fn construct_model_info_for_custom_alias(
 +    alias: &str,
 +    custom_model: &CustomModelConfig,
-+    candidates: &[ModelInfo],
++    backing: Option<ModelInfo>,
 +) -> ModelInfo {
-+    let remote = find_model_by_longest_prefix(&custom_model.model, candidates)
-+        .or_else(|| find_model_by_namespaced_suffix(&custom_model.model, candidates));
-+    if let Some(remote) = remote {
++    if let Some(backing) = backing {
 +        ModelInfo {
 +            slug: alias.to_string(),
 +            request_model: Some(custom_model.model.clone()),
 +            display_name: alias.to_string(),
-+            used_fallback_model_metadata: false,
-+            ..remote
++            ..backing
 +        }
 +    } else {
 +        let mut fallback_model = model_info::model_info_from_slug(&custom_model.model);
@@ -2391,10 +2401,10 @@ index 94e8a33ac57d3d8bcf38dc84cf5f457bfb974f3a..9f2eefa8c0bc407d63b4091b4d59e092
  #[path = "manager_tests.rs"]
  mod tests;
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 468aee2176e615e336e607dec88f330d4b9c8258..8de154d1baa48e35053645e4a7372675f8052370 100644
+index 8c642771f1f8da338056b4785656ecc4ccc877b4..7038307802d21861108dae648fdbe6d346d56c31 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -853,6 +853,141 @@ async fn get_model_info_uses_custom_catalog() {
+@@ -862,6 +862,141 @@ async fn get_model_info_uses_custom_catalog() {
      );
  }
 
@@ -2432,7 +2442,7 @@ index 468aee2176e615e336e607dec88f330d4b9c8258..8de154d1baa48e35053645e4a7372675
 +    assert_eq!(model_info.context_window, Some(123_456));
 +    assert_eq!(model_info.auto_compact_token_limit, Some(100_000));
 +    assert!(model_info.include_skills_usage_instructions);
-+    assert!(!model_info.used_fallback_model_metadata);
++    assert_eq!(model_info.origin, ModelOrigin::ExplicitConfig);
 +
 +    let available = manager
 +        .list_models(RefreshStrategy::Offline, DEFAULT_HTTP_CLIENT_FACTORY)
@@ -2472,7 +2482,7 @@ index 468aee2176e615e336e607dec88f330d4b9c8258..8de154d1baa48e35053645e4a7372675
 +    assert_eq!(overridden.context_window, Some(64_000));
 +    assert_eq!(overridden.auto_compact_token_limit, Some(48_000));
 +    assert!(overridden.include_skills_usage_instructions);
-+    assert!(!overridden.used_fallback_model_metadata);
++    assert_eq!(overridden.origin, ModelOrigin::ExplicitConfig);
 +}
 +
 +#[tokio::test]
@@ -2514,7 +2524,7 @@ index 468aee2176e615e336e607dec88f330d4b9c8258..8de154d1baa48e35053645e4a7372675
 +        assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
 +        assert_eq!(alias.context_window, Some(64_000));
 +        assert_eq!(alias.auto_compact_token_limit, Some(48_000));
-+        assert!(!alias.used_fallback_model_metadata);
++        assert_eq!(alias.origin, ModelOrigin::Bundled);
 +        let catalog = manager
 +            .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
 +            .await;
@@ -2537,7 +2547,7 @@ index 468aee2176e615e336e607dec88f330d4b9c8258..8de154d1baa48e35053645e4a7372675
  async fn get_model_info_matches_namespaced_suffix() {
      let config = ModelsManagerConfig::default();
 diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
-index 20847e1ebb69048358278778fedf8469a506e734..d0b5095a599e7f3b2efd72bfb4294323ccca4283 100644
+index f7e6f5b943b8c4971ae96c0a494ea800fce3361a..baaa5919cba892eb20bd96a9592391828021b83c 100644
 --- a/codex-rs/models-manager/src/model_info.rs
 +++ b/codex-rs/models-manager/src/model_info.rs
 @@ -99,6 +99,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
@@ -2549,7 +2559,7 @@ index 20847e1ebb69048358278778fedf8469a506e734..d0b5095a599e7f3b2efd72bfb4294323
          description: None,
          default_reasoning_level: None,
 diff --git a/codex-rs/prompts/src/model_instructions_tests.rs b/codex-rs/prompts/src/model_instructions_tests.rs
-index df70ae8012f42f1e71da91f0e6400fda961788de..60853c36745942700b20f8fb093c8d73d704d5a1 100644
+index 2360c5516ba6cf3ea7a6bc11458f97d1a28046ca..4385732844c1a178ed1d0902bf1632e94e29be66 100644
 --- a/codex-rs/prompts/src/model_instructions_tests.rs
 +++ b/codex-rs/prompts/src/model_instructions_tests.rs
 @@ -10,6 +10,7 @@ use pretty_assertions::assert_eq;
@@ -2561,10 +2571,10 @@ index df70ae8012f42f1e71da91f0e6400fda961788de..60853c36745942700b20f8fb093c8d73
          description: None,
          default_reasoning_level: None,
 diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
-index 704359ff4c42116fbdec59bf7a90a261ce6557f6..21d4a714e071fc7ce92ec17e244aa4dbad2aec77 100644
+index ade365496889c1f99b195665ac14ccf1b19f5ddb..c0146fded81d10302012b95cafe7790573417494 100644
 --- a/codex-rs/protocol/src/openai_models.rs
 +++ b/codex-rs/protocol/src/openai_models.rs
-@@ -417,6 +417,11 @@ pub struct ModelInfo {
+@@ -418,6 +418,11 @@ pub struct ModelInfo {
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub guardian: Option<GuardianModelPolicy>,
      pub slug: String,
@@ -2576,7 +2586,7 @@ index 704359ff4c42116fbdec59bf7a90a261ce6557f6..21d4a714e071fc7ce92ec17e244aa4db
      pub display_name: String,
      pub description: Option<String>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
-@@ -520,6 +525,10 @@ pub struct ModelInfo {
+@@ -549,6 +554,10 @@ impl std::ops::DerefMut for CatalogModel {
  }
 
  impl ModelInfo {
@@ -2587,7 +2597,7 @@ index 704359ff4c42116fbdec59bf7a90a261ce6557f6..21d4a714e071fc7ce92ec17e244aa4db
      pub fn resolved_context_window(&self) -> Option<i64> {
          self.context_window.or(self.max_context_window)
      }
-@@ -1140,6 +1149,7 @@ mod tests {
+@@ -1181,6 +1190,7 @@ mod tests {
      pub(super) fn test_model(spec: Option<ModelMessages>) -> ModelInfo {
          ModelInfo {
              slug: "test-model".to_string(),

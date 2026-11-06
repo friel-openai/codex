@@ -82,7 +82,7 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index b4fc0f70cedb5e84416ce434e4d90864948d821c..0fb348a02dd9deaad724677d4941eabe6502fa9a 100644
+index b0d763b188933ad3cde60859a9b20544c54a9913..4c41d99aca23f597eff23b30e4003a20688747be 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
@@ -129,10 +129,10 @@ index 2f15771ab49cfea4fa74ead9e702183a37989977..049845f6e6706c46cf3c0e4bd0b09026
              previous_items,
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 694820047cf5fe06e8c82e55a6017d914dd273ed..4489fa7f5682ac05d6007c351f698a6b048718b8 100644
+index 0fc8cdbf2790a7b71fbf20bf5d86c29fd15aa624..27ea9e5699cf8f55525378dd093cf03b3d629f70 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -542,6 +542,11 @@ impl ContextManager {
+@@ -566,6 +566,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -361,10 +361,10 @@ index 0000000000000000000000000000000000000000..9074db181b876312df8e7fc24821298a
 +mod tests;
 diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..42156c7556bff5acc34cb25e36d4dfe2b7cefb30
+index 0000000000000000000000000000000000000000..1bed11502099bb6650f4da180d68d4730c7c1025
 --- /dev/null
 +++ b/codex-rs/core/src/independent_thread/message_tests.rs
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,428 @@
 +use super::*;
 +use crate::CodexAppsToolsCache;
 +use crate::ThreadManager;
@@ -748,6 +748,7 @@ index 0000000000000000000000000000000000000000..42156c7556bff5acc34cb25e36d4dfe2
 +                cancellation_token: CancellationToken::new(),
 +                tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
 +                call_id: "message-call".to_string(),
++                native_call: None,
 +                environments: ToolEnvironments::All,
 +                tool_name: ToolName::namespaced("frodex", "send_message_to_thread"),
 +                source: ToolCallSource::Direct,
@@ -1189,10 +1190,10 @@ index 0000000000000000000000000000000000000000..ec21030fe941b331d166492ba9bc1c92
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 8ed656e7ae1132fa9fbfc1a256092a88b11e623c..d689922541c19ad500b9d8a204426e61a12347d3 100644
+index 2622adb3a1c37eb0855207aad136aced6036fc11..52b5c380ca921aeacf63b023a3bf08647ce9b629 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -84,6 +84,8 @@ mod agent_communication;
+@@ -87,6 +87,8 @@ mod agent_communication;
  pub use agent_communication::PendingAgentMessage;
  mod agent_message_board;
  pub use agent_message_board::install_agent_message_board;
@@ -1202,10 +1203,10 @@ index 8ed656e7ae1132fa9fbfc1a256092a88b11e623c..d689922541c19ad500b9d8a204426e61
  mod code_mode_host;
  mod codex_delegate;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 64da3b01a1f913938a8bfe512902833b8b8f8616..f11e05f1d2aaf39977bbecf89f571ca8ef50be97 100644
+index 52d7941d275bdbac07722a8f0dc3b2d9629b3f08..22a927a2421699030c32cb40b389a6bc54b0babb 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -5124,6 +5124,7 @@ impl Session {
+@@ -5201,6 +5201,7 @@ impl Session {
              executor_hook_sources,
              mcp,
              required_mcp_servers: required_servers.to_vec(),
@@ -1214,7 +1215,7 @@ index 64da3b01a1f913938a8bfe512902833b8b8f8616..f11e05f1d2aaf39977bbecf89f571ca8
              loaded_agents_md,
              context_transition: Default::default(),
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
-index f228cf6290f88794490c7725c0b7f727d87099a8..ef18abd7ab6c37059a432b5088fbf15f7163b605 100644
+index 330d193009ed1e538639a3e04fa3a06131190631..b43333f9a625bdb74583bc15b076544043f7dd6e 100644
 --- a/codex-rs/core/src/session/step_context.rs
 +++ b/codex-rs/core/src/session/step_context.rs
 @@ -17,6 +17,7 @@ use codex_file_system::EnvironmentAccess;
@@ -1225,7 +1226,7 @@ index f228cf6290f88794490c7725c0b7f727d87099a8..ef18abd7ab6c37059a432b5088fbf15f
  use codex_protocol::items::ModelInvocationContext;
  use codex_protocol::protocol::TurnContextItem;
  use tokio_util::sync::CancellationToken;
-@@ -48,6 +49,8 @@ pub(crate) struct StepContext {
+@@ -51,6 +52,8 @@ pub(crate) struct StepContext {
      /// A model reroute preserves these names when it rebuilds the step so steering input does not
      /// lose a server that was not required by the original turn input.
      pub(crate) required_mcp_servers: Vec<String>,
@@ -1235,10 +1236,10 @@ index f228cf6290f88794490c7725c0b7f727d87099a8..ef18abd7ab6c37059a432b5088fbf15f
      pub(crate) tool_router: Arc<ToolRouter>,
      /// The canonical AGENTS.md value observed with this environment snapshot.
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 80983cd4010e423f87e84af382d04196c09eccf4..5142a3c678f7454f55d775a5db6ab9f27737338a 100644
+index a8f649535da6cddc9df34837ade3cb13a787538c..e829e4acfbc38d5ec3e0fa79adbd590a99453eb2 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -315,6 +315,7 @@ impl StepContext {
+@@ -320,6 +320,7 @@ impl StepContext {
                  &turn.config,
              ))),
              required_mcp_servers: Vec::new(),
@@ -1247,10 +1248,10 @@ index 80983cd4010e423f87e84af382d04196c09eccf4..5142a3c678f7454f55d775a5db6ab9f2
                  ToolRegistry::empty_for_test(),
                  Vec::new(),
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 2a0726bab65f4b45957d97ffeecabec7b65e5987..e6d4fdf1cd9ec392942f6b909cc9b4fac2379669 100644
+index af21eb1578500efe6ff41794b3488bcd74261170..a7a2a29673d77a1015d47888c4ddab9240f7b4f0 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -158,6 +158,8 @@ pub(crate) fn build_tool_router(
+@@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(
      let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
      add_core_tool_sources(&context, &mut registry);
 

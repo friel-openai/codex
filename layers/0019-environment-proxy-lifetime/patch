@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 7a8e7327a3e8a13dcb975ddebd25b49bdf0463e1..c6736f39ffebd57819e4e408ca2f7390880cf5ad 100644
+index 003ee6e543128e04a9931935038a69cb7c09bf2a..85aca65d248ef737cc3d2bdfd68e03b8b859aa04 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2371,6 +2371,7 @@ dependencies = [
@@ -407,17 +407,17 @@ index 9d0352b0ac34bf71eaa1076d1a032a0e9da491d9..4fe441ceef91526032c3aaa6e82cf85b
      }
  }
 diff --git a/codex-rs/core/src/unified_exec/async_watcher.rs b/codex-rs/core/src/unified_exec/async_watcher.rs
-index f30c750cbb38afef5a7117c41e5e9c26aca0add9..c9422ec4c44a7959abf0d623cf796b4932f98cdc 100644
+index 49ae8b2cf27c7da1e8c9654e80c4ccaa5726361f..4e7e8f94276e31d27d9a263f2e91a0de7618a2fc 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher.rs
-@@ -22,6 +22,7 @@ use crate::tools::events::ToolEventCtx;
+@@ -23,6 +23,7 @@ use crate::tools::events::ToolEventCtx;
  use crate::tools::events::ToolEventFailure;
  use crate::tools::events::ToolEventStage;
  use codex_core_plugins::PluginCommandAttribution;
 +use codex_network_proxy::EnvironmentProxyLease;
  use codex_protocol::exec_output::ExecToolCallOutput;
  use codex_protocol::exec_output::StreamOutput;
- use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::protocol::EventMsg;
 @@ -166,6 +167,7 @@ pub(crate) fn spawn_exit_watcher(
      started_at: Instant,
      network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
@@ -456,7 +456,7 @@ index f346892224e0382059bee4b7cf560323b8d9f698..e049309a968debc82a2e11d82286b131
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 2a2eb2afe0e94c26871e51a1e0f2c1882c0b15e4..8fa9472362c55d9fda238d78509cef26d8a16558 100644
+index 9715d1b1a8d0c3e2f0c02c7b27858fa77bb75bd6..e1cce9eb4997a3a4013c99d5420e8fa9b2a475c8 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -74,6 +74,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
@@ -483,7 +483,7 @@ index 2a2eb2afe0e94c26871e51a1e0f2c1882c0b15e4..8fa9472362c55d9fda238d78509cef26
                  Arc::clone(&output_buffer),
                  Arc::clone(&initial_exec_command_active),
              )
-@@ -1260,6 +1263,7 @@ impl UnifiedExecProcessManager {
+@@ -1261,6 +1264,7 @@ impl UnifiedExecProcessManager {
          network_approval: Option<DeferredNetworkApproval>,
          network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
          metrics_sidecar: Option<PluginMetricsSidecar>,
@@ -491,7 +491,7 @@ index 2a2eb2afe0e94c26871e51a1e0f2c1882c0b15e4..8fa9472362c55d9fda238d78509cef26
          output_buffer: Arc<tokio::sync::Mutex<OutputBuffers>>,
          initial_exec_command_active: Arc<AtomicBool>,
      ) {
-@@ -1286,6 +1290,8 @@ impl UnifiedExecProcessManager {
+@@ -1287,6 +1291,8 @@ impl UnifiedExecProcessManager {
              store.processes.insert(process_id, entry);
              pruned_entry
          };
@@ -500,7 +500,7 @@ index 2a2eb2afe0e94c26871e51a1e0f2c1882c0b15e4..8fa9472362c55d9fda238d78509cef26
          spawn_exit_watcher(
              Arc::clone(&process),
              context,
-@@ -1297,6 +1303,7 @@ impl UnifiedExecProcessManager {
+@@ -1298,6 +1304,7 @@ impl UnifiedExecProcessManager {
              started_at,
              network_denial_monitor,
              plugin_metrics_sidecar,
