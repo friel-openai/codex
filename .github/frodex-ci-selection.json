@@ -25,7 +25,10 @@
         "schema_fixtures_tests::json_schema_fixtures_match_generated",
         "schema_fixtures_tests::stable_precomputed_exports_match_schema_fixtures",
         "schema_fixtures_tests::typescript_schema_fixtures_match_generated",
-        "tests::export::tests::generate_json_filters_experimental_fields_and_methods"
+        "tests::export::tests::generate_json_filters_experimental_fields_and_methods",
+        "protocol::thread_history_projection::tests::ignores_legacy_abort_without_turn_id_and_context_only_records",
+        "protocol::thread_history_projection::tests::projects_completed_canonical_turn_items",
+        "protocol::thread_history_projection::tests::projects_optional_completed_item_lifecycle_timestamps"
       ]
     },
     {
@@ -153,7 +156,13 @@
         "suite::v2::thread_ownership_restoration::adoption_waits_for_the_active_source_turn_without_interrupting_it",
         "suite::v2::model_provider_enforcement::provider_selection_can_be_restored_for_existing_threads",
         "suite::v2::thread_archive::thread_archive_indexed_legacy_subtree_does_not_wait_for_migration",
-        "suite::v2::thread_archive::thread_archive_rejects_owned_unmaterialized_paginated_descendant"
+        "suite::v2::thread_archive::thread_archive_rejects_owned_unmaterialized_paginated_descendant",
+        "suite::v2::model_routing_profiles::routed_profile_falls_back_after_tool_continuation_failure",
+        "suite::v2::model_routing_profiles::routed_profile_falls_back_and_reloads_config_between_turns",
+        "suite::v2::thread_ownership_restoration::promotion_materializes_the_original_ephemeral_child",
+        "suite::v2::thread_read::frodex_running_legacy_resume_returns_newest_five_segments_only",
+        "suite::v2::thread_read::paginated_history_lists_and_legacy_reads_use_projected_turns_and_items",
+        "suite::v2::thread_read::thread_turns_list_reuses_legacy_reference_depths_without_changing_history"
       ]
     },
     {
@@ -164,7 +173,8 @@
       "tests": [
         "doctor::tests::websocket_error_detail_preserves_categories_without_wire_values",
         "prune_archived::tests::prune_duration_rejects_implicit_zero_negative_and_overflow_values",
-        "prune_archived::tests::prune_requires_period_and_offline_for_apply"
+        "prune_archived::tests::prune_requires_period_and_offline_for_apply",
+        "doctor::tests::redacted_json_report_structures_and_sanitizes_details"
       ]
     },
     {
@@ -440,7 +450,23 @@
         "unified_exec::process_manager::tests::exec_server_params_use_path_uri_and_env_policy_overlay_contract",
         "unified_exec::process_manager::tests::failed_initial_end_for_unstored_process_uses_fallback_output",
         "unified_exec::process_manager::tests::late_network_denial_grace_observes_cancellation_after_exit",
-        "unified_exec::process_manager::tests::pruning_does_not_evict_live_process_while_exited_process_is_finalizing"
+        "unified_exec::process_manager::tests::pruning_does_not_evict_live_process_while_exited_process_is_finalizing",
+        "agent::control::tests::concurrent_saved_thread_reads_preserve_active_turn_and_messages",
+        "agent::control::tests::resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale",
+        "agent::control::tests::spawn_publication::cancelled_spawn_edge_publication_cleanup::before_acknowledgement",
+        "agent::control::tests::spawn_publication::cancelled_spawn_edge_publication_cleanup::before_commit",
+        "agent::control::tests::spawn_publication::failed_spawn_edge_publication_cleanup",
+        "agent::control::tests::spawn_publication::repeated_child_id_preserves_existing_thread_and_graph",
+        "client::tests::incomplete_response_traces_attempted_call_without_streaming_it",
+        "context_manager::history::tests::fork_copy_on_write_preserves_harness_metadata",
+        "context_manager::history::tests::fork_snapshot_detects_context_changes_without_response_item_changes",
+        "context_manager::history::tests::fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset",
+        "session::turn::tests::cloned_step_context_shares_transition_state_for_one_request",
+        "thread_manager::tests::policy_transfer_rejects_changed_sources_and_weakened_destination_rules",
+        "tools::handlers::workspace::tests::handler_completes_workspace_switch_when_agents_md_refresh_fails",
+        "tools::handlers::workspace::tests::handler_rejects_a_context_transition_mixed_with_another_tool",
+        "tools::handlers::workspace::tests::handler_rejects_subagents_even_when_invoked_directly",
+        "tools::handlers::workspace::tests::handler_requests_immediate_context_refresh_and_refreshes_agents_md"
       ]
     },
     {
@@ -549,7 +575,14 @@
         "suite::wake_reservation::interrupt_during_wake_context_construction_does_not_start_turn",
         "suite::workspace_cwd::workspace_cwd_rejects_a_response_with_sibling_tool_calls",
         "suite::workspace_cwd::workspace_cwd_switches_context_before_the_next_model_step",
-        "suite::workspace_cwd::workspace_cwd_waits_for_a_delayed_sibling_before_changing_settings"
+        "suite::workspace_cwd::workspace_cwd_waits_for_a_delayed_sibling_before_changing_settings",
+        "suite::client::sends_audio_urls_to_responses",
+        "suite::client::sends_local_audio_to_responses",
+        "suite::compact::manual_compact_twice_preserves_latest_user_messages",
+        "suite::scenarios::audio_file::unsupported_steered_audio_is_rejected_before_continuation_and_resume",
+        "suite::scenarios::audio_file::unsupported_uploaded_audio_fails_before_inference_without_poisoning_follow_up",
+        "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history",
+        "suite::token_budget::new_context_tool_skips_auto_compact_fallback"
       ]
     },
     {
@@ -594,7 +627,11 @@
         "tests::dynamic_tools_updates_survive_replay_and_explicit_clear",
         "tests::multi_agent_version_respects_explicit_empty_compaction_metadata",
         "tests::rollout_item_schema_matches_tagged_payload_and_sibling_metadata",
-        "tests::rollout_item_variants_preserve_existing_payload_shapes"
+        "tests::rollout_item_variants_preserve_existing_payload_shapes",
+        "tests::uploaded_audio_round_trips_in_canonical_message_content",
+        "user_authorization::tests::mixed_media_user_authorization_preserves_text_and_marks_incomplete",
+        "user_message_input::tests::labels_without_matching_adjacent_media_remain_user_text",
+        "user_message_input::tests::media_labels_and_output_text_do_not_change_recovered_user_text"
       ]
     },
     {
@@ -667,7 +704,13 @@
         "server::tests::connection_identity_does_not_reuse_connections_across_credential_policies",
         "server::tests::executor_connection_identity_does_not_capture_host_environment_values",
         "server::tests::remote_http_connections_track_host_headers_but_not_executor_bearer_tokens",
-        "server::tests::tool_catalog_cache_does_not_reuse_catalogs_across_credential_policies"
+        "server::tests::tool_catalog_cache_does_not_reuse_catalogs_across_credential_policies",
+        "connection_pool::tests::concurrent_attributable_requests_open_once_and_override_both_metadata_keys",
+        "connection_pool::tests::idle_wire_release_does_not_evict_a_busy_sibling",
+        "connection_pool::tests::raw_transport_is_not_reused_by_a_different_request_router",
+        "connection_pool::tests::rejected_release_evicts_only_its_physical_generation",
+        "connection_pool::tests::releasing_lease_cancels_pending_call_before_release",
+        "connection_pool::tests::timed_out_open_is_released_after_the_server_acknowledges_it"
       ]
     },
     {
@@ -690,7 +733,8 @@
         "models_endpoint::originator_tests::originator_catalogs_are_isolated_and_reused_from_disk",
         "provider::tests::amazon_bedrock_provider_creates_static_models_manager",
         "provider::tests::configured_bedrock_catalog_preserves_service_tiers",
-        "provider::tests::configured_catalog_preserves_origins_and_custom_aliases"
+        "provider::tests::configured_catalog_preserves_origins_and_custom_aliases",
+        "gcp::tests::bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_metadata"
       ]
     },
     {
@@ -706,7 +750,9 @@
         "manager::tests::replacing_custom_models_preserves_authenticated_remote_catalog",
         "manager::tests::replacing_custom_models_updates_picker_and_fallback_lookup",
         "manager::tests::try_list_models_reads_complete_snapshots_during_custom_model_replacement",
-        "manager::tests::upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisions"
+        "manager::tests::upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisions",
+        "manager::tests::authoritative_catalog_preserves_configured_alias_metadata_and_replacement",
+        "manager::tests::get_model_info_tracks_metadata_origin"
       ]
     },
     {
@@ -734,7 +780,9 @@
       "target": null,
       "tests": [
         "rmcp_client::user_verification_cancellation_tests::cancelling_one_verification_leaves_the_mcp_connection_and_other_requests_alive",
-        "rmcp_client::user_verification_cancellation_tests::dropping_shared_resource_and_custom_requests_cancels_the_pending_request"
+        "rmcp_client::user_verification_cancellation_tests::dropping_shared_resource_and_custom_requests_cancels_the_pending_request",
+        "rmcp_client::user_verification_cancellation_tests::ordinary_elicitations_release_pending_responses_on_cancellation",
+        "rmcp_client::user_verification_cancellation_tests::transport_eof_releases_pending_elicitations_without_dropping_client"
       ]
     },
     {
@@ -1057,7 +1105,11 @@
         "session_archive_commands::tests::queues_non_interactive_and_custom_sessions_by_server_label",
         "transcript_view::markdown_copy_tests::full_reply_caption_preserves_links_and_partial_selections",
         "transcript_view::markdown_copy_tests::reply_answer_distinguishes_whitespace_from_nonprinting_markdown",
-        "transcript_view::markdown_copy_tests::reply_caption_clips_on_overflow_and_copies_with_its_markdown_answer"
+        "transcript_view::markdown_copy_tests::reply_caption_clips_on_overflow_and_copies_with_its_markdown_answer",
+        "app::tests::session_lifecycle_requests::durable_fork_import_hydrates_bounded_history_and_keeps_parent_title",
+        "named_session_lookup::tests::recovers_legacy_index_name_without_requiring_sidecar_rewrite",
+        "named_session_lookup::tests::rejects_duplicate_labels_across_server_pages",
+        "named_session_lookup::tests::resolves_name_and_preview_from_server_list"
       ]
     }
   ]
