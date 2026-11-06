@@ -3713,10 +3713,10 @@ index b7abbfc12b62e532d25062312c881a525f182e0b..dd78a78dc0d0b938af7427ff0b3b2f56
  }
 diff --git a/codex-rs/core/src/tools/collaboration_contract_tests.rs b/codex-rs/core/src/tools/collaboration_contract_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..12106b0afe3361d991668625a0a9bb6e725764f7
+index 0000000000000000000000000000000000000000..7e3253d3e13d69f6236b1a428f0b01acc91a5fc0
 --- /dev/null
 +++ b/codex-rs/core/src/tools/collaboration_contract_tests.rs
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,572 @@
 +use std::collections::HashMap;
 +use std::path::PathBuf;
 +use std::sync::Arc;
@@ -3880,6 +3880,10 @@ index 0000000000000000000000000000000000000000..12106b0afe3361d991668625a0a9bb6e
 +        }
 +        match self {
 +            Self::V1Deferred => {
++                config
++                    .features
++                    .disable(Feature::DeferredToolWorldState)
++                    .expect("the pinned contract lists sources in tool_search");
 +                update_turn_settings_for_test(turn, |settings| {
 +                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
 +                });
