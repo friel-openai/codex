@@ -84,6 +84,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
         },
         RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
