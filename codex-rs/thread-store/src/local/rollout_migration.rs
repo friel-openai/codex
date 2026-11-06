@@ -53,6 +53,7 @@ use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+pub(super) mod archive_gate;
 mod canonical_projection;
 mod canonicalizer;
 mod dependencies;
@@ -134,6 +135,7 @@ use publish::rewrite_subagent_history_boundary;
 use publish::rewritten_staged_rollout_path;
 use publish::staged_rollout_path;
 use publish::sync_parent_directory;
+#[cfg(test)]
 use publish::write_migration_journal;
 use rollback_plan::RollbackPlan;
 use rollback_plan::RollbackPlanner;
@@ -738,6 +740,7 @@ impl LocalThreadStore {
         if let Some(selected) = &selected
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             // A stable thread can retain older physical rollouts after a revert. Migrating one of
             // those files would overwrite the selected thread's history mode and migration journal.
@@ -1000,6 +1003,7 @@ impl LocalThreadStore {
         if let Some(selected) = &locked_selected
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             return Ok(None);
         }
@@ -1115,27 +1119,38 @@ impl LocalThreadStore {
             }));
         }
         let bytes_before = limiter.bytes_processed;
-        let result = match self
-            .migrate_one_rollout(thread_id, &path, legacy_names, limiter, &locks)
-            .await
-        {
-            Ok(()) => Ok(RolloutMigrationStatus::Migrated),
-            Err(failure) => {
-                if let Err(cleanup_error) = self
-                    .cleanup_failed_unpublished_migration(thread_id, &path, &journal_path, &locks)
-                    .await
-                {
-                    Err(RolloutMigrationFailure::new(
-                        failure.reason,
-                        migration_error(format!(
-                            "{}; failed to clean up unpublished migration: {cleanup_error}",
-                            failure.error
-                        )),
-                    ))
-                } else {
-                    Err(failure)
+        let started = self
+            .begin_ordinary_migration(thread_id, &path, locked_metadata.meta.history_mode, &locks)
+            .await;
+        let result = match started {
+            Err(failure) => Err(failure),
+            Ok(indexed) => match self
+                .migrate_one_rollout(thread_id, &path, indexed, legacy_names, limiter, &locks)
+                .await
+            {
+                Ok(()) => Ok(RolloutMigrationStatus::Migrated),
+                Err(failure) => {
+                    if let Err(cleanup_error) = self
+                        .cleanup_failed_unpublished_migration(
+                            thread_id,
+                            &path,
+                            &journal_path,
+                            &locks,
+                        )
+                        .await
+                    {
+                        Err(RolloutMigrationFailure::new(
+                            failure.reason,
+                            migration_error(format!(
+                                "{}; failed to clean up unpublished migration: {cleanup_error}",
+                                failure.error
+                            )),
+                        ))
+                    } else {
+                        Err(failure)
+                    }
                 }
-            }
+            },
         };
         let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
         Ok(Some(match result {
@@ -1151,32 +1166,11 @@ impl LocalThreadStore {
         &self,
         thread_id: ThreadId,
         rollout_path: &Path,
+        indexed: codex_state::ThreadMetadata,
         legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
         locks: &Arc<MigrationLocks>,
     ) -> ClassifiedMigrationResult<()> {
-        let indexed = if let Some(state_db) = &self.state_db {
-            Some(
-                with_failure_reason(
-                    state_db
-                        .get_thread(thread_id)
-                        .await
-                        .map_err(migration_error),
-                    RolloutMigrationFailureReason::Unknown,
-                )?
-                .ok_or_else(|| {
-                    RolloutMigrationFailure::new(
-                        RolloutMigrationFailureReason::MissingSqliteMetadata,
-                        migration_error(format!(
-                            "thread {thread_id} is missing its SQLite metadata"
-                        )),
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
-
         let rollout_id = migration_rollout_id(rollout_path, thread_id);
         let compressed = rollout_path_is_compressed(rollout_path);
         let staged_path = with_failure_reason(
@@ -1189,15 +1183,7 @@ impl LocalThreadStore {
                 .transpose(),
             RolloutMigrationFailureReason::Unknown,
         )?;
-        with_failure_reason(
-            thread_history::delete_thread(self, rollout_id).await,
-            RolloutMigrationFailureReason::SqliteMaterializationFailed,
-        )?;
         let journal_path = migration_journal_path(&self.config.codex_home, thread_id);
-        with_failure_reason(
-            write_migration_journal(&journal_path, locks).await,
-            RolloutMigrationFailureReason::RolloutPublishFailed,
-        )?;
 
         #[cfg(test)]
         {
@@ -1252,7 +1238,7 @@ impl LocalThreadStore {
             ));
         };
         let (session_source, thread_source) =
-            session_metadata::current_sources(&metadata.meta, indexed.as_ref());
+            session_metadata::current_sources(&metadata.meta, Some(&indexed));
         let kind = RolloutMigrationKind::from_sources(&session_source, thread_source.as_ref());
 
         let canonicalization_source = CanonicalizationSource {
@@ -2077,6 +2063,16 @@ async fn find_current_rollout_path(
         .find(|candidate| {
             codex_rollout::plain_rollout_path(candidate).file_name() == Some(file_name)
         }))
+}
+
+// Archiving changes the directory but not physical rollout identity. A still-present selected
+// file or a different filename means this is an older rollout, not the selected file moving.
+async fn same_rollout_moved(selected: &Path, candidate: &Path) -> bool {
+    codex_rollout::plain_rollout_path(selected).file_name()
+        == codex_rollout::plain_rollout_path(candidate).file_name()
+        && codex_rollout::existing_rollout_path(selected)
+            .await
+            .is_none()
 }
 
 fn matches_selection(selected: &[ThreadId], actual: Option<ThreadId>) -> bool {
