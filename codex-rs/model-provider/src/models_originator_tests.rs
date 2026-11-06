@@ -142,6 +142,7 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
             routing_profile: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]);
     for _ in 0..2 {
