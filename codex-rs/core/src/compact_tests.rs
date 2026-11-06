@@ -377,7 +377,7 @@ async fn extension_window_prefix_precedes_retained_turns_and_is_not_repeated() {
         }),
     );
     let retained = vec![user_message("earlier turn"), user_message("latest turn")];
-    let (replacement, snapshot) =
+    let (replacement, snapshot, _prepared_window_advance) =
         build_compaction_replacement_history(&session, &step, &world, annotated(retained.clone()))
             .await;
     let items = raw(replacement);
