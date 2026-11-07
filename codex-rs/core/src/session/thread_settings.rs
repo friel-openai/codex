@@ -70,7 +70,7 @@ impl Session {
     }
 }
 
-/// Applies standalone thread settings. The caller holds the persistence permit through notification.
+/// Applies settings while the caller holds checkpoint admission and persistence through notification.
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "the active-turn guard makes continuation invalidation atomic with turn admission"
