@@ -340,6 +340,7 @@ impl ThreadMetadataSync {
                 }
                 RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::EventMsg(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
@@ -504,6 +505,8 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
