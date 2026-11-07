@@ -17757,10 +17757,10 @@ index 713725feb4c7e4a92903d83639f2c467dbb2bed2..96300affa2b2ff78b7f161ef1d93cca8
          .thread
 diff --git a/codex-rs/core/tests/suite/mcp_agent_tree.rs b/codex-rs/core/tests/suite/mcp_agent_tree.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4eef12e30c571ef27d81eb5916eea663d11cd60
+index 0000000000000000000000000000000000000000..965ba89630ed6c9e8259527d0c76fbc190d44b8c
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/mcp_agent_tree.rs
-@@ -0,0 +1,1895 @@
+@@ -0,0 +1,1933 @@
 +use rmcp::model::ReadResourceRequestParams;
 +use std::collections::HashMap;
 +use std::collections::HashSet;
@@ -17900,16 +17900,54 @@ index 0000000000000000000000000000000000000000..f4eef12e30c571ef27d81eb5916eea66
 +}
 +
 +fn process_label_from_body(body: &Value, agent: &str) -> String {
-+    let tools = body.get("tools").unwrap_or(&Value::Null).to_string();
-+    let marker = "rmcp-test-process-";
-+    let start = tools.find(marker).unwrap_or_else(|| {
-+        panic!("{agent} request should describe the test MCP process; tools={tools}")
-+    });
-+    let label = &tools[start..];
-+    let end = label
-+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-+        .unwrap_or(label.len());
-+    label[..end].to_string()
++    let mut pids = HashSet::new();
++    let mut record_pid = |description: &str| {
++        let pid = description
++            .strip_prefix("Use the tools from rmcp-test-process-")
++            .and_then(|suffix| suffix.strip_suffix('.'))
++            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
++            .and_then(|digits| digits.parse::<u32>().ok())
++            .filter(|pid| *pid > 0)
++            .unwrap_or_else(|| panic!("{agent} request has an invalid agent_tree process label"));
++        pids.insert(pid);
++    };
++
++    // Models without tool search get the namespace directly; deferred models get its
++    // description in the developer tool inventory carried by each request.
++    for tool in body["tools"].as_array().into_iter().flatten() {
++        if tool["type"].as_str() == Some("namespace")
++            && tool["name"].as_str() == Some("mcp__agent_tree")
++        {
++            record_pid(tool["description"].as_str().unwrap_or_default());
++        }
++    }
++    for item in body["input"].as_array().into_iter().flatten() {
++        if item["type"].as_str() != Some("message") || item["role"].as_str() != Some("developer") {
++            continue;
++        }
++        for content in item["content"].as_array().into_iter().flatten() {
++            if content["type"].as_str() == Some("input_text")
++                && let Some(inventory) = content["text"]
++                    .as_str()
++                    .and_then(|text| text.strip_prefix("<tools>\nDeferred tool namespaces:\n"))
++                    .and_then(|text| text.strip_suffix("\n</tools>"))
++            {
++                for description in inventory
++                    .lines()
++                    .filter_map(|line| line.strip_prefix("- mcp__agent_tree: "))
++                {
++                    record_pid(description);
++                }
++            }
++        }
++    }
++    assert_eq!(
++        pids.len(),
++        1,
++        "{agent} request should describe exactly one agent_tree process"
++    );
++    let pid = pids.into_iter().next().expect("the one process ID");
++    format!("rmcp-test-process-{pid}")
 +}
 +
 +fn body_contains(request: &Request, text: &str) -> bool {
