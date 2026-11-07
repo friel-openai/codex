@@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
 
+    crate::independent_thread::register(session, turn_context, &mut registry);
+
     let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
         mcp,
         &turn_context.config,
