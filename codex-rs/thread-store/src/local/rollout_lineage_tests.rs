@@ -58,6 +58,96 @@ async fn rejects_reference_lineage_escaping_symlinked_sessions_root() {
     assert!(error.to_string().contains("must be in Codex home"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn clean_fork_lineage_defers_managed_ancestor_and_rejects_nested_escape() {
+    for nested_escape in [false, true] {
+        let home = TempDir::new().expect("temp dir");
+        let external = TempDir::new().expect("external temp dir");
+        let escaped = TempDir::new().expect("escaped temp dir");
+        let external_archived = external.path().join("archived");
+        fs::create_dir_all(&external_archived).expect("create managed archive");
+        let archived = home.path().join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
+        std::os::unix::fs::symlink(&external_archived, &archived)
+            .expect("configure managed archive");
+        let ancestor_directory = if nested_escape {
+            std::os::unix::fs::symlink(escaped.path(), external_archived.join("escaped"))
+                .expect("create nested escape");
+            archived.join("escaped")
+        } else {
+            archived
+        };
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let ancestor_id = ThreadId::new();
+        let child_id = ThreadId::new();
+        let ancestor_path = write_rollout_under(
+            ancestor_directory,
+            ancestor_id,
+            /*history_base*/ None,
+            /*next_ordinal*/ 3,
+        );
+        let ancestor_end = history_position(&ancestor_path, ancestor_id, 3);
+        let child_path = write_rollout(home.path(), child_id, Some(ancestor_end), 3);
+        let child_end = history_position(&child_path, child_id, 6);
+        let ancestor_bytes = fs::read(&ancestor_path).expect("ancestor bytes");
+        let child_bytes = fs::read(&child_path).expect("child bytes");
+        let lineage = RolloutLineage {
+            root_rollout_id: child_id,
+            segments: vec![
+                expected_segment(ancestor_id, ancestor_path.clone(), 1, Some(ancestor_end)),
+                expected_segment_with_provenance(
+                    child_id,
+                    child_path.clone(),
+                    4,
+                    Some(child_end),
+                    /*uses_history_base*/ true,
+                    /*uses_fork_boundary*/ true,
+                ),
+            ],
+        };
+        let reservation = store
+            .reserve_rollout_writers(&[child_id])
+            .await
+            .expect("reserve only child");
+        assert!(reservation.contains(child_id));
+        assert!(!reservation.contains(ancestor_id));
+
+        let result = store
+            .materialize_clean_fork_lineage(
+                child_id,
+                lineage,
+                &reservation,
+                /*include_full_history*/ true,
+            )
+            .await;
+        if nested_escape {
+            let error = match result {
+                Ok(_) => panic!("nested escape must be rejected"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                crate::ThreadStoreError::InvalidRequest { message }
+                    if message.contains("must be in Codex home")
+            ));
+        } else {
+            assert!(
+                result
+                    .expect("managed ancestor must retain compatibility fallback")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            fs::read(&ancestor_path).expect("unchanged ancestor bytes"),
+            ancestor_bytes
+        );
+        assert_eq!(
+            fs::read(&child_path).expect("unchanged child bytes"),
+            child_bytes
+        );
+    }
+}
+
 #[tokio::test]
 async fn resolves_nested_lineage_with_empty_intermediate_segments() {
     let home = TempDir::new().expect("temp dir");
@@ -433,7 +523,7 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         /*next_ordinal*/ 2,
     );
 
-    let expected = store
+    let mut expected = store
         .resolve_rollout_lineage(child)
         .await
         .expect("resolve child lineage with explicit byte cutoff");
@@ -447,6 +537,10 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         .await
         .expect("prepare child lineage for a fork reference");
 
+    for segment in &mut expected.segments {
+        segment.rollout_path =
+            fs::canonicalize(&segment.rollout_path).expect("canonical expected rollout path");
+    }
     assert_eq!(prepared.segments, expected.segments);
 }
 
@@ -480,7 +574,7 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
         vec![
             expected_segment(
                 parent,
-                parent_path.clone(),
+                fs::canonicalize(&parent_path).expect("canonical parent rollout path"),
                 /*start_ordinal*/ 1,
                 Some(history_position(
                     parent_path.as_path(),
@@ -580,7 +674,7 @@ async fn history_base_cutoff_survives_parent_rotation() {
         vec![
             expected_segment(
                 parent,
-                immutable_path,
+                fs::canonicalize(&immutable_path).expect("canonical immutable rollout path"),
                 /*start_ordinal*/ 1,
                 Some(parent_end),
             ),
