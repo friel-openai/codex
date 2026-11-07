@@ -320,6 +320,7 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
             "vertex-local".to_string(),
             CustomModelConfig {
                 model: model.to_string(),
+                routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
             },
@@ -334,7 +335,7 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
                 manager.get_remote_models().await,
                 vec![expected_model.clone()]
             );
-            assert_eq!(manager.custom_models(), &aliases);
+            assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
             let sourced_catalog = manager
                 .model_catalog_with_origins(
                     codex_models_manager::manager::RefreshStrategy::InMemory,
