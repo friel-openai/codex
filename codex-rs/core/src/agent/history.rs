@@ -1,5 +1,6 @@
 //! Loads stored agent context and prepares the history a child inherits when it forks.
 
+use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
 use crate::config::Config;
 use crate::context::BaseInstructionsFragment;
@@ -15,9 +16,11 @@ use crate::context::MultiAgentRoleInstructions;
 use crate::context::MultiAgentUsageHint;
 use crate::context::world_state::IncrementalToolsHint;
 use crate::context::world_state::PersistentModeState;
+use crate::session::ForkStartupItems;
 use crate::session::multi_agents::resolve_usage_hints;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::thread_manager::ForkSnapshot;
+use crate::thread_manager::SharedFullHistorySourceReservation;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::fork_history_from_snapshot;
 use codex_context_fragments::set_annotated_content;
@@ -39,6 +42,14 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
+use std::sync::Arc;
+
+pub(super) struct PreparedForkHistory {
+    pub(super) history: InitialHistory,
+    pub(super) history_mode: Option<ThreadHistoryMode>,
+    pub(super) startup_items: ForkStartupItems,
+    pub(super) source_reservation: Option<SharedFullHistorySourceReservation>,
+}
 
 fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool) -> bool {
     match item {
@@ -83,6 +94,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
         // Child threads inherit model context, not the parent's cumulative usage state.
         RolloutItem::TokenUsageRecord(_) => false,
         RolloutItem::DynamicToolsUpdated { .. }
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
         | RolloutItem::SessionMeta(_) => true,
@@ -158,24 +170,25 @@ pub(super) async fn load_agent_model_context(
     }
 }
 
-/// Prepare copied history while leaving startup settings and timing with the caller.
+/// Prepare fork history while leaving startup settings and timing with the caller.
 pub(super) async fn prepare_forked_history(
     state: &ThreadManagerState,
     session_source: &SessionSource,
     options: &SpawnAgentOptions,
     config: &Config,
     multi_agent_version: MultiAgentVersion,
-) -> CodexResult<(InitialHistory, Option<ThreadHistoryMode>)> {
+    allow_rollout_references: bool,
+) -> CodexResult<PreparedForkHistory> {
     if options.fork_parent_spawn_call_id.is_none() {
         return Err(CodexErr::Fatal(
             "spawn_agent fork requires a parent spawn call id".to_string(),
         ));
     }
-    if options.fork_mode.is_none() {
+    let Some(fork_mode) = options.fork_mode.as_ref() else {
         return Err(CodexErr::Fatal(
             "spawn_agent fork requires a fork mode".to_string(),
         ));
-    }
+    };
     let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id, ..
     }) = session_source
@@ -224,15 +237,49 @@ pub(super) async fn prepare_forked_history(
 
     let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
         .then_some(ThreadHistoryMode::Paginated);
-    let mut forked_rollout_items =
-        load_agent_model_context(state, parent_thread_id, parent_history_mode)
-            .await?
-            .ok_or_else(|| {
-                CodexErr::Fatal(format!(
-                    "parent thread history unavailable for fork: {parent_thread_id}"
-                ))
-            })?
-            .items;
+    let (
+        mut forked_rollout_items,
+        reference_rollout_items,
+        source_reservation,
+        forked_from_ordinal_exclusive,
+    ) = match fork_mode {
+        SpawnAgentForkMode::FullHistory
+            if allow_rollout_references
+                && parent_thread
+                    .session
+                    .services
+                    .thread_store
+                    .as_any()
+                    .is::<codex_thread_store::LocalThreadStore>() =>
+        {
+            let (reference_history, logical_history, reservation, end_ordinal) = state
+                .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                .await?;
+            (
+                logical_history,
+                Some(reference_history.get_rollout_items().to_vec()),
+                Some(Arc::new(std::sync::Mutex::new(reservation))),
+                end_ordinal,
+            )
+        }
+        SpawnAgentForkMode::FullHistory => {
+            let history = load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                .await?
+                .ok_or_else(|| {
+                    CodexErr::Fatal(format!(
+                        "parent thread history unavailable for fork: {parent_thread_id}"
+                    ))
+                })?
+                .items;
+            (history, None, None, None)
+        }
+    };
+    let dynamic_tools =
+        codex_history::latest_dynamic_tools(&forked_rollout_items).map(<[_]>::to_vec);
+    let unsanitized_parent_history = reference_rollout_items
+        .as_ref()
+        .map(|_| serde_json::to_value(&forked_rollout_items))
+        .transpose()?;
 
     let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
         if multi_agent_version == MultiAgentVersion::V2 {
@@ -421,6 +468,7 @@ pub(super) async fn prepare_forked_history(
             }
             RolloutItem::RealtimeItem(_) => false,
             RolloutItem::DynamicToolsUpdated { .. }
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::TurnContext(_)
@@ -437,6 +485,12 @@ pub(super) async fn prepare_forked_history(
                 "You are now a newly spawned child agent. The preceding conversation is inherited parent context. Follow your own role, identity, and task below; earlier identities, tasks, and action-specific approvals belong to your ancestors. Inherited tool calls are historical records; live tool sessions and process handles are not inherited. Report your result to your parent.",
             )).into(),
         ));
+    }
+    if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
+        (reference_rollout_items, unsanitized_parent_history)
+        && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
+    {
+        forked_rollout_items = reference_rollout_items;
     }
     // Full forks reuse the parent's reference context instead of rebuilding it. If that
     // context omitted the parent's developer fragment, append the child's override so its
@@ -476,8 +530,12 @@ pub(super) async fn prepare_forked_history(
             subagent_usage_hint_message.into(),
         ));
     }
-    Ok((
-        InitialHistory::Forked(forked_rollout_items),
-        destination_history_mode,
-    ))
+    Ok(PreparedForkHistory {
+        history: InitialHistory::Forked(forked_rollout_items),
+        history_mode: destination_history_mode,
+        startup_items: ForkStartupItems::default()
+            .with_dynamic_tools(dynamic_tools)
+            .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
+        source_reservation,
+    })
 }
