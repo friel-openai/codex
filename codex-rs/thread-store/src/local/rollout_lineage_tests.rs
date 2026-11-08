@@ -18,6 +18,8 @@ use tempfile::TempDir;
 
 use super::super::LocalThreadStore;
 use super::super::test_support::test_config;
+use super::LineageOffsetMode;
+use super::LineageResolutionMode;
 use super::RolloutLineage;
 use super::RolloutLineageSegment;
 use super::resolve_path;
@@ -101,6 +103,9 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 jsonl_end_byte_offset: Some(root_end.end_byte_offset),
                 end_byte_offset: Some(root_end.end_byte_offset),
                 filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: false,
+                uses_fork_boundary: false,
             },
             RolloutLineageSegment {
                 thread_id: middle,
@@ -111,6 +116,9 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 jsonl_end_byte_offset: Some(middle_end.end_byte_offset),
                 end_byte_offset: Some(middle_end.end_byte_offset),
                 filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: true,
+                uses_fork_boundary: true,
             },
             RolloutLineageSegment {
                 thread_id: child,
@@ -121,6 +129,9 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 jsonl_end_byte_offset: Some(child_len),
                 end_byte_offset: Some(child_len),
                 filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: true,
+                uses_fork_boundary: true,
             },
         ]
     );
@@ -312,6 +323,9 @@ async fn resolves_lineage_at_explicit_history_position() {
                 jsonl_end_byte_offset: Some(root_end.end_byte_offset),
                 end_byte_offset: Some(root_end.end_byte_offset),
                 filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: false,
+                uses_fork_boundary: false,
             },
             RolloutLineageSegment {
                 thread_id: child,
@@ -322,6 +336,9 @@ async fn resolves_lineage_at_explicit_history_position() {
                 jsonl_end_byte_offset: Some(end.end_byte_offset),
                 end_byte_offset: Some(end.end_byte_offset),
                 filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: true,
+                uses_fork_boundary: true,
             },
         ]
     );
@@ -471,8 +488,9 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
                     /*end_ordinal_exclusive*/ 3,
                 )),
             ),
-            expected_segment(
+            expected_segment_with_provenance(
                 child, child_path, /*start_ordinal*/ 4, /*end*/ None,
+                /*uses_history_base*/ false, /*uses_fork_boundary*/ true,
             ),
         ]
     );
@@ -496,7 +514,9 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
             /*end*/ None,
             /*inherited_filter_texts*/ None,
             /*graph_depth*/ 0,
+            LineageResolutionMode::ModelContext,
             &mut active_paths,
+            LineageOffsetMode::Resolve,
         )
         .await
         .expect("resolve same-thread rotation"),
@@ -564,8 +584,9 @@ async fn history_base_cutoff_survives_parent_rotation() {
                 /*start_ordinal*/ 1,
                 Some(parent_end),
             ),
-            expected_segment(
+            expected_segment_with_provenance(
                 child, child_path, /*start_ordinal*/ 5, /*end*/ None,
+                /*uses_history_base*/ true, /*uses_fork_boundary*/ true,
             ),
         ]
     );
@@ -576,6 +597,24 @@ fn expected_segment(
     rollout_path: std::path::PathBuf,
     start_ordinal: u64,
     end: Option<HistoryPosition>,
+) -> RolloutLineageSegment {
+    expected_segment_with_provenance(
+        thread_id,
+        rollout_path,
+        start_ordinal,
+        end,
+        /*uses_history_base*/ false,
+        /*uses_fork_boundary*/ false,
+    )
+}
+
+fn expected_segment_with_provenance(
+    thread_id: ThreadId,
+    rollout_path: std::path::PathBuf,
+    start_ordinal: u64,
+    end: Option<HistoryPosition>,
+    uses_history_base: bool,
+    uses_fork_boundary: bool,
 ) -> RolloutLineageSegment {
     RolloutLineageSegment {
         thread_id,
@@ -594,6 +633,9 @@ fn expected_segment(
         rollout_path,
         start_ordinal,
         filter_texts: Vec::new(),
+        goal_supervisor_provenance: Default::default(),
+        uses_history_base,
+        uses_fork_boundary,
     }
 }
 
@@ -739,7 +781,9 @@ async fn rejects_reference_graphs_past_the_global_depth_limit() {
         /*end*/ None,
         /*inherited_filter_texts*/ None,
         codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH - 1,
+        LineageResolutionMode::ModelContext,
         &mut active_paths,
+        LineageOffsetMode::Resolve,
     )
     .await
     .expect("the final permitted reference edge should resolve");
@@ -753,7 +797,9 @@ async fn rejects_reference_graphs_past_the_global_depth_limit() {
         /*end*/ None,
         /*inherited_filter_texts*/ None,
         codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+        LineageResolutionMode::ModelContext,
         &mut active_paths,
+        LineageOffsetMode::Resolve,
     )
     .await
     .expect_err("a reference edge beyond the global limit must fail");
@@ -785,7 +831,9 @@ async fn rejects_reference_graphs_past_the_global_depth_limit() {
         /*end*/ None,
         /*inherited_filter_texts*/ None,
         codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+        LineageResolutionMode::ModelContext,
         &mut active_paths,
+        LineageOffsetMode::Resolve,
     )
     .await
     .expect_err("a history_base edge beyond the global limit must fail");
@@ -867,7 +915,9 @@ async fn resolves_512_same_thread_lineage_segments() {
         /*end*/ None,
         /*inherited_filter_texts*/ None,
         /*graph_depth*/ 0,
+        LineageResolutionMode::ModelContext,
         &mut active_paths,
+        LineageOffsetMode::Resolve,
     )
     .await
     .expect("ordinary same-thread rotation must not exhaust fork depth");
@@ -929,7 +979,9 @@ async fn resolves_512_same_thread_lineage_segments() {
         /*end*/ None,
         /*inherited_filter_texts*/ None,
         /*graph_depth*/ 0,
+        LineageResolutionMode::ModelContext,
         &mut active_paths,
+        LineageOffsetMode::Resolve,
     )
     .await
     .expect("same-thread lineage must remain readable beyond 512 segments");
