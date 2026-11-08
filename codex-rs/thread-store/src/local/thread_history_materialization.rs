@@ -655,7 +655,7 @@ fn thread_history_error(err: impl std::fmt::Display) -> ThreadStoreError {
     }
 }
 
-struct LegacyProjectionReader {
+pub(super) struct LegacyProjectionReader {
     batches: tokio::sync::mpsc::Receiver<Vec<Vec<u8>>>,
     pending_lines: std::vec::IntoIter<Vec<u8>>,
     worker: Option<tokio::task::JoinHandle<io::Result<()>>>,
@@ -663,7 +663,7 @@ struct LegacyProjectionReader {
 }
 
 impl LegacyProjectionReader {
-    async fn next_line(&mut self) -> io::Result<Option<Vec<u8>>> {
+    pub(super) async fn next_line(&mut self) -> io::Result<Option<Vec<u8>>> {
         loop {
             if let Some(line) = self.pending_lines.next() {
                 return Ok(Some(line));
@@ -683,7 +683,7 @@ impl LegacyProjectionReader {
     }
 }
 
-async fn open_legacy_projection_reader(
+pub(super) async fn open_legacy_projection_reader(
     path: &Path,
     start_offset: u64,
 ) -> io::Result<Option<LegacyProjectionReader>> {
