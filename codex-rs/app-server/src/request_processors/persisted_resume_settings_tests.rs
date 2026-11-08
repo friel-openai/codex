@@ -82,6 +82,8 @@ fn turn_context_item(
         realtime_active: None,
         cyber_access_program: None,
         effort: None,
+        service_tier: None,
+        model_profile: None,
         summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     })
 }
