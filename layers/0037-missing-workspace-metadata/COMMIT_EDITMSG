@@ -1,0 +1,3 @@
+Mount shared missing workspace ancestors once per writable root
+
+A command may run in a different directory from its policy workspace. When that workspace is absent, read-only metadata and deny rules can resolve to the same missing component. Bubblewrap cannot install repeated bind-data mounts at that destination. Reuse only identical missing-file masks after validating each logical path. Reapply the masks after a writable bind or a registry rebind that shadows them. Do not change workspace selection or filesystem grants.

@@ -1,0 +1,245 @@
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5eed724f7a0 100644
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -619,8 +619,14 @@ fn create_filesystem_args(
+         .collect();
+     unreadable_ancestors_of_writable_roots.sort_by_key(|path| path_depth(path));
+
++    let mut masked_missing_files = HashSet::new();
+     for unreadable_root in &unreadable_ancestors_of_writable_roots {
+-        append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
++        append_unreadable_root_args(
++            &mut bwrap_args,
++            unreadable_root,
++            &allowed_write_paths,
++            &mut masked_missing_files,
++        )?;
+     }
+
+     for writable_root in &sorted_writable_roots {
+@@ -697,6 +703,9 @@ fn create_filesystem_args(
+                 remap_paths_for_symlink_target(deferred_read_only_subpaths, root, target);
+         }
+         read_only_subpaths.sort_by_key(|path| path_depth(path));
++        // Read-only subpaths are bound parent first, but a new writable
++        // bind can expose descendants that were masked on the previous bind.
++        masked_missing_files.clear();
+         for subpath in read_only_subpaths {
+             if let Some(symlink) =
+                 first_writable_symlink_component_in_path(&subpath, &allowed_write_paths)
+@@ -722,6 +731,7 @@ fn create_filesystem_args(
+                 &subpath,
+                 &allowed_write_paths,
+                 &daemon_directories,
++                &mut masked_missing_files,
+             )?;
+         }
+         // Protect the registry only where a writable bind exposes it. Apply
+@@ -736,6 +746,8 @@ fn create_filesystem_args(
+             None
+         };
+         if let Some(registry_mount) = registry_mount {
++            // This bind can shadow missing-file masks under the registry.
++            masked_missing_files.retain(|path| !path.starts_with(registry_mount));
+             fs::create_dir_all(&registry_root)?;
+             bwrap_args.args.push("--ro-bind".to_string());
+             bwrap_args.args.push(path_to_string(registry_mount));
+@@ -753,7 +765,12 @@ fn create_filesystem_args(
+         }
+         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
+         for unreadable_root in nested_unreadable_roots {
+-            append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
++            append_unreadable_root_args(
++                &mut bwrap_args,
++                &unreadable_root,
++                &allowed_write_paths,
++                &mut masked_missing_files,
++            )?;
+         }
+     }
+
+@@ -769,7 +786,12 @@ fn create_filesystem_args(
+         .collect();
+     rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
+     for unreadable_root in rootless_unreadable_roots {
+-        append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
++        append_unreadable_root_args(
++            &mut bwrap_args,
++            &unreadable_root,
++            &allowed_write_paths,
++            &mut masked_missing_files,
++        )?;
+     }
+
+     if options.mask_wslg_distro
+@@ -1240,6 +1262,7 @@ fn append_read_only_subpath_args(
+     subpath: &Path,
+     allowed_write_paths: &[PathBuf],
+     daemon_directories: &BTreeSet<PathBuf>,
++    masked_missing_files: &mut HashSet<PathBuf>,
+ ) -> Result<()> {
+     if let Some(metadata) = transient_empty_metadata_path(subpath)
+         && is_within_allowed_write_paths(subpath, allowed_write_paths)
+@@ -1262,7 +1285,11 @@ fn append_read_only_subpath_args(
+         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
+             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+         {
+-            append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
++            append_missing_read_only_subpath_args(
++                bwrap_args,
++                &first_missing_component,
++                masked_missing_files,
++            )?;
+         }
+         return Ok(());
+     }
+@@ -1296,7 +1323,11 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
+     bwrap_args.args.push(path_to_string(path));
+ }
+
+-fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
++fn append_missing_read_only_subpath_args(
++    bwrap_args: &mut BwrapArgs,
++    path: &Path,
++    masked_missing_files: &mut HashSet<PathBuf>,
++) -> Result<()> {
+     if path.file_name().is_some_and(is_protected_metadata_name) {
+         append_empty_directory_args(bwrap_args, path);
+         bwrap_args
+@@ -1305,10 +1336,19 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
+         return Ok(());
+     }
+
+-    append_missing_empty_file_bind_data_args(bwrap_args, path)
++    append_missing_empty_file_bind_data_args(bwrap_args, path, masked_missing_files)
+ }
+
+-fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
++fn append_missing_empty_file_bind_data_args(
++    bwrap_args: &mut BwrapArgs,
++    path: &Path,
++    masked_missing_files: &mut HashSet<PathBuf>,
++) -> Result<()> {
++    // Both read-only and deny rules block creation beneath a missing ancestor
++    // with the same empty file. A second bind-data on that file fails in bwrap.
++    if !masked_missing_files.insert(path.to_path_buf()) {
++        return Ok(());
++    }
+     append_empty_file_bind_data_args(bwrap_args, path)?;
+     bwrap_args
+         .synthetic_mount_targets
+@@ -1345,6 +1385,7 @@ fn append_unreadable_root_args(
+     bwrap_args: &mut BwrapArgs,
+     unreadable_root: &Path,
+     allowed_write_paths: &[PathBuf],
++    masked_missing_files: &mut HashSet<PathBuf>,
+ ) -> Result<()> {
+     if let Some(symlink) =
+         first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
+@@ -1367,7 +1408,11 @@ fn append_unreadable_root_args(
+         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
+             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
+         {
+-            append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
++            append_missing_empty_file_bind_data_args(
++                bwrap_args,
++                &first_missing_component,
++                masked_missing_files,
++            )?;
+         }
+         return Ok(());
+     }
+diff --git a/codex-rs/linux-sandbox/tests/suite/nested_metadata_tests.rs b/codex-rs/linux-sandbox/tests/suite/nested_metadata_tests.rs
+index 6d2ef2555889c00b8d1a3e5c9e8d0e239efc7c4f..881447dedf1a2866574bc84658d7219e3ffa4ce9 100644
+--- a/codex-rs/linux-sandbox/tests/suite/nested_metadata_tests.rs
++++ b/codex-rs/linux-sandbox/tests/suite/nested_metadata_tests.rs
+@@ -20,6 +20,88 @@ enum RootLayout {
+     Symlink,
+ }
+
++#[test_case::test_case(false; "missing_policy_cwd_on_executor")]
++#[test_case::test_case(true; "existing_local_policy_cwd")]
++#[tokio::test]
++async fn metadata_rules_below_policy_cwd_preserve_access(policy_cwd_exists: bool) {
++    if should_skip_bwrap_tests().await {
++        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
++        return;
++    }
++
++    let temp = tempfile::tempdir().expect("tempdir");
++    let home = AbsolutePathBuf::try_from(temp.path())
++        .expect("absolute tempdir")
++        .join("home");
++    std::fs::create_dir(&home).expect("create executor home");
++    let chat = home.join("date/chat");
++    let command_cwd = if policy_cwd_exists {
++        std::fs::create_dir_all(&chat).expect("create local chat cwd");
++        std::fs::write(chat.join("private"), "chat only").expect("write local deny fixture");
++        &chat
++    } else {
++        &home
++    };
++    std::fs::write(home.join("private"), "host only").expect("write deny fixture");
++    let mut entries = vec![
++        FileSystemSandboxEntry::new(
++            FileSystemPath::Special {
++                value: FileSystemSpecialPath::Root,
++            },
++            FileSystemAccessMode::Read,
++        ),
++        FileSystemSandboxEntry::new(home.clone().into(), FileSystemAccessMode::Write),
++        FileSystemSandboxEntry::new(chat.clone().into(), FileSystemAccessMode::Write),
++        FileSystemSandboxEntry::new(home.join("private").into(), FileSystemAccessMode::Deny),
++        FileSystemSandboxEntry::new(chat.join("private").into(), FileSystemAccessMode::Deny),
++    ];
++    for name in [".git", ".agents", ".codex", ".aws"] {
++        entries.push(FileSystemSandboxEntry::new(
++            chat.join(name).into(),
++            FileSystemAccessMode::Read,
++        ));
++    }
++    let permissions = PermissionProfile::from_runtime_permissions(
++        &FileSystemSandboxPolicy::restricted(entries),
++        NetworkSandboxPolicy::Restricted,
++    );
++    let output = std::process::Command::new(super::codex_linux_sandbox_exe())
++        .current_dir(command_cwd)
++        .arg("--command-cwd")
++        .arg(command_cwd.as_path())
++        .arg("--sandbox-policy-cwd")
++        .arg(chat.as_path())
++        .arg("--permission-profile")
++        .arg(serde_json::to_string(&permissions).expect("serialize profile"))
++        .args(["--", "/bin/sh", "-ec"])
++        .arg(
++            r#"
++test "$(pwd -P)" = "$1"
++if cat "$2/private"; then exit 1; fi
++if cat "$3/private"; then exit 4; fi
++if mkdir -p "$3/.codex" && touch "$3/.codex/new"; then exit 2; fi
++if touch "$2/../outside"; then exit 3; fi
++printf allowed > marker
++"#,
++        )
++        .arg("test")
++        .arg(command_cwd.as_path())
++        .arg(home.as_path())
++        .arg(chat.as_path())
++        .output()
++        .expect("launch helper");
++    assert!(
++        output.status.success(),
++        "{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    assert_eq!(
++        std::fs::read(command_cwd.join("marker")).expect("allowed write"),
++        b"allowed"
++    );
++    assert_eq!(home.join("date").exists(), policy_cwd_exists);
++}
++
+ #[test_case::test_case(RootLayout::Directory, ""; "home_cwd")]
+ #[test_case::test_case(RootLayout::Directory, ".codex/visualizations/thread"; "visualization_cwd")]
+ #[test_case::test_case(RootLayout::Symlink, ""; "symlink_home_cwd")]

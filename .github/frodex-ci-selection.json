@@ -641,6 +641,16 @@
       ]
     },
     {
+      "package": "codex-linux-sandbox",
+      "binary": "codex-linux-sandbox::all",
+      "kind": "test",
+      "target": "all",
+      "tests": [
+        "suite::sandbox::nested_metadata_tests::metadata_rules_below_policy_cwd_preserve_access::existing_local_policy_cwd",
+        "suite::sandbox::nested_metadata_tests::metadata_rules_below_policy_cwd_preserve_access::missing_policy_cwd_on_executor"
+      ]
+    },
+    {
       "package": "codex-mcp",
       "binary": "codex-mcp",
       "kind": "lib",
