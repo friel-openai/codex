@@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::CompactionReporting;
 use crate::compact::compaction_status_from_result;
+use crate::compact::retain_independent_thread_messages;
 use crate::compact::retain_subagent_assignment_and_recent_messages;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
