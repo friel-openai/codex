@@ -52,6 +52,7 @@ enum StopProxy {
     Shutdown,
     Drop,
     CancelWait,
+    IdleRetirement,
 }
 
 #[tokio::test]
@@ -69,6 +70,11 @@ async fn canceling_wait_closes_proxy_connections() -> Result<()> {
     assert_stop_closes_connections(StopProxy::CancelWait).await
 }
 
+#[tokio::test]
+async fn idle_retirement_closes_environment_proxy_connections() -> Result<()> {
+    assert_stop_closes_connections(StopProxy::IdleRetirement).await
+}
+
 async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
     let mut config = NetworkProxyConfig {
         allow_local_binding: Some(true),
@@ -77,17 +83,20 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
         ..NetworkProxyConfig::default()
     };
     config.set_allowed_domains(vec![Ipv4Addr::LOCALHOST.to_string()]);
-    let proxy = NetworkProxy::builder()
+    let mut builder = NetworkProxy::builder()
         .state(Arc::new(network_proxy_state_for_policy(config)))
         .managed_by_codex(!cfg!(target_os = "windows"))
         .http_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .socks_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .build()
-        .await?;
+        .socks_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    if matches!(stop, StopProxy::IdleRetirement) {
+        builder = builder.environment_proxy_idle_timeout(Duration::from_millis(25));
+    }
+    let proxy = builder.build().await?;
     let handle = proxy.run().await?;
     // Environment listeners reserve ephemeral ports on every platform. Managed main
     // listeners do so off Windows, whose shared ingress has separate route tests.
     let prepared = proxy.prepare_for_remote_environment(HashMap::new(), "lifecycle-test")?;
+    let mut environment_proxy_lease = prepared.environment_proxy_lease;
     let scopes = [
         ("environment", prepared.env),
         #[cfg(not(target_os = "windows"))]
@@ -99,7 +108,11 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
         ),
     ];
     let mut connections = Vec::new();
+    let mut environment_proxy_addrs = Vec::new();
     for (scope, env) in scopes {
+        if matches!(stop, StopProxy::IdleRetirement) && scope != "environment" {
+            continue;
+        }
         for kind in [
             ConnectionKind::HttpConnect(TunnelState::Open),
             ConnectionKind::HttpConnect(TunnelState::ClientWriteClosed),
@@ -119,6 +132,9 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
                 .strip_prefix(prefix)
                 .context("proxy URL scheme")?
                 .parse()?;
+            if scope == "environment" && !environment_proxy_addrs.contains(&addr) {
+                environment_proxy_addrs.push(addr);
+            }
             let connection = timeout(Duration::from_secs(5), open_connection(kind, addr))
                 .await
                 .with_context(|| format!("{scope} {kind:?} connection did not become ready"))??;
@@ -126,6 +142,7 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
         }
     }
 
+    let mut idle_handle = None;
     match stop {
         StopProxy::Shutdown => timeout(Duration::from_secs(2), handle.shutdown())
             .await
@@ -139,6 +156,15 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
                 "running proxy unexpectedly stopped: {state:?}"
             );
             drop(wait);
+        }
+        StopProxy::IdleRetirement => {
+            // Keep global shutdown from masking failure to close the retired environment.
+            idle_handle = Some(handle);
+            drop(
+                environment_proxy_lease
+                    .take()
+                    .expect("environment listeners must have a lease"),
+            );
         }
     }
 
@@ -170,6 +196,24 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
                 ),
             }
         }
+    }
+    if let Some(handle) = idle_handle {
+        for addr in environment_proxy_addrs {
+            timeout(Duration::from_secs(2), async {
+                while TcpStream::connect(addr).await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .with_context(|| format!("retired environment listener {addr} remained open"))?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        for addr in [proxy.http_addr(), proxy.socks_addr()] {
+            timeout(Duration::from_secs(2), TcpStream::connect(addr))
+                .await
+                .context("main listener did not respond after environment retirement")??;
+        }
+        handle.shutdown().await?;
     }
     Ok(())
 }
