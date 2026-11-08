@@ -1,0 +1,337 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+index 2d9ea24ce458235e0e4dcee560f8ccb131aa629f..3d84b764503509c535280356208df78b7f101b5b 100644
+--- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
+@@ -13,6 +13,7 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_rollout::RolloutRecorder;
+ use codex_rollout::WriterLockCoordinator;
++use tokio::sync::OwnedMutexGuard;
+
+ #[path = "thread_goal_user_context.rs"]
+ mod user_context;
+@@ -130,6 +131,21 @@ impl ThreadGoalRequestProcessor {
+             .map_err(|err| err.to_string())
+     }
+
++    async fn lock_goal_mutation(
++        &self,
++        thread_id: ThreadId,
++    ) -> Result<OwnedMutexGuard<()>, JSONRPCErrorError> {
++        let guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
++        let state = self.thread_state_manager.thread_state(thread_id).await;
++        // The old listener can still forward a goal event after Core removes the runtime.
++        if state.lock().await.pending_shutdown_drain().is_some() {
++            return Err(invalid_request(format!(
++                "thread {thread_id} is closing; retry after its listener has drained"
++            )));
++        }
++        Ok(guard)
++    }
++
+     async fn thread_goal_set_inner(
+         &self,
+         request_id: ConnectionRequestId,
+@@ -140,7 +156,7 @@ impl ThreadGoalRequestProcessor {
+         }
+
+         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+-        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
++        let _goal_resume_guard = self.lock_goal_mutation(thread_id).await?;
+         let state_db = self
+             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+             .await?;
+@@ -284,7 +300,7 @@ impl ThreadGoalRequestProcessor {
+         }
+
+         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+-        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
++        let _goal_resume_guard = self.lock_goal_mutation(thread_id).await?;
+         let state_db = self
+             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+             .await?;
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index a1abf98bf28b68d55c3eca6abb8c35b3033d6dc2..bb56b72c5073d81bb5de239bd597aa35c3188b3e 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -69,6 +69,7 @@ pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+ const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
+ const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
+ const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
++const THREAD_LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+ const MAX_LEGACY_PAGE_DEPTH_HINTS: usize = 256;
+ const MAX_LEGACY_PAGE_DEPTH_HINT_BYTES: usize = 512 * 1024;
+ const MAX_LEGACY_DISPLAYED_TURNS: usize = 256;
+@@ -2733,7 +2734,7 @@ impl ThreadRequestProcessor {
+             }
+         }
+         tokio::time::timeout(
+-            Duration::from_secs(10),
++            THREAD_LISTENER_DRAIN_TIMEOUT,
+             shutdown_drain.wait_for(|drained| *drained),
+         )
+         .await
+@@ -5661,9 +5662,9 @@ impl ThreadRequestProcessor {
+                 .thread_state(resumed.conversation_id)
+                 .await;
+             let drain = state.lock().await.pending_shutdown_drain();
+-            if let Some(mut drain) = drain {
++            if let Some(drain) = drain {
+                 // Core can remove the old runtime before its listener forwards ShutdownComplete.
+-                let _ = drain.wait_for(|drained| *drained).await;
++                Self::wait_for_resume_shutdown_drain(resumed.conversation_id, drain).await?;
+             }
+             Some(guard)
+         } else {
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+index 2236da7e34580c1278664058c086da309204d888..0be1252ccd309d3869452a18e9484b6689941015 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+@@ -4,6 +4,20 @@ use super::*;
+ use codex_thread_store::ReadThreadsParams;
+
+ impl ThreadRequestProcessor {
++    pub(super) async fn wait_for_resume_shutdown_drain(
++        thread_id: ThreadId,
++        mut drain: watch::Receiver<bool>,
++    ) -> Result<(), JSONRPCErrorError> {
++        // Only the wait can expire. The old listener still owns terminal events.
++        let _ = tokio::time::timeout(
++            THREAD_LISTENER_DRAIN_TIMEOUT,
++            drain.wait_for(|drained| *drained),
++        )
++        .await
++        .map_err(|_| thread_closing_for_resume(thread_id))?;
++        Ok(())
++    }
++
+     pub(super) async fn acquire_thread_resume_permit(
+         &self,
+         params: &ThreadResumeParams,
+@@ -84,3 +98,78 @@ impl ThreadRequestProcessor {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::connection_rpc_gate::ConnectionRpcGate;
++    use crate::request_serialization::QueuedInitializedRequest;
++    use crate::request_serialization::RequestSerializationAccess;
++    use crate::request_serialization::RequestSerializationQueueKey;
++    use crate::request_serialization::RequestSerializationQueues;
++
++    #[tokio::test(start_paused = true)]
++    async fn cold_resume_with_pending_shutdown_drain_releases_thread_queue() {
++        let thread_id = ThreadId::new();
++        let key = RequestSerializationQueueKey::Thread {
++            thread_id: thread_id.to_string(),
++        };
++        let state_manager = Arc::new(ThreadStateManager::new());
++        let state = state_manager.thread_state(thread_id).await;
++        let queues = RequestSerializationQueues::default();
++        let gate = Arc::new(ConnectionRpcGate::new());
++        let (old_listener, drain) = watch::channel(false);
++        let (started_tx, started_rx) = oneshot::channel();
++        let (resume_tx, resume_rx) = oneshot::channel();
++        let (follower_tx, follower_rx) = oneshot::channel();
++
++        queues
++            .enqueue(
++                key.clone(),
++                RequestSerializationAccess::Exclusive,
++                QueuedInitializedRequest::new(Arc::clone(&gate), {
++                    let state_manager = Arc::clone(&state_manager);
++                    let drain = drain.clone();
++                    async move {
++                        let _guard = state_manager.lock_goal_resume(thread_id).await;
++                        started_tx.send(()).unwrap();
++                        let result = ThreadRequestProcessor::wait_for_resume_shutdown_drain(
++                            thread_id, drain,
++                        )
++                        .await;
++                        resume_tx.send(result).unwrap();
++                    }
++                }),
++            )
++            .await;
++        started_rx.await.unwrap();
++        queues
++            .enqueue(
++                key,
++                RequestSerializationAccess::Exclusive,
++                QueuedInitializedRequest::new(gate, {
++                    let state_manager = Arc::clone(&state_manager);
++                    async move {
++                        let _guard = state_manager.lock_goal_resume(thread_id).await;
++                        follower_tx.send(()).unwrap();
++                    }
++                }),
++            )
++            .await;
++        let start = tokio::time::Instant::now();
++        let error = resume_rx.await.unwrap().unwrap_err();
++        assert_eq!(error.message, thread_closing_for_resume(thread_id).message);
++        assert!(start.elapsed() >= THREAD_LISTENER_DRAIN_TIMEOUT);
++        follower_rx.await.unwrap();
++        assert!(Arc::ptr_eq(
++            &state,
++            &state_manager.thread_state(thread_id).await
++        ));
++        assert!(!*drain.borrow());
++
++        old_listener.send_replace(true);
++        ThreadRequestProcessor::wait_for_resume_shutdown_drain(thread_id, drain)
++            .await
++            .unwrap();
++    }
++}
+diff --git a/codex-rs/app-server/src/request_serialization.rs b/codex-rs/app-server/src/request_serialization.rs
+index efd2f5e70d0b080890448893c1a8dd7e866ff079..b520927c25671ecb23944416e1cea9671748b7fb 100644
+--- a/codex-rs/app-server/src/request_serialization.rs
++++ b/codex-rs/app-server/src/request_serialization.rs
+@@ -1,6 +1,7 @@
+ use std::collections::HashMap;
+ use std::collections::VecDeque;
+ use std::future::Future;
++use std::panic::AssertUnwindSafe;
+ use std::path::PathBuf;
+ use std::pin::Pin;
+ use std::sync::Arc;
+@@ -8,6 +9,7 @@ use std::sync::Arc;
+ use codex_app_server_protocol::ClientRequestSerializationScope;
+ use codex_diagnostics::Gauge;
+ use codex_diagnostics::GaugeGuard;
++use futures::FutureExt;
+ use futures::stream::FuturesUnordered;
+ use futures::stream::StreamExt;
+ use tokio::sync::Mutex;
+@@ -139,6 +141,18 @@ impl QueuedInitializedRequest {
+             None => future.await,
+         }
+     }
++
++    async fn run_serialized(self, key: &RequestSerializationQueueKey) {
++        // The drain owns the map entry. A handler that unwinds must not take
++        // the drain with it or later requests will enqueue without a worker.
++        if AssertUnwindSafe(self.run()).catch_unwind().await.is_err() {
++            let thread_id = match key {
++                RequestSerializationQueueKey::Thread { thread_id } => Some(thread_id.as_str()),
++                _ => None,
++            };
++            tracing::error!(?thread_id, "serialized app-server request panicked");
++        }
++    }
+ }
+
+ struct QueuedSerializedRequest {
+@@ -262,14 +276,14 @@ impl RequestSerializationQueues {
+
+             if requests[0].access == RequestSerializationAccess::Exclusive {
+                 for request in requests {
+-                    request.request.run().await;
++                    request.request.run_serialized(&key).await;
+                 }
+                 continue;
+             }
+
+             let mut running_reads = requests
+                 .into_iter()
+-                .map(|request| request.request.run())
++                .map(|request| request.request.run_serialized(&key))
+                 .collect::<FuturesUnordered<_>>();
+
+             loop {
+@@ -298,7 +312,7 @@ impl RequestSerializationQueues {
+                         };
+
+                         for request in requests {
+-                            running_reads.push(request.request.run());
++                            running_reads.push(request.request.run_serialized(&key));
+                         }
+                     }
+                 }
+@@ -415,6 +429,82 @@ mod tests {
+             .expect("blocked request should be waiting");
+     }
+
++    #[tokio::test]
++    async fn panicking_thread_request_does_not_strand_queue() {
++        let queues = RequestSerializationQueues::default();
++        let (key, access) = RequestSerializationQueueKey::from_scope(
++            ConnectionId(1),
++            ClientRequestSerializationScope::Thread {
++                thread_id: "thread-a".to_string(),
++            },
++        );
++        let (follower_key, follower_access) = RequestSerializationQueueKey::from_scope(
++            ConnectionId(2),
++            ClientRequestSerializationScope::Thread {
++                thread_id: "thread-a".to_string(),
++            },
++        );
++        assert_eq!(key, follower_key);
++        let (started_tx, started_rx) = oneshot::channel();
++        let (release_tx, release_rx) = oneshot::channel();
++        let (follower_tx, mut follower_rx) = oneshot::channel();
++        let (other_tx, other_rx) = oneshot::channel();
++        let handler_guard = Arc::new(Mutex::new(()));
++        let first_guard = Arc::clone(&handler_guard);
++
++        queues
++            .enqueue(
++                key,
++                access,
++                QueuedInitializedRequest::new(gate(), async move {
++                    let _guard = first_guard.lock().await;
++                    started_tx.send(()).unwrap();
++                    release_rx.await.unwrap();
++                    panic!("test serialized handler panic");
++                }),
++            )
++            .await;
++        timeout(queue_drain_timeout(), started_rx)
++            .await
++            .unwrap()
++            .unwrap();
++        queues
++            .enqueue(
++                follower_key,
++                follower_access,
++                QueuedInitializedRequest::new(gate(), async move {
++                    let _guard = handler_guard.try_lock().unwrap();
++                    follower_tx.send(()).unwrap();
++                }),
++            )
++            .await;
++        queues
++            .enqueue(
++                RequestSerializationQueueKey::Thread {
++                    thread_id: "thread-b".to_string(),
++                },
++                RequestSerializationAccess::Exclusive,
++                QueuedInitializedRequest::new(gate(), async move {
++                    other_tx.send(()).unwrap();
++                }),
++            )
++            .await;
++        timeout(queue_drain_timeout(), other_rx)
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            follower_rx.try_recv(),
++            Err(oneshot::error::TryRecvError::Empty)
++        );
++
++        release_tx.send(()).unwrap();
++        timeout(queue_drain_timeout(), follower_rx)
++            .await
++            .unwrap()
++            .unwrap();
++    }
++
+     #[tokio::test]
+     async fn closed_gate_request_is_skipped_and_following_requests_continue() {
+         let queues = RequestSerializationQueues::default();
