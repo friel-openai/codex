@@ -58,6 +58,8 @@
         "request_processors::thread_processor::subagent_history_projection::tests::projection_preserves_agent_identities_after_decimal_token_count",
         "request_processors::thread_processor::subagent_history_projection::tests::removes_stale_activity_and_prunes_mixed_spawn",
         "request_processors::thread_processor::subagent_history_projection::tests::sixth_segment_enables_projection_and_current_ids_survive",
+        "request_processors::thread_processor::resume_preparation::tests::cold_resume_with_pending_shutdown_drain_releases_thread_queue",
+        "request_serialization::tests::panicking_thread_request_does_not_strand_queue",
         "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up"
       ]
     },
