@@ -125,5 +125,53 @@ async fn static_catalog_records_its_supplied_origin() {
                 origin
             }]
         );
+        let aliases = HashMap::from([
+            (
+                "local-reviewer".to_string(),
+                CustomModelConfig {
+                    model: model.slug.clone(),
+                    model_context_window: None,
+                    model_auto_compact_token_limit: None,
+                },
+            ),
+            (
+                "local-missing".to_string(),
+                CustomModelConfig {
+                    model: "missing-backing-model".to_string(),
+                    model_context_window: None,
+                    model_auto_compact_token_limit: None,
+                },
+            ),
+        ]);
+        let aliased_manager = StaticModelsManager::new_with_custom_models(
+            /*auth_manager*/ None,
+            ModelsResponse {
+                models: vec![model.clone()],
+            },
+            origin,
+            aliases,
+        );
+        assert_eq!(
+            aliased_manager
+                .model_catalog_with_origins(RefreshStrategy::Offline, DEFAULT_HTTP_CLIENT_FACTORY)
+                .await,
+            vec![CatalogModel {
+                model: model.clone().into(),
+                origin
+            }]
+        );
+        let alias = aliased_manager
+            .get_model_info("local-reviewer", &ModelsManagerConfig::default())
+            .await;
+        assert_eq!(alias.request_model.as_deref(), Some(model.slug.as_str()));
+        assert_eq!(alias.origin, origin);
+        let missing = aliased_manager
+            .get_model_info("local-missing", &ModelsManagerConfig::default())
+            .await;
+        assert_eq!(
+            missing.request_model.as_deref(),
+            Some("missing-backing-model")
+        );
+        assert_eq!(missing.origin, ModelOrigin::Synthetic);
     }
 }
