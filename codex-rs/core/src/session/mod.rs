@@ -40,6 +40,7 @@ use crate::context::world_state::WorldStateUpdate;
 use crate::context::world_state::WorldStateUpdateContent;
 use crate::context::world_state::split_prefix_updates;
 use crate::current_time::TimeProvider;
+use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
 use crate::exec_policy::ExecPolicyManager;
@@ -1037,7 +1038,7 @@ impl Session {
                     roots
                 }
             };
-        let environment_selections = environment_requests
+        let mut environment_selections = environment_requests
             .into_iter()
             .map(|request| TurnEnvironmentSelection::new(request, &selected_capability_roots))
             .collect::<Vec<_>>();
@@ -1317,7 +1318,7 @@ impl Session {
             &model_info,
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
-        let session_configuration = SessionConfiguration {
+        let mut session_configuration = SessionConfiguration {
             turn_extension_init,
             provider: create_model_provider(
                 config.model_provider.clone(),
@@ -1363,6 +1364,34 @@ impl Session {
         session_configuration
             .validate(&environment_selections)
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+        // DeferredExecutor lets an explicit attachment connect after thread/start.
+        let inherited_environments = if let Some(discovery) =
+            thread_extension_init.remove::<crate::thread_manager::StartupEnvironmentDiscovery>()
+            && (discovery.implicit_selection || !config.features.enabled(Feature::DeferredExecutor))
+        {
+            debug_assert!(inherited_environments.is_none());
+            ThreadEnvironments::admit_startup_remotes(
+                Arc::clone(&environment_manager),
+                session_configuration
+                    .user_shell_override
+                    .clone()
+                    .unwrap_or_else(shell::default_user_shell),
+                ThreadEnvironmentDefaults::new(
+                    session_configuration.inferred_environment_config(),
+                    session_configuration.windows_sandbox_type,
+                ),
+                config.as_ref(),
+                &mut environment_selections,
+                discovery.implicit_selection,
+            )
+            .await?
+            .or(inherited_environments)
+        } else {
+            inherited_environments
+        };
+        session_configuration
+            .environments
+            .clone_from(&environment_selections);
         crate::windows_sandbox::log_windows_sandbox_startup(&config);
 
         // Generate a unique ID for the lifetime of this session.

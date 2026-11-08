@@ -5158,6 +5158,11 @@ mod tests {
                 "owner",
                 EnvironmentConfigState::Pending,
             ),
+            (
+                EnvironmentConfigState::StartupUnavailable,
+                "owner",
+                EnvironmentConfigState::StartupUnavailable,
+            ),
         ] {
             let selection = TurnEnvironmentSelection {
                 environment_id: "selected-environment".to_string(),
@@ -5170,18 +5175,19 @@ mod tests {
             snapshot.environments =
                 Some(TurnEnvironmentSelections::new(cwd.clone(), vec![selection.clone()]).into());
             let encoded = serde_json::to_value(&snapshot)?;
-            assert_eq!(
-                encoded["environments"],
-                json!({
-                    "legacy_fallback_cwd": cwd,
-                    "environments": [{
-                        "environment_id": selection.environment_id,
-                        "cwd": selection.cwd,
-                        "workspace_roots": selection.workspace_roots,
-                        "config_source": expected_source,
-                    }],
-                })
-            );
+            let mut expected = json!({
+                "legacy_fallback_cwd": cwd,
+                "environments": [{
+                    "environment_id": selection.environment_id,
+                    "cwd": selection.cwd,
+                    "workspace_roots": selection.workspace_roots,
+                    "config_source": expected_source,
+                }],
+            });
+            if config == EnvironmentConfigState::StartupUnavailable {
+                expected["environments"][0]["startup_unavailable"] = json!(true);
+            }
+            assert_eq!(encoded["environments"], expected);
             let decoded: ThreadSettingsSnapshot = serde_json::from_value(encoded.clone())?;
             assert_eq!(decoded, snapshot);
             let mut poisoned = encoded.clone();
