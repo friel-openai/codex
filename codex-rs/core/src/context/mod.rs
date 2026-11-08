@@ -68,6 +68,7 @@ pub(crate) use codex_context_fragments::AdditionalContextToolOutput;
 pub(crate) use codex_context_fragments::AdditionalContextUserFragment;
 pub use codex_context_fragments::AnsweredQuestion;
 pub use codex_context_fragments::ContextualUserFragment;
+pub use codex_context_fragments::StandaloneSideBoundary;
 pub(crate) use codex_guardian_context::PermissionContext as GuardianPermissionContext;
 pub use codex_guardian_reviewer::GuardianContextMode;
 pub(crate) use codex_prompts::MultiAgentRoleInstructions;
