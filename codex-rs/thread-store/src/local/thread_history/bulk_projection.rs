@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use codex_app_server_protocol::ThreadHistoryTurnMetadata;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::models::MessagePhase;
@@ -190,20 +190,21 @@ impl BulkProjection {
         }
         for change in &line.changes.changed_items {
             let created_at_ms = change
+                .item
                 .started_at_ms
                 .or(line.fallback_created_at_ms)
                 .ok_or_else(|| invalid("bulk projection item is missing its creation timestamp"))?;
             let id = change.item.id().to_string();
-            let class = match &change.item {
-                ThreadItem::UserMessage { .. } => SummaryClass::User,
-                ThreadItem::AgentMessage {
+            let class = match &change.item.payload {
+                ThreadItemPayload::UserMessage { .. } => SummaryClass::User,
+                ThreadItemPayload::AgentMessage {
                     phase: Some(MessagePhase::FinalAnswer),
                     ..
                 } => SummaryClass::FinalAgent,
-                ThreadItem::AgentMessage { phase: None, .. } => SummaryClass::UnphasedAgent,
+                ThreadItemPayload::AgentMessage { phase: None, .. } => SummaryClass::UnphasedAgent,
                 _ => SummaryClass::Other,
             };
-            let json = serde_json::to_string(&change.item).map_err(thread_history_error)?;
+            let json = serde_json::to_string(&change.item.payload).map_err(thread_history_error)?;
             let group = self.groups.entry(change.turn_id.clone()).or_default();
             if let Some(previous_ordinal) = group.item_ordinals.get(&id) {
                 let item = group
@@ -211,8 +212,8 @@ impl BulkProjection {
                     .get_mut(previous_ordinal)
                     .ok_or_else(|| invalid("bulk projection item index is inconsistent"))?;
                 item.updated_at_ordinal = ordinal;
-                item.started_at_ms = item.started_at_ms.or(change.started_at_ms);
-                item.completed_at_ms = item.completed_at_ms.or(change.completed_at_ms);
+                item.started_at_ms = item.started_at_ms.or(change.item.started_at_ms);
+                item.completed_at_ms = item.completed_at_ms.or(change.item.completed_at_ms);
                 item.json = json;
                 item.class = class;
             } else {
@@ -227,8 +228,8 @@ impl BulkProjection {
                         ordinal,
                         updated_at_ordinal: ordinal,
                         created_at_ms,
-                        started_at_ms: change.started_at_ms,
-                        completed_at_ms: change.completed_at_ms,
+                        started_at_ms: change.item.started_at_ms,
+                        completed_at_ms: change.item.completed_at_ms,
                         json,
                         class,
                     },
