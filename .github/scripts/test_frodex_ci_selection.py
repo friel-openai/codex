@@ -119,8 +119,8 @@ class DeclarationTests(unittest.TestCase):
     def test_checked_in_selection_matches_the_affected_cohort(self):
         configured = Path(__file__).resolve().parents[1] / "frodex-ci-selection.json"
         groups = selection.load_selection(selection.load_json(configured.read_text()))
-        self.assertEqual(len(groups), 20)
-        self.assertEqual(sum(len(group["tests"]) for group in groups), 951)
+        self.assertEqual(len(groups), 21)
+        self.assertEqual(sum(len(group["tests"]) for group in groups), 956)
 
     def test_rejects_duplicate_json_keys_in_declarations_and_listings(self):
         duplicate_documents = [

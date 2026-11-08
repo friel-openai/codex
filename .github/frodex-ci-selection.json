@@ -67,6 +67,8 @@
       "kind": "test",
       "target": "all",
       "tests": [
+        "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
+        "suite::v2::selected_environment::thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls",
         "suite::v2::mcp_connection_sharing::stdio_sharing_follows_protocol_and_enablement_for_loaded_chats",
         "suite::v2::model_routing_profiles::routed_profile_balances_partial_message_before_falling_back",
         "suite::v2::rollout_migration::malformed_records::concatenated_legacy_ancestor_record_migrates_across_restart",
@@ -183,6 +185,8 @@
       "kind": "lib",
       "target": null,
       "tests": [
+        "agents_md::tests::stalled_remote_project_instructions_fail_closed_and_can_be_retried",
+        "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
         "agent::api::tests::host_list_canonical_bounds_task_previews_and_falls_back_to_id",
         "agent::api::tests::host_list_canonical_does_not_truncate_at_private_page_limit",
         "agent::api::tests::host_list_canonical_preserves_metadata_and_order",
@@ -771,6 +775,15 @@
         "proxy::tests::prepare_for_environment_keeps_env_and_sandbox_ports_in_sync",
         "proxy::tests::prepare_for_optional_environment_preserves_effective_unix_socket_permissions",
         "proxy::tests::released_environment_batches_do_not_accumulate_listeners"
+      ]
+    },
+    {
+      "package": "codex-protocol",
+      "binary": "codex-protocol",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "protocol::tests::thread_settings_environments_persist_locations_without_owner_config"
       ]
     },
     {
