@@ -238,6 +238,70 @@ pub enum RolloutItem {
     RealtimeItem(RealtimeItem),
 }
 
+/// Projects foreign-owner goal-supervisor history without changing its model payloads.
+/// Callers must establish the destination policy and physical ownership before flattening.
+pub fn retain_inherited_supervisor_rollout_item(
+    item: &mut RolloutItem,
+    multi_agent_version: Option<MultiAgentVersion>,
+) -> bool {
+    match item {
+        RolloutItem::ResponseItem(item) => mark_supervisor_item_inherited(item),
+        RolloutItem::InterAgentCommunication(communication) => {
+            let mut envelope = ResponseItemEnvelope::from(communication.to_model_input_item());
+            mark_supervisor_item_inherited(&mut envelope);
+            *item = RolloutItem::ResponseItem(envelope);
+        }
+        RolloutItem::Compacted(compacted) => {
+            compacted.guardian_history = None;
+            compacted.retained_context = (multi_agent_version == Some(MultiAgentVersion::V2)
+                && compacted.retained_context.as_ref().is_some_and(|context| {
+                    context.user_messages_complete() && context.verified_answers_complete()
+                }))
+            .then(RetainedContext::default);
+            compacted.latest_token_usage_record = None;
+            if let Some(metadata) = compacted.resume_metadata.as_mut() {
+                if multi_agent_version.is_some() {
+                    metadata.multi_agent_version = multi_agent_version;
+                }
+                metadata.turn_attribution = None;
+            }
+            if let Some(items) = compacted.replacement_history.as_mut() {
+                for item in items {
+                    mark_supervisor_item_inherited(item);
+                }
+            }
+        }
+        RolloutItem::TokenUsageRecord(_)
+        | RolloutItem::RetainedContext(_)
+        | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::EventMsg(EventMsg::TokenCount(_)) => return false,
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::RealtimeItem(_) => {}
+    }
+    true
+}
+
+fn mark_supervisor_item_inherited(item: &mut ResponseItemEnvelope) {
+    let metadata = item
+        .metadata
+        .get_or_insert_with(CodexHarnessMetadata::default);
+    metadata.guardian_sources.clear();
+    metadata.guardian_review_ids.clear();
+    metadata.guardian_source_order_guidance = false;
+    metadata.guardian_retained_omissions = None;
+    metadata.retained_source = None;
+    metadata.delivered_assistant_message = None;
+    metadata.sender_user_messages = None;
+    metadata.user_input_order = None;
+    metadata.inherited_user_message = true;
+}
+
 impl Serialize for RolloutItem {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
