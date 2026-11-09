@@ -589,11 +589,87 @@ pub(super) async fn write_lineage_migration_journal(
     journal: &LineageMigrationJournal,
     locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
+    let path = path.to_path_buf();
+    let journal = journal.clone();
+    let locks = Arc::clone(locks);
+    // Revalidation can await filesystem work too; retain the existing lease before that await.
+    tokio::spawn(
+        async move { write_lineage_migration_journal_owned(&path, &journal, &locks).await },
+    )
+    .await
+    .map_err(migration_error)?
+}
+
+async fn write_lineage_migration_journal_owned(
+    path: &Path,
+    journal: &LineageMigrationJournal,
+    locks: &Arc<MigrationLocks>,
+) -> ThreadStoreResult<()> {
     journal.validate_review_input_target()?;
+    let previous = match tokio::fs::read(path).await {
+        Ok(bytes) => Some(parse_lineage_migration_journal(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(migration_error(error)),
+    };
+    let introduces_pins = previous.as_ref().is_none_or(|previous| {
+        previous.selected_thread_id != journal.selected_thread_id
+            || super::archive_gate::pins(previous) != super::archive_gate::pins(journal)
+    });
+    let publication_guard = if introduces_pins {
+        let home = path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| migration_error("migration journal has no Codex home"))?;
+        let guard = super::archive_gate::try_acquire(home)?;
+        super::archive_gate::validate_new_source_paths(journal).await?;
+        let sessions = home.join(codex_rollout::SESSIONS_SUBDIR);
+        for target in &journal.targets {
+            if !target.path.starts_with(&sessions) {
+                continue;
+            }
+            let plain = codex_rollout::plain_rollout_path(&target.path);
+            let filename = plain
+                .file_name()
+                .ok_or_else(|| migration_error("migration target has no filename"))?;
+            let archived = home
+                .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+                .join(filename);
+            let mut compressed_filename = filename.to_os_string();
+            compressed_filename.push(".zst");
+            let compressed = archived.with_file_name(compressed_filename);
+            // An existing counterpart is ambiguous even if an active copy also exists.
+            // Do not recreate a target that archive moved before this manifest was pinned.
+            for counterpart in [archived, compressed] {
+                match tokio::fs::symlink_metadata(&counterpart).await {
+                    Ok(_) => {
+                        return Err(crate::ThreadStoreError::Conflict {
+                            message: "migration target has an archived counterpart".to_string(),
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(migration_error(error)),
+                }
+            }
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let mut bytes = serde_json::to_vec(journal).map_err(migration_error)?;
     bytes.push(b'\n');
+    publish_journal(path, bytes, locks, publication_guard).await
+}
+
+pub(super) async fn publish_journal(
+    path: &Path,
+    bytes: Vec<u8>,
+    locks: &Arc<MigrationLocks>,
+    publication_guard: Option<super::archive_gate::ArchivePublicationGuard>,
+) -> ThreadStoreResult<()> {
     let path = path.to_path_buf();
     physical_io::run(locks, move || {
+        // The physical worker, not its cancellable caller, owns publication through fsync.
+        let _publication_guard = publication_guard;
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("lineage migration journal has no parent directory"))?;
@@ -622,8 +698,14 @@ pub(super) async fn read_lineage_migration_journal(
     path: &Path,
 ) -> ThreadStoreResult<LineageMigrationJournal> {
     let bytes = tokio::fs::read(path).await.map_err(migration_error)?;
-    let journal = serde_json::from_slice::<LineageMigrationJournal>(bytes.as_slice())
-        .map_err(migration_error)?;
+    parse_lineage_migration_journal(&bytes)
+}
+
+pub(super) fn parse_lineage_migration_journal(
+    bytes: &[u8],
+) -> ThreadStoreResult<LineageMigrationJournal> {
+    let journal =
+        serde_json::from_slice::<LineageMigrationJournal>(bytes).map_err(migration_error)?;
     if journal.version != LINEAGE_MIGRATION_JOURNAL_VERSION
         && !PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS.contains(&journal.version)
     {
