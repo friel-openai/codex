@@ -70,6 +70,7 @@
       "target": "all",
       "tests": [
         "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
+        "suite::v2::selected_environment::thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments",
         "suite::v2::selected_environment::thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls",
         "suite::v2::mcp_connection_sharing::stdio_sharing_follows_protocol_and_enablement_for_loaded_chats",
         "suite::v2::model_routing_profiles::routed_profile_balances_partial_message_before_falling_back",
