@@ -248,6 +248,7 @@ mod footer_selection;
 mod native_history;
 mod owned_transcript;
 mod pending_interactive_replay;
+mod pending_thread_approvals;
 mod permission_shortcuts;
 mod pets;
 mod platform_actions;
@@ -304,6 +305,7 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
+pub(crate) use self::thread_events::ThreadEventChannelIdentity;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";

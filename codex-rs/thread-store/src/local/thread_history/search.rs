@@ -340,6 +340,8 @@ fn searchable_text(item: &ThreadItemPayload) -> Option<Cow<'_, str>> {
         }
         ThreadItemPayload::HookPrompt { .. }
         | ThreadItemPayload::FunctionCallOutput { .. }
+        | ThreadItemPayload::InterAgentCommunication { .. }
+        | ThreadItemPayload::RawResponseItem { .. }
         | ThreadItemPayload::Plan { .. }
         | ThreadItemPayload::Reasoning { .. }
         | ThreadItemPayload::CommandExecution { .. }
