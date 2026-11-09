@@ -139,6 +139,7 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
         "local-reviewer".to_string(),
         CustomModelConfig {
             model: "gpt-5.5".to_string(),
+            routing_profile: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
         },
@@ -184,9 +185,9 @@ async fn originator_catalogs_are_isolated_and_reused_from_disk() {
         }
         actual.push(chat_catalog);
         assert_eq!(actual, catalogs);
-        assert_eq!(manager.custom_models(), &aliases);
+        assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
         for (child, originator) in [(&work, "codex_work_cca"), (&chat, "chatgpt_cca")] {
-            assert_eq!(child.custom_models(), &aliases);
+            assert_eq!(child.custom_models_snapshot().as_ref(), &aliases);
             let alias = child
                 .get_model_info("local-reviewer", &ModelsManagerConfig::default())
                 .await;
