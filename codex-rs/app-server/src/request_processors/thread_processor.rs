@@ -3810,6 +3810,7 @@ impl ThreadRequestProcessor {
         }
         let fallback_thread =
             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
+        let needs_name_lookup = include_turns || persisted_thread.is_none();
         let mut thread = if let Some(mut thread) = persisted_thread {
             if thread.path.is_none() {
                 thread.path = fallback_thread.path.clone();
@@ -3826,6 +3827,23 @@ impl ThreadRequestProcessor {
             fallback_thread
         };
         apply_live_thread_settings(&mut thread, &config_snapshot);
+        if needs_name_lookup {
+            self.attach_thread_name(thread_id, &mut thread).await;
+        } else if let Some(title) = thread
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        {
+            // The same persisted snapshot already supplied the name. Reopening the
+            // rollout here can block the serialized read after its data is available.
+            if thread.history_mode == ApiThreadHistoryMode::Paginated {
+                thread.name = Some(title);
+            } else {
+                set_thread_name_from_title(&mut thread, title);
+            }
+        }
         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
             .await?;
         Ok(thread)
@@ -3838,8 +3856,6 @@ impl ThreadRequestProcessor {
         include_turns: bool,
         loaded_thread: &CodexThread,
     ) -> Result<(), ThreadReadViewError> {
-        self.attach_thread_name(thread_id, thread).await;
-
         if include_turns {
             let config_snapshot = loaded_thread.config_snapshot().await;
             if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
@@ -4916,6 +4932,15 @@ impl ThreadRequestProcessor {
         thread_store: &dyn ThreadStore,
         thread_id: ThreadId,
     ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
+        if let Some(store) = thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            return store
+                .resume_backwards_cursors(thread_id)
+                .await
+                .map_err(paginated_history_list_error);
+        }
         let turns_page = thread_store
             .list_turns(StoreListTurnsParams {
                 thread_id,
