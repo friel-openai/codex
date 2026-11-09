@@ -1,0 +1,3 @@
+Preserve recorded subagent activity completion during rollout conversion
+
+Legacy history uses the nonzero sub_agent_activity occurrence time as its item completion. Carry that value into the synthesized item_completed event instead of losing it on conversion. Leave lifecycle start unknown, keep the zero sentinel and do not derive any time from the rollout envelope.
