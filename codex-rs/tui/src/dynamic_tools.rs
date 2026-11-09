@@ -1430,10 +1430,14 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
             }),
             ThreadItemPayload::InterAgentCommunication { id, communication } => json!({
                 "type": "interAgentCommunication", "id": id,
-                "author": communication.author, "recipient": communication.recipient
+                "author": communication.author, "recipient": communication.recipient,
+                "text": codex_app_server_protocol::visible_inter_agent_message_content(communication)
+                    .map(|text| truncate(&text, DEFAULT_OUTPUT_CHARS))
             }),
-            ThreadItemPayload::RawResponseItem { id, .. } => json!({
-                "type": "rawResponseItem", "id": id
+            ThreadItemPayload::RawResponseItem { id, item } => json!({
+                "type": "rawResponseItem", "id": id,
+                "text": codex_app_server_protocol::inter_agent_message_display_from_response_item(item)
+                    .map(|display| truncate(&display.text(), DEFAULT_OUTPUT_CHARS))
             }),
             ThreadItemPayload::Plan { id, text } => json!({
                 "type": "plan", "id": id, "text": truncate(text, DEFAULT_OUTPUT_CHARS)
