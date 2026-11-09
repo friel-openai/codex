@@ -619,8 +619,14 @@ fn create_filesystem_args(
         .collect();
     unreadable_ancestors_of_writable_roots.sort_by_key(|path| path_depth(path));
 
+    let mut masked_missing_files = HashSet::new();
     for unreadable_root in &unreadable_ancestors_of_writable_roots {
-        append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
+        append_unreadable_root_args(
+            &mut bwrap_args,
+            unreadable_root,
+            &allowed_write_paths,
+            &mut masked_missing_files,
+        )?;
     }
 
     for writable_root in &sorted_writable_roots {
@@ -697,6 +703,9 @@ fn create_filesystem_args(
                 remap_paths_for_symlink_target(deferred_read_only_subpaths, root, target);
         }
         read_only_subpaths.sort_by_key(|path| path_depth(path));
+        // Read-only subpaths are bound parent first, but a new writable
+        // bind can expose descendants that were masked on the previous bind.
+        masked_missing_files.clear();
         for subpath in read_only_subpaths {
             if let Some(symlink) =
                 first_writable_symlink_component_in_path(&subpath, &allowed_write_paths)
@@ -722,6 +731,7 @@ fn create_filesystem_args(
                 &subpath,
                 &allowed_write_paths,
                 &daemon_directories,
+                &mut masked_missing_files,
             )?;
         }
         // Protect the registry only where a writable bind exposes it. Apply
@@ -736,6 +746,8 @@ fn create_filesystem_args(
             None
         };
         if let Some(registry_mount) = registry_mount {
+            // This bind can shadow missing-file masks under the registry.
+            masked_missing_files.retain(|path| !path.starts_with(registry_mount));
             fs::create_dir_all(&registry_root)?;
             bwrap_args.args.push("--ro-bind".to_string());
             bwrap_args.args.push(path_to_string(registry_mount));
@@ -753,7 +765,12 @@ fn create_filesystem_args(
         }
         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
         for unreadable_root in nested_unreadable_roots {
-            append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+            append_unreadable_root_args(
+                &mut bwrap_args,
+                &unreadable_root,
+                &allowed_write_paths,
+                &mut masked_missing_files,
+            )?;
         }
     }
 
@@ -769,7 +786,12 @@ fn create_filesystem_args(
         .collect();
     rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
     for unreadable_root in rootless_unreadable_roots {
-        append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+        append_unreadable_root_args(
+            &mut bwrap_args,
+            &unreadable_root,
+            &allowed_write_paths,
+            &mut masked_missing_files,
+        )?;
     }
 
     if options.mask_wslg_distro
@@ -1240,6 +1262,7 @@ fn append_read_only_subpath_args(
     subpath: &Path,
     allowed_write_paths: &[PathBuf],
     daemon_directories: &BTreeSet<PathBuf>,
+    masked_missing_files: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     if let Some(metadata) = transient_empty_metadata_path(subpath)
         && is_within_allowed_write_paths(subpath, allowed_write_paths)
@@ -1262,7 +1285,11 @@ fn append_read_only_subpath_args(
         if let Some(first_missing_component) = find_first_non_existent_component(subpath)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
         {
-            append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
+            append_missing_read_only_subpath_args(
+                bwrap_args,
+                &first_missing_component,
+                masked_missing_files,
+            )?;
         }
         return Ok(());
     }
@@ -1296,7 +1323,11 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
     bwrap_args.args.push(path_to_string(path));
 }
 
-fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+fn append_missing_read_only_subpath_args(
+    bwrap_args: &mut BwrapArgs,
+    path: &Path,
+    masked_missing_files: &mut HashSet<PathBuf>,
+) -> Result<()> {
     if path.file_name().is_some_and(is_protected_metadata_name) {
         append_empty_directory_args(bwrap_args, path);
         bwrap_args
@@ -1305,10 +1336,19 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
         return Ok(());
     }
 
-    append_missing_empty_file_bind_data_args(bwrap_args, path)
+    append_missing_empty_file_bind_data_args(bwrap_args, path, masked_missing_files)
 }
 
-fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+fn append_missing_empty_file_bind_data_args(
+    bwrap_args: &mut BwrapArgs,
+    path: &Path,
+    masked_missing_files: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    // Both read-only and deny rules block creation beneath a missing ancestor
+    // with the same empty file. A second bind-data on that file fails in bwrap.
+    if !masked_missing_files.insert(path.to_path_buf()) {
+        return Ok(());
+    }
     append_empty_file_bind_data_args(bwrap_args, path)?;
     bwrap_args
         .synthetic_mount_targets
@@ -1345,6 +1385,7 @@ fn append_unreadable_root_args(
     bwrap_args: &mut BwrapArgs,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
+    masked_missing_files: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     if let Some(symlink) =
         first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
@@ -1367,7 +1408,11 @@ fn append_unreadable_root_args(
         if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
             && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
         {
-            append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
+            append_missing_empty_file_bind_data_args(
+                bwrap_args,
+                &first_missing_component,
+                masked_missing_files,
+            )?;
         }
         return Ok(());
     }
