@@ -1,0 +1,827 @@
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage_publish.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage_publish.rs
+index a0c985873667bd9877f84bfc9d90c1dddadf83bd..7ed8d5ba06ffa436af3efcfbe81b92353070af5b 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/lineage_publish.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/lineage_publish.rs
+@@ -1,7 +1,10 @@
+ //! Publishes and verifies staged lineage targets.
+
++use std::io;
+ use std::io::Read;
++use std::io::Seek;
+ use std::path::Path;
++use std::path::PathBuf;
+ use std::sync::Arc;
+
+ use sha2::Digest;
+@@ -25,22 +28,23 @@ pub(super) async fn publish_lineage_targets(
+     locks: &Arc<MigrationLocks>,
+ ) -> ThreadStoreResult<()> {
+     journal.validate_review_input_target()?;
++    let codex_home = journal_path
++        .parent()
++        .and_then(Path::parent)
++        .ok_or_else(|| migration_error("lineage migration journal has no Codex home"))?;
+     if let Some(target) = journal
+         .review_input_target
+         .as_mut()
+         .filter(|target| target.staged_path.is_some())
+     {
+-        let codex_home = journal_path
+-            .parent()
+-            .and_then(Path::parent)
+-            .ok_or_else(|| migration_error("lineage migration journal has no Codex home"))?;
+-        publish_one_target(target, Some(codex_home), locks).await?;
++        publish_one_target(target, codex_home, /*review_input*/ true, locks).await?;
+         write_lineage_migration_journal(journal_path, journal, locks).await?;
+     }
+     for index in 0..journal.targets.len() {
+         publish_one_target(
+             &mut journal.targets[index],
+-            /*review_input_codex_home*/ None,
++            codex_home,
++            /*review_input*/ false,
+             locks,
+         )
+         .await?;
+@@ -66,10 +70,11 @@ pub(super) async fn verify_published_lineage_targets(
+
+ async fn publish_one_target(
+     target: &mut LineageMigrationJournalTarget,
+-    review_input_codex_home: Option<&Path>,
++    codex_home: &Path,
++    review_input: bool,
+     locks: &Arc<MigrationLocks>,
+ ) -> ThreadStoreResult<()> {
+-    if let Some(codex_home) = review_input_codex_home
++    if review_input
+         && target.path != codex_rollout::review_input_segment_path(codex_home, target.rollout_id)
+     {
+         return Err(migration_error(
+@@ -80,10 +85,12 @@ async fn publish_one_target(
+         .await
+         .map_err(migration_error)?
+     {
+-        target.published_sha256 = Some(verify_published_target(target).await?);
+-        if let Some(codex_home) = review_input_codex_home {
+-            sync_review_input_directories(target, codex_home, locks).await?;
++        let sha256 = verify_published_target(target).await?;
++        // The file can be visible before its directory entries have been synced and recorded.
++        if review_input || target.published_sha256.is_none() {
++            sync_publication_directories(&target.path, codex_home, locks).await?;
+         }
++        target.published_sha256 = Some(sha256);
+         return Ok(());
+     }
+     let staged_path = target
+@@ -102,76 +109,160 @@ async fn publish_one_target(
+         .path
+         .extension()
+         .is_some_and(|extension| extension == "zst");
+-    if review_input_codex_home.is_some() {
++    if review_input {
+         // Other checkpoints may already reference the content-derived destination. Never replace
+         // it or delete it during rollback; only the transaction's staged link is temporary.
+         match physical_io::hard_link(staged_path, &target.path, locks).await {
+             Ok(()) => {}
+-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
++            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                 verify_published_target(target).await?;
+             }
+             Err(error) => return Err(migration_error(error)),
+         }
+-    } else if compressed {
+-        let temporary = staged_path.with_extension("publish.zst.tmp");
+-        let permissions = tokio::fs::metadata(staged_path)
+-            .await
+-            .map_err(migration_error)?
+-            .permissions();
+-        compress_rollout_to_path(
+-            staged_path,
+-            temporary.as_path(),
+-            permissions,
+-            /*modified_at*/ None,
+-            locks,
+-        )
+-        .await?;
+-        physical_io::rename(temporary.as_path(), target.path.as_path(), locks)
+-            .await
+-            .map_err(migration_error)?;
+-    } else {
+-        physical_io::rename(staged_path, target.path.as_path(), locks)
+-            .await
+-            .map_err(migration_error)?;
+-    }
+-    if let Some(codex_home) = review_input_codex_home {
+-        sync_review_input_directories(target, codex_home, locks).await?;
++        sync_publication_directories(&target.path, codex_home, locks).await?;
++        target.published_sha256 = Some(verify_published_target(target).await?);
+     } else {
+-        sync_parent_directory(target.path.as_path(), locks).await?;
++        let temporary;
++        let source = if compressed {
++            temporary = staged_path.with_extension("publish.zst.tmp");
++            let permissions = tokio::fs::metadata(staged_path)
++                .await
++                .map_err(migration_error)?
++                .permissions();
++            compress_rollout_to_path(
++                staged_path,
++                &temporary,
++                permissions,
++                /*modified_at*/ None,
++                locks,
++            )
++            .await?;
++            temporary.as_path()
++        } else {
++            staged_path.as_path()
++        };
++        let rename = physical_io::rename(source, &target.path, locks).await;
++        target.published_sha256 =
++            Some(finish_rollout_publication(rename, source, target, codex_home, locks).await?);
+     }
+-    target.published_sha256 = Some(verify_published_target(target).await?);
+     Ok(())
+ }
+
+-async fn sync_review_input_directories(
++async fn finish_rollout_publication(
++    rename: io::Result<()>,
++    source: &Path,
++    target: &LineageMigrationJournalTarget,
++    codex_home: &Path,
++    locks: &Arc<MigrationLocks>,
++) -> ThreadStoreResult<String> {
++    match rename {
++        Ok(()) => sync_parent_directory(&target.path, locks).await?,
++        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
++            copy_rollout_for_publication(source, target, codex_home, locks).await?;
++        }
++        Err(error) => return Err(migration_error(error)),
++    }
++    verify_published_target(target).await
++}
++
++async fn copy_rollout_for_publication(
++    source: &Path,
+     target: &LineageMigrationJournalTarget,
+     codex_home: &Path,
+     locks: &Arc<MigrationLocks>,
+ ) -> ThreadStoreResult<()> {
+-    // A matching hard link can be visible before its creator synchronizes the directory. Sync
+-    // every containing entry, including a newly created UUID directory and detached-storage root.
+-    for entry in review_input_directory_entries(&target.path, codex_home)? {
+-        sync_parent_directory(entry, locks).await?;
++    let directory_entries = publication_directory_entries(&target.path, codex_home)?;
++    let expected_plain_sha = target
++        .sha256
++        .clone()
++        .ok_or_else(|| migration_error("lineage migration target has no staged SHA-256"))?;
++    let expected_published_sha = target.published_sha256.clone();
++    let source = source.to_path_buf();
++    let destination = target.path.clone();
++    physical_io::run(locks, move || {
++        let parent = destination
++            .parent()
++            .ok_or_else(|| io::Error::other("lineage migration target has no parent"))?;
++        let mut input = std::fs::File::open(source)?;
++        // A second bind mount can reject rename even on the same filesystem. Keep staging
++        // intact for recovery and publish only a verified file created on the destination mount.
++        let mut temporary = tempfile::Builder::new()
++            .prefix(".rollout-migration-publish-")
++            .tempfile_in(parent)?;
++        let output = temporary.as_file_mut();
++        io::copy(&mut input, output)?;
++        output.rewind()?;
++        let plain_sha = if destination.extension().is_some_and(|ext| ext == "zst") {
++            hash_reader(zstd::stream::read::Decoder::new(&mut *output)?)?
++        } else {
++            hash_reader(&mut *output)?
++        };
++        let published_sha_matches = if let Some(expected) = expected_published_sha {
++            output.rewind()?;
++            hash_reader(&mut *output)? == expected
++        } else {
++            true
++        };
++        if plain_sha != expected_plain_sha || !published_sha_matches {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                format!(
++                    "copied lineage migration target failed verification: {}",
++                    destination.display()
++                ),
++            ));
++        }
++        output.set_permissions(input.metadata()?.permissions())?;
++        output.sync_all()?;
++        match temporary.persist_noclobber(destination) {
++            Ok(_) => {}
++            // Verify the existing file against the journal after returning from the copy.
++            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
++            Err(error) => return Err(error.error),
++        }
++        sync_publication_directories_blocking(&directory_entries)
++    })
++    .await
++    .map_err(migration_error)
++}
++
++async fn sync_publication_directories(
++    path: &Path,
++    codex_home: &Path,
++    locks: &Arc<MigrationLocks>,
++) -> ThreadStoreResult<()> {
++    let directory_entries = publication_directory_entries(path, codex_home)?;
++    physical_io::run(locks, move || {
++        sync_publication_directories_blocking(&directory_entries)
++    })
++    .await
++    .map_err(migration_error)
++}
++
++fn sync_publication_directories_blocking(directory_entries: &[PathBuf]) -> io::Result<()> {
++    // Sync newly created containing directories before SQLite can select the published rollout.
++    for entry in directory_entries {
++        physical_io::sync_parent_directory_blocking(entry)?;
+     }
+     Ok(())
+ }
+
+-fn review_input_directory_entries<'a>(
+-    path: &'a Path,
++fn publication_directory_entries(
++    path: &Path,
+     codex_home: &Path,
+-) -> ThreadStoreResult<Vec<&'a Path>> {
++) -> ThreadStoreResult<Vec<PathBuf>> {
+     if !path.starts_with(codex_home) || path == codex_home {
+         return Err(migration_error(
+-            "review-input target has no Codex-home ancestor",
++            "lineage migration target has no Codex-home ancestor",
+         ));
+     }
+     let mut entries = Vec::new();
+     let mut entry = path;
+     loop {
+-        entries.push(entry);
+-        let parent = entry
+-            .parent()
+-            .ok_or_else(|| migration_error("review-input target has no Codex-home ancestor"))?;
++        entries.push(entry.to_path_buf());
++        let parent = entry.parent().ok_or_else(|| {
++            migration_error("lineage migration target has no Codex-home ancestor")
++        })?;
+         if parent == codex_home {
+             return Ok(entries);
+         }
+@@ -227,24 +318,26 @@ async fn verify_published_target(
+
+ async fn hash_decompressed(path: &Path) -> ThreadStoreResult<String> {
+     let path = path.to_path_buf();
+-    tokio::task::spawn_blocking(move || -> ThreadStoreResult<String> {
+-        let input = std::fs::File::open(path).map_err(migration_error)?;
+-        let mut decoder = zstd::stream::read::Decoder::new(input).map_err(migration_error)?;
+-        let mut hasher = Sha256::new();
+-        let mut buffer = vec![0_u8; 256 * 1024];
+-        loop {
+-            let read = decoder
+-                .read(buffer.as_mut_slice())
+-                .map_err(migration_error)?;
+-            if read == 0 {
+-                break;
+-            }
+-            hasher.update(&buffer[..read]);
+-        }
+-        Ok(format!("{:x}", hasher.finalize()))
++    tokio::task::spawn_blocking(move || {
++        let input = std::fs::File::open(path)?;
++        hash_reader(zstd::stream::read::Decoder::new(input)?)
+     })
+     .await
+     .map_err(migration_error)?
++    .map_err(migration_error)
++}
++
++fn hash_reader(mut input: impl Read) -> io::Result<String> {
++    let mut hasher = Sha256::new();
++    let mut buffer = vec![0_u8; 256 * 1024];
++    loop {
++        let read = input.read(&mut buffer)?;
++        if read == 0 {
++            break;
++        }
++        hasher.update(&buffer[..read]);
++    }
++    Ok(format!("{:x}", hasher.finalize()))
+ }
+
+ #[cfg(test)]
+@@ -252,12 +345,199 @@ mod tests {
+     use super::*;
+     use codex_protocol::ThreadId;
+
++    use crate::LocalThreadStore;
++    use crate::local::test_support::test_config;
++
++    const SYNTHETIC_ROLLOUT: &[u8] = b"{\"synthetic\":true}\n";
++
++    async fn staged_predecessor(
++        home: &Path,
++        compressed: bool,
++    ) -> (LineageMigrationJournalTarget, Arc<MigrationLocks>) {
++        let thread_id = ThreadId::new();
++        let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
++        let stage = home
++            .join("rollout-migrations")
++            .join(format!("{thread_id}.staging"));
++        let destination = home.join("sessions/rollout_segments/2025/01/03");
++        std::fs::create_dir_all(&stage).expect("create staging directory");
++        std::fs::create_dir_all(&destination).expect("create destination directory");
++        let (path, staged_path, bytes) = if compressed {
++            (
++                destination.join(format!("{filename}.zst")),
++                stage.join("00000000.publish.zst.tmp"),
++                zstd::stream::encode_all(SYNTHETIC_ROLLOUT, 3).expect("compress fixture"),
++            )
++        } else {
++            (
++                destination.join(filename),
++                stage.join("00000000.jsonl"),
++                SYNTHETIC_ROLLOUT.to_vec(),
++            )
++        };
++        std::fs::write(&staged_path, bytes).expect("write staged rollout");
++        let store = LocalThreadStore::new(test_config(home), None);
++        let locks = store
++            .acquire_migration_locks_for_test(thread_id)
++            .await
++            .expect("reserve migration writer");
++        (
++            LineageMigrationJournalTarget {
++                thread_id,
++                rollout_id: ThreadId::new(),
++                segment_id: None,
++                path,
++                selected: false,
++                predecessor_segment_id: None,
++                staged_path: Some(staged_path),
++                start_ordinal: None,
++                end_ordinal_exclusive: None,
++                byte_count: None,
++                record_count: None,
++                sha256: Some(format!("{:x}", Sha256::digest(SYNTHETIC_ROLLOUT))),
++                published_sha256: None,
++            },
++            locks,
++        )
++    }
++
++    fn cross_device_rename() -> io::Result<()> {
++        Err(io::ErrorKind::CrossesDevices.into())
++    }
++
++    #[tokio::test]
++    async fn cross_device_rename_publishes_plain_and_compressed_lineage_without_consuming_stage() {
++        for compressed in [false, true] {
++            let home = tempfile::tempdir().expect("Codex home");
++            let (target, locks) = staged_predecessor(home.path(), compressed).await;
++            let source = target.staged_path.as_deref().expect("staged rollout path");
++            let encoded = std::fs::read(source).expect("read staged rollout");
++            let published_sha = finish_rollout_publication(
++                cross_device_rename(),
++                source,
++                &target,
++                home.path(),
++                &locks,
++            )
++            .await
++            .expect("publish across mount boundary");
++            assert_eq!(published_sha, format!("{:x}", Sha256::digest(&encoded)));
++            assert_eq!(
++                std::fs::read(&target.path).expect("read published file"),
++                encoded
++            );
++            assert_eq!(
++                std::fs::read(source).expect("retain staged rollout"),
++                encoded
++            );
++
++            let directories = publication_directory_entries(&target.path, home.path())
++                .expect("bounded directory entries")
++                .into_iter()
++                .map(|entry| entry.parent().expect("containing directory").to_path_buf())
++                .collect::<Vec<_>>();
++            assert_eq!(
++                directories,
++                [
++                    home.path().join("sessions/rollout_segments/2025/01/03"),
++                    home.path().join("sessions/rollout_segments/2025/01"),
++                    home.path().join("sessions/rollout_segments/2025"),
++                    home.path().join("sessions/rollout_segments"),
++                    home.path().join("sessions"),
++                    home.path().to_path_buf(),
++                ]
++            );
++            let entries = std::fs::read_dir(&directories[0])
++                .expect("read destination directory")
++                .collect::<io::Result<Vec<_>>>()
++                .expect("read destination entries");
++            assert_eq!(entries.len(), 1);
++            assert_eq!(entries[0].path(), target.path);
++        }
++    }
++
++    #[tokio::test]
++    async fn cross_device_publication_rejects_corruption_and_does_not_clobber() {
++        let home = tempfile::tempdir().expect("Codex home");
++        let (mut target, locks) = staged_predecessor(home.path(), /*compressed*/ false).await;
++        let source = target.staged_path.clone().expect("staged rollout path");
++        for (bytes, published_sha256) in [
++            (b"changed staging".as_slice(), None),
++            (SYNTHETIC_ROLLOUT, Some("wrong encoded digest".to_string())),
++        ] {
++            std::fs::write(&source, bytes).expect("write rejected staging data");
++            target.published_sha256 = published_sha256;
++            let error = finish_rollout_publication(
++                cross_device_rename(),
++                &source,
++                &target,
++                home.path(),
++                &locks,
++            )
++            .await
++            .expect_err("do not publish an unauthenticated copy");
++            assert!(
++                error
++                    .to_string()
++                    .contains("copied lineage migration target failed verification")
++            );
++            assert_eq!(
++                std::fs::read_dir(target.path.parent().expect("destination parent"))
++                    .expect("read destination directory")
++                    .count(),
++                0
++            );
++        }
++        target.published_sha256 = None;
++
++        let error = finish_rollout_publication(
++            Err(io::ErrorKind::PermissionDenied.into()),
++            &source,
++            &target,
++            home.path(),
++            &locks,
++        )
++        .await
++        .expect_err("unrelated rename failures must not copy");
++        assert!(
++            error
++                .to_string()
++                .contains(&io::Error::from(io::ErrorKind::PermissionDenied).to_string())
++        );
++        assert!(!target.path.exists());
++
++        // Simulate a destination that appears after the caller's existence check.
++        std::fs::write(&target.path, b"conflicting file").expect("create conflicting destination");
++        let error = finish_rollout_publication(
++            cross_device_rename(),
++            &source,
++            &target,
++            home.path(),
++            &locks,
++        )
++        .await
++        .expect_err("do not accept an incompatible destination");
++        assert!(
++            error
++                .to_string()
++                .contains("published lineage migration target failed verification")
++        );
++        assert_eq!(
++            std::fs::read(&target.path).expect("retain conflicting destination"),
++            b"conflicting file"
++        );
++        assert_eq!(
++            std::fs::read(source).expect("retain staged rollout"),
++            SYNTHETIC_ROLLOUT
++        );
++    }
++
+     #[test]
+     fn review_input_sync_includes_every_directory_through_codex_home() {
+         let home = tempfile::tempdir().expect("Codex home");
+         let rollout_id = ThreadId::new();
+         let path = codex_rollout::review_input_segment_path(home.path(), rollout_id);
+-        let directories = review_input_directory_entries(&path, home.path())
++        let directories = publication_directory_entries(&path, home.path())
+             .expect("bounded directory entries")
+             .into_iter()
+             .map(|entry| entry.parent().expect("containing directory").to_path_buf())
+@@ -279,7 +559,7 @@ mod tests {
+     fn review_input_sync_rejects_paths_outside_codex_home() {
+         let home = tempfile::tempdir().expect("Codex home");
+         let outside = tempfile::tempdir().expect("different directory");
+-        assert!(review_input_directory_entries(outside.path(), home.path()).is_err());
+-        assert!(review_input_directory_entries(home.path(), home.path()).is_err());
++        assert!(publication_directory_entries(outside.path(), home.path()).is_err());
++        assert!(publication_directory_entries(home.path(), home.path()).is_err());
+     }
+ }
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage_transaction.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage_transaction.rs
+index 835c28392fa10b89c1ea88b36cf2e4b5d627a2d1..5626f450990a4d0e1ab7fbfd89856b16796a9629 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/lineage_transaction.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/lineage_transaction.rs
+@@ -529,25 +529,45 @@ impl LocalThreadStore {
+                 .await
+                 .map_err(migration_error)?
+                 .ok_or_else(|| migration_error("selected lineage thread is missing"))?;
+-            publish_lineage_targets(journal_path, &mut journal, locks).await?;
+             let selected_target = journal
+                 .targets
+                 .iter()
+                 .find(|target| target.selected)
++                .map(|target| target.path.clone())
+                 .ok_or_else(|| migration_error("lineage journal has no selected target"))?;
+-            if current.rollout_path != selected_target.path
++            let needs_selection = current.rollout_path != selected_target;
++            if needs_selection {
++                let selected_source = journal
++                    .sources
++                    .last()
++                    .ok_or_else(|| migration_error("lineage journal has no selected source"))?;
++                // A compressed sibling can be the recorded source while SQLite still stores the
++                // plain path. Authenticate the physical file, but keep the exact SQLite key.
++                if codex_rollout::existing_rollout_path(&current.rollout_path)
++                    .await
++                    .as_deref()
++                    != Some(selected_source.path.as_path())
++                {
++                    return Err(migration_error(
++                        "SQLite selection no longer resolves to the recorded lineage source",
++                    ));
++                }
++            }
++            publish_lineage_targets(journal_path, &mut journal, locks).await?;
++            if needs_selection
+                 && !state_db
+                     .replace_rollout_path_if_current(
+                         journal.selected_thread_id,
+-                        selected_source_path,
+-                        selected_target.path.as_path(),
++                        &current.rollout_path,
++                        &selected_target,
+                     )
+                     .await
+                     .map_err(migration_error)?
+             {
+-                return Err(ThreadStoreError::Conflict {
+-                    message: "selected rollout changed during lineage migration".to_string(),
+-                });
++                // A changed selection is not writer-lock contention.
++                return Err(migration_error(
++                    "SQLite selection changed while publishing the lineage",
++                ));
+             }
+             self.promote_legacy_name(journal.selected_thread_id, None)
+                 .await?;
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b5510954d 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -6189,15 +6189,35 @@ async fn assert_migration_process_death_recovers_every_durable_phase(
+
+ #[tokio::test]
+ async fn migration_preserves_archived_compressed_segmented_lineage_and_sources() {
+-    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Legacy).await;
++    assert_migration_preserves_archived_compressed_lineage(
++        ThreadHistoryMode::Legacy,
++        /*stale_indexed_plain_path*/ false,
++    )
++    .await;
+ }
+
+ #[tokio::test]
+ async fn native_history_base_migration_preserves_archived_compressed_lineage_and_sources() {
+-    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Paginated).await;
++    assert_migration_preserves_archived_compressed_lineage(
++        ThreadHistoryMode::Paginated,
++        /*stale_indexed_plain_path*/ false,
++    )
++    .await;
+ }
+
+-async fn assert_migration_preserves_archived_compressed_lineage(history_mode: ThreadHistoryMode) {
++#[tokio::test]
++async fn migration_preserves_archived_compressed_lineage_with_stale_indexed_plain_path() {
++    assert_migration_preserves_archived_compressed_lineage(
++        ThreadHistoryMode::Legacy,
++        /*stale_indexed_plain_path*/ true,
++    )
++    .await;
++}
++
++async fn assert_migration_preserves_archived_compressed_lineage(
++    history_mode: ThreadHistoryMode,
++    stale_indexed_plain_path: bool,
++) {
+     let home = TempDir::new().expect("create Codex home");
+     let thread_id = ThreadId::new();
+     let segment_ids = [SegmentId::new(), SegmentId::new()];
+@@ -6258,6 +6278,35 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+         fs::read(archived.as_path()).expect("read compressed active"),
+     ];
+     let store = indexed_store(home.path()).await;
++    let stale_index = if stale_indexed_plain_path {
++        let state_db = store.state_db.as_ref().expect("indexed archive");
++        let mut expected = state_db
++            .get_thread(thread_id)
++            .await
++            .expect("read selected archive metadata")
++            .expect("indexed archive row");
++        assert_eq!(expected.rollout_path, archived);
++        let archived_at = expected.archived_at.expect("archived row");
++        assert_eq!(codex_rollout::plain_rollout_path(&archived), archived_plain);
++        assert!(!archived_plain.exists());
++        assert!(
++            state_db
++                .replace_rollout_path_if_current(thread_id, &archived, &archived_plain)
++                .await
++                .expect("set the missing plain sibling as the indexed path")
++        );
++        expected.rollout_path = archived_plain;
++        assert_eq!(
++            state_db
++                .get_thread(thread_id)
++                .await
++                .expect("read the stale archive row"),
++            Some(expected),
++        );
++        Some((state_db, archived_at))
++    } else {
++        None
++    };
+
+     let report = store
+         .migrate_rollouts(apply_options())
+@@ -6268,7 +6317,7 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+         report.outcomes[0].status,
+         RolloutMigrationStatus::Migrated,
+         "{:?}",
+-        report.outcomes[0].message
++        report.outcomes[0],
+     );
+     let selected_path = report.outcomes[0].rollout_path.clone();
+     assert!(selected_path.starts_with(home.path().join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)));
+@@ -6276,6 +6325,16 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+         selected_path.extension().and_then(|value| value.to_str()),
+         Some("zst")
+     );
++    if let Some((state_db, archived_at)) = stale_index {
++        let selected = state_db
++            .get_thread(thread_id)
++            .await
++            .expect("read migrated archive metadata")
++            .expect("migrated archive row");
++        assert_ne!(selected_path, archived);
++        assert_eq!(selected.rollout_path, selected_path);
++        assert_eq!(selected.archived_at, Some(archived_at));
++    }
+     assert_eq!(
+         [
+             fs::read(immutable.as_path()).expect("reread compressed predecessor"),
+@@ -6307,6 +6366,134 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+     assert!(json.contains("archived active"));
+ }
+
++#[tokio::test]
++async fn archived_lineage_recovery_refuses_a_different_existing_selection_before_publication() {
++    let home = TempDir::new().expect("create Codex home");
++    let thread_id = ThreadId::new();
++    let [predecessor_id, selected_id, replacement_id] = std::array::from_fn(|_| SegmentId::new());
++    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
++    let predecessor_plain = home
++        .path()
++        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++        .join(thread_id.to_string())
++        .join(predecessor_id.to_string())
++        .join(&filename);
++    write_legacy_segment(
++        &predecessor_plain,
++        home.path(),
++        thread_id,
++        predecessor_id,
++        vec![user_message("predecessor")],
++    );
++    let active = home.path().join("sessions/2025/01/03").join(filename);
++    write_legacy_segment(
++        &active,
++        home.path(),
++        thread_id,
++        selected_id,
++        vec![
++            segment_reference(predecessor_plain.clone(), thread_id, predecessor_id),
++            user_message("original selection"),
++        ],
++    );
++    let predecessor = compress_rollout(&predecessor_plain);
++    let archived = compress_rollout(&move_to_archived(home.path(), active));
++    let store = indexed_store(home.path()).await;
++    let state_db = store.state_db.as_ref().expect("indexed archive");
++    let mut expected = state_db
++        .get_thread(thread_id)
++        .await
++        .expect("read selected archive metadata")
++        .expect("indexed archive row");
++    assert_eq!(expected.rollout_path, archived);
++    assert!(expected.archived_at.is_some());
++
++    let journal_path = migration_journal_path(home.path(), thread_id);
++    let plan = plan_legacy_lineage(home.path(), &archived)
++        .await
++        .expect("plan archived lineage");
++    let mut limiter = RolloutMigrationRateLimiter::new(None).expect("migration limiter");
++    let stopped = store
++        .migrate_legacy_lineage_until_phase_for_test(
++            &archived,
++            &journal_path,
++            plan,
++            &mut limiter,
++            LineageMigrationPhase::ProjectionDurable,
++        )
++        .await
++        .expect_err("stop before publication");
++    assert!(
++        stopped
++            .to_string()
++            .contains("injected lineage migration stop")
++    );
++    let journal = read_lineage_migration_journal(&journal_path)
++        .await
++        .expect("read durable journal");
++    assert_eq!(journal.phase, LineageMigrationPhase::ProjectionDurable);
++    assert!(journal.targets.iter().all(|target| !target.path.exists()));
++    let journal_bytes = fs::read(&journal_path).expect("read durable journal bytes");
++
++    let replacement = archived
++        .parent()
++        .expect("archive directory")
++        .join(format!("rollout-2025-01-04T12-00-00-{thread_id}.jsonl"));
++    write_legacy_segment(
++        &replacement,
++        home.path(),
++        thread_id,
++        replacement_id,
++        vec![user_message("different selection")],
++    );
++    let replacement_meta = codex_rollout::read_session_meta_line(&replacement)
++        .await
++        .expect("read replacement selection metadata");
++    assert_eq!(replacement_meta.meta.id, thread_id);
++    assert_eq!(replacement_meta.meta.segment_id, Some(replacement_id));
++    let sources = [&predecessor, &archived, &replacement];
++    let source_bytes = sources.map(|path| fs::read(path).expect("read source bytes"));
++    assert!(
++        state_db
++            .replace_rollout_path_if_current(thread_id, &archived, &replacement)
++            .await
++            .expect("select a different existing rollout for the same thread")
++    );
++    expected.rollout_path = replacement.clone();
++
++    let locks = store
++        .acquire_migration_locks_for_test(thread_id)
++        .await
++        .expect("lock archive for direct recovery");
++    let error = store
++        .recover_legacy_lineage(thread_id, &journal_path, &mut limiter, &locks)
++        .await
++        .expect_err("recovery must refuse the changed selection");
++    assert!(
++        journal.targets.iter().all(|target| !target.path.exists()),
++        "recovery published targets after selection changed: {error}"
++    );
++    assert_eq!(
++        fs::read(&journal_path).expect("read journal after refusal"),
++        journal_bytes,
++    );
++    assert_eq!(
++        sources.map(|path| fs::read(path).expect("reread source bytes")),
++        source_bytes,
++    );
++    assert_eq!(
++        state_db
++            .get_thread(thread_id)
++            .await
++            .expect("read selection after refusal"),
++        Some(expected),
++    );
++    assert!(
++        matches!(error, ThreadStoreError::Internal { .. }),
++        "{error}"
++    );
++}
++
+ #[tokio::test]
+ async fn migration_refuses_source_mutation_after_lineage_journal_is_durable() {
+     let home = TempDir::new().expect("create Codex home");
