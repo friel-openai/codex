@@ -133,6 +133,7 @@
         "suite::v2::thread_list_current_agents::historical_tests::thread_list_relation_filters_ignore_historical_edges_for_unloaded_root",
         "suite::v2::thread_list_current_agents::pagination_tests::thread_list_relation_includes_explicitly_resumed_archived_v1_agent",
         "suite::v2::thread_list_current_agents::pagination_tests::thread_list_relation_paginates_app_members_and_matches_list_agents",
+        "suite::v2::thread_read::direct_items_page_reads_compressed_leaf_at_recorded_plain_path",
         "suite::v2::thread_read::frodex_history_apis_ignore_deleted_sixth_segment",
         "suite::v2::thread_read::frodex_thread_turns_list_stays_bounded_with_1025_segments",
         "suite::v2::thread_read::frodex_thread_turns_list_stays_bounded_with_258_segments",
