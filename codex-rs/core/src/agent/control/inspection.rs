@@ -9,7 +9,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 
 impl LocalAgentControl {
-    pub(super) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {
+    pub(crate) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {
         let manager = self.runtime.upgrade()?;
         let thread = match manager.get_thread(thread_id).await {
             Ok(thread) => thread,
