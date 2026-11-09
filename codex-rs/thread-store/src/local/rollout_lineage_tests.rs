@@ -93,6 +93,7 @@ async fn clean_fork_lineage_defers_managed_ancestor_and_rejects_nested_escape() 
         let child_bytes = fs::read(&child_path).expect("child bytes");
         let lineage = RolloutLineage {
             root_rollout_id: child_id,
+            has_attached_visibility: false,
             segments: vec![
                 expected_segment(ancestor_id, ancestor_path.clone(), 1, Some(ancestor_end)),
                 expected_segment_with_provenance(
@@ -179,6 +180,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
         .resolve_rollout_lineage(child)
         .await
         .expect("resolve nested lineage");
+    assert!(!lineage.has_attached_visibility);
     let child_len = fs::metadata(&child_path).expect("child metadata").len();
 
     assert_eq!(
@@ -213,7 +215,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
             RolloutLineageSegment {
                 thread_id: child,
                 rollout_id: child,
-                rollout_path: child_path,
+                rollout_path: child_path.clone(),
                 start_ordinal: 6,
                 end_ordinal_exclusive: None,
                 jsonl_end_byte_offset: Some(child_len),
@@ -224,6 +226,55 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 uses_fork_boundary: true,
             },
         ]
+    );
+
+    let mut lines = fs::read_to_string(&middle_path)
+        .expect("read middle rollout")
+        .lines()
+        .map(codex_rollout::parse_rollout_line)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse middle rollout");
+    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
+        panic!("middle rollout must start with metadata");
+    };
+    meta.meta.attached_thread = true;
+    meta.meta.forked_from_id = Some(root);
+    meta.meta.forked_from_ordinal_exclusive = Some(root_end.end_ordinal_exclusive);
+    let records = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("serialize attached middle rollout");
+    fs::write(&middle_path, format!("{}\n", records.join("\n")))
+        .expect("write attached middle rollout");
+    let middle_end = history_position(&middle_path, middle, 5);
+    assert_eq!(
+        write_rollout(home.path(), child, Some(middle_end), 3),
+        child_path
+    );
+    let lineage = store
+        .resolve_rollout_lineage_from_path(child, &child_path)
+        .await
+        .expect("resolve child of attached ancestor");
+    assert!(lineage.has_attached_visibility);
+    assert_eq!(lineage.segments.len(), 3);
+    let reservation = store
+        .reserve_rollout_writers(&[root, middle, child])
+        .await
+        .expect("reserve nested source owners");
+    let source = lineage.segments.last().expect("reserved source segment");
+    let visible = store
+        .resolve_reserved_history_page_lineage(child, source, child, &reservation)
+        .await
+        .expect("resolve reserved attached visibility");
+    assert_eq!(visible.root_rollout_id, child);
+    assert_eq!(visible.segments.len(), 1);
+    assert_eq!(visible.segments[0].rollout_path, child_path);
+    assert!(
+        store
+            .resolve_reserved_history_page_lineage(child, source, root, &reservation)
+            .await
+            .is_err()
     );
 }
 
@@ -728,23 +779,20 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
         /*next_ordinal*/ 6,
     );
     let mut active_paths = std::collections::HashSet::new();
-    let rotated = RolloutLineage {
-        root_rollout_id: parent,
-        segments: resolve_path(
-            &store,
-            parent,
-            parent,
-            stable_path.clone(),
-            /*end*/ None,
-            /*inherited_filter_texts*/ None,
-            /*graph_depth*/ 0,
-            LineageResolutionMode::ModelContext,
-            &mut active_paths,
-            LineageOffsetMode::Resolve,
-        )
-        .await
-        .expect("resolve same-thread rotation"),
-    };
+    let rotated = resolve_path(
+        &store,
+        parent,
+        parent,
+        stable_path.clone(),
+        /*end*/ None,
+        /*inherited_filter_texts*/ None,
+        /*graph_depth*/ 0,
+        LineageResolutionMode::ModelContext,
+        &mut active_paths,
+        LineageOffsetMode::Resolve,
+    )
+    .await
+    .expect("resolve same-thread rotation");
     assert_eq!(rotated.segments.len(), 2);
     assert_eq!(rotated.segments[0].thread_id, parent);
     assert_eq!(rotated.segments[0].end_ordinal_exclusive, Some(3));
@@ -1146,7 +1194,8 @@ async fn resolves_512_same_thread_lineage_segments() {
     .await
     .expect("ordinary same-thread rotation must not exhaust fork depth");
 
-    assert_eq!(segments.len(), SEGMENT_COUNT);
+    assert_eq!(segments.segments.len(), SEGMENT_COUNT);
+    assert!(!segments.has_attached_visibility);
     assert!(active_paths.is_empty());
 
     let overflow_path = home
@@ -1209,7 +1258,8 @@ async fn resolves_512_same_thread_lineage_segments() {
     )
     .await
     .expect("same-thread lineage must remain readable beyond 512 segments");
-    assert_eq!(segments.len(), SEGMENT_COUNT + 1);
+    assert_eq!(segments.segments.len(), SEGMENT_COUNT + 1);
+    assert!(!segments.has_attached_visibility);
     assert!(active_paths.is_empty());
 }
 

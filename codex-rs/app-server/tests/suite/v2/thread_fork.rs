@@ -3665,6 +3665,7 @@ async fn thread_fork_freezes_active_paginated_turn_as_interrupted(
         for (method, field) in [
             ("thread/revert", "beforeTurnId"),
             ("thread/fork", "lastTurnId"),
+            ("thread/fork", "beforeTurnId"),
         ] {
             let id = mcp
                 .send_raw_request(
