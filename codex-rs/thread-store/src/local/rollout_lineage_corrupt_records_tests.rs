@@ -422,6 +422,7 @@ async fn full_history_reads_damaged_rotated_ancestor_without_rewriting_history_b
         .expect("reserve source");
     let lineage = RolloutLineage {
         root_rollout_id: thread_id,
+        has_attached_visibility: false,
         segments: vec![
             segment(
                 thread_id,
@@ -491,6 +492,7 @@ async fn full_history_damaged_tail_keeps_last_complete_ordinal_and_cutoff_checks
         .expect("reserve source");
     let lineage = RolloutLineage {
         root_rollout_id: thread_id,
+        has_attached_visibility: false,
         segments: vec![segment(
             thread_id, thread_id, &path, /*start_ordinal*/ 1, None,
         )],
@@ -519,6 +521,7 @@ async fn full_history_damaged_tail_keeps_last_complete_ordinal_and_cutoff_checks
     };
     let claimed_lineage = RolloutLineage {
         root_rollout_id: thread_id,
+        has_attached_visibility: false,
         segments: vec![segment(
             thread_id,
             thread_id,
