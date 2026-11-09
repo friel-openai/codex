@@ -69,6 +69,7 @@ pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
 const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
+const THREAD_LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LEGACY_PAGE_DEPTH_HINTS: usize = 256;
 const MAX_LEGACY_PAGE_DEPTH_HINT_BYTES: usize = 512 * 1024;
 const MAX_LEGACY_DISPLAYED_TURNS: usize = 256;
@@ -2733,7 +2734,7 @@ impl ThreadRequestProcessor {
             }
         }
         tokio::time::timeout(
-            Duration::from_secs(10),
+            THREAD_LISTENER_DRAIN_TIMEOUT,
             shutdown_drain.wait_for(|drained| *drained),
         )
         .await
@@ -5661,9 +5662,9 @@ impl ThreadRequestProcessor {
                 .thread_state(resumed.conversation_id)
                 .await;
             let drain = state.lock().await.pending_shutdown_drain();
-            if let Some(mut drain) = drain {
+            if let Some(drain) = drain {
                 // Core can remove the old runtime before its listener forwards ShutdownComplete.
-                let _ = drain.wait_for(|drained| *drained).await;
+                Self::wait_for_resume_shutdown_drain(resumed.conversation_id, drain).await?;
             }
             Some(guard)
         } else {
