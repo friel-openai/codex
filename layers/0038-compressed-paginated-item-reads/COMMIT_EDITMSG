@@ -1,0 +1,3 @@
+Read paginated items when only the compressed rollout remains
+
+A stored rollout path can still name the plain leaf after compression. Let a missing plain reverse scan use the reference reader, and fingerprint the selected physical file for descending page hints. Preserve other open errors and the plain-file fast path.
