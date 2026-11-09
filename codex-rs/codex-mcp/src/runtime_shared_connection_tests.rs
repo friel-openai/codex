@@ -4,6 +4,7 @@ use crate::connection_pool::ConnectionSharing;
 use crate::connection_pool::ConnectionSlot;
 use crate::connection_pool::McpConnectionPool;
 use crate::connection_pool::tests as fixture;
+use crate::request_router::McpConnectionRequestRouter;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
@@ -13,6 +14,7 @@ use tokio::sync::Notify;
 async fn forced_refresh_replaces_pending_connection_without_interrupting_other_chats() {
     let pool = McpConnectionPool::default();
     let key = fixture::key(&fixture::context(), &fixture::config());
+    let request_router = McpConnectionRequestRouter::default();
     let starts = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -27,12 +29,14 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
     let first = {
         let pool = pool.clone();
         let key = key.clone();
+        let request_router = request_router.clone();
         let slot = Arc::clone(&slot);
         let launch = Arc::clone(&launch);
         async move {
             pool.connect(
                 slot,
                 key,
+                request_router,
                 Arc::default(),
                 /*tool_catalog_cache_context*/ None,
                 CancellationToken::new(),
@@ -48,6 +52,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
     let other = pool.connect(
         Arc::default(),
         key.clone(),
+        request_router.clone(),
         Arc::default(),
         /*tool_catalog_cache_context*/ None,
         CancellationToken::new(),
@@ -76,11 +81,14 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         ready_selected_capability_roots: Vec::new(),
         environment_selections: Arc::default(),
         ready_environments: HashMap::new(),
+        shutting_down: AtomicBool::new(false),
         cached_binding: Mutex::new(None),
     }));
     let input = McpRuntimeInput {
         network_policy_metadata: None,
         startup_policy: McpStartupPolicy::Eager,
+        connection_pool: pool.clone(),
+        connection_pool_mode: McpConnectionPoolMode::Reuse,
         config,
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),
@@ -110,6 +118,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         pool.connect(
             Arc::default(),
             key.clone(),
+            request_router.clone(),
             Arc::default(),
             /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
@@ -127,6 +136,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
             /*arguments*/ None,
             |_| Ok(None),
             /*timeout*/ None,
+            /*lease*/ None,
         )
         .await
         .unwrap();
@@ -137,6 +147,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         .connect(
             Arc::default(),
             key,
+            request_router,
             Arc::default(),
             /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
@@ -160,6 +171,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
             /*arguments*/ None,
             |_| Ok(None),
             /*timeout*/ None,
+            /*lease*/ None,
         )
         .await
         .unwrap();
