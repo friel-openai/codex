@@ -5494,10 +5494,10 @@ index 0000000000000000000000000000000000000000..0f12b03f1456eee65686a16fa57e1f22
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b267ccd018aa6de5687b77ee42860bdcd625c936
+index 0000000000000000000000000000000000000000..ab5f95cb63a781674ebe23ca21e72f44a9f6b326
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,582 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +
@@ -5917,8 +5917,15 @@ index 0000000000000000000000000000000000000000..b267ccd018aa6de5687b77ee42860bdc
 +        "the oldest evicted ephemeral worker must retain registry identity"
 +    );
 +
-+    mcp.wait_for_json_log_event(
-+        "codex.current_agents.list",
++    // The stdout response can arrive before the stderr reader records the final page.
++    mcp.wait_for_matching_json_log_event(
++        "codex.current_agents.list for the final page",
++        |event| {
++            let fields = &event["fields"];
++            fields["event.name"] == "codex.current_agents.list"
++                && fields["thread.id"].as_str() == Some(root.id.as_str())
++                && fields["returned_count"] == 5
++        },
 +        std::time::Duration::from_secs(10),
 +    )
 +    .await?;
@@ -5928,7 +5935,8 @@ index 0000000000000000000000000000000000000000..b267ccd018aa6de5687b77ee42860bdc
 +        .filter(|event| event["fields"]["event.name"] == "codex.current_agents.list")
 +        .collect::<Vec<_>>();
 +    assert_eq!(relation_events.len(), 4);
-+    for event in relation_events {
++    for (event, returned_count) in relation_events.into_iter().zip([7, 7, 7, 5]) {
++        assert_eq!(event["fields"]["returned_count"], returned_count);
 +        assert_eq!(event["fields"]["member_count"], AGENT_COUNT);
 +        assert_eq!(event["fields"]["metadata_batch_queries"], 1);
 +        assert_eq!(event["fields"]["scalar_thread_reads"], 0);
