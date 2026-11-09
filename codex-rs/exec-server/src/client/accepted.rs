@@ -243,6 +243,7 @@ impl LazyRemoteExecServerClient {
             transport_params: None,
             http_client_factory,
             recovery_policy: super::RecoveryPolicy::Wait,
+            bound_client: None,
             startup: std::sync::Arc::new(super::ConnectionAttempt {
                 result: OnceCell::new_with(Some(Ok(client.clone()))),
                 ..Default::default()
@@ -259,6 +260,11 @@ impl LazyRemoteExecServerClient {
         &self,
         websocket: WebSocket,
     ) -> Result<(), ExecServerError> {
+        if self.is_attachment_bound() {
+            return Err(ExecServerError::Protocol(
+                "cannot replace the transport through an attachment-bound environment".to_string(),
+            ));
+        }
         self.get()
             .await?
             .replace_accepted_websocket(websocket)

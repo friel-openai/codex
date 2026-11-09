@@ -45,6 +45,7 @@ use tracing::instrument::WithSubscriber;
 use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
 use crate::agents_md::StartupProjectInstructions;
 use crate::agents_md::read_startup_project_instructions;
+use crate::agents_md::verify_remote_project_instructions;
 use crate::config::Config;
 use crate::session::ThreadEnvironmentDefaults;
 use crate::session::turn_context::ShellSnapshotCache;
@@ -316,6 +317,51 @@ struct ThreadEnvironmentsState {
     environments: Vec<SelectedTurnEnvironment>,
     // Keep each rejection at its original position without binding an executor.
     startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
+    default_secondary_admissions: Option<DefaultSecondaryAdmissions>,
+}
+
+/// A local-primary turn must verify its default secondaries before using their tools.
+#[derive(Clone)]
+pub(crate) struct DefaultSecondaryAdmissions {
+    turn: Arc<()>,
+    secondaries: Vec<DefaultSecondaryAdmission>,
+}
+
+#[derive(Clone)]
+struct DefaultSecondaryAdmission {
+    selection: TurnEnvironmentSelection,
+    registration: Arc<Environment>,
+    verified: Option<TurnEnvironment>,
+}
+
+impl DefaultSecondaryAdmission {
+    fn matches(
+        &self,
+        selection: &TurnEnvironmentSelection,
+        config_origin: EnvironmentConfigOrigin,
+        registration: &Arc<Environment>,
+    ) -> bool {
+        // An owner can install the same normalized config without preserving its origin.
+        config_origin == EnvironmentConfigOrigin::Thread
+            && self.selection == *selection
+            && Arc::ptr_eq(&self.registration, registration)
+    }
+
+    fn unavailable(&self) -> TurnEnvironmentState {
+        let mut selection = self.selection.clone();
+        let error = format!(
+            "Environment `{}` is unavailable for this turn because its AGENTS.md discovery could not be verified.",
+            selection.environment_id,
+        );
+        // Retain the ID in inherited selections without granting tools or requiring its skills.
+        selection.config = EnvironmentConfigState::StartupUnavailable;
+        selection.selected_capability_roots = EnvironmentCapabilityRoots::default();
+        TurnEnvironmentState::Failed {
+            selection,
+            required_skills: Vec::new(),
+            error,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -556,11 +602,13 @@ impl ThreadEnvironments {
                 thread_defaults: thread_defaults.clone(),
                 environments: active,
                 startup_rejections: Vec::new(),
+                default_secondary_admissions: None,
             }),
             configured: Mutex::new(ThreadEnvironmentsState {
                 thread_defaults,
                 environments,
                 startup_rejections: Vec::new(),
+                default_secondary_admissions: None,
             }),
             connection_event_tx: OnceLock::new(),
         }
@@ -670,6 +718,7 @@ impl ThreadEnvironments {
             thread_defaults,
             environments: current,
             startup_rejections,
+            ..
         } = &mut *state;
         let mut seen_environment_ids = HashSet::with_capacity(environments.len());
         let mut next = Vec::with_capacity(environments.len());
@@ -1224,18 +1273,213 @@ impl ThreadEnvironments {
 
     /// Copies the current selection without waiting for any executor to connect.
     pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
-        Self::snapshot_state(&self.state).refresh_readiness()
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::execution_snapshot(&state, state.default_secondary_admissions.as_ref())
+            .refresh_readiness()
     }
 
     /// Captures configured bindings without resolving readiness or losing config ownership.
     /// Inheritance and eviction retain these bindings; execution and validation resolve a view.
     pub(crate) fn configured_snapshot_now(&self) -> TurnEnvironmentSnapshot {
-        Self::snapshot_state(&self.configured)
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::snapshot_state(&configured)
     }
 
-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
+    /// Inheritance must not restore authority excluded from the active turn.
+    pub(crate) fn inherited_snapshot_now(&self) -> TurnEnvironmentSnapshot {
+        let active = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::execution_snapshot(&configured, active.default_secondary_admissions.as_ref())
+    }
+
+    /// Keep default secondaries unavailable while their instructions are being checked.
+    pub(crate) fn begin_default_secondary_admissions(
+        &self,
+        requested: &[TurnEnvironmentSelection],
+        defaults: &[TurnEnvironmentSelection],
+    ) -> Option<DefaultSecondaryAdmissions> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let local_primary = requested.first().is_some_and(|primary| {
+            state.environments.first().is_some_and(|active| {
+                !active.environment.is_remote() && active.selection.has_same_workspace(primary)
+            })
+        });
+        let secondaries = state
+            .environments
+            .iter()
+            .filter(|environment| {
+                local_primary
+                    && environment.config_origin == EnvironmentConfigOrigin::Thread
+                    && environment.environment.is_remote()
+                    && defaults
+                        .iter()
+                        .any(|default| default.has_same_workspace(&environment.selection))
+            })
+            .map(|environment| DefaultSecondaryAdmission {
+                selection: environment.selection.clone(),
+                registration: Arc::clone(&environment.environment),
+                verified: None,
+            })
+            .collect::<Vec<_>>();
+        let admissions = (!secondaries.is_empty()).then(|| DefaultSecondaryAdmissions {
+            turn: Arc::new(()),
+            secondaries,
+        });
+        state.default_secondary_admissions = admissions.clone();
+        admissions
+    }
+
+    pub(crate) async fn verify_default_secondaries(
+        &self,
+        config: &Config,
+        mut admissions: DefaultSecondaryAdmissions,
+        denied: TurnEnvironmentSnapshot,
+    ) -> TurnEnvironmentSnapshot {
+        let raw = {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .default_secondary_admissions
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.turn, &admissions.turn))
+                .map(|_| Self::snapshot_state(&state).refresh_readiness())
+        };
+        let Some(raw) = raw else {
+            return self.resolve_snapshot(denied).await;
+        };
+        let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
+        futures::stream::iter(admissions.secondaries.iter_mut())
+            .for_each_concurrent(16, |admission| {
+                let raw = &raw;
+                async move {
+                    let Some(mut environment) = raw
+                        .turn_environments()
+                        .find(|environment| {
+                            admission.matches(
+                                &environment.selection,
+                                environment.config_origin,
+                                &environment.environment,
+                            )
+                        })
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    let Ok(bound) = environment.environment.connected_view() else {
+                        return;
+                    };
+                    environment.environment = Arc::new(bound);
+                    let verify = async {
+                        // HOME, temporary directories, and shell must describe the checked attachment.
+                        let info = environment.environment.info().await.ok()?;
+                        environment.user_home_dir = info.user_home_dir;
+                        environment.temporary_directories = info.temporary_directories;
+                        environment.executor_platform_os = info.platform_os;
+                        environment.shell = Shell::from_environment_shell_info(info.shell).ok();
+                        environment.shell_snapshot_v2_supported =
+                            info.capabilities.shell_snapshot_v2;
+                        verify_remote_project_instructions(config, &environment)
+                            .await
+                            .ok()
+                    };
+                    let Ok(Some(docs)) = tokio::time::timeout_at(deadline, verify).await else {
+                        tracing::warn!(
+                            environment_id = %admission.selection.environment_id,
+                            "default secondary AGENTS.md discovery failed for this turn"
+                        );
+                        return;
+                    };
+                    if environment.environment.check_connected_view().is_err() {
+                        return;
+                    }
+                    environment.verified_project_instructions = Some(Arc::new(docs));
+                    admission.verified = Some(environment);
+                }
+            })
+            .await;
+        let snapshot = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state
+                .default_secondary_admissions
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(&current.turn, &admissions.turn))
+            {
+                denied
+            } else {
+                for admission in &mut admissions.secondaries {
+                    if !state.environments.iter().any(|environment| {
+                        admission.matches(
+                            &environment.selection,
+                            environment.config_origin,
+                            &environment.environment,
+                        )
+                    }) {
+                        admission.verified = None;
+                    }
+                    if let Some(environment) = &mut admission.verified {
+                        // A shell snapshot from an older connection does not belong to this view.
+                        environment.shell_snapshot = Self::start_shell_snapshot_task(
+                            self.shell_snapshot.clone(),
+                            Arc::clone(&environment.environment),
+                            environment.selection.cwd.clone(),
+                            environment.shell.clone(),
+                            &environment.selection.config,
+                        );
+                        environment.shell_snapshot_cache = Arc::default();
+                    }
+                }
+                state.default_secondary_admissions = Some(admissions);
+                Self::execution_snapshot(&state, state.default_secondary_admissions.as_ref())
+            }
+        };
+        self.resolve_snapshot(snapshot).await
+    }
+
+    fn execution_snapshot(
+        state: &ThreadEnvironmentsState,
+        admissions: Option<&DefaultSecondaryAdmissions>,
+    ) -> TurnEnvironmentSnapshot {
+        let mut snapshot = Self::snapshot_state(state);
+        if let Some(admissions) = admissions {
+            for admission in &admissions.secondaries {
+                if let Some(environment) = snapshot.environments.iter_mut().find(|environment| {
+                    let selection = match environment {
+                        TurnEnvironmentState::Starting(starting) => &starting.selection,
+                        TurnEnvironmentState::Ready(ready) => &ready.selection,
+                        TurnEnvironmentState::Failed { selection, .. } => selection,
+                    };
+                    selection.environment_id == admission.selection.environment_id
+                }) {
+                    let verified = admission.verified.as_ref().filter(|verified| {
+                        let TurnEnvironmentState::Starting(starting) = &*environment else {
+                            return false;
+                        };
+                        admission.matches(
+                            &starting.selection,
+                            starting.config_origin,
+                            &starting.environment,
+                        ) && verified.environment.check_connected_view().is_ok()
+                    });
+                    *environment = verified.map_or_else(
+                        || admission.unavailable(),
+                        |verified| TurnEnvironmentState::Ready(verified.clone()),
+                    );
+                } else {
+                    // An active step can remove a selection, but cannot regrant it via MCP lookup.
+                    snapshot.environments.push(admission.unavailable());
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn snapshot_state(state: &ThreadEnvironmentsState) -> TurnEnvironmentSnapshot {
         // Keep the startup results, but not the senders that would keep removed Pending work alive.
-        let state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut environments: Vec<_> = state
             .environments
             .iter()
@@ -1280,7 +1524,7 @@ impl ThreadEnvironments {
             non_blocking = non_blocking_snapshots,
         )
     )]
-    fn resolve_snapshot(
+    pub(crate) fn resolve_snapshot(
         &self,
         snapshot: TurnEnvironmentSnapshot,
     ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
@@ -1740,6 +1984,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use crate::LoadedAgentsMd;
     use crate::config::PermissionProfileSnapshot;
     use codex_exec_server::Environment;
     use codex_exec_server::ExecServerRuntimeOptions;
@@ -1835,7 +2080,7 @@ mod tests {
         }
     }
 
-    async fn serve_environment_info(listener: TcpListener) {
+    async fn serve_environment_info(listener: TcpListener) -> WebSocketStream<TcpStream> {
         let (stream, _) = listener.accept().await.expect("connection");
         let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
@@ -1874,6 +2119,108 @@ mod tests {
             ))
             .await
             .expect("environment info response");
+        websocket
+    }
+
+    #[tokio::test]
+    async fn verified_default_secondary_cannot_be_reused_after_owner_configuration() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let manager = Arc::new(
+            EnvironmentManager::create_for_tests_with_local(
+                Some(format!("ws://{}", listener.local_addr().expect("address"))),
+                test_runtime_paths(),
+            )
+            .await,
+        );
+        let server = tokio::spawn(serve_environment_info(listener));
+        let local = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+            selected_capability_roots: Default::default(),
+        };
+        let default_secondary = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            ..local.clone()
+        };
+        let mut selections = [local.clone(), default_secondary.clone()];
+        let environments = ThreadEnvironments::new(
+            manager,
+            crate::shell::default_user_shell(),
+            ThreadEnvironmentDefaults::new(test_environment_config(), SandboxType::None),
+            ShellSnapshot::disabled(),
+            TurnEnvironmentSnapshot::default(),
+            /*non_blocking_snapshots*/ false,
+        );
+        environments.update_configured_selections(&selections);
+        environments.update_selections(&selections);
+        let started = timeout(Duration::from_secs(5), environments.snapshot())
+            .await
+            .expect("executor starts");
+        let _socket = server.await.expect("keep the verified transport connected");
+        let mut verified = started
+            .turn_environments()
+            .find(|environment| environment.environment.is_remote())
+            .expect("ready remote")
+            .clone();
+        let registration = Arc::clone(&verified.environment);
+        verified.environment = Arc::new(registration.connected_view().expect("bound transport"));
+        verified.verified_project_instructions = Some(Arc::new(LoadedAgentsMd::default()));
+        let owner_selection = verified.selection.clone();
+        let mut admissions = environments
+            .begin_default_secondary_admissions(
+                &selections,
+                std::slice::from_ref(&default_secondary),
+            )
+            .expect("default secondary admission");
+        admissions.secondaries[0].verified = Some(verified);
+        environments
+            .state
+            .lock()
+            .expect("environment state")
+            .default_secondary_admissions = Some(admissions);
+        assert_eq!(environments.snapshot_now().to_selections(), selections);
+        assert!(
+            environments
+                .inherited_snapshot_now()
+                .turn_environments()
+                .any(|environment| environment.environment.is_remote())
+        );
+
+        // Keep the normalized Ready config and registration identical while changing its owner.
+        selections[1] = owner_selection.clone();
+        environments.update_configured_selections(&selections);
+        environments.update_selections(&selections);
+        {
+            let state = environments.state.lock().expect("environment state");
+            let secondary = &state.environments[1];
+            assert_eq!(secondary.selection, owner_selection);
+            assert_eq!(secondary.config_origin, EnvironmentConfigOrigin::Owner);
+            assert!(Arc::ptr_eq(&secondary.environment, &registration));
+        }
+        assert_eq!(
+            environments.snapshot_now().to_selections(),
+            vec![local.clone()]
+        );
+        let denied = TurnEnvironmentSelection {
+            config: EnvironmentConfigState::StartupUnavailable,
+            ..owner_selection
+        };
+        for snapshot in [
+            environments.snapshot_now(),
+            environments.inherited_snapshot_now(),
+        ] {
+            assert_eq!(snapshot.all_selections(), [local.clone(), denied.clone()]);
+        }
+
+        environments.activate_selections(&selections);
+        assert!(
+            environments
+                .begin_default_secondary_admissions(&selections, &[])
+                .is_none()
+        );
+        assert_eq!(environments.snapshot().await.to_selections(), selections);
     }
 
     #[tokio::test]

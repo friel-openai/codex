@@ -1126,6 +1126,9 @@ impl Environment {
         let Some(client) = &environment.remote_client else {
             return;
         };
+        if client.is_attachment_bound() {
+            return;
+        }
         let mut startup_task = environment
             .startup_task
             .lock()
@@ -1195,6 +1198,34 @@ impl Environment {
 
     pub fn get_filesystem(&self) -> Arc<dyn ExecutorFileSystem> {
         Arc::clone(&self.filesystem)
+    }
+
+    /// Captures the currently connected attachment without starting or waiting for one.
+    ///
+    /// Use the returned environment for both policy discovery and subsequent operations.
+    /// A remote view never sends new work through a recovered or replacement transport.
+    /// Revalidate it after asynchronous policy discovery with [`Self::check_connected_view`].
+    pub fn connected_view(&self) -> Result<Self, ExecServerError> {
+        let Some(client) = &self.remote_client else {
+            return Ok(self.clone());
+        };
+        let client = client.connected_view()?;
+        Ok(Self {
+            remote_client: Some(client.clone()),
+            ready_info: Arc::new(ArcSwapOption::new(self.last_ready_info())),
+            exec_backend: Arc::new(RemoteProcess::new(client.clone())),
+            filesystem: Arc::new(RemoteFileSystem::new(client.clone())),
+            http_client: Arc::new(client),
+            ..self.clone()
+        })
+    }
+
+    /// Checks that this connected view still identifies the active transport.
+    /// An ordinary remote environment is not a connected view.
+    pub fn check_connected_view(&self) -> Result<(), ExecServerError> {
+        self.remote_client
+            .as_ref()
+            .map_or(Ok(()), LazyRemoteExecServerClient::check_connected_view)
     }
 
     /// Borrows the shared filesystem identity without extending the environment's lifetime.

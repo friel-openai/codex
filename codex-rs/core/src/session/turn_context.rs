@@ -2,6 +2,7 @@ use super::step_settings::ResolvedStepSettings;
 use super::token_budget::has_explicit_settings;
 use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::agents_md::LoadedAgentsMd;
 use crate::config::TokenBudgetConfig;
 use crate::cyber_access_program;
 use crate::environment_selection::EnvironmentConfigOrigin;
@@ -81,6 +82,8 @@ pub(crate) struct TurnEnvironment {
     pub(crate) selection: TurnEnvironmentSelection,
     pub(crate) config_origin: EnvironmentConfigOrigin,
     pub(crate) environment: Arc<Environment>,
+    /// Empty is a verified absence of project instructions on the bound connection.
+    pub(crate) verified_project_instructions: Option<Arc<LoadedAgentsMd>>,
     /// Cached from the selected executor; `None` means it did not report one.
     pub(crate) user_home_dir: Option<PathUri>,
     /// Cached from the selected executor; `None` means it did not report them.
@@ -106,6 +109,7 @@ impl TurnEnvironment {
             selection,
             config_origin,
             environment,
+            verified_project_instructions: None,
             user_home_dir: None,
             temporary_directories: None,
             shell,

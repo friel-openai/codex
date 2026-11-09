@@ -124,7 +124,7 @@ struct ThreadEnvironmentOverride {
     runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
 }
 
-fn restates_unavailable_startup_secondaries(
+fn restates_startup_secondaries(
     current: &TurnEnvironmentRequests,
     requested: &TurnEnvironmentRequests,
 ) -> bool {
@@ -140,9 +140,6 @@ fn restates_unavailable_startup_secondaries(
         && primary.config == EnvironmentConfigState::FromThread
         && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
         && requested_primary.config == EnvironmentConfigState::FromThread
-        && secondaries
-            .iter()
-            .any(|environment| environment.config == EnvironmentConfigState::StartupUnavailable)
         && secondaries.len() == requested_secondaries.len()
         && secondaries
             .iter()
@@ -834,12 +831,12 @@ impl TurnRequestProcessor {
             };
             let mut requested =
                 TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
-            // Thread.environments cannot represent StartupUnavailable. A restated secondary
-            // is not a new selection when the client is only setting the local workspace.
+            // Thread.environments cannot represent startup provenance or StartupUnavailable.
+            // An exact echo of existing secondaries is not a new remote selection.
             if requested.environment_requests.len() > 1
                 && requested.environment_requests[0].environment_id == LOCAL_ENVIRONMENT_ID
-                && let Some(current) = thread.restorable_thread_settings().await.environments
-                && restates_unavailable_startup_secondaries(&current, &requested)
+                && let Some(current) = thread.restatable_environment_settings().await
+                && restates_startup_secondaries(&current, &requested)
             {
                 let local = &requested.environment_requests[0];
                 let local_changed = *local != current.environment_requests[0];
@@ -888,11 +885,12 @@ impl TurnRequestProcessor {
             request.cwd = PathUri::from_abs_path(&legacy_fallback_cwd);
             request.workspace_roots = workspace_roots.iter().map(PathUri::from_abs_path).collect();
         }
+        let mut environment_requests =
+            TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
+                .with_implicit_selection(current_environments.implicit_selection);
+        environment_requests.retain_default_secondaries = true;
         ThreadEnvironmentOverride {
-            environment_requests: Some(
-                TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
-                    .with_implicit_selection(current_environments.implicit_selection),
-            ),
+            environment_requests: Some(environment_requests),
             runtime_workspace_roots: Some(workspace_roots),
         }
     }

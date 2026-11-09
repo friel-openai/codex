@@ -46,6 +46,7 @@ struct AgentsMdState {
 #[derive(Default)]
 struct AgentsMdCache {
     selections: Option<Vec<TurnEnvironmentSelection>>,
+    verified_project_instructions: Vec<Option<Arc<LoadedAgentsMd>>>,
     active_project_trust_level: Option<TrustLevel>,
     loaded: Option<Arc<LoadedAgentsMd>>,
 }
@@ -94,10 +95,15 @@ impl AgentsMdManager {
             .turn_environments()
             .map(|environment| environment.selection.clone())
             .collect::<Vec<_>>();
+        let verified_project_instructions = environments
+            .turn_environments()
+            .map(|environment| environment.verified_project_instructions.clone())
+            .collect::<Vec<_>>();
         let active_project_trust_level = config.active_project.trust_level;
         let (mut instructions, cached, refresh_repository) = {
             let mut state = self.state.lock().await;
             let refresh_repository = state.cache.selections.as_ref() != Some(&selections)
+                || state.cache.verified_project_instructions != verified_project_instructions
                 || state.cache.active_project_trust_level != active_project_trust_level;
             if refresh_repository {
                 // Tightened read permissions must not leave inaccessible instructions visible,
@@ -167,6 +173,7 @@ impl AgentsMdManager {
             state.instructions = instructions;
             state.cache = AgentsMdCache {
                 selections: Some(selections),
+                verified_project_instructions,
                 active_project_trust_level,
                 loaded: loaded.clone(),
             };
@@ -193,6 +200,13 @@ impl AgentsMdManager {
             .collect::<Vec<_>>();
         let state = self.state.lock().await;
         (state.cache.selections.as_ref() == Some(&selections)
+            && state
+                .cache
+                .verified_project_instructions
+                .iter()
+                .eq(environments
+                    .turn_environments()
+                    .map(|environment| &environment.verified_project_instructions))
             && state.cache.active_project_trust_level == config.active_project.trust_level)
             .then(|| state.cache.loaded.clone().unwrap_or_default())
     }

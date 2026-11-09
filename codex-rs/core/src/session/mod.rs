@@ -149,6 +149,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::HistoryPosition;
@@ -169,6 +170,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnEnvironmentRequest;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::W3cTraceContext;
@@ -1342,6 +1344,7 @@ impl Session {
                 .as_ref()
                 .map(|discovery| Arc::clone(&discovery.optional_on_resume))
                 .unwrap_or_default(),
+            default_secondary_environments: Vec::new(),
             model_info_overrides: config.to_models_manager_config().into(),
             developer_instructions: config.developer_instructions.clone(),
             base_instructions,
@@ -1397,6 +1400,26 @@ impl Session {
             )
             .await?
             {
+                if !discovery.cold_resume
+                    && discovery.implicit_selection
+                    && let Some((primary, secondaries)) = environment_selections.split_first()
+                    && primary.config == EnvironmentConfigState::FromThread
+                    && environment_manager
+                        .get_environment(&primary.environment_id)
+                        .is_some_and(|environment| !environment.is_remote())
+                {
+                    session_configuration.default_secondary_environments = secondaries
+                        .iter()
+                        .filter(|selection| {
+                            selection.config == EnvironmentConfigState::FromThread
+                                && environments.turn_environments().any(|admitted| {
+                                    admitted.environment.is_remote()
+                                        && admitted.selection.has_same_workspace(selection)
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                }
                 thread_extension_init.insert(instructions);
                 Some(environments)
             } else {
@@ -3101,7 +3124,7 @@ impl Session {
         let snapshot = {
             let _state = self.state.lock().await;
             if self.features.enabled(Feature::SubagentThreadEnvironments) {
-                return self.services.turn_environments.configured_snapshot_now();
+                return self.services.turn_environments.inherited_snapshot_now();
             }
             self.services.turn_environments.snapshot()
         };
@@ -3125,6 +3148,23 @@ impl Session {
         state
             .session_configuration
             .restorable_thread_settings(state.session_configuration.environments.clone())
+    }
+
+    pub(crate) async fn restatable_environment_settings(&self) -> Option<TurnEnvironmentRequests> {
+        let state = self.state.lock().await;
+        let configuration = &state.session_configuration;
+        if configuration.default_secondary_environments.is_empty()
+            && !configuration
+                .environments
+                .iter()
+                .skip(1)
+                .any(|environment| environment.config == EnvironmentConfigState::StartupUnavailable)
+        {
+            return None;
+        }
+        configuration
+            .restorable_thread_settings(configuration.environments.clone())
+            .environments
     }
 
     pub(crate) async fn set_app_server_client_info(
@@ -5064,7 +5104,7 @@ impl Session {
                 self.services.turn_environments.snapshot(),
                 self.features
                     .enabled(Feature::SubagentThreadEnvironments)
-                    .then(|| self.services.turn_environments.configured_snapshot_now()),
+                    .then(|| self.services.turn_environments.inherited_snapshot_now()),
             )
         };
         if matches!(

@@ -123,10 +123,11 @@ fn update_local_workspace(
         let mut environments = current.environments.clone();
         environments[0].cwd = requested_local.cwd.clone();
         environments[0].workspace_roots = requested_local.workspace_roots.clone();
-        return Ok(TurnEnvironmentSelections::new(
-            requested.legacy_fallback_cwd.clone(),
+        return Ok(TurnEnvironmentSelections {
+            legacy_fallback_cwd: requested.legacy_fallback_cwd.clone(),
             environments,
-        ));
+            implicit_selection: current.implicit_environment_selection,
+        });
     }
     Err(ConstraintError::InvalidValue {
         field_name: "environments",
@@ -249,9 +250,10 @@ impl Session {
         &self,
         configuration: &SessionConfiguration,
     ) -> TurnEnvironmentSnapshot {
-        let snapshot = {
+        let (snapshot, admissions) = {
             let active = self.active_turn.lock().await;
             let state = self.state.lock().await;
+            let mut admissions = None;
             // Another task may have started while this one was preparing its settings.
             if active.as_ref().is_none_or(|turn| turn.task.is_none()) {
                 let mut environments = configuration.environments.clone();
@@ -271,10 +273,32 @@ impl Session {
                 self.services
                     .turn_environments
                     .activate_selections(&environments);
+                admissions = self
+                    .services
+                    .turn_environments
+                    .begin_default_secondary_admissions(
+                        &environments,
+                        &configuration.default_secondary_environments,
+                    );
             }
-            self.services.turn_environments.snapshot()
+            (self.services.turn_environments.snapshot_now(), admissions)
         };
-        snapshot.await
+        if let Some(admissions) = admissions {
+            self.mark_mcp_runtime_dirty();
+            let config = self.build_effective_session_config(configuration);
+            let snapshot = self
+                .services
+                .turn_environments
+                .verify_default_secondaries(&config, admissions, snapshot)
+                .await;
+            self.mark_mcp_runtime_dirty();
+            snapshot
+        } else {
+            self.services
+                .turn_environments
+                .resolve_snapshot(snapshot)
+                .await
+        }
     }
 
     /// Applies an explicit workspace tool transition to the running task, unlike ordinary
@@ -499,6 +523,9 @@ impl Session {
                 .update_configured_selections(&future);
         }
         state.session_configuration.environments = future;
+        state
+            .session_configuration
+            .retain_default_secondary_environments();
         if update_current {
             // Invalidate MCP before installed configuration can wake a waiting turn.
             self.mark_mcp_runtime_dirty();
