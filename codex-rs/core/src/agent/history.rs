@@ -241,12 +241,96 @@ pub(super) async fn prepare_forked_history(
 
     let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
         .then_some(ThreadHistoryMode::Paginated);
+    let mut supervisor_last_parent_message_at = None;
+    let mut ephemeral_supervisor_model_history = None;
+    let ephemeral_supervisor_store = if is_goal_supervisor_helper
+        && config.ephemeral
+        && parent_history_mode == ThreadHistoryMode::Paginated
+    {
+        match parent_thread
+            .session
+            .services
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            Some(store) if store.state_db().await.is_some() => Some(store),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let (
         mut forked_rollout_items,
         reference_backed_history,
         source_reservation,
         forked_from_ordinal_exclusive,
     ) = match fork_mode {
+        SpawnAgentForkMode::FullHistory if ephemeral_supervisor_store.is_some() => {
+            let store = ephemeral_supervisor_store.expect("local store checked above");
+            let rollout_path = parent_thread
+                .session
+                .current_rollout_path()
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?
+                .ok_or_else(|| CodexErr::Fatal("supervisor parent has no rollout".into()))?;
+            let rollout_id = codex_rollout::rollout_id_from_path(rollout_path.as_path())
+                .ok_or_else(|| CodexErr::Fatal("supervisor parent has no rollout ID".into()))?;
+            // Ephemeral helpers never publish a child reference. Freezing their source
+            // would retain a full snapshot after every check-in, including failed spawns.
+            let prepared = store
+                .prepare_fork_without_response_history_for_rollout(
+                    codex_thread_store::PrepareForkParams {
+                        thread_id: parent_thread_id,
+                        boundary: codex_thread_store::ForkBoundary::Latest,
+                    },
+                    rollout_id,
+                    /*ephemeral_context_only*/ true,
+                )
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            let mut cursor = None;
+            loop {
+                let page = store
+                    .list_turns(codex_thread_store::ListTurnsParams {
+                        thread_id: parent_thread_id,
+                        include_archived: false,
+                        cursor,
+                        page_size: 32,
+                        sort_direction: codex_thread_store::SortDirection::Desc,
+                        items_view: codex_thread_store::StoredTurnItemsView::NotLoaded,
+                    })
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                supervisor_last_parent_message_at =
+                    page.turns.iter().find_map(|turn| turn.completed_at);
+                if supervisor_last_parent_message_at.is_some() || page.next_cursor.is_none() {
+                    break;
+                }
+                cursor = page.next_cursor;
+            }
+            let mut model_history = prepared.model_context.as_ref().clone();
+            if let Some(meta) = model_history.iter_mut().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta) => Some(meta),
+                _ => None,
+            }) {
+                // This copy already contains the inherited model context. Debug
+                // materialization must not prepend its original history_base again.
+                meta.meta.history_base = None;
+            }
+            ephemeral_supervisor_model_history = Some(model_history.clone());
+            let end_ordinal = prepared.source_end_ordinal_exclusive;
+            (
+                model_history,
+                None,
+                Some(Arc::new(std::sync::Mutex::new(
+                    crate::thread_manager::FullHistorySourceReservation::Prepared {
+                        _prepared: Box::new(prepared),
+                    },
+                ))),
+                end_ordinal,
+            )
+        }
         SpawnAgentForkMode::FullHistory
             if allow_rollout_references
                 && parent_thread
@@ -254,12 +338,31 @@ pub(super) async fn prepare_forked_history(
                     .services
                     .thread_store
                     .as_any()
-                    .is::<codex_thread_store::LocalThreadStore>() =>
+                    .is::<codex_thread_store::LocalThreadStore>()
+                && !(is_goal_supervisor_helper && config.ephemeral) =>
         {
-            let (reference_history, logical_history, model_history, reservation, end_ordinal) =
-                state
-                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
-                    .await?;
+            let materialization = if is_goal_supervisor_helper {
+                crate::thread_manager::FullHistoryLogicalMaterialization::SupervisorContinuity
+            } else {
+                crate::thread_manager::FullHistoryLogicalMaterialization::CompleteResponseHistory
+            };
+            let (
+                reference_history,
+                logical_history,
+                model_history,
+                last_parent_message_at,
+                reservation,
+                end_ordinal,
+            ) = state
+                .reference_backed_full_history(
+                    parent_thread_id,
+                    config.codex_home.as_path(),
+                    materialization,
+                )
+                .await?;
+            if is_goal_supervisor_helper {
+                supervisor_last_parent_message_at = last_parent_message_at;
+            }
             (
                 logical_history,
                 Some((
@@ -271,14 +374,48 @@ pub(super) async fn prepare_forked_history(
             )
         }
         SpawnAgentForkMode::FullHistory => {
-            let history = load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                .await?
-                .ok_or_else(|| {
-                    CodexErr::Fatal(format!(
-                        "parent thread history unavailable for fork: {parent_thread_id}"
-                    ))
-                })?
-                .items;
+            let mut history = if is_goal_supervisor_helper
+                && config.ephemeral
+                && parent_thread
+                    .session
+                    .services
+                    .thread_store
+                    .as_any()
+                    .is::<codex_thread_store::LocalThreadStore>()
+            {
+                state
+                    .load_latest_model_context(LoadThreadHistoryParams {
+                        thread_id: parent_thread_id,
+                        include_archived: true,
+                    })
+                    .await?
+                    .items
+            } else {
+                load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                    .await?
+                    .ok_or_else(|| {
+                        CodexErr::Fatal(format!(
+                            "parent thread history unavailable for fork: {parent_thread_id}"
+                        ))
+                    })?
+                    .items
+            };
+            if is_goal_supervisor_helper
+                && config.ephemeral
+                && let Some(meta) = history.iter_mut().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta) => Some(meta),
+                    _ => None,
+                })
+            {
+                meta.meta.history_base = None;
+            }
+            if is_goal_supervisor_helper {
+                supervisor_last_parent_message_at =
+                    history.iter().rev().find_map(|item| match item {
+                        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
+                        _ => None,
+                    });
+            }
             (history, None, None, None)
         }
     };
@@ -305,7 +442,7 @@ pub(super) async fn prepare_forked_history(
                     &parent_thread.session,
                     &goal_id,
                     &parent_goal,
-                    &forked_rollout_items,
+                    supervisor_last_parent_message_at,
                 )
                 .await,
             );
@@ -345,7 +482,14 @@ pub(super) async fn prepare_forked_history(
             ),
             None => (
                 InitialHistory::Forked(forked_rollout_items),
-                ForkStartupItems::default(),
+                match ephemeral_supervisor_model_history {
+                    Some(model_items) => ForkStartupItems::with_model_history_override(
+                        model_items,
+                        /*shared_model_response_items*/ None,
+                        /*shared_model_state*/ None,
+                    ),
+                    None => ForkStartupItems::default(),
+                },
             ),
         };
         return Ok(PreparedForkHistory {
@@ -574,6 +718,15 @@ pub(super) async fn prepare_forked_history(
         && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
     {
         forked_rollout_items = reference_rollout_items;
+    } else {
+        forked_rollout_items.retain_mut(|item| match item {
+            RolloutItem::SessionMeta(meta) => {
+                meta.meta.history_base = None;
+                true
+            }
+            RolloutItem::RolloutReference(_) => false,
+            _ => true,
+        });
     }
     // Full forks reuse the parent's reference context instead of rebuilding it. If that
     // context omitted the parent's developer fragment, append the child's override so its
