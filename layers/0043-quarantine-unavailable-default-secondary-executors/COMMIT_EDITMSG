@@ -1,0 +1,5 @@
+Quarantine unavailable default secondary executors
+
+Keep verified instructions for an unavailable default secondary without
+admitting new work or forwarding terminal input. Do not reuse a
+thread-owned admission after the owner replaces its configuration.

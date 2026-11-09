@@ -1,0 +1,298 @@
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index c1ce09f2e39b9b151f71790ac16fd016d26a28a2..5b980a815f0df1a92605ab0905808fee14d94628 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -1116,6 +1116,7 @@ impl MessageProcessor {
+             _ => None,
+         };
+         let serialization_scope = codex_request.serialization_scope();
++        let method = codex_request.method_name();
+         let error_request_id = connection_request_id.clone();
+         let rpc_gate = Arc::clone(&session.rpc_gate);
+         let processor = Arc::clone(self);
+@@ -1151,7 +1152,8 @@ impl MessageProcessor {
+                 }
+             }
+             .instrument(span),
+-        );
++        )
++        .with_method(method);
+
+         if let Some(scope) = serialization_scope {
+             let (key, access) = RequestSerializationQueueKey::from_scope(connection_id, scope);
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..23adfb345d3de2e1041c2a283b96fd7628c4b162 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -3814,6 +3814,7 @@ impl ThreadRequestProcessor {
+         }
+         let fallback_thread =
+             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
++        let needs_name_lookup = include_turns || persisted_thread.is_none();
+         let mut thread = if let Some(mut thread) = persisted_thread {
+             if thread.path.is_none() {
+                 thread.path = fallback_thread.path.clone();
+@@ -3830,6 +3831,23 @@ impl ThreadRequestProcessor {
+             fallback_thread
+         };
+         apply_live_thread_settings(&mut thread, &config_snapshot);
++        if needs_name_lookup {
++            self.attach_thread_name(thread_id, &mut thread).await;
++        } else if let Some(title) = thread
++            .name
++            .as_deref()
++            .map(str::trim)
++            .filter(|s| !s.is_empty())
++            .map(str::to_owned)
++        {
++            // The same persisted snapshot already supplied the name. Reopening the
++            // rollout here can block the serialized read after its data is available.
++            if thread.history_mode == ApiThreadHistoryMode::Paginated {
++                thread.name = Some(title);
++            } else {
++                set_thread_name_from_title(&mut thread, title);
++            }
++        }
+         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
+             .await?;
+         Ok(thread)
+@@ -3842,8 +3860,6 @@ impl ThreadRequestProcessor {
+         include_turns: bool,
+         loaded_thread: &CodexThread,
+     ) -> Result<(), ThreadReadViewError> {
+-        self.attach_thread_name(thread_id, thread).await;
+-
+         if include_turns {
+             let config_snapshot = loaded_thread.config_snapshot().await;
+             if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
+@@ -4920,6 +4936,15 @@ impl ThreadRequestProcessor {
+         thread_store: &dyn ThreadStore,
+         thread_id: ThreadId,
+     ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
++        if let Some(store) = thread_store
++            .as_any()
++            .downcast_ref::<codex_thread_store::LocalThreadStore>()
++        {
++            return store
++                .resume_backwards_cursors(thread_id)
++                .await
++                .map_err(paginated_history_list_error);
++        }
+         let turns_page = thread_store
+             .list_turns(StoreListTurnsParams {
+                 thread_id,
+diff --git a/codex-rs/app-server/src/request_serialization.rs b/codex-rs/app-server/src/request_serialization.rs
+index b520927c25671ecb23944416e1cea9671748b7fb..18b61b46a2a708dc88a9828c7770b0f063767036 100644
+--- a/codex-rs/app-server/src/request_serialization.rs
++++ b/codex-rs/app-server/src/request_serialization.rs
+@@ -112,6 +112,7 @@ impl RequestSerializationQueueKey {
+ }
+
+ pub(crate) struct QueuedInitializedRequest {
++    method: &'static str,
+     gate: Option<Arc<ConnectionRpcGate>>,
+     future: BoxFutureUnit,
+ }
+@@ -122,6 +123,7 @@ impl QueuedInitializedRequest {
+         future: impl Future<Output = ()> + Send + 'static,
+     ) -> Self {
+         Self {
++            method: "internal",
+             gate: Some(gate),
+             future: Box::pin(future),
+         }
+@@ -129,13 +131,19 @@ impl QueuedInitializedRequest {
+
+     fn new_background(future: impl Future<Output = ()> + Send + 'static) -> Self {
+         Self {
++            method: "internal",
+             gate: None,
+             future: Box::pin(future),
+         }
+     }
+
++    pub(crate) fn with_method(mut self, method: &'static str) -> Self {
++        self.method = method;
++        self
++    }
++
+     pub(crate) async fn run(self) {
+-        let Self { gate, future } = self;
++        let Self { gate, future, .. } = self;
+         match gate {
+             Some(gate) => gate.run(future).await,
+             None => future.await,
+@@ -145,7 +153,29 @@ impl QueuedInitializedRequest {
+     async fn run_serialized(self, key: &RequestSerializationQueueKey) {
+         // The drain owns the map entry. A handler that unwinds must not take
+         // the drain with it or later requests will enqueue without a worker.
+-        if AssertUnwindSafe(self.run()).catch_unwind().await.is_err() {
++        let method = self.method;
++        let work = AssertUnwindSafe(self.run()).catch_unwind();
++        tokio::pin!(work);
++        let outcome = if matches!(
++            key,
++            RequestSerializationQueueKey::Thread { .. }
++                | RequestSerializationQueueKey::ThreadPath { .. }
++        ) {
++            let start = std::time::Instant::now();
++            tokio::select! {
++                biased;
++                done = &mut work => done,
++                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
++                    // Do not inherit a request span carrying identifiers. Observing a
++                    // slow owner neither releases its key nor drops its future.
++                    tracing::warn!(parent: None, method, age_ms = start.elapsed().as_millis() as u64, "slow serialized thread request");
++                    work.await
++                }
++            }
++        } else {
++            work.await
++        };
++        if outcome.is_err() {
+             let thread_id = match key {
+                 RequestSerializationQueueKey::Thread { thread_id } => Some(thread_id.as_str()),
+                 _ => None,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index b58ef320c1aa6b9c12ece735559c6f709fc35eed..eacff3819dca2efacfd91c318714c2e917396cd1 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1262,6 +1262,16 @@ impl LocalThreadStore {
+         .await
+     }
+
++    /// Both resume anchors refer to one validated rollout lineage. The page readers
++    /// still enforce segment boundaries, item visibility and cursor encoding.
++    pub async fn resume_backwards_cursors(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<(Option<String>, Option<String>)> {
++        self.await_automatic_rollout_migration(thread_id).await?;
++        thread_history::resume_backwards_cursors(self, thread_id).await
++    }
++
+     /// Lists projection-backed turns without enabling app-server routing yet.
+     pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
+         self.await_automatic_rollout_migration(params.thread_id)
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 1dd130cccc9528662132f5c3bae22fb389039764..d4b8e295d8ce3109fcd698ef0e2e2f9dcf319cc9 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -26,6 +26,7 @@ pub(super) use read::list_items;
+ pub(super) use read::list_segmented_legacy_items;
+ pub(super) use read::list_segmented_legacy_turns;
+ pub(super) use read::list_turns;
++pub(super) use read::resume_backwards_cursors;
+ pub(super) use read::validate_thread_for_paginated_reads;
+ pub(super) use realtime::list_timeline;
+ pub(super) use search::search_thread_occurrences;
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index e8f3069cb3134ebca673e659878b1de21fe74f98..b586b2e05ec8c364678e906b0fd33263afd871ca 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -143,6 +143,49 @@ pub(in crate::local) async fn list_turns(
+     list_turns_from_lineage(store, params, &lineage).await
+ }
+
++pub(in crate::local) async fn resume_backwards_cursors(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++) -> ThreadStoreResult<(Option<String>, Option<String>)> {
++    validate_thread_for_paginated_reads(store, thread_id, true, "list_turns").await?;
++    let lineage = match indexed_same_thread_lineage(store, thread_id).await? {
++        Some(lineage) => lineage,
++        None => {
++            store
++                .resolve_rollout_lineage_for_history_page(thread_id)
++                .await?
++        }
++    };
++    let pool = store.thread_history_db().await?;
++    let turns = page_turn_rows(
++        pool,
++        thread_id,
++        &lineage,
++        None,
++        1,
++        crate::SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    )
++    .await?;
++    let items = page_item_rows(
++        pool,
++        &lineage,
++        &ListItemsParams {
++            item_ids: None,
++            thread_id,
++            turn_id: None,
++            include_archived: true,
++            position: None,
++            page_size: 1,
++            sort_direction: crate::SortDirection::Desc,
++            sort_key: crate::ItemSortKey::CreatedAtOrdinal,
++            after_updated_at_ordinal: None,
++        },
++    )
++    .await?;
++    Ok((turns.backwards_cursor, items.backwards_cursor))
++}
++
+ async fn list_turns_from_lineage(
+     store: &LocalThreadStore,
+     params: ListTurnsParams,
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index d2cd9dfd6287637c0466495ea10f21132d047447..38c62d975538fd54bc637d8c00aad414a388c6a2 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -2637,6 +2637,27 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
+
+ #[tokio::test]
+ async fn cursors_are_bound_to_the_selected_rollout_generation() {
++    async fn check_resume_anchors(store: &LocalThreadStore, id: ThreadId) {
++        let turns = store
++            .list_turns(turn_params(
++                id,
++                None,
++                1,
++                SortDirection::Desc,
++                StoredTurnItemsView::NotLoaded,
++            ))
++            .await
++            .unwrap();
++        let items = store
++            .list_items(item_params(id, None, None, 1, SortDirection::Desc))
++            .await
++            .unwrap();
++        assert_eq!(
++            store.resume_backwards_cursors(id).await.unwrap(),
++            (turns.backwards_cursor, items.backwards_cursor)
++        );
++    }
++
+     let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+     let first_rollout_id = ThreadId::new();
+     let second_rollout_id = ThreadId::new();
+@@ -2645,6 +2666,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+     write_rollout(first_path.as_path(), thread_id, /*history_base*/ None);
+     write_rollout(second_path.as_path(), thread_id, /*history_base*/ None);
+     select_rollout_path(&store, thread_id, first_path).await;
++    check_resume_anchors(&store, thread_id).await;
+
+     let db = history_db(&store).await;
+     for (rollout_id, prefix) in [(first_rollout_id, "first"), (second_rollout_id, "second")] {
+@@ -2673,6 +2695,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+         }
+     }
+
++    check_resume_anchors(&store, thread_id).await;
+     let first_turn_page = store
+         .list_turns(turn_params(
+             thread_id,
+@@ -2851,6 +2874,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+     assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+
+     select_rollout_path(&store, thread_id, second_path).await;
++    check_resume_anchors(&store, thread_id).await;
+
+     for cursor in history_cursors.drain(..2) {
+         let error = store
