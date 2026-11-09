@@ -71,6 +71,8 @@
       "target": "all",
       "tests": [
         "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
+        "suite::v2::selected_environment::initially_unavailable_default_secondary_joins_an_ordinary_later_turn",
+        "suite::v2::selected_environment::initially_unavailable_default_secondary_rejects_replaced_registration",
         "suite::v2::selected_environment::later_turn_denies_stdin_for_terminal_in_quarantined_default_secondary",
         "suite::v2::selected_environment::later_turn_preserves_remote_instructions_and_executes_after_session_rejoin",
         "suite::v2::selected_environment::thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments",
@@ -197,6 +199,7 @@
       "tests": [
         "agents_md::tests::stalled_remote_project_instructions_fail_closed_and_can_be_retried",
         "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
+        "environment_selection::tests::initially_unavailable_default_keeps_its_child_denial_and_revokes_active_reselection",
         "environment_selection::tests::verified_default_secondary_cannot_be_reused_after_owner_configuration",
         "agent::api::tests::host_list_canonical_bounds_task_previews_and_falls_back_to_id",
         "agent::api::tests::host_list_canonical_does_not_truncate_at_private_page_limit",
@@ -607,7 +610,10 @@
       "target": null,
       "tests": [
         "client::tests::connected_view_does_not_start_an_unconnected_environment",
-        "client::tests::connected_view_rejects_replacement_rpc_but_can_terminate_started_process"
+        "client::tests::connected_view_rejects_replacement_rpc_but_can_terminate_started_process",
+        "client::tests::initial_recovery_pending_start_cleanup_stops_after_original_rpc_closes",
+        "client::tests::initial_recovery_revocation_denies_queued_process_start_before_dispatch",
+        "client::tests::initial_recovery_revokes_cached_new_io_but_allows_process_cleanup"
       ]
     },
     {
