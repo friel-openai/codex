@@ -140,7 +140,8 @@ async fn resolve_review_model_from_catalog(
         catalog
             .into_iter()
             .filter(|entry| {
-                context.model_info.auto_review_model_override.is_some()
+                turn.config.auto_review_use_ultrafast
+                    || context.model_info.auto_review_model_override.is_some()
                     || matches!(
                         entry.origin,
                         codex_models_manager::ModelOrigin::Provider
@@ -151,8 +152,18 @@ async fn resolve_review_model_from_catalog(
             .collect(),
     );
     let default_review_model_id = turn.provider.approval_review_preferred_model();
+    // Resolve policy and telemetry against the concrete reviewer. Its execution alias is installed
+    // only after model selection, so prewarming and live review resolve the same catalog entry.
+    let parent_model_with_review_override = turn.config.auto_review_use_ultrafast.then(|| {
+        let mut model = context.model_info.as_ref().clone();
+        model.auto_review_model_override =
+            Some(super::review::ULTRAFAST_AUTO_REVIEW_MODEL.to_owned());
+        model
+    });
     let review_model = codex_guardian_reviewer::select_review_model(
-        &context.model_info,
+        parent_model_with_review_override
+            .as_ref()
+            .unwrap_or(context.model_info.as_ref()),
         context.reasoning_effort.as_ref(),
         default_review_model_id,
         &available_models,
