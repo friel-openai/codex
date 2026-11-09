@@ -31,6 +31,11 @@ async fn account_thread_usage_uses_active_workspace_and_canonical_thread_ids() -
     let thread_id = "019fc8ab-1fb2-7000-8000-000000000123";
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!("chatgpt_base_url = \"{}\"\n", server.uri()),
