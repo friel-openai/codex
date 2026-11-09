@@ -540,7 +540,9 @@ fn any_environment_has_full_disk_write(
                 config.permission_profile.permission_profile(),
                 &config.workspace_roots,
             ),
-            EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => return None,
+            EnvironmentConfigState::Pending
+            | EnvironmentConfigState::Failed(_)
+            | EnvironmentConfigState::StartupUnavailable => return None,
         };
         Some(
             profile
