@@ -1,3 +1,40 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1fb3a843720c879a3c2543fcfea3af170836e787 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
+             }
+         }
+
+-        let implicit_environment_selection = environment_requests.is_none();
+-        let environment_requests = environment_requests.unwrap_or_else(|| {
+-            listener_task_context
+-                .thread_manager
+-                .default_environment_requests(&config.cwd, &config.workspace_roots)
+-        });
+         let dynamic_tools = dynamic_tools.unwrap_or_default();
+         if !dynamic_tools.is_empty() {
+             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
+@@ -1941,7 +1935,10 @@ impl ThreadRequestProcessor {
+         }
+         let mut start_options = StartThreadOptions::new(config);
+         start_options.thread_extension_init = thread_extension_init;
+-        start_options.bound_startup_environment_discovery(implicit_environment_selection);
++        start_options.bound_startup_environment_discovery(
++            &listener_task_context.thread_manager,
++            environment_requests,
++        );
+         let reserved_thread_id = if start_options.config.ephemeral {
+             None
+         } else {
+@@ -1982,7 +1979,6 @@ impl ThreadRequestProcessor {
+                 dynamic_tools,
+                 metrics_service_name: service_name,
+                 parent_trace: request_trace,
+-                environments: Some(environment_requests),
+                 client_mcp_extensions,
+                 ..start_options
+             })
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
 index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4babcfb864 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
@@ -56,7 +93,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
          }
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index c53c73bd8c7a04887018256d1e04dd6553b470ba..3bfa4ce5c383187f3ac4fbd9e5799e26f7dc0996 100644
+index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d5864e37e 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 @@ -60,6 +60,7 @@ use pretty_assertions::assert_eq;
@@ -245,7 +282,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..3bfa4ce5c383187f3ac4fbd9e5799e26
          })
          .await?;
      let error = timeout(
-@@ -440,14 +485,620 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -440,14 +485,915 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
          "{error:?}",
      );
 
@@ -606,6 +643,301 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..3bfa4ce5c383187f3ac4fbd9e5799e26
 +        ),
 +        "the executor must see no writes to the old terminal"
 +    );
+     Ok(())
+ }
+
++#[tokio::test]
++async fn initially_unavailable_default_secondary_joins_an_ordinary_later_turn() -> Result<()> {
++    check_initial_default_secondary_admission(/*replace_registration*/ false).await
++}
++
++#[tokio::test]
++async fn initially_unavailable_default_secondary_rejects_replaced_registration() -> Result<()> {
++    check_initial_default_secondary_admission(/*replace_registration*/ true).await
++}
++
++async fn check_initial_default_secondary_admission(replace_registration: bool) -> Result<()> {
++    use codex_app_server_protocol::EnvironmentAddResponse;
++    use codex_app_server_protocol::EnvironmentInfoResponse;
++    use codex_app_server_protocol::EnvironmentStatusKind;
++    use codex_app_server_protocol::EnvironmentStatusResponse;
++    use codex_app_server_protocol::SandboxPolicy;
++    use tokio_tungstenite::accept_hdr_async;
++    use tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
++    use tokio_tungstenite::tungstenite::handshake::server::Request;
++    use tokio_tungstenite::tungstenite::handshake::server::Response;
++    use tokio_tungstenite::tungstenite::http::StatusCode;
++    use tokio_util::task::AbortOnDropHandle;
++
++    const REMOTE_ID: &str = "initially-unavailable";
++    const EARLY_CALL: &str = "exec-before-first-attachment";
++    const LATER_CALL: &str = "exec-after-first-attachment";
++    const LOCAL_INSTRUCTIONS: &str = "local instructions for the initial offline turn";
++    const REMOTE_INSTRUCTIONS: &str = "instructions from the newly attached default executor";
++    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
++
++    let server = responses::start_mock_server().await;
++    let call = |id: &str| {
++        responses::sse(vec![
++            responses::ev_response_created(id),
++            responses::ev_exec_command_call_with_args(
++                id,
++                &json!({
++                    "cmd": "cat",
++                    "environment_id": REMOTE_ID,
++                    "login": false,
++                    "tty": true,
++                    "yield_time_ms": 250,
++                }),
++            ),
++            responses::ev_completed(id),
++        ])
++    };
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            call(EARLY_CALL),
++            create_final_assistant_message_sse_response("continued locally")?,
++            call(LATER_CALL),
++            create_final_assistant_message_sse_response(if replace_registration {
++                "continued locally after replacement"
++            } else {
++                "remote terminal opened"
++            })?,
++        ],
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    let workspace_dir = TempDir::new()?;
++    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
++    std::fs::write(workspace.join("AGENTS.md"), LOCAL_INSTRUCTIONS)?;
++    let workspace_uri = PathUri::from_abs_path(&workspace);
++    let local_source = workspace_uri.join("AGENTS.md")?;
++    let remote_source = workspace_uri.join("AGENTS.override.md")?;
++    let listener = TcpListener::bind("127.0.0.1:0").await?;
++    let original_addr = listener.local_addr()?;
++    std::fs::write(
++        codex_home.path().join("environments.toml"),
++        format!("[[environments]]\nid = \"{REMOTE_ID}\"\nurl = \"ws://{original_addr}\"\n"),
++    )?;
++    MockResponsesConfig::new(&server.uri())
++        .with_sandbox_mode("workspace-write")
++        .with_approval_policy("never")
++        .with_provider_config("supports_websockets = false")
++        .enable_feature(Feature::UnifiedExec)
++        .with_extra_config(&format!(
++            "[projects.{}]\ntrust_level = \"trusted\"\n",
++            json!(workspace.to_string_lossy()),
++        ))
++        .write(codex_home.path())?;
++
++    let (allow_attach, mut attach_allowed) = oneshot::channel();
++    let original = AbortOnDropHandle::new(tokio::spawn(async move {
++        // Only the same-registration case releases this listener to accept upgrades.
++        loop {
++            let (stream, _) = tokio::select! {
++                biased;
++                allow = &mut attach_allowed => {
++                    allow?;
++                    return Ok::<_, anyhow::Error>(listener);
++                }
++                connection = listener.accept() => connection?,
++            };
++            let rejected = accept_hdr_async(stream, |_: &Request, _: Response| {
++                let mut response = ErrorResponse::new(None);
++                *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
++                Err(response)
++            })
++            .await;
++            assert!(rejected.is_err(), "initial WebSocket must not attach");
++        }
++    }));
++
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .with_mock_chatgpt_backend()
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let request_id = app
++        .send_thread_start_request(ThreadStartParams {
++            cwd: Some(workspace.to_string_lossy().into_owned()),
++            ephemeral: Some(true),
++            ..Default::default()
++        })
++        .await?;
++    let started: ThreadStartResponse =
++        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request_id)).await??;
++    assert!(matches!(
++        started.sandbox,
++        SandboxPolicy::WorkspaceWrite { .. }
++    ));
++    assert_eq!(
++        started.instruction_sources,
++        [LegacyAppPathString::from(local_source)]
++    );
++    let selections = started.thread.environments.context("default selections")?;
++    assert_eq!(
++        selections
++            .iter()
++            .map(|environment| environment.environment_id.as_str())
++            .collect::<Vec<_>>(),
++        [LOCAL_ENVIRONMENT_ID, REMOTE_ID],
++    );
++    let thread_id = started.thread.id;
++    let first = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app.start_turn_and_wait_for_completion(text_turn_params(
++            thread_id.clone(),
++            "Continue while the default secondary is unavailable.",
++        )),
++    )
++    .await??;
++    assert_eq!(first.turn.status, TurnStatus::Completed);
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 2);
++    let input = requests[0].message_input_texts("user");
++    assert!(input.iter().any(|text| text.contains(LOCAL_INSTRUCTIONS)));
++    assert!(!input.iter().any(|text| text.contains(REMOTE_INSTRUCTIONS)));
++    let (output, success) = requests[1]
++        .function_call_output_content_and_success(EARLY_CALL)
++        .context("denial of exec on the unattached executor")?;
++    assert_ne!(success, Some(true));
++    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++
++    let request_id = app
++        .send_raw_request(
++            "environment/status",
++            Some(json!({"environmentId": REMOTE_ID})),
++        )
++        .await?;
++    let status: EnvironmentStatusResponse =
++        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
++    assert_eq!(status.status, EnvironmentStatusKind::Disconnected);
++    assert!(
++        status
++            .error
++            .as_deref()
++            .is_some_and(|error| error.contains("503"))
++    );
++    let ready_listener = if replace_registration {
++        TcpListener::bind("127.0.0.1:0").await?
++    } else {
++        allow_attach
++            .send(())
++            .expect("executor is still rejecting upgrades");
++        timeout(DEFAULT_READ_TIMEOUT, original).await???
++    };
++    let ready_addr = ready_listener.local_addr()?;
++    let (stop, stopped) = oneshot::channel();
++    let (terminal_events, mut terminal_requests) = mpsc::unbounded_channel();
++    let remote = AbortOnDropHandle::new(tokio::spawn(serve_quarantine_executor_with_terminal(
++        ready_listener,
++        Some((remote_source, REMOTE_INSTRUCTIONS)),
++        /*metadata_fault*/ None,
++        Some((LATER_CALL, terminal_events)),
++        stopped,
++    )));
++    if replace_registration {
++        assert_ne!(ready_addr, original_addr);
++        let request_id = app
++            .send_raw_request(
++                "environment/add",
++                Some(json!({
++                    "environmentId": REMOTE_ID,
++                    "execServerUrl": format!("ws://{ready_addr}"),
++                })),
++            )
++            .await?;
++        let _: EnvironmentAddResponse =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
++    } else {
++        assert_eq!(ready_addr, original_addr);
++    }
++    // Connect without sending any thread setting or selection update.
++    let request_id = app
++        .send_raw_request(
++            "environment/info",
++            Some(json!({"environmentId": REMOTE_ID})),
++        )
++        .await?;
++    let info: EnvironmentInfoResponse =
++        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
++    assert_eq!(info.shell.name, "bash");
++    assert_eq!(info.shell.path, "/bin/bash");
++
++    let later = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app.start_turn_and_wait_for_completion(text_turn_params(
++            thread_id.clone(),
++            "Use the recovered default secondary in the same workspace.",
++        )),
++    )
++    .await??;
++    assert_eq!(later.turn.status, TurnStatus::Completed);
++    assert_ne!(first.turn.id, later.turn.id);
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 4);
++    let input = requests[2].message_input_texts("user");
++    let instructions = input
++        .iter()
++        .rfind(|text| text.starts_with("# AGENTS.md instructions"))
++        .context("current workspace instructions")?;
++    assert!(instructions.contains(LOCAL_INSTRUCTIONS));
++    if replace_registration {
++        assert!(
++            requests[2..]
++                .iter()
++                .flat_map(|request| request.message_input_texts("user"))
++                .all(|text| !text.contains(REMOTE_INSTRUCTIONS)),
++            "the replacement's instructions must not reach this thread"
++        );
++        let (output, success) = requests[3]
++            .function_call_output_content_and_success(LATER_CALL)
++            .context("denial of exec on the replacement registration")?;
++        assert_ne!(success, Some(true));
++        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++        stop.send(()).expect("replacement is still connected");
++        timeout(DEFAULT_READ_TIMEOUT, remote).await???;
++        assert!(
++            matches!(
++                terminal_requests.try_recv(),
++                Err(mpsc::error::TryRecvError::Disconnected)
++            ),
++            "the replacement must not receive process/start"
++        );
++        return Ok(());
++    }
++    assert!(instructions.contains(REMOTE_INSTRUCTIONS), "{instructions}");
++    let (output, success) = requests[3]
++        .function_call_output_content_and_success(LATER_CALL)
++        .context("exec output from the newly attached executor")?;
++    assert_ne!(success, Some(false));
++    let session_id: i32 = output
++        .context("remote terminal output")?
++        .lines()
++        .find_map(|line| line.strip_prefix("Process running with session ID "))
++        .context("expected an open terminal on the newly attached executor")?
++        .parse()?;
++    let command = timeout(DEFAULT_READ_TIMEOUT, terminal_requests.recv())
++        .await?
++        .context("remote process/start RPC")?;
++    assert_eq!(command["method"], "process/start");
++    assert_eq!(command["params"]["metadata"]["threadId"], thread_id);
++    assert_eq!(command["params"]["metadata"]["toolCallId"], LATER_CALL);
++    assert_eq!(command["params"]["cwd"], json!(workspace_uri));
++    assert_eq!(
++        command["params"]["sandbox"]["permissions"]["type"],
++        "managed"
++    );
++    assert!(
++        command["params"]["processId"]
++            .as_str()
++            .context("remote process ID")?
++            .starts_with(&format!("{session_id}-"))
++    );
++    stop.send(()).expect("executor is still connected");
++    timeout(DEFAULT_READ_TIMEOUT, remote).await???;
 +    Ok(())
 +}
 +
@@ -735,9 +1067,9 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..3bfa4ce5c383187f3ac4fbd9e5799e26
 +
 +    let _ = stop.send(());
 +    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
-     Ok(())
- }
-
++    Ok(())
++}
++
 +async fn serve_quarantine_executor(
 +    listener: TcpListener,
 +    instruction: Option<(PathUri, &'static str)>,
@@ -868,7 +1200,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..3bfa4ce5c383187f3ac4fbd9e5799e26
  #[tokio::test]
  async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments()
  -> Result<()> {
-@@ -1272,3 +1923,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
+@@ -1272,3 +2218,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
 
      Ok(())
  }
@@ -1547,10 +1879,26 @@ index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8
      pub fn client_mcp_extensions(&self) -> ClientMcpExtensions {
          self.session.services.client_mcp_extensions.clone()
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e3ff195b7 100644
+index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86f07d7752 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
-@@ -45,6 +45,7 @@ use tracing::instrument::WithSubscriber;
+@@ -6,6 +6,7 @@ use std::sync::Arc;
+ use std::sync::Mutex;
+ use std::sync::OnceLock;
+ use std::sync::PoisonError;
++use std::sync::Weak;
+
+ use async_channel::Sender;
+ use codex_exec_server::Environment;
+@@ -38,6 +39,7 @@ use futures::future::BoxFuture;
+ use futures::future::Shared;
+ use tokio::sync::watch;
+ use tokio::time::Instant;
++use tokio_util::sync::CancellationToken;
+ use tokio_util::task::AbortOnDropHandle;
+ use tracing::Instrument;
+ use tracing::instrument::WithSubscriber;
+@@ -45,6 +47,7 @@ use tracing::instrument::WithSubscriber;
  use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
  use crate::agents_md::StartupProjectInstructions;
  use crate::agents_md::read_startup_project_instructions;
@@ -1558,7 +1906,29 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
  use crate::config::Config;
  use crate::session::ThreadEnvironmentDefaults;
  use crate::session::turn_context::ShellSnapshotCache;
-@@ -316,6 +317,51 @@ struct ThreadEnvironmentsState {
+@@ -129,8 +132,19 @@ pub(crate) fn default_thread_environment_requests(
+     cwd: &AbsolutePathBuf,
+     workspace_roots: &[AbsolutePathBuf],
+ ) -> Vec<TurnEnvironmentRequest> {
+-    environment_manager
+-        .default_environment_ids()
++    default_thread_environment_requests_for_ids(
++        environment_manager.default_environment_ids(),
++        cwd,
++        workspace_roots,
++    )
++}
++
++pub(crate) fn default_thread_environment_requests_for_ids(
++    environment_ids: impl IntoIterator<Item = String>,
++    cwd: &AbsolutePathBuf,
++    workspace_roots: &[AbsolutePathBuf],
++) -> Vec<TurnEnvironmentRequest> {
++    environment_ids
+         .into_iter()
+         .map(|environment_id| TurnEnvironmentRequest {
+             environment_id,
+@@ -316,6 +330,123 @@ struct ThreadEnvironmentsState {
      environments: Vec<SelectedTurnEnvironment>,
      // Keep each rejection at its original position without binding an executor.
      startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
@@ -1572,11 +1942,57 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +    secondaries: Vec<DefaultSecondaryAdmission>,
 +}
 +
++/// Server-owned eligibility from the original omitted app-server startup.
++#[derive(Clone)]
++pub(crate) enum DefaultSecondaryEnvironment {
++    Ready(TurnEnvironmentSelection),
++    InitiallyUnavailable(Arc<InitialDefaultSecondary>),
++}
++
++impl DefaultSecondaryEnvironment {
++    pub(crate) fn matches_saved_selection(&self, current: &TurnEnvironmentSelection) -> bool {
++        match self {
++            Self::Ready(original) => {
++                current.config == EnvironmentConfigState::FromThread
++                    && original.has_same_workspace(current)
++            }
++            Self::InitiallyUnavailable(original) => original.rejection == *current,
++        }
++    }
++}
++
++/// The exact optional rejection and its original registration, not an ID to resolve later.
++pub(crate) struct InitialDefaultSecondary {
++    pub(crate) rejection: TurnEnvironmentSelection,
++    registration: Weak<Environment>,
++    pub(crate) revoked: CancellationToken,
++}
++
++/// The current turn's verification may be revoked independently of future eligibility.
++#[derive(Clone)]
++struct InitialDefaultSecondaryAttempt {
++    original: Arc<InitialDefaultSecondary>,
++    revoked: CancellationToken,
++}
++
++/// The inherited denial and the lifetime of a verified active-turn execution view.
++pub(crate) struct InitialTurnEnvironmentRecovery {
++    rejection: TurnEnvironmentSelection,
++    revoked: CancellationToken,
++}
++
++pub(crate) struct StartupEnvironmentAdmission {
++    pub(crate) environments: TurnEnvironmentSnapshot,
++    pub(crate) instructions: StartupProjectInstructions,
++    pub(crate) initially_unavailable: Vec<DefaultSecondaryEnvironment>,
++}
++
 +#[derive(Clone)]
 +struct DefaultSecondaryAdmission {
 +    selection: TurnEnvironmentSelection,
 +    registration: Arc<Environment>,
 +    verified: Option<TurnEnvironment>,
++    initial_recovery: Option<InitialDefaultSecondaryAttempt>,
 +}
 +
 +impl DefaultSecondaryAdmission {
@@ -1607,10 +2023,121 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +            error,
 +        }
 +    }
++
++    fn matches_initial_rejection(&self, state: &ThreadEnvironmentsState) -> bool {
++        let Some(attempt) = &self.initial_recovery else {
++            return false;
++        };
++        !attempt.revoked.is_cancelled()
++            && state.environments.first().is_some_and(|primary| {
++                primary.selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++                    && !primary.environment.is_remote()
++                    && primary.config_origin == EnvironmentConfigOrigin::Thread
++            })
++            && state
++                .startup_rejections
++                .iter()
++                .any(|(position, rejection)| {
++                    *position > 0 && *rejection == attempt.original.rejection
++                })
++            && !state
++                .startup_rejections
++                .iter()
++                .any(|(position, _)| *position == 0)
++            && self.selection.config
++                == EnvironmentConfigState::Ready(
++                    state.thread_defaults.for_selection(&self.selection),
++                )
++    }
  }
 
  #[derive(Clone, Copy)]
-@@ -556,11 +602,13 @@ impl ThreadEnvironments {
+@@ -360,7 +491,8 @@ impl ThreadEnvironments {
+         selections: &mut [TurnEnvironmentSelection],
+         implicit_selection: bool,
+         optional_on_resume: &HashSet<String>,
+-    ) -> CodexResult<Option<(TurnEnvironmentSnapshot, StartupProjectInstructions)>> {
++        default_registrations: &HashMap<String, Arc<Environment>>,
++    ) -> CodexResult<Option<StartupEnvironmentAdmission>> {
+         let local_primary = selections.first().is_some_and(|selection| {
+             environment_manager
+                 .get_environment(&selection.environment_id)
+@@ -389,7 +521,25 @@ impl ThreadEnvironments {
+         );
+         discovery.update_selections(&remote_selections);
+         let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
+-        let ready = futures::stream::iter(discovery.snapshot_now().environments)
++        // A completed failure no longer carries its registration after readiness is refreshed.
++        let snapshot = {
++            let state = discovery
++                .state
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner);
++            Self::snapshot_state(&state)
++        };
++        let original_registrations = snapshot
++            .starting()
++            .filter_map(|starting| {
++                let id = &starting.selection.environment_id;
++                let original = default_registrations.get(id)?;
++                (Arc::ptr_eq(original, &starting.environment)
++                    && original.supports_initial_default_recovery())
++                .then(|| (id.clone(), Arc::downgrade(original)))
++            })
++            .collect::<HashMap<_, _>>();
++        let ready = futures::stream::iter(snapshot.refresh_readiness().environments)
+             .map(|state| async move {
+                 if Instant::now() >= deadline {
+                     return None;
+@@ -428,6 +578,7 @@ impl ThreadEnvironments {
+             .iter()
+             .map(|selection| selection.environment_id.as_str())
+             .collect::<HashSet<_>>();
++        let mut initially_unavailable = Vec::new();
+         for selection in selections {
+             let id = &selection.environment_id;
+             if !requested.contains(id.as_str()) || ready.contains_key(id) {
+@@ -443,8 +594,23 @@ impl ThreadEnvironments {
+             }
+             tracing::warn!(environment_id = %id, "optional secondary executor unavailable at thread startup");
+             // Keep the failed selection so MCP cannot fall back to the global
+-            // registry for this executor and the thread cannot promote it later.
++            // registry for this executor. A live permit does not change saved settings.
+             selection.config = EnvironmentConfigState::StartupUnavailable;
++            if local_primary
++                && implicit_selection
++                && let Some(registration) = original_registrations.get(id)
++                && registration
++                    .upgrade()
++                    .is_some_and(|environment| environment.supports_initial_default_recovery())
++            {
++                initially_unavailable.push(DefaultSecondaryEnvironment::InitiallyUnavailable(
++                    Arc::new(InitialDefaultSecondary {
++                        rejection: selection.clone(),
++                        registration: registration.clone(),
++                        revoked: CancellationToken::new(),
++                    }),
++                ));
++            }
+         }
+         let mut environments = Vec::with_capacity(ready.len());
+         let mut instructions = StartupProjectInstructions::default();
+@@ -454,10 +620,11 @@ impl ThreadEnvironments {
+                 .insert(id, (environment.selection(), docs));
+             environments.push(TurnEnvironmentState::Ready(environment));
+         }
+-        Ok(Some((
+-            TurnEnvironmentSnapshot { environments },
++        Ok(Some(StartupEnvironmentAdmission {
++            environments: TurnEnvironmentSnapshot { environments },
+             instructions,
+-        )))
++            initially_unavailable,
++        }))
+     }
+
+     pub(crate) fn new(
+@@ -556,11 +723,13 @@ impl ThreadEnvironments {
                  thread_defaults: thread_defaults.clone(),
                  environments: active,
                  startup_rejections: Vec::new(),
@@ -1624,7 +2151,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
              }),
              connection_event_tx: OnceLock::new(),
          }
-@@ -670,6 +718,7 @@ impl ThreadEnvironments {
+@@ -670,6 +839,7 @@ impl ThreadEnvironments {
              thread_defaults,
              environments: current,
              startup_rejections,
@@ -1632,14 +2159,66 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
          } = &mut *state;
          let mut seen_environment_ids = HashSet::with_capacity(environments.len());
          let mut next = Vec::with_capacity(environments.len());
-@@ -1224,18 +1273,213 @@ impl ThreadEnvironments {
+@@ -807,6 +977,15 @@ impl ThreadEnvironments {
+             .collect::<Vec<_>>();
+         let previous = std::mem::replace(current, next);
+         *startup_rejections = rejections;
++        if let Some(admissions) = &state.default_secondary_admissions {
++            for admission in &admissions.secondaries {
++                if let Some(attempt) = &admission.initial_recovery
++                    && !admission.matches_initial_rejection(&state)
++                {
++                    attempt.revoked.cancel();
++                }
++            }
++        }
+
+         // Publish after installing the new list, including pending bindings replaced by retries.
+         for (completion, result) in pending_completions {
+@@ -919,6 +1098,21 @@ impl ThreadEnvironments {
+         self.set_thread_defaults(&self.state, defaults);
+     }
+
++    pub(crate) fn revoke_active_initial_recovery(&self) {
++        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
++        Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
++    }
++
++    fn revoke_initial_attempts(admissions: Option<&DefaultSecondaryAdmissions>) {
++        if let Some(admissions) = admissions {
++            for admission in &admissions.secondaries {
++                if let Some(attempt) = &admission.initial_recovery {
++                    attempt.revoked.cancel();
++                }
++            }
++        }
++    }
++
+     pub(crate) fn set_configured_thread_defaults(&self, defaults: EnvironmentConfig) {
+         self.set_thread_defaults(&self.configured, defaults);
+     }
+@@ -929,6 +1123,9 @@ impl ThreadEnvironments {
+         defaults: EnvironmentConfig,
+     ) {
+         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
++        if state.thread_defaults.common != defaults {
++            Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
++        }
+         let ThreadEnvironmentsState {
+             thread_defaults,
+             environments,
+@@ -1224,18 +1421,302 @@ impl ThreadEnvironments {
 
      /// Copies the current selection without waiting for any executor to connect.
      pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
 -        Self::snapshot_state(&self.state).refresh_readiness()
 +        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-+        Self::execution_snapshot(&state, state.default_secondary_admissions.as_ref())
-+            .refresh_readiness()
++        Self::execution_snapshot(
++            &state,
++            state.default_secondary_admissions.as_ref(),
++            /*include_initial_recovery*/ true,
++        )
++        .refresh_readiness()
      }
 
      /// Captures configured bindings without resolving readiness or losing config ownership.
@@ -1651,9 +2230,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +            .lock()
 +            .unwrap_or_else(PoisonError::into_inner);
 +        Self::snapshot_state(&configured)
-     }
-
--    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
++    }
++
 +    /// Inheritance must not restore authority excluded from the active turn.
 +    pub(crate) fn inherited_snapshot_now(&self) -> TurnEnvironmentSnapshot {
 +        let active = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1661,44 +2239,81 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +            .configured
 +            .lock()
 +            .unwrap_or_else(PoisonError::into_inner);
-+        Self::execution_snapshot(&configured, active.default_secondary_admissions.as_ref())
++        Self::execution_snapshot(
++            &configured,
++            active.default_secondary_admissions.as_ref(),
++            /*include_initial_recovery*/ false,
++        )
 +    }
 +
 +    /// Keep default secondaries unavailable while their instructions are being checked.
 +    pub(crate) fn begin_default_secondary_admissions(
 +        &self,
 +        requested: &[TurnEnvironmentSelection],
-+        defaults: &[TurnEnvironmentSelection],
++        defaults: &[DefaultSecondaryEnvironment],
 +    ) -> Option<DefaultSecondaryAdmissions> {
 +        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
++        Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
 +        let local_primary = requested.first().is_some_and(|primary| {
 +            state.environments.first().is_some_and(|active| {
 +                !active.environment.is_remote() && active.selection.has_same_workspace(primary)
 +            })
 +        });
-+        let secondaries = state
++        let mut secondaries = state
 +            .environments
 +            .iter()
 +            .filter(|environment| {
 +                local_primary
 +                    && environment.config_origin == EnvironmentConfigOrigin::Thread
 +                    && environment.environment.is_remote()
-+                    && defaults
-+                        .iter()
-+                        .any(|default| default.has_same_workspace(&environment.selection))
++                    && defaults.iter().any(|default| {
++                        matches!(default, DefaultSecondaryEnvironment::Ready(default)
++                            if default.has_same_workspace(&environment.selection))
++                    })
 +            })
 +            .map(|environment| DefaultSecondaryAdmission {
 +                selection: environment.selection.clone(),
 +                registration: Arc::clone(&environment.environment),
 +                verified: None,
++                initial_recovery: None,
 +            })
 +            .collect::<Vec<_>>();
++        if local_primary {
++            secondaries.extend(defaults.iter().filter_map(|default| {
++                let DefaultSecondaryEnvironment::InitiallyUnavailable(original) = default else {
++                    return None;
++                };
++                let registration = original.registration.upgrade()?;
++                let mut input = original.rejection.clone();
++                input.config = EnvironmentConfigState::FromThread;
++                let (selection, _) = resolve_selection_config(input, &state.thread_defaults);
++                let admission = DefaultSecondaryAdmission {
++                    selection,
++                    registration,
++                    verified: None,
++                    initial_recovery: Some(InitialDefaultSecondaryAttempt {
++                        original: Arc::clone(original),
++                        revoked: original.revoked.child_token(),
++                    }),
++                };
++                admission
++                    .matches_initial_rejection(&state)
++                    .then_some(admission)
++            }));
++        }
 +        let admissions = (!secondaries.is_empty()).then(|| DefaultSecondaryAdmissions {
 +            turn: Arc::new(()),
 +            secondaries,
 +        });
 +        state.default_secondary_admissions = admissions.clone();
 +        admissions
+     }
+
+-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
++    fn is_current_registration(&self, admission: &DefaultSecondaryAdmission) -> bool {
++        self.environment_manager
++            .get_environment(&admission.selection.environment_id)
++            .is_some_and(|current| Arc::ptr_eq(&current, &admission.registration))
 +    }
 +
 +    pub(crate) async fn verify_default_secondaries(
@@ -1723,23 +2338,48 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +            .for_each_concurrent(16, |admission| {
 +                let raw = &raw;
 +                async move {
-+                    let Some(mut environment) = raw
-+                        .turn_environments()
-+                        .find(|environment| {
-+                            admission.matches(
-+                                &environment.selection,
-+                                environment.config_origin,
-+                                &environment.environment,
-+                            )
-+                        })
-+                        .cloned()
-+                    else {
-+                        return;
++                    let mut environment = if let Some(attempt) = &admission.initial_recovery {
++                        if !self.is_current_registration(admission) {
++                            return;
++                        }
++                        let Ok(bound) = admission
++                            .registration
++                            .connected_initial_default_recovery_view(attempt.revoked.clone())
++                        else {
++                            return;
++                        };
++                        let mut environment = TurnEnvironment::new(
++                            admission.selection.clone(),
++                            EnvironmentConfigOrigin::Thread,
++                            Arc::new(bound),
++                            /*shell*/ None,
++                        );
++                        environment.initial_recovery =
++                            Some(Arc::new(InitialTurnEnvironmentRecovery {
++                                rejection: attempt.original.rejection.clone(),
++                                revoked: attempt.revoked.clone(),
++                            }));
++                        environment
++                    } else {
++                        let Some(mut environment) = raw
++                            .turn_environments()
++                            .find(|environment| {
++                                admission.matches(
++                                    &environment.selection,
++                                    environment.config_origin,
++                                    &environment.environment,
++                                )
++                            })
++                            .cloned()
++                        else {
++                            return;
++                        };
++                        let Ok(bound) = environment.environment.connected_view() else {
++                            return;
++                        };
++                        environment.environment = Arc::new(bound);
++                        environment
 +                    };
-+                    let Ok(bound) = environment.environment.connected_view() else {
-+                        return;
-+                    };
-+                    environment.environment = Arc::new(bound);
 +                    let verify = async {
 +                        // HOME, temporary directories, and shell must describe the checked attachment.
 +                        let info = environment.environment.info().await.ok()?;
@@ -1778,13 +2418,22 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +                denied
 +            } else {
 +                for admission in &mut admissions.secondaries {
-+                    if !state.environments.iter().any(|environment| {
-+                        admission.matches(
-+                            &environment.selection,
-+                            environment.config_origin,
-+                            &environment.environment,
-+                        )
-+                    }) {
++                    let still_selected = if admission.initial_recovery.is_some() {
++                        admission.matches_initial_rejection(&state)
++                            && self.is_current_registration(admission)
++                            && admission.verified.as_ref().is_some_and(|environment| {
++                                environment.environment.check_connected_view().is_ok()
++                            })
++                    } else {
++                        state.environments.iter().any(|environment| {
++                            admission.matches(
++                                &environment.selection,
++                                environment.config_origin,
++                                &environment.environment,
++                            )
++                        })
++                    };
++                    if !still_selected {
 +                        admission.verified = None;
 +                    }
 +                    if let Some(environment) = &mut admission.verified {
@@ -1800,7 +2449,11 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +                    }
 +                }
 +                state.default_secondary_admissions = Some(admissions);
-+                Self::execution_snapshot(&state, state.default_secondary_admissions.as_ref())
++                Self::execution_snapshot(
++                    &state,
++                    state.default_secondary_admissions.as_ref(),
++                    /*include_initial_recovery*/ true,
++                )
 +            }
 +        };
 +        self.resolve_snapshot(snapshot).await
@@ -1809,6 +2462,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +    fn execution_snapshot(
 +        state: &ThreadEnvironmentsState,
 +        admissions: Option<&DefaultSecondaryAdmissions>,
++        include_initial_recovery: bool,
 +    ) -> TurnEnvironmentSnapshot {
 +        let mut snapshot = Self::snapshot_state(state);
 +        if let Some(admissions) = admissions {
@@ -1822,6 +2476,11 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +                    selection.environment_id == admission.selection.environment_id
 +                }) {
 +                    let verified = admission.verified.as_ref().filter(|verified| {
++                        if admission.initial_recovery.is_some() {
++                            return include_initial_recovery
++                                && admission.matches_initial_rejection(state)
++                                && verified.environment.check_connected_view().is_ok();
++                        }
 +                        let TurnEnvironmentState::Starting(starting) = &*environment else {
 +                            return false;
 +                        };
@@ -1831,6 +2490,11 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +                            &starting.environment,
 +                        ) && verified.environment.check_connected_view().is_ok()
 +                    });
++                    // An initial recovery may only overlay its exact rejection. An owner
++                    // decision in the raw snapshot supersedes the old attempt.
++                    if admission.initial_recovery.is_some() && verified.is_none() {
++                        continue;
++                    }
 +                    *environment = verified.map_or_else(
 +                        || admission.unavailable(),
 +                        |verified| TurnEnvironmentState::Ready(verified.clone()),
@@ -1850,7 +2514,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
          let mut environments: Vec<_> = state
              .environments
              .iter()
-@@ -1280,7 +1524,7 @@ impl ThreadEnvironments {
+@@ -1280,7 +1761,7 @@ impl ThreadEnvironments {
              non_blocking = non_blocking_snapshots,
          )
      )]
@@ -1859,7 +2523,194 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
          &self,
          snapshot: TurnEnvironmentSnapshot,
      ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
-@@ -1740,6 +1984,7 @@ mod tests {
+@@ -1317,6 +1798,39 @@ pub(crate) enum TurnEnvironmentState {
+ }
+
+ impl TurnEnvironmentState {
++    fn initial_recovery_rejection(&self) -> Option<&TurnEnvironmentSelection> {
++        let Self::Ready(environment) = self else {
++            return None;
++        };
++        environment
++            .initial_recovery
++            .as_ref()
++            .map(|recovery| &recovery.rejection)
++    }
++
++    fn inheritance_rejection(&self) -> Option<&TurnEnvironmentSelection> {
++        match self {
++            Self::Failed { selection, .. }
++                if selection.config == EnvironmentConfigState::StartupUnavailable =>
++            {
++                Some(selection)
++            }
++            _ => self.initial_recovery_rejection(),
++        }
++    }
++
++    fn initial_recovery_denied(selection: TurnEnvironmentSelection) -> Self {
++        let error = selection
++            .config
++            .failure_reason()
++            .expect("initial startup rejection");
++        Self::Failed {
++            error: error.to_owned(),
++            selection,
++            required_skills: Vec::new(),
++        }
++    }
++
+     fn from_resolution(
+         starting: StartingTurnEnvironment,
+         resolved: Option<TurnEnvironmentResult>,
+@@ -1394,6 +1908,56 @@ pub struct TurnEnvironmentSnapshot {
+ }
+
+ impl TurnEnvironmentSnapshot {
++    pub(crate) fn without_initial_recovery(mut self) -> Self {
++        for state in &mut self.environments {
++            if let Some(rejection) = state.initial_recovery_rejection().cloned() {
++                *state = TurnEnvironmentState::initial_recovery_denied(rejection);
++            }
++        }
++        self
++    }
++
++    pub(crate) fn revoke_initial_recovery(&self) -> bool {
++        let mut changed = false;
++        for state in &self.environments {
++            if let TurnEnvironmentState::Ready(environment) = state
++                && let Some(recovery) = &environment.initial_recovery
++                && !recovery.revoked.is_cancelled()
++            {
++                recovery.revoked.cancel();
++                changed = true;
++            }
++        }
++        changed
++    }
++
++    /// Keep an inherited rejection in both the bound snapshot and the child's request list.
++    /// Otherwise the child can resolve a derived FromThread request against the live registry.
++    pub(crate) fn remove_initial_recovery_for_child(
++        &mut self,
++        requests: &mut Vec<TurnEnvironmentRequest>,
++    ) {
++        for (position, state) in self.environments.iter_mut().enumerate() {
++            let Some(rejection) = state.inheritance_rejection().cloned() else {
++                continue;
++            };
++            if let Some(request) = requests
++                .iter_mut()
++                .find(|request| request.environment_id == rejection.environment_id)
++            {
++                if request.config == EnvironmentConfigState::FromThread {
++                    request.config = EnvironmentConfigState::StartupUnavailable;
++                }
++            } else {
++                requests.insert(
++                    position.min(requests.len()),
++                    rejection.clone().into_request(),
++                );
++            }
++            *state = TurnEnvironmentState::initial_recovery_denied(rejection);
++        }
++    }
++
+     /// Keeps the original root order for child threads and saved history.
+     pub(crate) fn selected_capability_roots(&self) -> Vec<SelectedCapabilityRoot> {
+         EnvironmentCapabilityRoots::collect(self.environments.iter().map(|environment| {
+@@ -1432,9 +1996,12 @@ impl TurnEnvironmentSnapshot {
+             .environments
+             .iter()
+             .map(|environment| match environment {
+-                TurnEnvironmentState::Ready(environment) => {
+-                    TurnEnvironmentState::Ready(environment.clone())
+-                }
++                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
++                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
++                        TurnEnvironmentState::initial_recovery_denied(recovery.rejection.clone())
++                    }
++                    _ => TurnEnvironmentState::Ready(environment.clone()),
++                },
+                 TurnEnvironmentState::Starting(environment) => {
+                     TurnEnvironmentState::from_resolution(
+                         environment.clone(),
+@@ -1452,7 +2019,9 @@ impl TurnEnvironmentSnapshot {
+             let TurnEnvironmentState::Ready(environment) = environment else {
+                 return None;
+             };
+-            Some(environment)
++            (environment.initial_recovery.is_none()
++                || environment.environment.check_connected_view().is_ok())
++            .then_some(environment)
+         })
+     }
+
+@@ -1466,12 +2035,18 @@ impl TurnEnvironmentSnapshot {
+     }
+
+     pub(crate) fn ready_environment_handles(&self) -> HashMap<String, Arc<Environment>> {
+-        self.turn_environments()
+-            .map(|environment| {
+-                (
++        // A recovery revoked after a caller captured its selections must still use
++        // the rejecting bound handle, never fall back to an unguarded registry entry.
++        self.environments
++            .iter()
++            .filter_map(|state| {
++                let TurnEnvironmentState::Ready(environment) = state else {
++                    return None;
++                };
++                Some((
+                     environment.selection.environment_id.clone(),
+                     Arc::clone(&environment.environment),
+-                )
++                ))
+             })
+             .collect()
+     }
+@@ -1594,7 +2169,12 @@ impl TurnEnvironmentSnapshot {
+         self.environments
+             .iter()
+             .filter_map(|environment| match environment {
+-                TurnEnvironmentState::Ready(environment) => Some(environment.selection()),
++                TurnEnvironmentState::Ready(environment) => {
++                    Some(environment.initial_recovery.as_ref().map_or_else(
++                        || environment.selection(),
++                        |recovery| recovery.rejection.clone(),
++                    ))
++                }
+                 TurnEnvironmentState::Starting(environment) => Some(
+                     environment
+                         .config_origin
+@@ -1616,7 +2196,12 @@ impl TurnEnvironmentSnapshot {
+         self.environments
+             .iter()
+             .map(|environment| match environment {
+-                TurnEnvironmentState::Ready(environment) => environment.selection(),
++                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
++                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
++                        recovery.rejection.clone()
++                    }
++                    _ => environment.selection(),
++                },
+                 TurnEnvironmentState::Starting(environment) => environment
+                     .config_origin
+                     .into_input_selection(environment.selection.clone()),
+@@ -1633,7 +2218,10 @@ impl TurnEnvironmentSnapshot {
+         self.environments
+             .iter()
+             .map(|environment| match environment {
+-                TurnEnvironmentState::Ready(environment) => Ok(environment.selection()),
++                TurnEnvironmentState::Ready(environment) => Ok(
++                    environment.initial_recovery.as_ref()
++                        .map_or_else(|| environment.selection(), |recovery| recovery.rejection.clone()),
++                ),
+                 TurnEnvironmentState::Starting(environment) => Ok(
+                     environment
+                         .config_origin
+@@ -1740,6 +2328,7 @@ mod tests {
 
      use std::time::Duration;
 
@@ -1867,7 +2718,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
      use crate::config::PermissionProfileSnapshot;
      use codex_exec_server::Environment;
      use codex_exec_server::ExecServerRuntimeOptions;
-@@ -1835,7 +2080,7 @@ mod tests {
+@@ -1835,7 +2424,7 @@ mod tests {
          }
      }
 
@@ -1876,7 +2727,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
          let (stream, _) = listener.accept().await.expect("connection");
          let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
-@@ -1874,6 +2119,108 @@ mod tests {
+@@ -1874,6 +2463,184 @@ mod tests {
              ))
              .await
              .expect("environment info response");
@@ -1932,7 +2783,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +        let mut admissions = environments
 +            .begin_default_secondary_admissions(
 +                &selections,
-+                std::slice::from_ref(&default_secondary),
++                &[DefaultSecondaryEnvironment::Ready(default_secondary)],
 +            )
 +            .expect("default secondary admission");
 +        admissions.secondaries[0].verified = Some(verified);
@@ -1982,14 +2833,98 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..9ad4af22fa9fb7d29e762c5a5a6dab2e
 +                .is_none()
 +        );
 +        assert_eq!(environments.snapshot().await.to_selections(), selections);
++    }
++
++    #[tokio::test]
++    async fn initially_unavailable_default_keeps_its_child_denial_and_revokes_active_reselection() {
++        let manager = Arc::new(EnvironmentManager::default_for_tests());
++        let remote = Arc::new(
++            Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string()))
++                .expect("unattached test registration"),
++        );
++        let local = TurnEnvironmentSelection {
++            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
++            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
++            workspace_roots: Vec::new(),
++            config: EnvironmentConfigState::FromThread,
++            selected_capability_roots: Default::default(),
++        };
++        let rejection = TurnEnvironmentSelection {
++            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
++            config: EnvironmentConfigState::StartupUnavailable,
++            ..local.clone()
++        };
++        let environments =
++            resolve_turn_environments(manager, &[local.clone(), rejection.clone()]).await;
++        let original = Arc::new(InitialDefaultSecondary {
++            rejection: rejection.clone(),
++            registration: Arc::downgrade(&remote),
++            revoked: CancellationToken::new(),
++        });
++        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
++        let admissions = environments
++            .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
++            .expect("exact startup rejection");
++        let admission = &admissions.secondaries[0];
++        let attempt = admission
++            .initial_recovery
++            .as_ref()
++            .expect("initial attempt");
++        let mut verified = TurnEnvironment::new(
++            admission.selection.clone(),
++            EnvironmentConfigOrigin::Thread,
++            remote,
++            /*shell*/ None,
++        );
++        verified.initial_recovery = Some(Arc::new(InitialTurnEnvironmentRecovery {
++            rejection: rejection.clone(),
++            revoked: attempt.revoked.clone(),
++        }));
++        let inherited = TurnEnvironmentSnapshot {
++            environments: vec![TurnEnvironmentState::Ready(verified)],
++        };
++        assert_eq!(
++            inherited.inheritable_requests(),
++            [rejection.clone().into_request()]
++        );
++        let mut request = rejection.clone().into_request();
++        request.config = EnvironmentConfigState::FromThread;
++        let mut requests = vec![request];
++        let mut direct = inherited.clone();
++        direct.remove_initial_recovery_for_child(&mut requests);
++        assert_eq!(direct.all_selections(), [rejection.clone()]);
++        assert_eq!(requests, [rejection.clone().into_request()]);
++        requests[0].config = admission.selection.config.clone();
++        let mut direct = inherited;
++        direct.remove_initial_recovery_for_child(&mut requests);
++        assert_eq!(requests[0].config, admission.selection.config);
++
++        environments.update_selections(std::slice::from_ref(&local));
++        assert!(attempt.revoked.is_cancelled());
++        environments.update_selections(&[local.clone(), rejection.clone()]);
++        let state = environments.state.lock().expect("state");
++        assert!(!admission.matches_initial_rejection(&state));
++        drop(state);
++        assert_eq!(
++            environments.snapshot_now().all_selections(),
++            [local, rejection]
++        );
      }
 
      #[tokio::test]
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index e9618b49a913b7ef0feedcd948d25873b51aa336..1bf9d55a2a82cc67db6fba7a2efe0614558c88cc 100644
+index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835a3296829 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -123,10 +123,11 @@ fn update_local_workspace(
+@@ -21,6 +21,7 @@ use crate::config::ConstraintError;
+ use crate::config::ConstraintResult;
+ use crate::config::ManagedFeatures;
+ use crate::config::NetworkProxySpec;
++use crate::environment_selection::DefaultSecondaryEnvironment;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::session::session::Session;
+ use crate::session::session::SessionConfiguration;
+@@ -123,10 +124,11 @@ fn update_local_workspace(
          let mut environments = current.environments.clone();
          environments[0].cwd = requested_local.cwd.clone();
          environments[0].workspace_roots = requested_local.workspace_roots.clone();
@@ -2004,9 +2939,42 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..1bf9d55a2a82cc67db6fba7a2efe0614
      }
      Err(ConstraintError::InvalidValue {
          field_name: "environments",
-@@ -249,9 +250,10 @@ impl Session {
+@@ -213,6 +215,12 @@ enum ConfigUpdateSource {
+ }
+
+ impl Session {
++    pub(crate) fn revoke_turn_initial_recovery(&self, turn_context: &TurnContext) {
++        if turn_context.initial_environments.revoke_initial_recovery() {
++            self.mark_mcp_runtime_dirty();
++        }
++    }
++
+     pub(super) fn apply_session_settings(
+         &self,
+         current: &SessionConfiguration,
+@@ -220,7 +228,16 @@ impl Session {
+     ) -> ConstraintResult<SessionConfiguration> {
+         let current_environments = &current.environments;
+         let adjusted;
+-        let updates = if updates.preserve_secondary_workspaces
++        let retain_initial_rejection = updates.retain_default_secondaries
++            && updates.environments.as_ref().is_some_and(|requested| {
++                requested.environments.first().is_some_and(|primary| {
++                    primary.environment_id == LOCAL_ENVIRONMENT_ID
++                        && primary.config == EnvironmentConfigState::FromThread
++                }) && requested.environments.iter().skip(1).any(|environment| {
++                    environment.config == EnvironmentConfigState::StartupUnavailable
++                })
++            });
++        let updates = if (updates.preserve_secondary_workspaces || retain_initial_rejection)
+             && let Some(environments) = &updates.environments
+         {
+             // Recheck under the settings lock so a stale request cannot restore a removed binding.
+@@ -248,10 +265,12 @@ impl Session {
+     pub(super) async fn activate_turn_environments(
          &self,
          configuration: &SessionConfiguration,
++        allow_initial_default_recovery: bool,
      ) -> TurnEnvironmentSnapshot {
 -        let snapshot = {
 +        let (snapshot, admissions) = {
@@ -2016,17 +2984,37 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..1bf9d55a2a82cc67db6fba7a2efe0614
              // Another task may have started while this one was preparing its settings.
              if active.as_ref().is_none_or(|turn| turn.task.is_none()) {
                  let mut environments = configuration.environments.clone();
-@@ -271,10 +273,32 @@ impl Session {
+@@ -265,16 +284,51 @@ impl Session {
+                     }
+                 }
+                 // Apply the saved defaults even if this turn selects the same environments.
++                let active_defaults = configuration.inferred_environment_config();
++                let saved = &state.session_configuration;
++                let eligible_initial_recovery = allow_initial_default_recovery
++                    && saved.inferred_environment_config() == active_defaults;
+                 self.services
+                     .turn_environments
+-                    .set_active_thread_defaults(configuration.inferred_environment_config());
++                    .set_active_thread_defaults(active_defaults);
                  self.services
                      .turn_environments
                      .activate_selections(&environments);
++                let defaults = configuration.default_secondary_environments.iter().filter(|default| {
++                    match default {
++                        DefaultSecondaryEnvironment::Ready(_) => true,
++                        DefaultSecondaryEnvironment::InitiallyUnavailable(original) => {
++                            eligible_initial_recovery
++                                && saved.default_secondary_environments.iter().any(|current| {
++                                    matches!(current, DefaultSecondaryEnvironment::InitiallyUnavailable(current)
++                                        if Arc::ptr_eq(original, current))
++                                })
++                        }
++                    }
++                }).cloned().collect::<Vec<_>>();
 +                admissions = self
 +                    .services
 +                    .turn_environments
-+                    .begin_default_secondary_admissions(
-+                        &environments,
-+                        &configuration.default_secondary_environments,
-+                    );
++                    .begin_default_secondary_admissions(&environments, &defaults);
              }
 -            self.services.turn_environments.snapshot()
 +            (self.services.turn_environments.snapshot_now(), admissions)
@@ -2051,21 +3039,54 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..1bf9d55a2a82cc67db6fba7a2efe0614
      }
 
      /// Applies an explicit workspace tool transition to the running task, unlike ordinary
-@@ -499,6 +523,9 @@ impl Session {
-                 .update_configured_selections(&future);
+@@ -493,12 +547,31 @@ impl Session {
+             }
          }
-         state.session_configuration.environments = future;
+
++        state.session_configuration.environments = future;
++        let previous_defaults = state
++            .session_configuration
++            .default_secondary_environments
++            .clone();
++        // An accepted owner decision revokes recovery even when it updated only the active row.
++        state
++            .session_configuration
++            .default_secondary_environments
++            .retain(|default| {
++                !matches!(default, DefaultSecondaryEnvironment::InitiallyUnavailable(original)
++                if original.rejection.has_same_workspace(selection))
++            });
 +        state
 +            .session_configuration
 +            .retain_default_secondary_environments();
++        SessionConfiguration::revoke_removed_initial_recoveries(
++            &previous_defaults,
++            &state.session_configuration.default_secondary_environments,
++        );
+         if update_future {
+             self.services
+                 .turn_environments
+-                .update_configured_selections(&future);
++                .update_configured_selections(&state.session_configuration.environments);
+         }
+-        state.session_configuration.environments = future;
          if update_current {
              // Invalidate MCP before installed configuration can wake a waiting turn.
              self.mark_mcp_runtime_dirty();
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113994860af 100644
+index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdecf997a410 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -149,6 +149,7 @@ use codex_protocol::openai_models::ModelPreset;
+@@ -40,6 +40,8 @@ use crate::context::world_state::WorldStateUpdate;
+ use crate::context::world_state::WorldStateUpdateContent;
+ use crate::context::world_state::split_prefix_updates;
+ use crate::current_time::TimeProvider;
++use crate::environment_selection::DefaultSecondaryEnvironment;
++use crate::environment_selection::StartupEnvironmentAdmission;
+ use crate::environment_selection::ThreadEnvironments;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
+@@ -149,6 +151,7 @@ use codex_protocol::openai_models::ModelPreset;
  use codex_protocol::permissions::FileSystemSandboxPolicy;
  use codex_protocol::permissions::FileSystemSandboxPolicyContext;
  use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -2073,7 +3094,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
  use codex_protocol::protocol::FileChange;
  use codex_protocol::protocol::HasLegacyEvent;
  use codex_protocol::protocol::HistoryPosition;
-@@ -169,6 +170,7 @@ use codex_protocol::protocol::ThreadSource;
+@@ -169,6 +172,7 @@ use codex_protocol::protocol::ThreadSource;
  use codex_protocol::protocol::TurnAbortReason;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentRequest;
@@ -2081,7 +3102,31 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
  use codex_protocol::protocol::TurnEnvironmentSelection;
  use codex_protocol::protocol::TurnStartedEvent;
  use codex_protocol::protocol::W3cTraceContext;
-@@ -1342,6 +1344,7 @@ impl Session {
+@@ -992,11 +996,11 @@ impl Session {
+             metrics_service_name,
+             user_shell_override,
+             inherited_exec_policy,
+-            inherited_environments,
++            mut inherited_environments,
+             parent_rollout_thread_trace,
+             inherited_thread_state,
+             parent_trace: _,
+-            environment_requests,
++            mut environment_requests,
+             mut thread_extension_init,
+             turn_extension_init,
+             client_mcp_extensions,
+@@ -1017,6 +1021,9 @@ impl Session {
+             .get::<codex_extension_api::SessionIsolation>()
+             .map(|policy| *policy)
+             .unwrap_or_default();
++        if let Some(environments) = &mut inherited_environments {
++            environments.remove_initial_recovery_for_child(&mut environment_requests);
++        }
+         // Manager-owned threads and inline delegates bind roots at the same startup boundary.
+         let selected_capability_roots =
+             match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
+@@ -1342,6 +1349,7 @@ impl Session {
                  .as_ref()
                  .map(|discovery| Arc::clone(&discovery.optional_on_resume))
                  .unwrap_or_default(),
@@ -2089,7 +3134,24 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
              model_info_overrides: config.to_models_manager_config().into(),
              developer_instructions: config.developer_instructions.clone(),
              base_instructions,
-@@ -1397,6 +1400,26 @@ impl Session {
+@@ -1380,7 +1388,11 @@ impl Session {
+                 || !config.features.enabled(Feature::DeferredExecutor))
+         {
+             debug_assert!(inherited_environments.is_none());
+-            if let Some((environments, instructions)) = ThreadEnvironments::admit_startup_remotes(
++            if let Some(StartupEnvironmentAdmission {
++                environments,
++                instructions,
++                initially_unavailable,
++            }) = ThreadEnvironments::admit_startup_remotes(
+                 Arc::clone(&environment_manager),
+                 session_configuration
+                     .user_shell_override
+@@ -1394,9 +1406,32 @@ impl Session {
+                 &mut environment_selections,
+                 discovery.implicit_selection,
+                 &discovery.optional_on_resume,
++                &discovery.default_registrations,
              )
              .await?
              {
@@ -2111,12 +3173,46 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
 +                                })
 +                        })
 +                        .cloned()
++                        .map(DefaultSecondaryEnvironment::Ready)
++                        .chain(initially_unavailable)
 +                        .collect();
 +                }
                  thread_extension_init.insert(instructions);
                  Some(environments)
              } else {
-@@ -3101,7 +3124,7 @@ impl Session {
+@@ -3005,9 +3040,30 @@ impl Session {
+             // Save new environment defaults for future turns. The running turn keeps its own.
+             windows_sandbox_changed =
+                 state.session_configuration.windows_sandbox_level != updated.windows_sandbox_level;
++            SessionConfiguration::revoke_removed_initial_recoveries(
++                &state.session_configuration.default_secondary_environments,
++                &updated.default_secondary_environments,
++            );
++            let updated_defaults = updated.inferred_environment_config();
++            if state
++                .session_configuration
++                .default_secondary_environments
++                .iter()
++                .any(|default| {
++                    matches!(
++                        default,
++                        DefaultSecondaryEnvironment::InitiallyUnavailable(_)
++                    )
++                })
++                && state.session_configuration.inferred_environment_config() != updated_defaults
++            {
++                self.services
++                    .turn_environments
++                    .revoke_active_initial_recovery();
++            }
+             self.services
+                 .turn_environments
+-                .set_configured_thread_defaults(updated.inferred_environment_config());
++                .set_configured_thread_defaults(updated_defaults);
+             if updated.environments != state.session_configuration.environments {
+                 self.services
+                     .turn_environments
+@@ -3101,11 +3157,11 @@ impl Session {
          let snapshot = {
              let _state = self.state.lock().await;
              if self.features.enabled(Feature::SubagentThreadEnvironments) {
@@ -2125,7 +3221,12 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
              }
              self.services.turn_environments.snapshot()
          };
-@@ -3127,6 +3150,23 @@ impl Session {
+-        snapshot.await
++        snapshot.await.without_initial_recovery()
+     }
+
+     pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
+@@ -3127,6 +3183,23 @@ impl Session {
              .restorable_thread_settings(state.session_configuration.environments.clone())
      }
 
@@ -2149,7 +3250,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
      pub(crate) async fn set_app_server_client_info(
          &self,
          app_server_client_name: Option<String>,
-@@ -5064,7 +5104,7 @@ impl Session {
+@@ -5064,7 +5137,7 @@ impl Session {
                  self.services.turn_environments.snapshot(),
                  self.features
                      .enabled(Feature::SubagentThreadEnvironments)
@@ -2158,11 +3259,29 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..4d7f40b5d8f4f1cf014a1249f9730113
              )
          };
          if matches!(
+@@ -5093,7 +5166,8 @@ impl Session {
+         );
+         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
+         let environments = environments.or_cancel(cancellation_token).await?;
+-        let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());
++        let inherited_environments = inherited_environments
++            .unwrap_or_else(|| environments.clone().without_initial_recovery());
+         // Keep both preparation futures off caller stacks while they are live together.
+         let load_agents_md = Box::pin(async {
+             let (loaded_agents_md, warnings) = self
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index ba9bab3f94efd5b005f784c818e68beb766ac5e8..34ac2e129ac595b9a655fc0b82aacdeee3ab18f2 100644
+index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea16fe610d 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -24,6 +24,7 @@ use crate::state::ActiveTurn;
+@@ -11,6 +11,7 @@ use crate::agent::api::AgentControl;
+ use crate::agents_md_manager::AgentsMdManager;
+ use crate::agents_md_manager::SessionInstructions;
+ use crate::config::ConstraintError;
++use crate::environment_selection::DefaultSecondaryEnvironment;
+ use crate::environment_selection::ThreadEnvironments;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::hook_mcp_executor::CoreHookMcpExecutor;
+@@ -24,6 +25,7 @@ use crate::state::ActiveTurn;
  use crate::turn_metadata::ExecutionMetadata;
  use codex_analytics::ThreadProductUpdate;
  use codex_attachment_store::AttachmentStore;
@@ -2170,17 +3289,17 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..34ac2e129ac595b9a655fc0b82aacdee
  use codex_extension_api::ExtensionDataInit;
  use codex_http_client::ClientRouteClass;
  use codex_http_client::RouteAwareClientPool;
-@@ -143,6 +144,9 @@ pub(crate) struct SessionConfiguration {
+@@ -143,6 +145,9 @@ pub(crate) struct SessionConfiguration {
      pub(super) implicit_environment_selection: bool,
      /// Saved registry executors allowed to remain unavailable for this loaded session only.
      pub(super) resume_optional_environment_ids: Arc<std::collections::HashSet<String>>,
 +    /// Exact remote bindings admitted from omitted app-server startup environments.
 +    /// Settings updates and cold resume cannot add entries.
-+    pub(super) default_secondary_environments: Vec<TurnEnvironmentSelection>,
++    pub(super) default_secondary_environments: Vec<DefaultSecondaryEnvironment>,
      /// Explicit startup overrides used when resolving effective model metadata.
      pub(super) model_info_overrides: ModelInfoOverrides,
 
-@@ -449,6 +453,25 @@ impl SessionConfiguration {
+@@ -449,6 +454,40 @@ impl SessionConfiguration {
          }
      }
 
@@ -2196,17 +3315,32 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..34ac2e129ac595b9a655fc0b82aacdee
 +            return;
 +        }
 +        self.default_secondary_environments.retain(|original| {
-+            secondaries.iter().any(|current| {
-+                current.config == EnvironmentConfigState::FromThread
-+                    && original.has_same_workspace(current)
-+            })
++            secondaries
++                .iter()
++                .any(|current| original.matches_saved_selection(current))
 +        });
++    }
++
++    pub(super) fn revoke_removed_initial_recoveries(
++        previous: &[DefaultSecondaryEnvironment],
++        current: &[DefaultSecondaryEnvironment],
++    ) {
++        for previous in previous {
++            if let DefaultSecondaryEnvironment::InitiallyUnavailable(previous) = previous
++                && !current.iter().any(|current| {
++                    matches!(current, DefaultSecondaryEnvironment::InitiallyUnavailable(current)
++                        if Arc::ptr_eq(previous, current))
++                })
++            {
++                previous.revoked.cancel();
++            }
++        }
 +    }
 +
      pub(super) fn validate(
          &self,
          environments: &[TurnEnvironmentSelection],
-@@ -518,6 +541,11 @@ impl SessionConfiguration {
+@@ -518,6 +557,11 @@ impl SessionConfiguration {
              next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
              next_configuration.environments = environments.environments.clone();
              next_configuration.implicit_environment_selection = environments.implicit_selection;
@@ -2218,7 +3352,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..34ac2e129ac595b9a655fc0b82aacdee
          }
          let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
          if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
-@@ -697,6 +725,8 @@ pub(crate) struct SessionSettingsUpdate {
+@@ -697,6 +741,8 @@ pub(crate) struct SessionSettingsUpdate {
      pub(crate) environments: Option<TurnEnvironmentSelections>,
      /// Recheck the secondary workspaces at commit and retain their actual bindings.
      pub(crate) preserve_secondary_workspaces: bool,
@@ -2302,10 +3436,10 @@ index 1a000b9cb5fa5b584ac859f36e588c635776b49e..79a14d049e45bfa8972e9afd33cf33db
          runtime_workspace_roots,
          profile_workspace_roots,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..ef7e528d1710c21982c1530b2267736881bf02d8 100644
+index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96cacae3f2 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -2,6 +2,7 @@ use super::step_settings::ResolvedStepSettings;
+@@ -2,9 +2,11 @@ use super::step_settings::ResolvedStepSettings;
  use super::token_budget::has_explicit_settings;
  use super::token_budget::resolve_token_budget;
  use super::*;
@@ -2313,23 +3447,201 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..ef7e528d1710c21982c1530b22677368
  use crate::config::TokenBudgetConfig;
  use crate::cyber_access_program;
  use crate::environment_selection::EnvironmentConfigOrigin;
-@@ -81,6 +82,8 @@ pub(crate) struct TurnEnvironment {
++use crate::environment_selection::InitialTurnEnvironmentRecovery;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::exec_policy::AllowPrefixRules;
+ use crate::shell_snapshot::ShellSnapshot;
+@@ -81,6 +83,10 @@ pub(crate) struct TurnEnvironment {
      pub(crate) selection: TurnEnvironmentSelection,
      pub(crate) config_origin: EnvironmentConfigOrigin,
      pub(crate) environment: Arc<Environment>,
 +    /// Empty is a verified absence of project instructions on the bound connection.
 +    pub(crate) verified_project_instructions: Option<Arc<LoadedAgentsMd>>,
++    /// A verified initial recovery is active-turn only; child snapshots retain this rejection.
++    pub(crate) initial_recovery: Option<Arc<InitialTurnEnvironmentRecovery>>,
      /// Cached from the selected executor; `None` means it did not report one.
      pub(crate) user_home_dir: Option<PathUri>,
      /// Cached from the selected executor; `None` means it did not report them.
-@@ -106,6 +109,7 @@ impl TurnEnvironment {
+@@ -106,6 +112,8 @@ impl TurnEnvironment {
              selection,
              config_origin,
              environment,
 +            verified_project_instructions: None,
++            initial_recovery: None,
              user_home_dir: None,
              temporary_directories: None,
              shell,
+@@ -328,6 +336,8 @@ impl std::fmt::Debug for TurnEnvironment {
+ pub(crate) struct NewTurnContextOptions {
+     pub(crate) final_output_json_schema: Option<Value>,
+     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
++    /// Automatic, context-only, and recovery tasks cannot activate a new startup recovery.
++    pub(crate) allow_initial_default_recovery: bool,
+ }
+
+ /// The context needed for a single turn of the thread.
+@@ -1417,7 +1427,9 @@ impl Session {
+                 )
+                 .await;
+         }
+-        let turn_environments = self.activate_turn_environments(&configuration).await;
++        let turn_environments = self
++            .activate_turn_environments(&configuration, options.allow_initial_default_recovery)
++            .await;
+         let turn_context = self
+             .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
+             .await;
+@@ -1728,7 +1740,10 @@ impl Session {
+         options: NewTurnContextOptions,
+     ) -> Arc<TurnContext> {
+         let turn_environments = self
+-            .activate_turn_environments(&session_configuration)
++            .activate_turn_environments(
++                &session_configuration,
++                options.allow_initial_default_recovery,
++            )
+             .await;
+         self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
+             .await
+@@ -1758,6 +1773,7 @@ impl Session {
+                 environments,
+                 NewTurnContextOptions {
+                     final_output_json_schema: current.final_output_json_schema.clone(),
++                    allow_initial_default_recovery: false,
+                     cyber_access_program: current.cyber_access_program,
+                 },
+                 TurnContextBuildMode::StartupPrewarm,
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 92963e6db51d4e985833530dbdeac4b2c250a73b..b92611aa31dd2f2c786a4b0759ed0fca9c813609 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -166,6 +166,7 @@ impl PreparedTurnInputSettings {
+         let options = NewTurnContextOptions {
+             final_output_json_schema,
+             cyber_access_program,
++            allow_initial_default_recovery: matches!(kind, TurnStartKind::User),
+         };
+         let turn_context = match kind {
+             TurnStartKind::User | TurnStartKind::Recovery => Some(
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+index 324099bd9ecde3d6b8fe9d0aee6591edb78751b6..09b54c3216ee1807c66b8ab1305543387d47b382 100644
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -54,6 +54,7 @@ pub(super) async fn suspend_turn_and_shutdown(
+         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
+     })?;
+     let turn_id = task.turn_context.sub_id.clone();
++    session.revoke_turn_initial_recovery(task.turn_context.as_ref());
+     // Normal shutdown records a terminal turn event, preventing another worker from
+     // recovering this turn under its original ID. Cancel the task without that event.
+     task.cancellation_token.cancel();
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index e4bd2e88c4257fa22266596dce6f551a6804e46b..20f7b4bfa176ceded5825befbd754a3e2f857483 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -610,6 +610,7 @@ impl Session {
+         let options = NewTurnContextOptions {
+             final_output_json_schema: start_options.final_output_json_schema,
+             cyber_access_program: start_options.cyber_access_program,
++            allow_initial_default_recovery: false,
+         };
+         let turn_context = match session_configuration {
+             Some(configuration) => {
+@@ -1020,6 +1021,7 @@ impl Session {
+         };
+         let saved_guardian_completion =
+             matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
++        self.revoke_turn_initial_recovery(turn_context.as_ref());
+         if !saved_guardian_completion {
+             self.send_event(turn_context.as_ref(), event.clone()).await;
+         }
+@@ -1098,6 +1100,7 @@ impl Session {
+         error: Option<ErrorEvent>,
+     ) {
+         let sub_id = task.turn_context.sub_id.clone();
++        self.revoke_turn_initial_recovery(task.turn_context.as_ref());
+         if task.cancellation_token.is_cancelled() {
+             self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
+                 .await;
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4c11e6fc1 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -24,6 +24,7 @@ use crate::config::ThreadStoreConfig;
+ use crate::current_time::TimeProvider;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::environment_selection::default_thread_environment_requests;
++use crate::environment_selection::default_thread_environment_requests_for_ids;
+ use crate::exec_policy::ExecPolicyManager;
+ use crate::exec_policy::InheritedExecPolicy;
+ use crate::inherited_thread_state::InheritedThreadState;
+@@ -55,6 +56,7 @@ use codex_code_mode::CodeModeSessionProvider;
+ use codex_code_mode::DisabledCodeModeSessionProvider;
+ use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
+ use codex_core_plugins::PluginsManager;
++use codex_exec_server::Environment;
+ use codex_exec_server::EnvironmentManager;
+ use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+ use codex_execpolicy::Policy;
+@@ -537,6 +539,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
+     pub(crate) cold_resume: bool,
+     /// Explicit exceptions for one cold resume, never part of saved settings.
+     pub(crate) optional_on_resume: Arc<HashSet<String>>,
++    /// Present only for the actual local-primary registry selection at a new app-server start.
++    pub(crate) default_registrations: HashMap<String, Arc<Environment>>,
+ }
+
+ /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
+@@ -555,12 +559,40 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
+
+ impl StartThreadOptions {
+     /// Bounds executor discovery for app-server thread/start before workspace startup work.
+-    pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
++    pub fn bound_startup_environment_discovery(
++        &mut self,
++        thread_manager: &ThreadManager,
++        requests: Option<Vec<TurnEnvironmentRequest>>,
++    ) {
++        let implicit_selection = requests.is_none();
++        let mut default_registrations = HashMap::new();
++        self.environments = Some(requests.unwrap_or_else(|| {
++            let bindings = thread_manager
++                .state
++                .environment_manager
++                .default_environment_bindings();
++            let requests = default_thread_environment_requests_for_ids(
++                bindings.iter().map(|(id, _)| id.clone()),
++                &self.config.cwd,
++                &self.config.workspace_roots,
++            );
++            if bindings.first().is_some_and(|(id, environment)| {
++                id == LOCAL_ENVIRONMENT_ID && !environment.is_remote()
++            }) {
++                default_registrations.extend(bindings.into_iter().skip(1).filter(
++                    |(_, environment)| {
++                        environment.is_unattached_initial_default_recovery_candidate()
++                    },
++                ));
++            }
++            requests
++        }));
+         self.thread_extension_init
+             .insert(StartupEnvironmentDiscovery {
+                 implicit_selection,
+                 cold_resume: false,
+                 optional_on_resume: Arc::default(),
++                default_registrations,
+             });
+     }
+
+@@ -666,6 +698,7 @@ impl StartThreadOptions {
+                 implicit_selection,
+                 cold_resume: true,
+                 optional_on_resume: Arc::new(optional_on_resume),
++                default_registrations: HashMap::new(),
+             });
+         Ok(())
+     }
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec.rs b/codex-rs/core/src/tools/handlers/unified_exec.rs
 index ec7a7d24aa87a8b28d9380f2aa8338b541c18057..e7dccd5fe07704d10f2a8b3227df52c75295bdd3 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec.rs
@@ -2390,10 +3702,35 @@ index ec7a7d24aa87a8b28d9380f2aa8338b541c18057..e7dccd5fe07704d10f2a8b3227df52c7
  }
 
 diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
-index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93de5e37384 100644
+index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeafbc3f96f7 100644
 --- a/codex-rs/exec-server/src/client.rs
 +++ b/codex-rs/exec-server/src/client.rs
-@@ -356,6 +356,18 @@ enum RecoveryPolicy {
+@@ -4,6 +4,7 @@ use std::future::Future;
+ use std::sync::Arc;
+ use std::sync::Mutex as StdMutex;
+ use std::sync::OnceLock;
++use std::sync::Weak;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+@@ -143,6 +144,7 @@ use crate::protocol::WriteParams;
+ use crate::protocol::WriteResponse;
+ use crate::rpc::RpcCallError;
+ use crate::rpc::RpcClient;
++use crate::rpc::RpcDispatchGuard;
+ use crate::rpc_server_requests::MAX_IN_FLIGHT_SERVER_CALLS;
+ use codex_http_client::HttpClientFactory;
+
+@@ -274,6 +276,8 @@ pub(crate) struct Session {
+
+ struct Inner {
+     connection: StdMutex<ConnectionState>,
++    // Initial-default recovery must not mistake a rejoined transport for the first attachment.
++    initial_rpc: Weak<RpcClient>,
+     connection_changed: watch::Sender<()>,
+     // The remote transport delivers one shared notification stream for every
+     // process on the connection. Keep a local process_id -> session registry so
+@@ -356,6 +360,25 @@ enum RecoveryPolicy {
  pub struct ExecServerClient {
      inner: Arc<Inner>,
      recovery_policy: RecoveryPolicy,
@@ -2405,6 +3742,13 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +struct BoundTransport {
 +    rpc: Arc<RpcClient>,
 +    environment_info: OnceCell<Arc<EnvironmentInfo>>,
++    startup_recovery: Option<StartupRecoveryAuthority>,
++}
++
++/// A first-attachment view remains valid only while its registration and turn are current.
++struct StartupRecoveryAuthority {
++    registration_retired: CancellationToken,
++    turn_revoked: CancellationToken,
 +}
 +
 +fn bound_transport_unavailable() -> ExecServerError {
@@ -2412,7 +3756,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
  }
 
  /// State carried from a Noise readiness wait into the initialize RPC.
-@@ -403,6 +415,7 @@ pub(crate) struct LazyRemoteExecServerClient {
+@@ -403,10 +426,13 @@ pub(crate) struct LazyRemoteExecServerClient {
      transport_params: Option<ExecServerTransportParams>,
      http_client_factory: HttpClientFactory,
      recovery_policy: RecoveryPolicy,
@@ -2420,15 +3764,24 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
      // Saves the first startup result so callers share it; retryable failures use reconnect.
      startup: Arc<ConnectionAttempt>,
      // The latest successful client, replaced whenever reconnecting succeeds.
-@@ -422,6 +435,7 @@ impl LazyRemoteExecServerClient {
+     current_client: Arc<StdMutex<Option<ExecServerClient>>>,
++    // A direct endpoint can prove its first attachment, not the identity of a later handshake.
++    initial_recovery_retired: CancellationToken,
+     reconnect: Arc<StdMutex<Option<Arc<ConnectionAttempt>>>>,
+     refresh_lock: Arc<Mutex<()>>,
+     pub(super) connection_observer: Arc<OnceLock<ConnectionObserver>>,
+@@ -422,8 +448,10 @@ impl LazyRemoteExecServerClient {
              transport_params: Some(transport_params),
              http_client_factory,
              recovery_policy: RecoveryPolicy::Wait,
 +            bound_client: None,
              startup: Arc::new(ConnectionAttempt::default()),
              current_client: Arc::new(StdMutex::new(None)),
++            initial_recovery_retired: CancellationToken::new(),
              reconnect: Arc::new(StdMutex::new(None)),
-@@ -439,6 +453,9 @@ impl LazyRemoteExecServerClient {
+             refresh_lock: Arc::new(Mutex::new(())),
+             connection_observer: Default::default(),
+@@ -439,6 +467,9 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn start_connecting(&self) -> Option<AbortOnDropHandle<()>> {
@@ -2438,7 +3791,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          // Stdio starts a process, so keep it lazy until the environment is used.
          if matches!(
              self.transport_params,
-@@ -464,6 +481,9 @@ impl LazyRemoteExecServerClient {
+@@ -464,6 +495,9 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn readiness_result(&self) -> Option<Result<(), ExecServerError>> {
@@ -2448,7 +3801,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          if let Some(client) = self.cached_client() {
              return client.readiness_result();
          }
-@@ -511,11 +531,41 @@ impl LazyRemoteExecServerClient {
+@@ -511,11 +545,77 @@ impl LazyRemoteExecServerClient {
          }
      }
 
@@ -2459,7 +3812,43 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +            .or_else(|| self.cached_client())
 +            .ok_or_else(bound_transport_unavailable)?;
 +        Ok(Self {
-+            bound_client: Some(client.bind_current_transport()?),
++            bound_client: Some(client.bind_current_transport(/*startup_recovery*/ None)?),
++            ..self.clone()
++        })
++    }
++
++    pub(crate) fn supports_initial_default_recovery(&self) -> bool {
++        matches!(
++            self.transport_params,
++            Some(ExecServerTransportParams::WebSocketUrl { .. })
++        ) && !self.initial_recovery_retired.is_cancelled()
++    }
++
++    pub(crate) fn is_unattached_initial_default_recovery_candidate(&self) -> bool {
++        self.supports_initial_default_recovery() && self.cached_client().is_none()
++    }
++
++    pub(crate) fn retire_initial_recovery(&self) {
++        self.initial_recovery_retired.cancel();
++    }
++
++    pub(crate) fn connected_initial_default_recovery_view(
++        &self,
++        turn_revoked: CancellationToken,
++    ) -> Result<Self, ExecServerError> {
++        if !self.supports_initial_default_recovery() || self.is_attachment_bound() {
++            return Err(bound_transport_unavailable());
++        }
++        let client = self
++            .cached_client()
++            .ok_or_else(bound_transport_unavailable)?;
++        Ok(Self {
++            bound_client: Some(
++                client.bind_current_transport(Some(StartupRecoveryAuthority {
++                    registration_retired: self.initial_recovery_retired.clone(),
++                    turn_revoked,
++                }))?,
++            ),
 +            ..self.clone()
 +        })
 +    }
@@ -2490,7 +3879,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          if matches!(self.recovery_policy, RecoveryPolicy::FailFast) {
              let client = match self.cached_client() {
                  Some(client) => client,
-@@ -621,6 +671,11 @@ impl LazyRemoteExecServerClient {
+@@ -621,6 +721,11 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn cached_executor_registration_id(&self) -> Option<String> {
@@ -2502,25 +3891,33 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          self.cached_client()
              .and_then(|client| client.executor_registration_id())
      }
-@@ -757,15 +812,52 @@ impl ExecServerClient {
+@@ -757,6 +862,62 @@ impl ExecServerClient {
          Ok(Self {
              inner: Arc::clone(&self.inner),
              recovery_policy: RecoveryPolicy::FailFast,
 +            bound_transport: self.bound_transport.clone(),
-         })
-     }
-
-+    fn bind_current_transport(&self) -> Result<Self, ExecServerError> {
++        })
++    }
++
++    fn bind_current_transport(
++        &self,
++        startup_recovery: Option<StartupRecoveryAuthority>,
++    ) -> Result<Self, ExecServerError> {
 +        if self.bound_transport.is_some() {
 +            self.check_bound_transport()?;
 +            return Ok(self.clone());
++        }
++        let rpc = self.rpc_client_without_recovery()?;
++        if startup_recovery.is_some() && !self.inner.initial_rpc.ptr_eq(&Arc::downgrade(&rpc)) {
++            return Err(bound_transport_unavailable());
 +        }
 +        let bound = Self {
 +            inner: Arc::clone(&self.inner),
 +            recovery_policy: RecoveryPolicy::FailFast,
 +            bound_transport: Some(Arc::new(BoundTransport {
-+                rpc: self.rpc_client_without_recovery()?,
++                rpc,
 +                environment_info: OnceCell::new(),
++                startup_recovery,
 +            })),
 +        };
 +        bound.check_bound_transport()?;
@@ -2534,9 +3931,30 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +        Ok(())
 +    }
 +
-     fn rpc_client_without_recovery(&self) -> Result<Arc<RpcClient>, ExecServerError> {
-         let connection = self
-             .inner
++    fn initial_recovery_authority(&self) -> Option<&StartupRecoveryAuthority> {
++        self.bound_transport.as_ref()?.startup_recovery.as_ref()
++    }
++
++    fn initial_recovery_dispatch_guard<'a>(
++        &'a self,
++        can_dispatch: &'a (dyn Fn() -> bool + Sync),
++        dispatched: Option<&'a AtomicBool>,
++    ) -> Option<RpcDispatchGuard<'a>> {
++        let authority = self.initial_recovery_authority()?;
++        Some(RpcDispatchGuard {
++            revoked: Box::pin(async move {
++                tokio::select! {
++                    _ = authority.registration_retired.cancelled() => {}
++                    _ = authority.turn_revoked.cancelled() => {}
++                    _ = self.inner.retired.cancelled() => {}
++                }
++            }),
++            can_dispatch,
++            dispatched,
+         })
+     }
+
+@@ -766,6 +927,22 @@ impl ExecServerClient {
              .connection
              .lock()
              .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2544,6 +3962,10 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +            return match &connection.status {
 +                ConnectionStatus::Connected(current)
 +                    if !self.inner.retired.is_cancelled()
++                        && bound.startup_recovery.as_ref().is_none_or(|authority| {
++                            !authority.registration_retired.is_cancelled()
++                                && !authority.turn_revoked.is_cancelled()
++                        })
 +                        && Arc::ptr_eq(current, &bound.rpc)
 +                        && !bound.rpc.is_disconnected() =>
 +                {
@@ -2555,7 +3977,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          match &connection.status {
              ConnectionStatus::Connected(rpc_client) if !rpc_client.is_disconnected() => {
                  Ok(Arc::clone(rpc_client))
-@@ -872,11 +964,19 @@ impl ExecServerClient {
+@@ -872,11 +1049,19 @@ impl ExecServerClient {
 
      /// Returns shared cached executor metadata, fetching it lazily if initialization omitted it.
      pub async fn environment_info(&self) -> Result<Arc<EnvironmentInfo>, ExecServerError> {
@@ -2579,16 +4001,27 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
      }
 
      /// Fetches executor metadata over RPC without reading or updating the cache.
-@@ -908,7 +1008,7 @@ impl ExecServerClient {
+@@ -908,10 +1093,15 @@ impl ExecServerClient {
      pub async fn environment_status(&self) -> Result<EnvironmentStatus, ExecServerError> {
          // Health checks only reuse an existing RPC connection and never initiate recovery.
          let rpc_client = self.rpc_client_without_recovery()?;
 -        self.map_rpc_call_result(
+-            rpc_client
+-                .call_with_timeout(ENVIRONMENT_STATUS_METHOD, &(), ENVIRONMENT_STATUS_TIMEOUT)
+-                .await,
 +        self.map_operation_result(
-             rpc_client
-                 .call_with_timeout(ENVIRONMENT_STATUS_METHOD, &(), ENVIRONMENT_STATUS_TIMEOUT)
-                 .await,
-@@ -1046,6 +1146,11 @@ impl ExecServerClient {
++            self.call_on_transport(
++                &rpc_client,
++                ENVIRONMENT_STATUS_METHOD,
++                &(),
++                Some(ENVIRONMENT_STATUS_TIMEOUT),
++                /*dispatched*/ None,
++            )
++            .await,
+         )
+     }
+
+@@ -1046,6 +1236,11 @@ impl ExecServerClient {
          &self,
          params: FsCloseParams,
      ) -> Result<FsCloseResponse, ExecServerError> {
@@ -2600,23 +4033,29 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          self.call_for_cleanup(FS_CLOSE_METHOD, &params).await
      }
 
-@@ -1076,11 +1181,13 @@ impl ExecServerClient {
+@@ -1076,11 +1271,18 @@ impl ExecServerClient {
          if !self.environment_info().await?.capabilities.fs_watch_missing {
              return Ok(None);
          }
 -        Ok(self
++        let can_dispatch = || self.check_bound_transport().is_ok();
 +        let watcher = self
              .rpc_client()
              .await?
-             .watch_missing(missing, present)
+-            .watch_missing(missing, present)
 -            .await?)
++            .watch_missing(
++                missing,
++                present,
++                self.initial_recovery_dispatch_guard(&can_dispatch, /*dispatched*/ None),
++            )
 +            .await;
 +        self.check_bound_transport()?;
 +        Ok(watcher?)
      }
 
      pub async fn fs_get_metadata(
-@@ -1171,6 +1278,9 @@ impl ExecServerClient {
+@@ -1171,6 +1373,9 @@ impl ExecServerClient {
          loop {
              let rpc_client = self.rpc_client().await?;
              if !self.inner.begin_process_start(&rpc_client) {
@@ -2626,7 +4065,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
                  continue;
              }
 
-@@ -1209,10 +1319,16 @@ impl ExecServerClient {
+@@ -1209,10 +1414,22 @@ impl ExecServerClient {
              let (result_received_tx, result_received_rx) = tokio::sync::oneshot::channel();
              let process_start_task = async move {
                  let _active_start = active_start;
@@ -2639,15 +4078,33 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +                    let _ = result_tx.send(Err(error));
 +                    return;
 +                }
-+                match client.map_operation_result(
-+                    rpc_client
-+                        .call::<_, ExecResponse>(EXEC_METHOD, &params)
-+                        .await,
-+                ) {
++                let dispatched = AtomicBool::new(false);
++                let result = client
++                    .call_on_transport::<_, ExecResponse>(
++                        &rpc_client,
++                        EXEC_METHOD,
++                        &params,
++                        /*call_timeout*/ None,
++                        Some(&dispatched),
++                    )
++                    .await;
++                match client.map_operation_result(result) {
                      Ok(response) => {
                          state.recoverable.store(true, Ordering::Release);
                          let session = Session {
-@@ -1255,6 +1371,7 @@ impl ExecServerClient {
+@@ -1231,7 +1448,10 @@ impl ExecServerClient {
+                         }
+                     }
+                     Err(error) => {
+-                        if is_transport_closed_error(&error) {
++                        if is_transport_closed_error(&error)
++                            && (client.initial_recovery_authority().is_none()
++                                || dispatched.load(Ordering::Relaxed))
++                        {
+                             tokio::spawn(async move {
+                                 cleanup_process_start(&client, &process_id, &state).await;
+                             });
+@@ -1255,6 +1475,7 @@ impl ExecServerClient {
                  ));
              }
              if matches!(&result, Ok(Ok(_))) {
@@ -2655,7 +4112,15 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
                  pending_start.armed = false;
                  let _ = result_received_tx.send(());
              }
-@@ -1377,6 +1494,7 @@ impl ExecServerClient {
+@@ -1349,6 +1570,7 @@ impl ExecServerClient {
+         let session_id = OnceLock::new();
+         let (connection_changed, _connection_changed_rx) = watch::channel(());
+         let inner = Arc::new(Inner {
++            initial_rpc: Arc::downgrade(&rpc_client),
+             connection: StdMutex::new(ConnectionState {
+                 status: ConnectionStatus::Connected(Arc::clone(&rpc_client)),
+                 executor_registration_id: noise_context
+@@ -1377,6 +1599,7 @@ impl ExecServerClient {
          let client = Self {
              inner,
              recovery_policy: RecoveryPolicy::Wait,
@@ -2663,11 +4128,24 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          };
          // An explicit resume can redirect notifications from running processes
          // before initialize returns. Drain them immediately so a burst cannot
-@@ -1416,13 +1534,14 @@ impl ExecServerClient {
+@@ -1415,14 +1638,26 @@ impl ExecServerClient {
+     {
          let rpc_client = self.rpc_client().await?;
          // Bound sending as well as receiving: a stuck transport can fill the outbound queue.
-         match timeout(call_timeout, rpc_client.call(method, params)).await {
+-        match timeout(call_timeout, rpc_client.call(method, params)).await {
 -            Ok(result) => self.map_rpc_call_result(result),
++        match timeout(
++            call_timeout,
++            self.call_on_transport(
++                &rpc_client,
++                method,
++                params,
++                /*call_timeout*/ None,
++                /*dispatched*/ None,
++            ),
++        )
++        .await
++        {
 +            Ok(result) => self.map_operation_result(result),
              Err(_) => {
 +                self.check_bound_transport()?;
@@ -2680,22 +4158,60 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
                      // Retire only the connection we probed; recovery ignores a stale client.
                      rpc_client.close_transport().await;
                      self.inner.request_recovery(rpc_client, error.to_string());
-@@ -1442,7 +1561,8 @@ impl ExecServerClient {
+@@ -1442,7 +1677,37 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
 -        self.map_rpc_call_result(rpc_client.call(method, params).await)
 +        self.check_bound_transport()?;
-+        self.map_operation_result(rpc_client.call(method, params).await)
++        self.map_operation_result(
++            self.call_on_transport(
++                rpc_client, method, params, /*call_timeout*/ None, /*dispatched*/ None,
++            )
++            .await,
++        )
++    }
++
++    async fn call_on_transport<P, T>(
++        &self,
++        rpc_client: &RpcClient,
++        method: &str,
++        params: &P,
++        call_timeout: Option<Duration>,
++        dispatched: Option<&AtomicBool>,
++    ) -> Result<T, RpcCallError>
++    where
++        P: serde::Serialize,
++        T: serde::de::DeserializeOwned,
++    {
++        let can_dispatch = || self.check_bound_transport().is_ok();
++        if let Some(guard) = self.initial_recovery_dispatch_guard(&can_dispatch, dispatched) {
++            return rpc_client
++                .call_guarded(method, params, call_timeout, guard)
++                .await;
++        }
++        match call_timeout {
++            Some(timeout) => rpc_client.call_with_timeout(method, params, timeout).await,
++            None => rpc_client.call(method, params).await,
++        }
      }
 
      async fn call_for_cleanup<P, T>(&self, method: &str, params: &P) -> Result<T, ExecServerError>
-@@ -1450,10 +1570,19 @@ impl ExecServerClient {
+@@ -1450,10 +1715,27 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
+-        let rpc_client = self.inner.rpc_client().await?;
 +        // Cleanup may terminate a known process on the recovered session, not start new work.
-         let rpc_client = self.inner.rpc_client().await?;
++        let rpc_client = match self
++            .bound_transport
++            .as_ref()
++            .filter(|bound| bound.startup_recovery.is_some())
++        {
++            // Initial-default recovery never authorizes reconnect, even for cleanup.
++            Some(bound) => Arc::clone(&bound.rpc),
++            None => self.inner.rpc_client().await?,
++        };
          self.map_rpc_call_result(rpc_client.call_for_cleanup(method, params).await)
      }
 
@@ -2710,7 +4226,25 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
      fn map_rpc_call_result<T>(
          &self,
          result: Result<T, RpcCallError>,
-@@ -1730,6 +1859,7 @@ impl Session {
+@@ -1481,10 +1763,16 @@ async fn cleanup_process_start(
+     process_id: &ProcessId,
+     state: &Arc<SessionState>,
+ ) {
++    // An initial-recovery view cannot retry cleanup on a recovered transport.
++    let retry_closed = client.initial_recovery_authority().is_none();
+     loop {
+         match client.terminate(process_id).await {
+             Ok(_) => break,
+-            Err(error) if is_transport_closed_error(&error) && !client.inner.is_failed() => {
++            Err(error)
++                if retry_closed
++                    && is_transport_closed_error(&error)
++                    && !client.inner.is_failed() =>
++            {
+                 continue;
+             }
+             Err(_) => break,
+@@ -1730,6 +2018,7 @@ impl Session {
          max_bytes: Option<usize>,
          wait_ms: Option<u64>,
      ) -> Result<ReadResponse, ExecServerError> {
@@ -2718,7 +4252,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          loop {
              if let Some(response) = self.state.failed_response() {
                  return Ok(response);
-@@ -1746,6 +1876,7 @@ impl Session {
+@@ -1746,6 +2035,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -2726,7 +4260,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -1765,6 +1896,7 @@ impl Session {
+@@ -1765,6 +2055,7 @@ impl Session {
      }
 
      pub(crate) async fn write(&self, chunk: Vec<u8>) -> Result<WriteResponse, ExecServerError> {
@@ -2734,7 +4268,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
          let write_id = self.state.next_write_id();
          loop {
              match self
-@@ -1773,6 +1905,7 @@ impl Session {
+@@ -1773,6 +2064,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -2742,15 +4276,34 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -2041,6 +2174,7 @@ mod tests {
+@@ -2037,14 +2329,18 @@ mod tests {
+     use tokio_tungstenite::WebSocketStream;
+     use tokio_tungstenite::accept_async;
+     use tokio_tungstenite::tungstenite::Message;
++    use tokio_util::sync::CancellationToken;
+     use tracing::Instrument;
      use tracing_subscriber::filter::filter_fn;
      use tracing_subscriber::prelude::*;
 
++    use super::ConnectionFailure;
 +    use super::ConnectionStatus;
      use super::ExecServerClient;
      use super::ExecServerClientConnectOptions;
      use super::ExecServerError;
-@@ -2063,6 +2197,7 @@ mod tests {
+     use super::LazyRemoteExecServerClient;
++    use super::StartupRecoveryAuthority;
+     use crate::Environment;
+     use crate::EnvironmentObservedStatus;
+     use crate::ExecutorFileSystem;
+@@ -2057,12 +2353,15 @@ mod tests {
+     use crate::client_api::StdioExecServerCommand;
+     use crate::client_api::StdioExecServerConnectArgs;
+     use crate::connection::JsonRpcConnection;
++    use crate::connection::JsonRpcConnectionEvent;
++    use crate::connection::JsonRpcTransport;
+     use crate::process::ExecProcessEvent;
+     use crate::protocol::EXEC_CLOSED_METHOD;
+     use crate::protocol::EXEC_EXITED_METHOD;
      use crate::protocol::EXEC_METHOD;
      use crate::protocol::EXEC_OUTPUT_DELTA_METHOD;
      use crate::protocol::EXEC_READ_METHOD;
@@ -2758,7 +4311,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
      use crate::protocol::EXEC_WRITE_METHOD;
      use crate::protocol::EnvironmentInfo;
      use crate::protocol::ExecClosedNotification;
-@@ -2073,11 +2208,14 @@ mod tests {
+@@ -2073,11 +2372,14 @@ mod tests {
      use crate::protocol::ExecResponse;
      use crate::protocol::FS_CLOSE_METHOD;
      use crate::protocol::FS_OPEN_METHOD;
@@ -2773,7 +4326,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
      use crate::protocol::INITIALIZE_METHOD;
      use crate::protocol::INITIALIZED_METHOD;
      use crate::protocol::InitializeResponse;
-@@ -2113,6 +2251,202 @@ mod tests {
+@@ -2113,6 +2415,515 @@ mod tests {
              .expect("json-rpc line should write");
      }
 
@@ -2824,16 +4377,20 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +                        serde_json::json!({"status": status, "headers": [], "bodyBase64": ""})
 +                    }
 +                    EXEC_METHOD => {
-+                        assert_eq!(label, "original");
++                        assert!(matches!(label, "original" | "initial-recovery"));
 +                        let params: ExecParams = serde_json::from_value(request.params.unwrap())
 +                            .expect("process params should deserialize");
 +                        serde_json::json!({"processId": params.process_id})
 +                    }
 +                    EXEC_TERMINATE_METHOD => {
-+                        assert_eq!(label, "replacement");
++                        let expected_process_id = match label {
++                            "replacement" => "started-on-original",
++                            "initial-recovery" => "before-revocation",
++                            _ => panic!("unexpected termination on {label}"),
++                        };
 +                        assert_eq!(
 +                            request.params.unwrap()["processId"],
-+                            serde_json::json!("started-on-original")
++                            serde_json::json!(expected_process_id)
 +                        );
 +                        serde_json::json!({"running": false})
 +                    }
@@ -2973,14 +4530,323 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..34e984a81b991d579e4bfe9669e1a93d
 +        );
 +    }
 +
++    #[tokio::test]
++    async fn initial_recovery_revokes_cached_new_io_but_allows_process_cleanup() {
++        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
++        let lazy = LazyRemoteExecServerClient::new(
++            ExecServerTransportParams::websocket_url(
++                "ws://127.0.0.1:1".to_string(),
++                DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
++            ),
++            factory,
++        );
++        let environment = Environment::remote_with_client(
++            lazy.clone(),
++            /*local_runtime_paths*/ None,
++            codex_config::ScopedSkillsConfig::default(),
++        );
++        let revoked = CancellationToken::new();
++        assert!(environment.is_unattached_initial_default_recovery_candidate());
++        assert!(
++            environment
++                .connected_initial_default_recovery_view(revoked.clone())
++                .is_err()
++        );
++        assert!(!environment.startup_finished());
++
++        let (client, _peer) = connected_view_test_peer("initial-recovery").await;
++        let original_rpc = client.rpc_client_without_recovery().unwrap();
++        *lazy.current_client.lock().unwrap() = Some(client.clone());
++        let view = environment
++            .connected_initial_default_recovery_view(revoked.clone())
++            .unwrap();
++        let exec = view.get_exec_backend();
++        let cwd = PathUri::from_host_native_path(std::env::current_dir().unwrap()).unwrap();
++        let mut params = ExecParams {
++            metadata: Default::default(),
++            process_id: ProcessId::from("before-revocation"),
++            argv: vec!["mocked".to_string()],
++            cwd,
++            shell_snapshot: None,
++            env_policy: None,
++            env: HashMap::new(),
++            tty: false,
++            pipe_stdin: false,
++            arg0: None,
++            sandbox: None,
++            enforce_managed_network: false,
++            managed_network: None,
++            network_proxy: None,
++        };
++        let started = exec.start(params.clone()).await.unwrap();
++        let next = environment
++            .connected_initial_default_recovery_view(CancellationToken::new())
++            .unwrap();
++        revoked.cancel();
++        params.process_id = ProcessId::from("after-revocation");
++        assert!(matches!(
++            exec.start(params).await,
++            Err(ExecServerError::Disconnected(_))
++        ));
++        assert!(matches!(
++            started.process.write(b"no new I/O".to_vec()).await,
++            Err(ExecServerError::Disconnected(_))
++        ));
++        assert!(next.check_connected_view().is_ok());
++        let (replacement, _replacement_peer) = connected_view_test_peer("replacement").await;
++        client
++            .inner
++            .connection
++            .lock()
++            .unwrap()
++            .set_status(ConnectionStatus::Connected(
++                replacement.rpc_client_without_recovery().unwrap(),
++            ));
++        assert!(next.check_connected_view().is_err());
++        assert!(
++            environment
++                .connected_initial_default_recovery_view(CancellationToken::new())
++                .is_err()
++        );
++        assert!(environment.connected_view().is_ok());
++        started.process.terminate().await.unwrap();
++
++        client
++            .inner
++            .connection
++            .lock()
++            .unwrap()
++            .set_status(ConnectionStatus::Connected(original_rpc));
++        lazy.retire_initial_recovery();
++        assert!(next.check_connected_view().is_err());
++        assert!(
++            environment
++                .connected_initial_default_recovery_view(CancellationToken::new())
++                .is_err()
++        );
++        assert!(environment.connected_view().is_ok());
++    }
++
++    /// A capacity-one transport lets these tests control dispatch without any sockets.
++    struct ControlledStartPeer {
++        client: ExecServerClient,
++        outgoing: mpsc::Sender<JSONRPCMessage>,
++        requests: mpsc::Receiver<JSONRPCMessage>,
++        _responses: mpsc::Sender<JsonRpcConnectionEvent>,
++    }
++
++    impl ControlledStartPeer {
++        async fn connect() -> Self {
++            let (outgoing, mut requests) = mpsc::channel(1);
++            let (responses, incoming_rx) = mpsc::channel(1);
++            let connection = JsonRpcConnection {
++                outgoing_tx: outgoing.clone(),
++                incoming_rx,
++                disconnected_rx: watch::channel(false).1,
++                task_handles: Vec::new(),
++                transport: JsonRpcTransport::Plain,
++            };
++            let connecting = ExecServerClient::connect(connection, Default::default());
++            tokio::pin!(connecting);
++            assert!(futures::poll!(connecting.as_mut()).is_pending());
++            let Some(JSONRPCMessage::Request(initialize)) = requests.try_recv().ok() else {
++                panic!("expected initialize request");
++            };
++            assert_eq!(initialize.method, INITIALIZE_METHOD);
++            responses
++                .try_send(JsonRpcConnectionEvent::message(JSONRPCMessage::Response(
++                    JSONRPCResponse {
++                        id: initialize.id,
++                        result: serde_json::json!({"sessionId": "controlled-start"}),
++                    },
++                )))
++                .unwrap();
++            let client = timeout(Duration::from_secs(5), connecting)
++                .await
++                .expect("initialize should complete")
++                .unwrap();
++            assert!(matches!(
++                requests.try_recv(),
++                Ok(JSONRPCMessage::Notification(notification))
++                    if notification.method == INITIALIZED_METHOD
++            ));
++            Self {
++                client,
++                outgoing,
++                requests,
++                _responses: responses,
++            }
++        }
++
++        fn initial_recovery_view(&self, turn_revoked: CancellationToken) -> ExecServerClient {
++            self.client
++                .bind_current_transport(Some(StartupRecoveryAuthority {
++                    registration_retired: CancellationToken::new(),
++                    turn_revoked,
++                }))
++                .unwrap()
++        }
++    }
++
++    fn controlled_start_params(process_id: ProcessId) -> ExecParams {
++        ExecParams {
++            metadata: Default::default(),
++            process_id,
++            argv: vec!["mocked".to_string()],
++            cwd: PathUri::from_host_native_path(std::env::current_dir().unwrap()).unwrap(),
++            shell_snapshot: None,
++            env_policy: None,
++            env: HashMap::new(),
++            tty: false,
++            pipe_stdin: false,
++            arg0: None,
++            sandbox: None,
++            enforce_managed_network: false,
++            managed_network: None,
++            network_proxy: None,
++        }
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn initial_recovery_pending_start_cleanup_stops_after_original_rpc_closes() {
++        let mut original = ControlledStartPeer::connect().await;
++        let mut replacement = ControlledStartPeer::connect().await;
++        let original_rpc = original.client.rpc_client_without_recovery().unwrap();
++        let replacement_rpc = replacement.client.rpc_client_without_recovery().unwrap();
++        let bound = original.initial_recovery_view(CancellationToken::new());
++        let process_id = ProcessId::from("start-without-receipt");
++        let starting = bound.start_process(controlled_start_params(process_id.clone()), None);
++        tokio::pin!(starting);
++        assert!(futures::poll!(starting.as_mut()).is_pending());
++        assert!(matches!(
++            timeout(Duration::from_secs(5), original.requests.recv())
++                .await
++                .unwrap(),
++            Some(JSONRPCMessage::Request(request)) if request.method == EXEC_METHOD
++        ));
++        let pending = Arc::downgrade(&original.client.inner.get_session(&process_id).unwrap());
++        original
++            .client
++            .inner
++            .connection
++            .lock()
++            .unwrap()
++            .set_status(ConnectionStatus::Connected(Arc::clone(&replacement_rpc)));
++        original_rpc.close_transport().await;
++        assert!(matches!(
++            timeout(Duration::from_secs(5), starting).await.unwrap(),
++            Err(ExecServerError::Disconnected(_))
++        ));
++        let cleanup_finished = timeout(Duration::from_secs(5), async {
++            while pending.strong_count() != 0 {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await;
++        if cleanup_finished.is_err() {
++            // Let a broken retry loop exit so the failing test cannot hang runtime shutdown.
++            original
++                .client
++                .inner
++                .connection
++                .lock()
++                .unwrap()
++                .set_status(ConnectionStatus::Failed(ConnectionFailure::Disconnected(
++                    "test cleanup deadline".to_string(),
++                )));
++        }
++        cleanup_finished.expect("closed original RPC must not retain a cleanup worker");
++        assert!(original.client.inner.get_session(&process_id).is_none());
++        assert!(Arc::ptr_eq(
++            &original.client.rpc_client_without_recovery().unwrap(),
++            &replacement_rpc
++        ));
++        assert!(matches!(
++            replacement.requests.try_recv(),
++            Err(mpsc::error::TryRecvError::Empty)
++        ));
++    }
++
++    #[tokio::test]
++    async fn initial_recovery_revocation_denies_queued_process_start_before_dispatch() {
++        for replace_transport in [false, true] {
++            let mut original = ControlledStartPeer::connect().await;
++            let mut replacement = ControlledStartPeer::connect().await;
++            let original_rpc = original.client.rpc_client_without_recovery().unwrap();
++            let revoked = CancellationToken::new();
++            let bound = original.initial_recovery_view(revoked.clone());
++            original
++                .outgoing
++                .try_send(JSONRPCMessage::Notification(JSONRPCNotification {
++                    method: "queue-filler".to_string(),
++                    params: None,
++                }))
++                .unwrap();
++            let process_id = ProcessId::from("must-not-dispatch");
++            let starting = bound.start_process(controlled_start_params(process_id.clone()), None);
++            tokio::pin!(starting);
++            assert!(futures::poll!(starting.as_mut()).is_pending());
++            timeout(Duration::from_secs(5), async {
++                while original_rpc.pending_request_count().await != 1 {
++                    tokio::task::yield_now().await;
++                }
++            })
++            .await
++            .expect("exec/start must be waiting on the full outgoing queue");
++            let pending = Arc::downgrade(&original.client.inner.get_session(&process_id).unwrap());
++            assert_eq!(original.outgoing.capacity(), 0);
++            let drain_filler = |peer: &mut ControlledStartPeer| {
++                assert!(matches!(
++                    peer.requests.try_recv(),
++                    Ok(JSONRPCMessage::Notification(notification)) if notification.method == "queue-filler"
++                ));
++            };
++            if replace_transport {
++                // No token is cancelled. Only the recheck after reservation sees replacement.
++                original.client.inner.connection.lock().unwrap().set_status(
++                    ConnectionStatus::Connected(
++                        replacement.client.rpc_client_without_recovery().unwrap(),
++                    ),
++                );
++                drain_filler(&mut original);
++            } else {
++                revoked.cancel();
++            }
++            assert!(matches!(
++                timeout(Duration::from_secs(5), starting).await.unwrap(),
++                Err(ExecServerError::Disconnected(_))
++            ));
++            if !replace_transport {
++                // Cancellation must return before queue capacity becomes available again.
++                drain_filler(&mut original);
++            }
++            timeout(Duration::from_secs(5), async {
++                while pending.strong_count() != 0 {
++                    tokio::task::yield_now().await;
++                }
++            })
++            .await
++            .expect("an undispatched start must not send cleanup");
++            assert_eq!(original_rpc.pending_request_count().await, 0);
++            assert!(matches!(
++                original.requests.try_recv(),
++                Err(mpsc::error::TryRecvError::Empty)
++            ));
++            assert!(matches!(
++                replacement.requests.try_recv(),
++                Err(mpsc::error::TryRecvError::Empty)
++            ));
++        }
++    }
++
      #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
      async fn process_start_propagates_caller_trace_context_across_background_task() {
          let (client_stdin, server_reader) = duplex(1 << 20);
 diff --git a/codex-rs/exec-server/src/client/accepted.rs b/codex-rs/exec-server/src/client/accepted.rs
-index 61f12219fe01189ff4f1bd1a55411aa3a76fa47b..173b9a01cde7da59b5354e470d04df618ba7bd8f 100644
+index 61f12219fe01189ff4f1bd1a55411aa3a76fa47b..c44d1d0e33e3690015173c95fb66bf296a862f95 100644
 --- a/codex-rs/exec-server/src/client/accepted.rs
 +++ b/codex-rs/exec-server/src/client/accepted.rs
-@@ -243,6 +243,7 @@ impl LazyRemoteExecServerClient {
+@@ -243,11 +243,13 @@ impl LazyRemoteExecServerClient {
              transport_params: None,
              http_client_factory,
              recovery_policy: super::RecoveryPolicy::Wait,
@@ -2988,7 +4854,13 @@ index 61f12219fe01189ff4f1bd1a55411aa3a76fa47b..173b9a01cde7da59b5354e470d04df61
              startup: std::sync::Arc::new(super::ConnectionAttempt {
                  result: OnceCell::new_with(Some(Ok(client.clone()))),
                  ..Default::default()
-@@ -259,6 +260,11 @@ impl LazyRemoteExecServerClient {
+             }),
+             current_client: std::sync::Arc::new(std::sync::Mutex::new(Some(client))),
++            initial_recovery_retired: Default::default(),
+             reconnect: std::sync::Arc::new(std::sync::Mutex::new(None)),
+             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+             environment_connection_state_tx,
+@@ -259,6 +261,11 @@ impl LazyRemoteExecServerClient {
          &self,
          websocket: WebSocket,
      ) -> Result<(), ExecServerError> {
@@ -3013,7 +4885,7 @@ index 7c6fdc86d450f5c9d7a586f27ae816373aeaee6c..6f7a8031cbfed4499cebb306c2a472ed
          // Resuming a session redirects notifications from its running processes
          // to this connection during initialize. Drain them immediately so a
 diff --git a/codex-rs/exec-server/src/client_refresh.rs b/codex-rs/exec-server/src/client_refresh.rs
-index 43cae9282040133e650a7cf20eef8dc72fab5876..9f03101192fefb0f8db91d488dcb6be1bfdb484e 100644
+index 43cae9282040133e650a7cf20eef8dc72fab5876..274e898015f0e0b0f8f0d59dffa989d4f31dadca 100644
 --- a/codex-rs/exec-server/src/client_refresh.rs
 +++ b/codex-rs/exec-server/src/client_refresh.rs
 @@ -98,6 +98,11 @@ impl LazyRemoteExecServerClient {
@@ -3028,11 +4900,82 @@ index 43cae9282040133e650a7cf20eef8dc72fab5876..9f03101192fefb0f8db91d488dcb6be1
          let _refresh = self.refresh_lock.lock().await;
          let (previous, attempt) = loop {
              let observed = self.cached_client();
+@@ -265,6 +270,9 @@ impl LazyRemoteExecServerClient {
+                     .lock()
+                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                 if !attempt.cancelled.is_cancelled() {
++                    if current.is_some() {
++                        self.retire_initial_recovery();
++                    }
+                     client.attach_environment_connection_state(
+                         self.environment_connection_state_tx.clone(),
+                     );
 diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
-index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..aa575805fc10901b94b69aa6f21a0a8254c14b8a 100644
+index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..9e54a287401bf13723bdfc46e5954dfd02d7c049 100644
 --- a/codex-rs/exec-server/src/environment.rs
 +++ b/codex-rs/exec-server/src/environment.rs
-@@ -1126,6 +1126,9 @@ impl Environment {
+@@ -17,6 +17,7 @@ use codex_http_client::OutboundProxyPolicy;
+ use codex_protocol::capabilities::CapabilityRootLocation;
+ use codex_protocol::capabilities::SelectedCapabilityRoot;
+ use codex_protocol::shell_environment::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
++use tokio_util::sync::CancellationToken;
+
+ use crate::CapabilityRootsDiscoverParams;
+ use crate::CapabilityRootsDiscoverResponse;
+@@ -385,6 +386,14 @@ impl EnvironmentManager {
+
+     /// Returns the ordered environment ids used for new thread startup.
+     pub fn default_environment_ids(&self) -> Vec<String> {
++        self.default_environment_bindings()
++            .into_iter()
++            .map(|(id, _)| id)
++            .collect()
++    }
++
++    /// Captures default IDs and the corresponding registrations under the same registry lock.
++    pub fn default_environment_bindings(&self) -> Vec<(String, Arc<Environment>)> {
+         let Some(default_environment_id) = self.default_environment.as_ref() else {
+             return Vec::new();
+         };
+@@ -392,15 +401,17 @@ impl EnvironmentManager {
+             .environments
+             .read()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        let mut environment_ids = Vec::with_capacity(environments.len());
+-        environment_ids.push(default_environment_id.clone());
+-        environment_ids.extend(
++        let mut bindings = Vec::with_capacity(environments.len());
++        if let Some(primary) = environments.get(default_environment_id) {
++            bindings.push((default_environment_id.clone(), Arc::clone(primary)));
++        }
++        bindings.extend(
+             environments
+-                .keys()
+-                .filter(|environment_id| *environment_id != default_environment_id)
+-                .cloned(),
++                .iter()
++                .filter(|(environment_id, _)| *environment_id != default_environment_id)
++                .map(|(id, environment)| (id.clone(), Arc::clone(environment))),
+         );
+-        environment_ids
++        bindings
+     }
+
+     /// Returns the local environment instance when one is configured.
+@@ -580,7 +591,11 @@ impl EnvironmentManager {
+                 .environments
+                 .write()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            environments.insert(environment_id, Arc::clone(&environment))
++            let replaced = environments.insert(environment_id, Arc::clone(&environment));
++            if let Some(client) = replaced.as_ref().and_then(|old| old.remote_client.as_ref()) {
++                client.retire_initial_recovery();
++            }
++            replaced
+         };
+         drop(replaced);
+         environment.start_connecting();
+@@ -1126,6 +1141,9 @@ impl Environment {
          let Some(client) = &environment.remote_client else {
              return;
          };
@@ -3042,7 +4985,7 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..aa575805fc10901b94b69aa6f21a0a82
          let mut startup_task = environment
              .startup_task
              .lock()
-@@ -1197,6 +1200,34 @@ impl Environment {
+@@ -1197,6 +1215,63 @@ impl Environment {
          Arc::clone(&self.filesystem)
      }
 
@@ -3055,15 +4998,44 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..aa575805fc10901b94b69aa6f21a0a82
 +        let Some(client) = &self.remote_client else {
 +            return Ok(self.clone());
 +        };
-+        let client = client.connected_view()?;
-+        Ok(Self {
++        Ok(self.with_bound_client(client.connected_view()?))
++    }
++
++    /// Whether a skipped startup may verify the first attachment of this direct endpoint.
++    pub fn supports_initial_default_recovery(&self) -> bool {
++        self.remote_client
++            .as_ref()
++            .is_some_and(LazyRemoteExecServerClient::supports_initial_default_recovery)
++    }
++
++    /// Excludes direct endpoints whose first attachment was already observed at thread start.
++    pub fn is_unattached_initial_default_recovery_candidate(&self) -> bool {
++        self.remote_client.as_ref().is_some_and(
++            LazyRemoteExecServerClient::is_unattached_initial_default_recovery_candidate,
++        )
++    }
++
++    /// Pins an independently established first attachment without connecting or waiting.
++    /// Revocation prevents new operations, but not termination of commands already started.
++    pub fn connected_initial_default_recovery_view(
++        &self,
++        turn_revoked: CancellationToken,
++    ) -> Result<Self, ExecServerError> {
++        let client = self.remote_client.as_ref().ok_or_else(|| {
++            ExecServerError::Disconnected("no remote attachment for startup recovery".to_string())
++        })?;
++        Ok(self.with_bound_client(client.connected_initial_default_recovery_view(turn_revoked)?))
++    }
++
++    fn with_bound_client(&self, client: LazyRemoteExecServerClient) -> Self {
++        Self {
 +            remote_client: Some(client.clone()),
 +            ready_info: Arc::new(ArcSwapOption::new(self.last_ready_info())),
 +            exec_backend: Arc::new(RemoteProcess::new(client.clone())),
 +            filesystem: Arc::new(RemoteFileSystem::new(client.clone())),
 +            http_client: Arc::new(client),
 +            ..self.clone()
-+        })
++        }
 +    }
 +
 +    /// Checks that this connected view still identifies the active transport.
@@ -3108,6 +5080,187 @@ index 06762ed9b483c32c667ca7887eb92876a2b77b0b..638b791fbf8c0fcecd72cb5e8fa804a4
              return self.get_metadata_uncached(path, options, sandbox).await;
          }
 
+diff --git a/codex-rs/exec-server/src/rpc.rs b/codex-rs/exec-server/src/rpc.rs
+index e60530fd55d0bcbbdbfea6225be7de2175efe62d..029d5857b1176bd2823cac6e1b3adf544b951052 100644
+--- a/codex-rs/exec-server/src/rpc.rs
++++ b/codex-rs/exec-server/src/rpc.rs
+@@ -61,6 +61,14 @@ pub(crate) enum RpcCallError {
+     PendingRequestLimitExceeded { limit: usize },
+ }
+
++/// An optional authorization check for dispatch, not for waiting for an admitted response.
++pub(crate) struct RpcDispatchGuard<'a> {
++    pub(crate) revoked: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
++    pub(crate) can_dispatch: &'a (dyn Fn() -> bool + Sync),
++    // Process-start cleanup is only needed after the start was admitted.
++    pub(crate) dispatched: Option<&'a AtomicBool>,
++}
++
+ #[path = "rpc_pending_request.rs"]
+ mod pending_request;
+ use pending_request::PendingRequestGuard;
+@@ -555,6 +563,7 @@ impl RpcClient {
+         &self,
+         missing: Vec<codex_utils_path_uri::PathUri>,
+         present: Option<codex_utils_path_uri::PathUri>,
++        dispatch_guard: Option<RpcDispatchGuard<'_>>,
+     ) -> Result<Option<oneshot::Receiver<()>>, RpcCallError> {
+         let (tx, rx) = oneshot::channel();
+         let watch_id = {
+@@ -566,16 +575,16 @@ impl RpcClient {
+             watch.invalidated = Some(tx);
+             watch.id
+         };
+-        let response: crate::protocol::FsWatchMissingResponse = self
+-            .call(
+-                crate::protocol::FS_WATCH_MISSING_METHOD,
+-                &crate::protocol::FsWatchMissingParams {
+-                    watch_id,
+-                    missing,
+-                    present,
+-                },
+-            )
+-            .await?;
++        let method = crate::protocol::FS_WATCH_MISSING_METHOD;
++        let params = crate::protocol::FsWatchMissingParams {
++            watch_id,
++            missing,
++            present,
++        };
++        let response: crate::protocol::FsWatchMissingResponse = match dispatch_guard {
++            Some(guard) => self.call_guarded(method, &params, None, guard).await?,
++            None => self.call(method, &params).await?,
++        };
+         Ok(response.watching.then_some(rx))
+     }
+
+@@ -641,7 +650,8 @@ impl RpcClient {
+     {
+         record_client_request(self.metrics.as_ref(), method);
+         let _call_slot = self.acquire_regular_call_slot()?;
+-        self.call_inner(method, params, RpcCallTimeout::None).await
++        self.call_inner(method, params, RpcCallTimeout::None, None)
++            .await
+     }
+
+     pub(crate) async fn call_with_timeout<P, T>(
+@@ -656,10 +666,38 @@ impl RpcClient {
+     {
+         record_client_request(self.metrics.as_ref(), method);
+         let _call_slot = self.acquire_regular_call_slot()?;
+-        self.call_inner(method, params, RpcCallTimeout::After(call_timeout))
++        self.call_inner(method, params, RpcCallTimeout::After(call_timeout), None)
+             .await
+     }
+
++    #[tracing::instrument(
++        name = "codex.exec_server.request",
++        level = "info",
++        skip_all,
++        fields(otel.kind = "client", otel.name = method, method)
++    )]
++    pub(crate) async fn call_guarded<P, T>(
++        &self,
++        method: &str,
++        params: &P,
++        call_timeout: Option<Duration>,
++        dispatch_guard: RpcDispatchGuard<'_>,
++    ) -> Result<T, RpcCallError>
++    where
++        P: Serialize,
++        T: DeserializeOwned,
++    {
++        record_client_request(self.metrics.as_ref(), method);
++        let _call_slot = self.acquire_regular_call_slot()?;
++        self.call_inner(
++            method,
++            params,
++            call_timeout.map_or(RpcCallTimeout::None, RpcCallTimeout::After),
++            Some(dispatch_guard),
++        )
++        .await
++    }
++
+     #[tracing::instrument(
+         name = "codex.exec_server.request",
+         level = "info",
+@@ -690,7 +728,8 @@ impl RpcClient {
+                 }
+             },
+         };
+-        self.call_inner(method, params, RpcCallTimeout::None).await
++        self.call_inner(method, params, RpcCallTimeout::None, None)
++            .await
+     }
+
+     async fn call_inner<P, T>(
+@@ -698,6 +737,7 @@ impl RpcClient {
+         method: &str,
+         params: &P,
+         call_timeout: RpcCallTimeout,
++        dispatch_guard: Option<RpcDispatchGuard<'_>>,
+     ) -> Result<T, RpcCallError>
+     where
+         P: Serialize,
+@@ -725,7 +765,14 @@ impl RpcClient {
+         };
+         let params = serde_json::to_value(params).map_err(RpcCallError::Json)?;
+         let response = self
+-            .send_request_and_wait(method, request_id, params, response_rx, call_timeout)
++            .send_request_and_wait(
++                method,
++                request_id,
++                params,
++                response_rx,
++                call_timeout,
++                dispatch_guard,
++            )
+             .await?;
+         serde_json::from_value(response).map_err(RpcCallError::Json)
+     }
+@@ -740,19 +787,31 @@ impl RpcClient {
+         params: Value,
+         response_rx: oneshot::Receiver<RpcCompletion>,
+         call_timeout: RpcCallTimeout,
++        dispatch_guard: Option<RpcDispatchGuard<'_>>,
+     ) -> Result<Value, RpcCallError> {
+         let enqueue_started = Instant::now();
+-        if self
+-            .write_tx
+-            .send(JSONRPCMessage::Request(JSONRPCRequest {
+-                id: request_id.clone(),
+-                method: method.to_string(),
+-                params: Some(params),
+-                trace: codex_otel::current_span_w3c_trace_context(),
+-            }))
+-            .await
+-            .is_err()
+-        {
++        let request = JSONRPCMessage::Request(JSONRPCRequest {
++            id: request_id,
++            method: method.to_string(),
++            params: Some(params),
++            trace: codex_otel::current_span_w3c_trace_context(),
++        });
++        if let Some(guard) = dispatch_guard {
++            let permit = tokio::select! {
++                biased;
++                _ = guard.revoked => return Err(RpcCallError::Closed),
++                permit = self.write_tx.reserve() => permit.map_err(|_| RpcCallError::Closed)?,
++            };
++            // Authorize at this recheck, after queue reservation. The send does not
++            // yield, and later revocation does not cancel an already admitted request.
++            if !(guard.can_dispatch)() {
++                return Err(RpcCallError::Closed);
++            }
++            if let Some(dispatched) = guard.dispatched {
++                dispatched.store(true, Ordering::Relaxed);
++            }
++            permit.send(request);
++        } else if self.write_tx.send(request).await.is_err() {
+             return Err(RpcCallError::Closed);
+         }
+         tracing::event!(
 diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
 index 9d2d42a2228f3c64c74fd1d5e4bd5c6b8783c4b1..31756cdd5a6f286a16d3ac85c566e4e46e1c6f30 100644
 --- a/codex-rs/protocol/src/environment.rs
