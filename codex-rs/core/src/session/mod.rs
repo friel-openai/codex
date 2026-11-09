@@ -1162,13 +1162,20 @@ impl Session {
         }
         let configured_config = Arc::clone(&config);
         let configured_multi_agent_version = config.multi_agent_version_override();
-        let multi_agent_version = configured_or_persisted_multi_agent_version(
-            &conversation_history,
-            configured_multi_agent_version,
-        )
-        .or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        // Internal sessions must not gain agent tools from Frodex's default v2 setting.
+        let multi_agent_version = if inherited_multi_agent_version
+            == Some(MultiAgentVersion::Disabled)
+        {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            configured_or_persisted_multi_agent_version(
+                &conversation_history,
+                configured_multi_agent_version,
+            )
+            .or_else(|| {
+                resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+            })
+        };
         if crate::goal_supervisor::is_goal_supervisor_helper_source(&session_source)
             && let InitialHistory::Forked(items) = &mut conversation_history
         {
