@@ -59,6 +59,7 @@
         "request_processors::thread_processor::subagent_history_projection::tests::removes_stale_activity_and_prunes_mixed_spawn",
         "request_processors::thread_processor::subagent_history_projection::tests::sixth_segment_enables_projection_and_current_ids_survive",
         "request_processors::thread_processor::resume_preparation::tests::cold_resume_with_pending_shutdown_drain_releases_thread_queue",
+        "request_serialization::tests::same_key_requests_run_fifo",
         "request_serialization::tests::panicking_thread_request_does_not_strand_queue",
         "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up"
       ]
@@ -70,8 +71,11 @@
       "target": "all",
       "tests": [
         "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
+        "suite::v2::selected_environment::later_turn_denies_stdin_for_terminal_in_quarantined_default_secondary",
+        "suite::v2::selected_environment::later_turn_preserves_remote_instructions_and_executes_after_session_rejoin",
         "suite::v2::selected_environment::thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments",
         "suite::v2::selected_environment::thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls",
+        "suite::v2::selected_environment::turn_start_fails_when_required_remote_instruction_refresh_fails",
         "suite::v2::mcp_connection_sharing::stdio_sharing_follows_protocol_and_enablement_for_loaded_chats",
         "suite::v2::model_routing_profiles::routed_profile_balances_partial_message_before_falling_back",
         "suite::v2::rollout_migration::malformed_records::concatenated_legacy_ancestor_record_migrates_across_restart",
@@ -168,6 +172,8 @@
         "suite::v2::thread_ownership_restoration::promotion_materializes_the_original_ephemeral_child",
         "suite::v2::thread_read::frodex_running_legacy_resume_returns_newest_five_segments_only",
         "suite::v2::thread_read::paginated_history_lists_and_legacy_reads_use_projected_turns_and_items",
+        "suite::v2::thread_read::paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume",
+        "suite::v2::thread_read::thread_read_loaded_thread_returns_precomputed_path_before_materialization",
         "suite::v2::thread_read::thread_turns_list_reuses_legacy_reference_depths_without_changing_history"
       ]
     },
@@ -191,6 +197,7 @@
       "tests": [
         "agents_md::tests::stalled_remote_project_instructions_fail_closed_and_can_be_retried",
         "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
+        "environment_selection::tests::verified_default_secondary_cannot_be_reused_after_owner_configuration",
         "agent::api::tests::host_list_canonical_bounds_task_previews_and_falls_back_to_id",
         "agent::api::tests::host_list_canonical_does_not_truncate_at_private_page_limit",
         "agent::api::tests::host_list_canonical_preserves_metadata_and_order",
@@ -591,6 +598,16 @@
         "suite::scenarios::audio_file::unsupported_uploaded_audio_fails_before_inference_without_poisoning_follow_up",
         "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history",
         "suite::token_budget::new_context_tool_skips_auto_compact_fallback"
+      ]
+    },
+    {
+      "package": "codex-exec-server",
+      "binary": "codex-exec-server",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "client::tests::connected_view_does_not_start_an_unconnected_environment",
+        "client::tests::connected_view_rejects_replacement_rpc_but_can_terminate_started_process"
       ]
     },
     {
@@ -1043,6 +1060,7 @@
         "local::segment::tests::uncertified_checkpoint_is_rejected_without_changing_rollout",
         "local::tests::try_reserving_writers_retains_cloned_locks_and_reports_conflicts",
         "local::thread_history::bulk_projection::tests::bulk_projection_matches_ordered_sql_for_late_and_duplicate_events",
+        "local::thread_history::read::tests::cursors_are_bound_to_the_selected_rollout_generation",
         "local::thread_history::read::tests::fork_marked_projection_requires_ancestry_without_history_base",
         "local::thread_history::read::tests::indexed_legacy_cursor_pages_never_open_projected_predecessors",
         "local::thread_history::read::tests::indexed_native_history_admission_preserves_attached_visibility",
