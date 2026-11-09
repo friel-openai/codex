@@ -2,7 +2,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_extension_api::ExtensionData;
-use codex_history::ResponseItemEnvelope;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::TurnItem;
@@ -16,6 +15,7 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::call_trace;
 use crate::tools::handlers::is_set_workspace_cwd_tool;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use codex_memories_read::citations::parse_memory_citation;
 use codex_memories_read::citations::thread_ids_from_memory_citation;
@@ -218,7 +218,7 @@ async fn record_stage1_output_usage_for_memory_citation(
 /// queuing any tool execution futures. This records items immediately so
 /// history and rollout stay in sync even if the turn is later cancelled.
 pub(crate) type InFlightFuture<'f> =
-    Pin<Box<dyn Future<Output = Result<ResponseItemEnvelope>> + Send + 'f>>;
+    Pin<Box<dyn Future<Output = Result<ToolCallResponse>> + Send + 'f>>;
 
 #[derive(Default)]
 pub(crate) struct OutputItemResult {
@@ -363,7 +363,7 @@ pub(crate) async fn handle_output_item_done(
                         // The call is already in history; resume needs its output even if we never dispatch.
                         let output =
                             ToolCallRuntime::aborted_response(&call, /*elapsed_secs*/ None);
-                        return Ok(output.into_response());
+                        return Ok(ToolCallResponse::Response(output.into_response()));
                     }
                     runtime.handle_tool_call(call, cancellation_token).await
                 })
