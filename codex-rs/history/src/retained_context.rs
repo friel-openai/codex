@@ -275,6 +275,13 @@ impl RetainedContext {
         order
     }
 
+    /// Observe a recorded local position without admitting retained evidence.
+    pub fn observe_input_order(&mut self, source: RetainedInputSource) {
+        if let RetainedInputSource::Local(Some(order)) = source {
+            self.next_order = self.next_order.max(order.saturating_add(1));
+        }
+    }
+
     fn record_order(&mut self, acceptance_order: Option<u64>) -> u64 {
         let order = acceptance_order.unwrap_or(self.next_order);
         self.next_order = self.next_order.max(order.saturating_add(1));
@@ -533,13 +540,11 @@ impl RetainedContext {
         {
             self.record_sender_user_messages(metadata);
         }
-        for order in surviving_items
+        for metadata in surviving_items
             .iter()
             .filter_map(|item| item.metadata.as_ref())
-            .filter(|metadata| !metadata.inherited_user_message)
-            .filter_map(|metadata| metadata.user_input_order)
         {
-            self.next_order = self.next_order.max(order.saturating_add(1));
+            self.observe_input_order(RetainedInputSource::from(Some(metadata)));
         }
         bound_family(
             &mut self.verified_answers,
