@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) async fn route(
     router: ElicitationRequestRouter,
-    events: Option<Sender<Event>>,
+    send_event: Option<SendEvent>,
     authority: Option<ElicitationAuthority>,
     server_name: String,
     request: ElicitationRequest,
@@ -20,7 +20,7 @@ pub(super) async fn route(
                     .is_host_owned_apps(&server_name, server.config())
             })
     });
-    let Some((events, authority)) = events
+    let Some((send_event, authority)) = send_event
         .zip(authority)
         .filter(|_| plugin_service && !router.auto_deny())
     else {
@@ -31,6 +31,6 @@ pub(super) async fn route(
         });
     };
     router
-        .request_user_interaction(Some(events), &authority, server_name, request)
+        .request_user_interaction(Some(send_event), &authority, server_name, request)
         .await
 }
