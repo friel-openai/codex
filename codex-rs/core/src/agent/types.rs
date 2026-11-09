@@ -13,6 +13,10 @@ use codex_protocol::turn_input::CyberAccessProgram;
 #[derive(Clone, Debug, Default)]
 pub struct AgentMetadata {
     pub agent_id: Option<ThreadId>,
+    /// Immediate owner in the current root-scoped agent tree.
+    pub parent_thread_id: Option<ThreadId>,
+    /// Depth recorded by the authoritative open ownership relationship.
+    pub depth: Option<i32>,
     pub agent_path: Option<AgentPath>,
     pub agent_nickname: Option<String>,
     pub agent_role: Option<String>,
