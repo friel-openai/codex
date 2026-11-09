@@ -1,0 +1,459 @@
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 12b94584384513b4e91f9ae4f0a0de0189b255d5..ae7b59de145d0eb1bacc26accf16bb1e6b70e9a9 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -123,6 +123,42 @@ struct ThreadEnvironmentOverride {
+     runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+ }
+
++fn restates_unavailable_startup_secondaries(
++    current: &TurnEnvironmentRequests,
++    requested: &TurnEnvironmentRequests,
++) -> bool {
++    let Some((primary, secondaries)) = current.environment_requests.split_first() else {
++        return false;
++    };
++    let Some((requested_primary, requested_secondaries)) =
++        requested.environment_requests.split_first()
++    else {
++        return false;
++    };
++    primary.environment_id == LOCAL_ENVIRONMENT_ID
++        && primary.config == EnvironmentConfigState::FromThread
++        && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
++        && requested_primary.config == EnvironmentConfigState::FromThread
++        && secondaries
++            .iter()
++            .any(|environment| environment.config == EnvironmentConfigState::StartupUnavailable)
++        && secondaries.len() == requested_secondaries.len()
++        && secondaries
++            .iter()
++            .zip(requested_secondaries)
++            .all(|(current, requested)| {
++                current.environment_id == requested.environment_id
++                    && current.cwd == requested.cwd
++                    && current.workspace_roots == requested.workspace_roots
++                    && matches!(
++                        current.config,
++                        EnvironmentConfigState::FromThread
++                            | EnvironmentConfigState::StartupUnavailable
++                    )
++                    && requested.config == EnvironmentConfigState::FromThread
++            })
++}
++
+ struct ThreadSettingsBuildParams {
+     method: &'static str,
+     disabled_plugin_ids: Option<Vec<String>>,
+@@ -781,7 +817,7 @@ impl TurnRequestProcessor {
+             return ThreadEnvironmentOverride::default();
+         }
+
+-        // Explicit environment requests own their workspace roots and pass through unchanged. Top-level
++        // Explicit environment requests own their workspace roots. Top-level
+         // `runtimeWorkspaceRoots` is only a compatibility input for default environments.
+         if let Some(environment_requests) = environment_requests {
+             let legacy_fallback_cwd = match cwd {
+@@ -795,11 +831,31 @@ impl TurnRequestProcessor {
+                     None => thread.config_snapshot().await.cwd().clone(),
+                 },
+             };
++            let mut requested =
++                TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
++            // Thread.environments cannot represent StartupUnavailable. A restated secondary
++            // is not a new selection when the client is only setting the local workspace.
++            if requested.environment_requests.len() > 1
++                && requested.environment_requests[0].environment_id == LOCAL_ENVIRONMENT_ID
++                && let Some(current) = thread.restorable_thread_settings().await.environments
++                && restates_unavailable_startup_secondaries(&current, &requested)
++            {
++                let local = &requested.environment_requests[0];
++                let local_changed = *local != current.environment_requests[0];
++                let same_fallback = requested.legacy_fallback_cwd == current.legacy_fallback_cwd;
++                if !local_changed && same_fallback {
++                    return ThreadEnvironmentOverride::default();
++                }
++                if local_changed
++                    && (same_fallback
++                        || local.cwd.to_abs_path().ok().as_ref()
++                            == Some(&requested.legacy_fallback_cwd))
++                {
++                    requested.preserve_secondary_workspaces = true;
++                }
++            }
+             return ThreadEnvironmentOverride {
+-                environment_requests: Some(TurnEnvironmentRequests::new(
+-                    legacy_fallback_cwd,
+-                    environment_requests,
+-                )),
++                environment_requests: Some(requested),
+                 ..Default::default()
+             };
+         }
+diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
+index 6b3458397c35eae00fd8b76f6a4115222ee49aa2..1dac3ace326c46b495ffff759b56532c7b3a65bb 100644
+--- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
++++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
+@@ -163,17 +163,31 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
+ #[tokio::test]
+ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls()
+ -> Result<()> {
++    use codex_app_server_protocol::ThreadReadParams;
++    use codex_app_server_protocol::ThreadReadResponse;
++    use codex_app_server_protocol::TurnStatus;
++
+     const THREAD_START_TIMEOUT: Duration = Duration::from_secs(20);
+     const LOCAL_INSTRUCTIONS: &str = "local workspace instructions";
++    const PROJECTLESS_INSTRUCTIONS: &str = "projectless workspace instructions";
+
+     let server = responses::start_mock_server().await;
+-    let response_mock = responses::mount_sse_once(
++    let response_mock = responses::mount_sse_sequence(
+         &server,
+-        responses::sse(vec![
+-            responses::ev_response_created("resp-1"),
+-            responses::ev_assistant_message("msg-1", "done"),
+-            responses::ev_completed("resp-1"),
+-        ]),
++        [
++            "explicit-environment-echo",
++            "implicit-environments",
++            "projectless-composer",
++        ]
++        .into_iter()
++        .map(|id| {
++            responses::sse(vec![
++                responses::ev_response_created(id),
++                responses::ev_assistant_message(id, "done"),
++                responses::ev_completed(id),
++            ])
++        })
++        .collect(),
+     )
+     .await;
+     let codex_home = TempDir::new()?;
+@@ -227,42 +241,147 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+         ephemeral: Some(true),
+         ..Default::default()
+     };
++    let denied = TurnEnvironmentParams {
++        environment_id: "stalled".to_string(),
++        cwd: LegacyAppPathString::from_path(workspace.as_path()),
++        runtime_workspace_roots: None,
++    };
++    let other_workspace_dir = TempDir::new()?;
++    let other_workspace = other_workspace_dir.path().canonicalize()?;
++    let projectless_cwd = other_workspace.join("project");
++    std::fs::create_dir(&projectless_cwd)?;
++    std::fs::write(projectless_cwd.join("AGENTS.md"), PROJECTLESS_INSTRUCTIONS)?;
+
+-    let request_id = app_server
+-        .send_raw_request(
+-            "thread/start",
+-            Some(json!({"cwd": workspace, "ephemeral": true})),
+-        )
+-        .await?;
+-    let response: ThreadStartResponse =
+-        timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
+-    assert_eq!(
+-        response.instruction_sources,
+-        vec![local_source.into(), healthy_source.into()],
+-    );
+-    timeout(
+-        DEFAULT_READ_TIMEOUT,
+-        app_server.start_turn_and_wait_for_completion(TurnStartParams {
+-            cwd: Some(workspace.to_path_buf()),
+-            ..text_turn_params(response.thread.id, "inspect workspace instructions")
+-        }),
+-    )
+-    .await??;
+-    let input = response_mock.single_request().message_input_texts("user");
+-    for expected in [LOCAL_INSTRUCTIONS, AGENTS_INSTRUCTIONS] {
+-        assert!(
+-            input.iter().any(|text| text.contains(expected)),
+-            "{input:?}"
++    for (index, label) in ["Desktop echo", "cwd only", "projectless composer"]
++        .into_iter()
++        .enumerate()
++    {
++        let request_id = app_server.send_thread_start_request(start.clone()).await?;
++        let response: ThreadStartResponse =
++            timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
++        assert_eq!(
++            response.instruction_sources,
++            vec![local_source.clone().into(), healthy_source.clone().into()],
+         );
++        let thread_id = response.thread.id;
++        let mut reported = response
++            .thread
++            .environments
++            .context("thread/start should report its selected environments")?;
++        assert_eq!(reported[0].environment_id, "local");
++        let projectless = index == 2;
++        let local_cwd = if projectless {
++            // The projectless composer changes only the primary local entry.
++            reported[0].cwd = LegacyAppPathString::from_path(&projectless_cwd);
++            reported[0].runtime_workspace_roots =
++                vec![LegacyAppPathString::from_path(&other_workspace)];
++            projectless_cwd.clone()
++        } else {
++            workspace.to_path_buf()
++        };
++        let echoed: Vec<_> = reported
++            .iter()
++            .cloned()
++            .map(|environment| TurnEnvironmentParams {
++                environment_id: environment.environment_id,
++                cwd: environment.cwd,
++                runtime_workspace_roots: Some(environment.runtime_workspace_roots),
++            })
++            .collect();
++        let stalled_index = echoed
++            .iter()
++            .position(|environment| environment.environment_id == "stalled")
++            .context("thread/start should report its unavailable secondary")?;
++        let completed = timeout(
++            DEFAULT_READ_TIMEOUT,
++            app_server.start_turn_and_wait_for_completion(TurnStartParams {
++                cwd: Some(local_cwd.clone()),
++                environments: (index != 1).then(|| echoed.clone()),
++                ..text_turn_params(thread_id.clone(), label)
++            }),
++        )
++        .await??;
++        assert_eq!(completed.turn.status, TurnStatus::Completed);
++        let requests = response_mock.requests();
++        assert_eq!(requests.len(), index + 1);
++        let input = requests[index].message_input_texts("user");
++        let local_instructions = if projectless {
++            PROJECTLESS_INSTRUCTIONS
++        } else {
++            LOCAL_INSTRUCTIONS
++        };
++        for expected in [local_instructions, AGENTS_INSTRUCTIONS] {
++            assert!(
++                input.iter().any(|text| text.contains(expected)),
++                "{input:?}"
++            );
++        }
++
++        if projectless {
++            assert!(!input.iter().any(|text| text.contains(LOCAL_INSTRUCTIONS)));
++            let request_id = app_server
++                .send_thread_read_request(ThreadReadParams {
++                    thread_id: thread_id.clone(),
++                    include_turns: false,
++                })
++                .await?;
++            let updated: ThreadReadResponse =
++                timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
++            assert_eq!(updated.thread.environments, Some(reported));
++
++            let mut promoted = echoed.clone();
++            promoted.swap(0, stalled_index);
++            let mut moved = echoed.clone();
++            moved[0].cwd = LegacyAppPathString::from_path(workspace.as_path());
++            moved[stalled_index].cwd = LegacyAppPathString::from_path(&other_workspace);
++            let mut rerooted = echoed.clone();
++            rerooted[stalled_index].runtime_workspace_roots =
++                Some(vec![LegacyAppPathString::from_path(&other_workspace)]);
++            for (label, cwd, environments) in [
++                (
++                    "request only the stalled executor",
++                    local_cwd.clone(),
++                    vec![echoed[stalled_index].clone()],
++                ),
++                ("promote the stalled executor", local_cwd.clone(), promoted),
++                (
++                    "move the stalled executor cwd",
++                    workspace.to_path_buf(),
++                    moved,
++                ),
++                (
++                    "change the stalled executor roots",
++                    local_cwd.clone(),
++                    rerooted,
++                ),
++                ("change the fallback cwd", other_workspace.clone(), echoed),
++            ] {
++                let request_id = app_server
++                    .send_turn_start_request(TurnStartParams {
++                        cwd: Some(cwd),
++                        environments: Some(environments),
++                        ..text_turn_params(thread_id.clone(), label)
++                    })
++                    .await?;
++                let error = timeout(
++                    DEFAULT_READ_TIMEOUT,
++                    app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
++                )
++                .await??;
++                assert_eq!(error.error.code, -32600, "{label}");
++                assert_eq!(
++                    error.error.message,
++                    "invalid thread settings override: invalid value for `environments`: `stalled` is not in the allowed set owner-provided environment configuration (set by <unspecified>)",
++                    "{label}"
++                );
++            }
++            assert_eq!(response_mock.requests().len(), index + 1);
++        }
+     }
+
+     let request_id = app_server
+         .send_thread_start_request(ThreadStartParams {
+-            environments: Some(vec![TurnEnvironmentParams {
+-                environment_id: "stalled".to_string(),
+-                cwd: LegacyAppPathString::from_path(workspace.as_path()),
+-                runtime_workspace_roots: None,
+-            }]),
++            environments: Some(vec![denied]),
+             ..start
+         })
+         .await?;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index d3759f7a5d834d9105a35062b73dbfdf0797ae26..26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -917,6 +917,9 @@ impl CodexThread {
+                 approval_policy,
+                 approvals_reviewer,
+             },
++            preserve_secondary_workspaces: environment_requests
++                .as_ref()
++                .is_some_and(|requests| requests.preserve_secondary_workspaces),
+             environments: environment_requests
+                 .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
+             runtime_workspace_roots,
+diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
+index 719e7cb083d93790eab8339e71511fb0b13bcedf..e9618b49a913b7ef0feedcd948d25873b51aa336 100644
+--- a/codex-rs/core/src/session/environment.rs
++++ b/codex-rs/core/src/session/environment.rs
+@@ -14,6 +14,7 @@ use codex_protocol::protocol::AgentStatus;
+ use codex_protocol::protocol::EnvironmentConfig;
+ use codex_protocol::protocol::EnvironmentConfigState;
+ use codex_protocol::protocol::TurnEnvironmentSelection;
++use codex_protocol::protocol::TurnEnvironmentSelections;
+ use codex_protocol::sandbox::SandboxType;
+
+ use crate::config::ConstraintError;
+@@ -98,6 +99,43 @@ pub(super) fn ensure_configs_stay_owner_provided(
+     Ok(())
+ }
+
++fn update_local_workspace(
++    current: &SessionConfiguration,
++    requested: &TurnEnvironmentSelections,
++) -> ConstraintResult<TurnEnvironmentSelections> {
++    let is_local_primary = |environment: &TurnEnvironmentSelection| {
++        environment.environment_id == LOCAL_ENVIRONMENT_ID
++            && environment.config == EnvironmentConfigState::FromThread
++    };
++    if let Some((local, secondaries)) = current.environments.split_first()
++        && let Some((requested_local, requested_secondaries)) = requested.environments.split_first()
++        && is_local_primary(local)
++        && is_local_primary(requested_local)
++        && (current.cwd() == &requested.legacy_fallback_cwd
++            || requested_local.cwd.to_abs_path().ok().as_ref()
++                == Some(&requested.legacy_fallback_cwd))
++        && secondaries.len() == requested_secondaries.len()
++        && secondaries
++            .iter()
++            .zip(requested_secondaries)
++            .all(|(selected, requested)| selected.has_same_workspace(requested))
++    {
++        let mut environments = current.environments.clone();
++        environments[0].cwd = requested_local.cwd.clone();
++        environments[0].workspace_roots = requested_local.workspace_roots.clone();
++        return Ok(TurnEnvironmentSelections::new(
++            requested.legacy_fallback_cwd.clone(),
++            environments,
++        ));
++    }
++    Err(ConstraintError::InvalidValue {
++        field_name: "environments",
++        candidate: "local workspace update".to_string(),
++        allowed: "current local primary and unchanged secondary workspaces".to_string(),
++        requirement_source: codex_config::RequirementSource::Unknown,
++    })
++}
++
+ fn validate_environment_config(
+     selection: &TurnEnvironmentSelection,
+     config: &EnvironmentConfig,
+@@ -181,6 +219,19 @@ impl Session {
+         updates: &SessionSettingsUpdate,
+     ) -> ConstraintResult<SessionConfiguration> {
+         let current_environments = &current.environments;
++        let adjusted;
++        let updates = if updates.preserve_secondary_workspaces
++            && let Some(environments) = &updates.environments
++        {
++            // Recheck under the settings lock so a stale request cannot restore a removed binding.
++            adjusted = SessionSettingsUpdate {
++                environments: Some(update_local_workspace(current, environments)?),
++                ..updates.clone()
++            };
++            &adjusted
++        } else {
++            updates
++        };
+         if let Some(environments) = &updates.environments {
+             ensure_configs_stay_owner_provided(current_environments, &environments.environments)?;
+         }
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index aa465e47105456875b698c21f72226f0455d1f71..b0e0f8007b6b50d4e11235bddd38ea67524ef898 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -673,6 +673,8 @@ pub(crate) struct SessionSettingsUpdate {
+     /// Omission preserves the current data; an empty initializer clears it.
+     pub(crate) turn_extension_init: Option<ExtensionDataInit>,
+     pub(crate) environments: Option<TurnEnvironmentSelections>,
++    /// Recheck the secondary workspaces at commit and retain their actual bindings.
++    pub(crate) preserve_secondary_workspaces: bool,
+     pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+     pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
+     pub(crate) sandbox_policy: Option<SandboxPolicy>,
+diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
+index de1f4e1466f9f50b6aef2261c0d995e46e8e9f58..1a000b9cb5fa5b584ac859f36e588c635776b49e 100644
+--- a/codex-rs/core/src/session/thread_settings.rs
++++ b/codex-rs/core/src/session/thread_settings.rs
+@@ -143,6 +143,9 @@ pub(super) fn prepare_update(
+             approval_policy,
+             approvals_reviewer,
+         },
++        preserve_secondary_workspaces: environment_requests
++            .as_ref()
++            .is_some_and(|requests| requests.preserve_secondary_workspaces),
+         environments: environment_requests.map(|requests| requests.select(roots)),
+         runtime_workspace_roots,
+         profile_workspace_roots,
+diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
+index 28637eadc8c4d801a33895cc7965f71023402426..b6a2eda66f86870c90a906be78d9fceff90d3d3c 100644
+--- a/codex-rs/protocol/src/environment.rs
++++ b/codex-rs/protocol/src/environment.rs
+@@ -190,6 +190,7 @@ impl TurnEnvironmentSelections {
+     /// Requests these environments again, leaving root choices to the receiving thread.
+     pub fn into_requests(self) -> TurnEnvironmentRequests {
+         TurnEnvironmentRequests {
++            preserve_secondary_workspaces: false,
+             legacy_fallback_cwd: self.legacy_fallback_cwd,
+             environment_requests: self
+                 .environments
+@@ -204,6 +205,9 @@ impl TurnEnvironmentSelections {
+ /// The receiving thread attaches roots in `select` before capturing these environments.
+ #[derive(Debug, Clone, PartialEq)]
+ pub struct TurnEnvironmentRequests {
++    /// Updates the local primary workspace; the remaining entries identify bindings to retain,
++    /// not new selections. This is set by the app-server, not by the wire request.
++    pub preserve_secondary_workspaces: bool,
+     pub legacy_fallback_cwd: AbsolutePathBuf,
+     pub environment_requests: Vec<TurnEnvironmentRequest>,
+ }
+@@ -214,6 +218,7 @@ impl TurnEnvironmentRequests {
+         environment_requests: Vec<TurnEnvironmentRequest>,
+     ) -> Self {
+         Self {
++            preserve_secondary_workspaces: false,
+             legacy_fallback_cwd,
+             environment_requests,
+         }
