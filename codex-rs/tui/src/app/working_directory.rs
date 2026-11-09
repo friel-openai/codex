@@ -8,6 +8,8 @@ use crate::app_event::ManagedWorktreeTransition;
 use crate::app_server_session::ForkGoalContinuation::DeferUntilNextTurn;
 use crate::history_cell::McpInventoryLoadingCell as LoadingCell;
 use crate::terminal_visualization_instructions::with_terminal_visualization_instructions;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
 
 enum DestinationConfig {
     Load,
@@ -160,7 +162,27 @@ impl App {
         let Some(thread_id) = self.chat_widget.thread_id() else {
             return;
         };
-        if self.pending_server_profiles.contains_key(&thread_id) {
+        let selected_profile = self
+            .agents_overview
+            .requested_permission_profiles
+            .get(&thread_id)
+            .cloned();
+        // Queue acceptance is not application. Carry only complete built-in intent to the
+        // destination, whose server response is independently checked before attachment.
+        if let Some(pending) = self.pending_server_profiles.get(&thread_id)
+            && !selected_profile.as_ref().is_some_and(|selected| {
+                matches!(
+                    selected.profile_id.as_str(),
+                    BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+                        | BUILT_IN_PERMISSION_PROFILE_WORKSPACE
+                        | BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS
+                ) && selected.approval_policy.is_some()
+                    && selected.approvals_reviewer.is_some()
+                    && selected.profile_id == pending.profile_id
+                    && selected.approval_policy == pending.approval_policy
+                    && selected.approvals_reviewer == pending.approvals_reviewer
+            })
+        {
             return self.working_directory_error(
                 "Wait for permissions to update before changing directories.",
             );
@@ -178,11 +200,6 @@ impl App {
                 "Changing directories with a named profile is not supported.",
             );
         }
-        let selected_profile = self
-            .agents_overview
-            .requested_permission_profiles
-            .get(&thread_id)
-            .cloned();
         if selected_profile
             .as_ref()
             .is_some_and(|profile| !profile.profile_id.starts_with(':'))
