@@ -20,6 +20,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -533,14 +534,14 @@ pub async fn materialize_model_context_rollout_items_from(
                 ModelContextScanProgress::Complete
             ) && (!cache.saw_fork_boundary_constraints || !has_older_reference)
             {
-                return Ok(scan.finish(session_meta));
+                let mut items = scan.finish();
+                items.insert(0, RolloutItem::SessionMeta(Box::new(session_meta)));
+                return Ok(items);
             }
         }
 
-        let mut items = scan.finish(session_meta.clone());
-        if !matches!(items.first(), Some(RolloutItem::SessionMeta(_))) {
-            items.insert(0, RolloutItem::SessionMeta(session_meta.clone()));
-        }
+        let mut items = scan.finish();
+        items.insert(0, RolloutItem::SessionMeta(Box::new(session_meta.clone())));
         if !has_older_reference {
             return Ok(items);
         }
@@ -634,7 +635,11 @@ async fn materialize_rollout_lines_from_with_cache(
     has_older_reference: &mut bool,
     cache: Option<&mut ImmutableRolloutCache>,
 ) -> io::Result<Vec<RolloutLine>> {
-    let root_thread_id = canonical_session_meta(&lines)?.meta.id;
+    let root_meta = &canonical_session_meta(&lines)?.meta;
+    let root_thread_id = root_meta.id;
+    let supervisor_owner = (root_meta.source.get_agent_role().as_deref()
+        == Some("goal_supervisor"))
+    .then_some((root_thread_id, root_meta.multi_agent_version));
     let mut state = ExpansionState {
         active_segments: HashSet::new(),
         cache,
@@ -644,7 +649,7 @@ async fn materialize_rollout_lines_from_with_cache(
     let mut materialized = Vec::with_capacity(lines.len());
     materialized.push(lines[0].clone());
     materialized.extend(
-        expand_lines(
+        expand_lines_with_supervisor_projection(
             codex_home,
             lines.into_iter().skip(1).collect(),
             &mut state,
@@ -656,6 +661,7 @@ async fn materialize_rollout_lines_from_with_cache(
             /*inherited_filter_texts*/ None,
             policy,
             has_older_reference,
+            supervisor_owner,
         )
         .await?,
     );
@@ -694,6 +700,29 @@ async fn expand_lines(
     inherited_filter_texts: Option<&[String]>,
     policy: MaterializationPolicy,
     has_older_reference: &mut bool,
+) -> io::Result<Vec<RolloutLine>> {
+    expand_lines_with_supervisor_projection(
+        codex_home,
+        lines,
+        state,
+        cursor,
+        inherited_filter_texts,
+        policy,
+        has_older_reference,
+        /*supervisor_owner*/ None,
+    )
+    .await
+}
+
+async fn expand_lines_with_supervisor_projection(
+    codex_home: &Path,
+    lines: Vec<RolloutLine>,
+    state: &mut ExpansionState<'_>,
+    cursor: ExpansionCursor,
+    inherited_filter_texts: Option<&[String]>,
+    policy: MaterializationPolicy,
+    has_older_reference: &mut bool,
+    supervisor_owner: Option<(ThreadId, Option<MultiAgentVersion>)>,
 ) -> io::Result<Vec<RolloutLine>> {
     let mut frames = vec![ExpansionFrame {
         materialized: Vec::with_capacity(lines.len()),
@@ -736,6 +765,13 @@ async fn expand_lines(
                     .inherited_filter_texts
                     .as_deref()
                     .is_none_or(|filter_texts| filter_line(&mut line, filter_texts))
+                && supervisor_owner.is_none_or(|(owner, version)| {
+                    frame.cursor.current_thread_id == owner
+                        || codex_history::retain_inherited_supervisor_rollout_item(
+                            &mut line.item,
+                            version,
+                        )
+                })
             {
                 frame.materialized.push(line);
             }
@@ -908,7 +944,7 @@ async fn read_candidate_session_meta(path: &Path) -> io::Result<SessionMetaLine>
         )
     })?;
     match line.item {
-        RolloutItem::SessionMeta(meta) => Ok(meta),
+        RolloutItem::SessionMeta(meta) => Ok(*meta),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
