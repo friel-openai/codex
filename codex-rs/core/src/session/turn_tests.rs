@@ -65,6 +65,24 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
 }
 
 #[tokio::test]
+async fn cloned_step_context_shares_transition_state_for_one_request() {
+    let (_session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let turn_context = Arc::new(turn_context);
+    let original = StepContext::for_test(Arc::clone(&turn_context));
+    let mut cloned = Arc::clone(&original);
+    let cloned = Arc::make_mut(&mut cloned);
+
+    original.reject_context_transition_mixed_with_sibling_tool();
+    cloned.request_turn_context_refresh();
+    assert!(cloned.context_transition_has_sibling_tool());
+    assert!(original.turn_context_refresh_requested());
+
+    let next = StepContext::for_test(turn_context);
+    assert!(!next.context_transition_has_sibling_tool());
+    assert!(!next.turn_context_refresh_requested());
+}
+
+#[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
