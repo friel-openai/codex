@@ -2,9 +2,11 @@ use super::step_settings::ResolvedStepSettings;
 use super::token_budget::has_explicit_settings;
 use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::agents_md::LoadedAgentsMd;
 use crate::config::TokenBudgetConfig;
 use crate::cyber_access_program;
 use crate::environment_selection::EnvironmentConfigOrigin;
+use crate::environment_selection::InitialTurnEnvironmentRecovery;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshot;
@@ -81,6 +83,10 @@ pub(crate) struct TurnEnvironment {
     pub(crate) selection: TurnEnvironmentSelection,
     pub(crate) config_origin: EnvironmentConfigOrigin,
     pub(crate) environment: Arc<Environment>,
+    /// Empty is a verified absence of project instructions on the bound connection.
+    pub(crate) verified_project_instructions: Option<Arc<LoadedAgentsMd>>,
+    /// A verified initial recovery is active-turn only; child snapshots retain this rejection.
+    pub(crate) initial_recovery: Option<Arc<InitialTurnEnvironmentRecovery>>,
     /// Cached from the selected executor; `None` means it did not report one.
     pub(crate) user_home_dir: Option<PathUri>,
     /// Cached from the selected executor; `None` means it did not report them.
@@ -106,6 +112,8 @@ impl TurnEnvironment {
             selection,
             config_origin,
             environment,
+            verified_project_instructions: None,
+            initial_recovery: None,
             user_home_dir: None,
             temporary_directories: None,
             shell,
@@ -328,6 +336,8 @@ impl std::fmt::Debug for TurnEnvironment {
 pub(crate) struct NewTurnContextOptions {
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+    /// Automatic, context-only, and recovery tasks cannot activate a new startup recovery.
+    pub(crate) allow_initial_default_recovery: bool,
 }
 
 /// The context needed for a single turn of the thread.
@@ -1417,7 +1427,9 @@ impl Session {
                 )
                 .await;
         }
-        let turn_environments = self.activate_turn_environments(&configuration).await;
+        let turn_environments = self
+            .activate_turn_environments(&configuration, options.allow_initial_default_recovery)
+            .await;
         let turn_context = self
             .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
             .await;
@@ -1728,7 +1740,10 @@ impl Session {
         options: NewTurnContextOptions,
     ) -> Arc<TurnContext> {
         let turn_environments = self
-            .activate_turn_environments(&session_configuration)
+            .activate_turn_environments(
+                &session_configuration,
+                options.allow_initial_default_recovery,
+            )
             .await;
         self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
             .await
@@ -1758,6 +1773,7 @@ impl Session {
                 environments,
                 NewTurnContextOptions {
                     final_output_json_schema: current.final_output_json_schema.clone(),
+                    allow_initial_default_recovery: false,
                     cyber_access_program: current.cyber_access_program,
                 },
                 TurnContextBuildMode::StartupPrewarm,

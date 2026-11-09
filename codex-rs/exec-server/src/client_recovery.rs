@@ -509,6 +509,7 @@ impl Inner {
         let client = ExecServerClient {
             inner: Arc::clone(self),
             recovery_policy: RecoveryPolicy::Wait,
+            bound_transport: None,
         };
         // Resuming a session redirects notifications from its running processes
         // to this connection during initialize. Drain them immediately so a

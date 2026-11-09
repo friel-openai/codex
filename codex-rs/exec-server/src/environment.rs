@@ -17,6 +17,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::shell_environment::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
+use tokio_util::sync::CancellationToken;
 
 use crate::CapabilityRootsDiscoverParams;
 use crate::CapabilityRootsDiscoverResponse;
@@ -385,6 +386,14 @@ impl EnvironmentManager {
 
     /// Returns the ordered environment ids used for new thread startup.
     pub fn default_environment_ids(&self) -> Vec<String> {
+        self.default_environment_bindings()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Captures default IDs and the corresponding registrations under the same registry lock.
+    pub fn default_environment_bindings(&self) -> Vec<(String, Arc<Environment>)> {
         let Some(default_environment_id) = self.default_environment.as_ref() else {
             return Vec::new();
         };
@@ -392,15 +401,17 @@ impl EnvironmentManager {
             .environments
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut environment_ids = Vec::with_capacity(environments.len());
-        environment_ids.push(default_environment_id.clone());
-        environment_ids.extend(
+        let mut bindings = Vec::with_capacity(environments.len());
+        if let Some(primary) = environments.get(default_environment_id) {
+            bindings.push((default_environment_id.clone(), Arc::clone(primary)));
+        }
+        bindings.extend(
             environments
-                .keys()
-                .filter(|environment_id| *environment_id != default_environment_id)
-                .cloned(),
+                .iter()
+                .filter(|(environment_id, _)| *environment_id != default_environment_id)
+                .map(|(id, environment)| (id.clone(), Arc::clone(environment))),
         );
-        environment_ids
+        bindings
     }
 
     /// Returns the local environment instance when one is configured.
@@ -580,7 +591,11 @@ impl EnvironmentManager {
                 .environments
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            environments.insert(environment_id, Arc::clone(&environment))
+            let replaced = environments.insert(environment_id, Arc::clone(&environment));
+            if let Some(client) = replaced.as_ref().and_then(|old| old.remote_client.as_ref()) {
+                client.retire_initial_recovery();
+            }
+            replaced
         };
         drop(replaced);
         environment.start_connecting();
@@ -1126,6 +1141,9 @@ impl Environment {
         let Some(client) = &environment.remote_client else {
             return;
         };
+        if client.is_attachment_bound() {
+            return;
+        }
         let mut startup_task = environment
             .startup_task
             .lock()
@@ -1195,6 +1213,63 @@ impl Environment {
 
     pub fn get_filesystem(&self) -> Arc<dyn ExecutorFileSystem> {
         Arc::clone(&self.filesystem)
+    }
+
+    /// Captures the currently connected attachment without starting or waiting for one.
+    ///
+    /// Use the returned environment for both policy discovery and subsequent operations.
+    /// A remote view never sends new work through a recovered or replacement transport.
+    /// Revalidate it after asynchronous policy discovery with [`Self::check_connected_view`].
+    pub fn connected_view(&self) -> Result<Self, ExecServerError> {
+        let Some(client) = &self.remote_client else {
+            return Ok(self.clone());
+        };
+        Ok(self.with_bound_client(client.connected_view()?))
+    }
+
+    /// Whether a skipped startup may verify the first attachment of this direct endpoint.
+    pub fn supports_initial_default_recovery(&self) -> bool {
+        self.remote_client
+            .as_ref()
+            .is_some_and(LazyRemoteExecServerClient::supports_initial_default_recovery)
+    }
+
+    /// Excludes direct endpoints whose first attachment was already observed at thread start.
+    pub fn is_unattached_initial_default_recovery_candidate(&self) -> bool {
+        self.remote_client.as_ref().is_some_and(
+            LazyRemoteExecServerClient::is_unattached_initial_default_recovery_candidate,
+        )
+    }
+
+    /// Pins an independently established first attachment without connecting or waiting.
+    /// Revocation prevents new operations, but not termination of commands already started.
+    pub fn connected_initial_default_recovery_view(
+        &self,
+        turn_revoked: CancellationToken,
+    ) -> Result<Self, ExecServerError> {
+        let client = self.remote_client.as_ref().ok_or_else(|| {
+            ExecServerError::Disconnected("no remote attachment for startup recovery".to_string())
+        })?;
+        Ok(self.with_bound_client(client.connected_initial_default_recovery_view(turn_revoked)?))
+    }
+
+    fn with_bound_client(&self, client: LazyRemoteExecServerClient) -> Self {
+        Self {
+            remote_client: Some(client.clone()),
+            ready_info: Arc::new(ArcSwapOption::new(self.last_ready_info())),
+            exec_backend: Arc::new(RemoteProcess::new(client.clone())),
+            filesystem: Arc::new(RemoteFileSystem::new(client.clone())),
+            http_client: Arc::new(client),
+            ..self.clone()
+        }
+    }
+
+    /// Checks that this connected view still identifies the active transport.
+    /// An ordinary remote environment is not a connected view.
+    pub fn check_connected_view(&self) -> Result<(), ExecServerError> {
+        self.remote_client
+            .as_ref()
+            .map_or(Ok(()), LazyRemoteExecServerClient::check_connected_view)
     }
 
     /// Borrows the shared filesystem identity without extending the environment's lifetime.

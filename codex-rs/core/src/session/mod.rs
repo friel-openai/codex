@@ -40,6 +40,8 @@ use crate::context::world_state::WorldStateUpdate;
 use crate::context::world_state::WorldStateUpdateContent;
 use crate::context::world_state::split_prefix_updates;
 use crate::current_time::TimeProvider;
+use crate::environment_selection::DefaultSecondaryEnvironment;
+use crate::environment_selection::StartupEnvironmentAdmission;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
@@ -149,6 +151,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::HistoryPosition;
@@ -169,6 +172,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnEnvironmentRequest;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::W3cTraceContext;
@@ -992,11 +996,11 @@ impl Session {
             metrics_service_name,
             user_shell_override,
             inherited_exec_policy,
-            inherited_environments,
+            mut inherited_environments,
             parent_rollout_thread_trace,
             inherited_thread_state,
             parent_trace: _,
-            environment_requests,
+            mut environment_requests,
             mut thread_extension_init,
             turn_extension_init,
             client_mcp_extensions,
@@ -1017,6 +1021,9 @@ impl Session {
             .get::<codex_extension_api::SessionIsolation>()
             .map(|policy| *policy)
             .unwrap_or_default();
+        if let Some(environments) = &mut inherited_environments {
+            environments.remove_initial_recovery_for_child(&mut environment_requests);
+        }
         // Manager-owned threads and inline delegates bind roots at the same startup boundary.
         let selected_capability_roots =
             match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
@@ -1342,6 +1349,7 @@ impl Session {
                 .as_ref()
                 .map(|discovery| Arc::clone(&discovery.optional_on_resume))
                 .unwrap_or_default(),
+            default_secondary_environments: Vec::new(),
             model_info_overrides: config.to_models_manager_config().into(),
             developer_instructions: config.developer_instructions.clone(),
             base_instructions,
@@ -1380,7 +1388,11 @@ impl Session {
                 || !config.features.enabled(Feature::DeferredExecutor))
         {
             debug_assert!(inherited_environments.is_none());
-            if let Some((environments, instructions)) = ThreadEnvironments::admit_startup_remotes(
+            if let Some(StartupEnvironmentAdmission {
+                environments,
+                instructions,
+                initially_unavailable,
+            }) = ThreadEnvironments::admit_startup_remotes(
                 Arc::clone(&environment_manager),
                 session_configuration
                     .user_shell_override
@@ -1394,9 +1406,32 @@ impl Session {
                 &mut environment_selections,
                 discovery.implicit_selection,
                 &discovery.optional_on_resume,
+                &discovery.default_registrations,
             )
             .await?
             {
+                if !discovery.cold_resume
+                    && discovery.implicit_selection
+                    && let Some((primary, secondaries)) = environment_selections.split_first()
+                    && primary.config == EnvironmentConfigState::FromThread
+                    && environment_manager
+                        .get_environment(&primary.environment_id)
+                        .is_some_and(|environment| !environment.is_remote())
+                {
+                    session_configuration.default_secondary_environments = secondaries
+                        .iter()
+                        .filter(|selection| {
+                            selection.config == EnvironmentConfigState::FromThread
+                                && environments.turn_environments().any(|admitted| {
+                                    admitted.environment.is_remote()
+                                        && admitted.selection.has_same_workspace(selection)
+                                })
+                        })
+                        .cloned()
+                        .map(DefaultSecondaryEnvironment::Ready)
+                        .chain(initially_unavailable)
+                        .collect();
+                }
                 thread_extension_init.insert(instructions);
                 Some(environments)
             } else {
@@ -3005,9 +3040,30 @@ impl Session {
             // Save new environment defaults for future turns. The running turn keeps its own.
             windows_sandbox_changed =
                 state.session_configuration.windows_sandbox_level != updated.windows_sandbox_level;
+            SessionConfiguration::revoke_removed_initial_recoveries(
+                &state.session_configuration.default_secondary_environments,
+                &updated.default_secondary_environments,
+            );
+            let updated_defaults = updated.inferred_environment_config();
+            if state
+                .session_configuration
+                .default_secondary_environments
+                .iter()
+                .any(|default| {
+                    matches!(
+                        default,
+                        DefaultSecondaryEnvironment::InitiallyUnavailable(_)
+                    )
+                })
+                && state.session_configuration.inferred_environment_config() != updated_defaults
+            {
+                self.services
+                    .turn_environments
+                    .revoke_active_initial_recovery();
+            }
             self.services
                 .turn_environments
-                .set_configured_thread_defaults(updated.inferred_environment_config());
+                .set_configured_thread_defaults(updated_defaults);
             if updated.environments != state.session_configuration.environments {
                 self.services
                     .turn_environments
@@ -3101,11 +3157,11 @@ impl Session {
         let snapshot = {
             let _state = self.state.lock().await;
             if self.features.enabled(Feature::SubagentThreadEnvironments) {
-                return self.services.turn_environments.configured_snapshot_now();
+                return self.services.turn_environments.inherited_snapshot_now();
             }
             self.services.turn_environments.snapshot()
         };
-        snapshot.await
+        snapshot.await.without_initial_recovery()
     }
 
     pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
@@ -3125,6 +3181,23 @@ impl Session {
         state
             .session_configuration
             .restorable_thread_settings(state.session_configuration.environments.clone())
+    }
+
+    pub(crate) async fn restatable_environment_settings(&self) -> Option<TurnEnvironmentRequests> {
+        let state = self.state.lock().await;
+        let configuration = &state.session_configuration;
+        if configuration.default_secondary_environments.is_empty()
+            && !configuration
+                .environments
+                .iter()
+                .skip(1)
+                .any(|environment| environment.config == EnvironmentConfigState::StartupUnavailable)
+        {
+            return None;
+        }
+        configuration
+            .restorable_thread_settings(configuration.environments.clone())
+            .environments
     }
 
     pub(crate) async fn set_app_server_client_info(
@@ -5064,7 +5137,7 @@ impl Session {
                 self.services.turn_environments.snapshot(),
                 self.features
                     .enabled(Feature::SubagentThreadEnvironments)
-                    .then(|| self.services.turn_environments.configured_snapshot_now()),
+                    .then(|| self.services.turn_environments.inherited_snapshot_now()),
             )
         };
         if matches!(
@@ -5093,7 +5166,8 @@ impl Session {
         );
         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         let environments = environments.or_cancel(cancellation_token).await?;
-        let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());
+        let inherited_environments = inherited_environments
+            .unwrap_or_else(|| environments.clone().without_initial_recovery());
         // Keep both preparation futures off caller stacks while they are live together.
         let load_agents_md = Box::pin(async {
             let (loaded_agents_md, warnings) = self

@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -143,6 +144,7 @@ use crate::protocol::WriteParams;
 use crate::protocol::WriteResponse;
 use crate::rpc::RpcCallError;
 use crate::rpc::RpcClient;
+use crate::rpc::RpcDispatchGuard;
 use crate::rpc_server_requests::MAX_IN_FLIGHT_SERVER_CALLS;
 use codex_http_client::HttpClientFactory;
 
@@ -274,6 +276,8 @@ pub(crate) struct Session {
 
 struct Inner {
     connection: StdMutex<ConnectionState>,
+    // Initial-default recovery must not mistake a rejoined transport for the first attachment.
+    initial_rpc: Weak<RpcClient>,
     connection_changed: watch::Sender<()>,
     // The remote transport delivers one shared notification stream for every
     // process on the connection. Keep a local process_id -> session registry so
@@ -356,6 +360,25 @@ enum RecoveryPolicy {
 pub struct ExecServerClient {
     inner: Arc<Inner>,
     recovery_policy: RecoveryPolicy,
+    // A policy-verified client may send new work only on this transport.
+    bound_transport: Option<Arc<BoundTransport>>,
+}
+
+/// An RPC attachment selected for one policy check and its subsequent operations.
+struct BoundTransport {
+    rpc: Arc<RpcClient>,
+    environment_info: OnceCell<Arc<EnvironmentInfo>>,
+    startup_recovery: Option<StartupRecoveryAuthority>,
+}
+
+/// A first-attachment view remains valid only while its registration and turn are current.
+struct StartupRecoveryAuthority {
+    registration_retired: CancellationToken,
+    turn_revoked: CancellationToken,
+}
+
+fn bound_transport_unavailable() -> ExecServerError {
+    ExecServerError::Disconnected("exec-server attachment is no longer connected".to_string())
 }
 
 /// State carried from a Noise readiness wait into the initialize RPC.
@@ -403,10 +426,13 @@ pub(crate) struct LazyRemoteExecServerClient {
     transport_params: Option<ExecServerTransportParams>,
     http_client_factory: HttpClientFactory,
     recovery_policy: RecoveryPolicy,
+    bound_client: Option<ExecServerClient>,
     // Saves the first startup result so callers share it; retryable failures use reconnect.
     startup: Arc<ConnectionAttempt>,
     // The latest successful client, replaced whenever reconnecting succeeds.
     current_client: Arc<StdMutex<Option<ExecServerClient>>>,
+    // A direct endpoint can prove its first attachment, not the identity of a later handshake.
+    initial_recovery_retired: CancellationToken,
     reconnect: Arc<StdMutex<Option<Arc<ConnectionAttempt>>>>,
     refresh_lock: Arc<Mutex<()>>,
     pub(super) connection_observer: Arc<OnceLock<ConnectionObserver>>,
@@ -422,8 +448,10 @@ impl LazyRemoteExecServerClient {
             transport_params: Some(transport_params),
             http_client_factory,
             recovery_policy: RecoveryPolicy::Wait,
+            bound_client: None,
             startup: Arc::new(ConnectionAttempt::default()),
             current_client: Arc::new(StdMutex::new(None)),
+            initial_recovery_retired: CancellationToken::new(),
             reconnect: Arc::new(StdMutex::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
             connection_observer: Default::default(),
@@ -439,6 +467,9 @@ impl LazyRemoteExecServerClient {
     }
 
     pub(crate) fn start_connecting(&self) -> Option<AbortOnDropHandle<()>> {
+        if self.is_attachment_bound() {
+            return None;
+        }
         // Stdio starts a process, so keep it lazy until the environment is used.
         if matches!(
             self.transport_params,
@@ -464,6 +495,9 @@ impl LazyRemoteExecServerClient {
     }
 
     pub(crate) fn readiness_result(&self) -> Option<Result<(), ExecServerError>> {
+        if self.is_attachment_bound() {
+            return Some(self.check_connected_view());
+        }
         if let Some(client) = self.cached_client() {
             return client.readiness_result();
         }
@@ -511,11 +545,77 @@ impl LazyRemoteExecServerClient {
         }
     }
 
+    pub(crate) fn connected_view(&self) -> Result<Self, ExecServerError> {
+        let client = self
+            .bound_client
+            .clone()
+            .or_else(|| self.cached_client())
+            .ok_or_else(bound_transport_unavailable)?;
+        Ok(Self {
+            bound_client: Some(client.bind_current_transport(/*startup_recovery*/ None)?),
+            ..self.clone()
+        })
+    }
+
+    pub(crate) fn supports_initial_default_recovery(&self) -> bool {
+        matches!(
+            self.transport_params,
+            Some(ExecServerTransportParams::WebSocketUrl { .. })
+        ) && !self.initial_recovery_retired.is_cancelled()
+    }
+
+    pub(crate) fn is_unattached_initial_default_recovery_candidate(&self) -> bool {
+        self.supports_initial_default_recovery() && self.cached_client().is_none()
+    }
+
+    pub(crate) fn retire_initial_recovery(&self) {
+        self.initial_recovery_retired.cancel();
+    }
+
+    pub(crate) fn connected_initial_default_recovery_view(
+        &self,
+        turn_revoked: CancellationToken,
+    ) -> Result<Self, ExecServerError> {
+        if !self.supports_initial_default_recovery() || self.is_attachment_bound() {
+            return Err(bound_transport_unavailable());
+        }
+        let client = self
+            .cached_client()
+            .ok_or_else(bound_transport_unavailable)?;
+        Ok(Self {
+            bound_client: Some(
+                client.bind_current_transport(Some(StartupRecoveryAuthority {
+                    registration_retired: self.initial_recovery_retired.clone(),
+                    turn_revoked,
+                }))?,
+            ),
+            ..self.clone()
+        })
+    }
+
+    pub(crate) fn is_attachment_bound(&self) -> bool {
+        self.bound_client.is_some()
+    }
+
+    pub(crate) fn check_connected_view(&self) -> Result<(), ExecServerError> {
+        self.bound_client
+            .as_ref()
+            .ok_or_else(bound_transport_unavailable)?
+            .check_bound_transport()
+    }
+
     pub(crate) async fn wait_until_ready(&self) -> Result<(), ExecServerError> {
+        if self.is_attachment_bound() {
+            return self.check_connected_view();
+        }
         self.initial_client().await.map(drop)
     }
 
     pub(crate) async fn get(&self) -> Result<ExecServerClient, ExecServerError> {
+        if let Some(client) = &self.bound_client {
+            client.check_bound_transport()?;
+            return Ok(client.clone());
+        }
         if matches!(self.recovery_policy, RecoveryPolicy::FailFast) {
             let client = match self.cached_client() {
                 Some(client) => client,
@@ -621,6 +721,11 @@ impl LazyRemoteExecServerClient {
     }
 
     pub(crate) fn cached_executor_registration_id(&self) -> Option<String> {
+        if let Some(client) = &self.bound_client {
+            let registration_id = client.executor_registration_id();
+            client.check_bound_transport().ok()?;
+            return registration_id;
+        }
         self.cached_client()
             .and_then(|client| client.executor_registration_id())
     }
@@ -757,6 +862,62 @@ impl ExecServerClient {
         Ok(Self {
             inner: Arc::clone(&self.inner),
             recovery_policy: RecoveryPolicy::FailFast,
+            bound_transport: self.bound_transport.clone(),
+        })
+    }
+
+    fn bind_current_transport(
+        &self,
+        startup_recovery: Option<StartupRecoveryAuthority>,
+    ) -> Result<Self, ExecServerError> {
+        if self.bound_transport.is_some() {
+            self.check_bound_transport()?;
+            return Ok(self.clone());
+        }
+        let rpc = self.rpc_client_without_recovery()?;
+        if startup_recovery.is_some() && !self.inner.initial_rpc.ptr_eq(&Arc::downgrade(&rpc)) {
+            return Err(bound_transport_unavailable());
+        }
+        let bound = Self {
+            inner: Arc::clone(&self.inner),
+            recovery_policy: RecoveryPolicy::FailFast,
+            bound_transport: Some(Arc::new(BoundTransport {
+                rpc,
+                environment_info: OnceCell::new(),
+                startup_recovery,
+            })),
+        };
+        bound.check_bound_transport()?;
+        Ok(bound)
+    }
+
+    fn check_bound_transport(&self) -> Result<(), ExecServerError> {
+        if self.bound_transport.is_some() {
+            self.rpc_client_without_recovery().map(drop)?;
+        }
+        Ok(())
+    }
+
+    fn initial_recovery_authority(&self) -> Option<&StartupRecoveryAuthority> {
+        self.bound_transport.as_ref()?.startup_recovery.as_ref()
+    }
+
+    fn initial_recovery_dispatch_guard<'a>(
+        &'a self,
+        can_dispatch: &'a (dyn Fn() -> bool + Sync),
+        dispatched: Option<&'a AtomicBool>,
+    ) -> Option<RpcDispatchGuard<'a>> {
+        let authority = self.initial_recovery_authority()?;
+        Some(RpcDispatchGuard {
+            revoked: Box::pin(async move {
+                tokio::select! {
+                    _ = authority.registration_retired.cancelled() => {}
+                    _ = authority.turn_revoked.cancelled() => {}
+                    _ = self.inner.retired.cancelled() => {}
+                }
+            }),
+            can_dispatch,
+            dispatched,
         })
     }
 
@@ -766,6 +927,22 @@ impl ExecServerClient {
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bound) = &self.bound_transport {
+            return match &connection.status {
+                ConnectionStatus::Connected(current)
+                    if !self.inner.retired.is_cancelled()
+                        && bound.startup_recovery.as_ref().is_none_or(|authority| {
+                            !authority.registration_retired.is_cancelled()
+                                && !authority.turn_revoked.is_cancelled()
+                        })
+                        && Arc::ptr_eq(current, &bound.rpc)
+                        && !bound.rpc.is_disconnected() =>
+                {
+                    Ok(Arc::clone(&bound.rpc))
+                }
+                _ => Err(bound_transport_unavailable()),
+            };
+        }
         match &connection.status {
             ConnectionStatus::Connected(rpc_client) if !rpc_client.is_disconnected() => {
                 Ok(Arc::clone(rpc_client))
@@ -872,11 +1049,19 @@ impl ExecServerClient {
 
     /// Returns shared cached executor metadata, fetching it lazily if initialization omitted it.
     pub async fn environment_info(&self) -> Result<Arc<EnvironmentInfo>, ExecServerError> {
-        self.inner
-            .environment_info
+        self.check_bound_transport()?;
+        // The ordinary cache spans same-session recovery. A policy view must not read it.
+        let cache = self
+            .bound_transport
+            .as_ref()
+            .map_or(&self.inner.environment_info, |transport| {
+                &transport.environment_info
+            });
+        let info = cache
             .get_or_try_init(|| async { self.force_environment_info().await.map(Arc::new) })
-            .await
-            .cloned()
+            .await?;
+        self.check_bound_transport()?;
+        Ok(Arc::clone(info))
     }
 
     /// Fetches executor metadata over RPC without reading or updating the cache.
@@ -908,10 +1093,15 @@ impl ExecServerClient {
     pub async fn environment_status(&self) -> Result<EnvironmentStatus, ExecServerError> {
         // Health checks only reuse an existing RPC connection and never initiate recovery.
         let rpc_client = self.rpc_client_without_recovery()?;
-        self.map_rpc_call_result(
-            rpc_client
-                .call_with_timeout(ENVIRONMENT_STATUS_METHOD, &(), ENVIRONMENT_STATUS_TIMEOUT)
-                .await,
+        self.map_operation_result(
+            self.call_on_transport(
+                &rpc_client,
+                ENVIRONMENT_STATUS_METHOD,
+                &(),
+                Some(ENVIRONMENT_STATUS_TIMEOUT),
+                /*dispatched*/ None,
+            )
+            .await,
         )
     }
 
@@ -1046,6 +1236,11 @@ impl ExecServerClient {
         &self,
         params: FsCloseParams,
     ) -> Result<FsCloseResponse, ExecServerError> {
+        if self.bound_transport.is_some() {
+            // File handles belong to the original RPC, unlike recoverable process IDs.
+            let rpc = self.rpc_client_without_recovery()?;
+            return self.map_operation_result(rpc.call_for_cleanup(FS_CLOSE_METHOD, &params).await);
+        }
         self.call_for_cleanup(FS_CLOSE_METHOD, &params).await
     }
 
@@ -1076,11 +1271,18 @@ impl ExecServerClient {
         if !self.environment_info().await?.capabilities.fs_watch_missing {
             return Ok(None);
         }
-        Ok(self
+        let can_dispatch = || self.check_bound_transport().is_ok();
+        let watcher = self
             .rpc_client()
             .await?
-            .watch_missing(missing, present)
-            .await?)
+            .watch_missing(
+                missing,
+                present,
+                self.initial_recovery_dispatch_guard(&can_dispatch, /*dispatched*/ None),
+            )
+            .await;
+        self.check_bound_transport()?;
+        Ok(watcher?)
     }
 
     pub async fn fs_get_metadata(
@@ -1171,6 +1373,9 @@ impl ExecServerClient {
         loop {
             let rpc_client = self.rpc_client().await?;
             if !self.inner.begin_process_start(&rpc_client) {
+                if self.bound_transport.is_some() {
+                    return Err(bound_transport_unavailable());
+                }
                 continue;
             }
 
@@ -1209,10 +1414,22 @@ impl ExecServerClient {
             let (result_received_tx, result_received_rx) = tokio::sync::oneshot::channel();
             let process_start_task = async move {
                 let _active_start = active_start;
-                match client
-                    .call_rpc::<_, ExecResponse>(&rpc_client, EXEC_METHOD, &params)
-                    .await
-                {
+                if let Err(error) = client.check_bound_transport() {
+                    client.inner.remove_session_if(&process_id, &state);
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+                let dispatched = AtomicBool::new(false);
+                let result = client
+                    .call_on_transport::<_, ExecResponse>(
+                        &rpc_client,
+                        EXEC_METHOD,
+                        &params,
+                        /*call_timeout*/ None,
+                        Some(&dispatched),
+                    )
+                    .await;
+                match client.map_operation_result(result) {
                     Ok(response) => {
                         state.recoverable.store(true, Ordering::Release);
                         let session = Session {
@@ -1231,7 +1448,10 @@ impl ExecServerClient {
                         }
                     }
                     Err(error) => {
-                        if is_transport_closed_error(&error) {
+                        if is_transport_closed_error(&error)
+                            && (client.initial_recovery_authority().is_none()
+                                || dispatched.load(Ordering::Relaxed))
+                        {
                             tokio::spawn(async move {
                                 cleanup_process_start(&client, &process_id, &state).await;
                             });
@@ -1255,6 +1475,7 @@ impl ExecServerClient {
                 ));
             }
             if matches!(&result, Ok(Ok(_))) {
+                self.check_bound_transport()?;
                 pending_start.armed = false;
                 let _ = result_received_tx.send(());
             }
@@ -1349,6 +1570,7 @@ impl ExecServerClient {
         let session_id = OnceLock::new();
         let (connection_changed, _connection_changed_rx) = watch::channel(());
         let inner = Arc::new(Inner {
+            initial_rpc: Arc::downgrade(&rpc_client),
             connection: StdMutex::new(ConnectionState {
                 status: ConnectionStatus::Connected(Arc::clone(&rpc_client)),
                 executor_registration_id: noise_context
@@ -1377,6 +1599,7 @@ impl ExecServerClient {
         let client = Self {
             inner,
             recovery_policy: RecoveryPolicy::Wait,
+            bound_transport: None,
         };
         // An explicit resume can redirect notifications from running processes
         // before initialize returns. Drain them immediately so a burst cannot
@@ -1415,14 +1638,26 @@ impl ExecServerClient {
     {
         let rpc_client = self.rpc_client().await?;
         // Bound sending as well as receiving: a stuck transport can fill the outbound queue.
-        match timeout(call_timeout, rpc_client.call(method, params)).await {
-            Ok(result) => self.map_rpc_call_result(result),
+        match timeout(
+            call_timeout,
+            self.call_on_transport(
+                &rpc_client,
+                method,
+                params,
+                /*call_timeout*/ None,
+                /*dispatched*/ None,
+            ),
+        )
+        .await
+        {
+            Ok(result) => self.map_operation_result(result),
             Err(_) => {
+                self.check_bound_transport()?;
                 let error = ExecServerError::RpcTimedOut {
                     method: method.to_string(),
                     timeout: call_timeout,
                 };
-                if self.inner.reconnect_strategy.is_some() {
+                if self.bound_transport.is_none() && self.inner.reconnect_strategy.is_some() {
                     // Retire only the connection we probed; recovery ignores a stale client.
                     rpc_client.close_transport().await;
                     self.inner.request_recovery(rpc_client, error.to_string());
@@ -1442,7 +1677,37 @@ impl ExecServerClient {
         P: serde::Serialize,
         T: serde::de::DeserializeOwned,
     {
-        self.map_rpc_call_result(rpc_client.call(method, params).await)
+        self.check_bound_transport()?;
+        self.map_operation_result(
+            self.call_on_transport(
+                rpc_client, method, params, /*call_timeout*/ None, /*dispatched*/ None,
+            )
+            .await,
+        )
+    }
+
+    async fn call_on_transport<P, T>(
+        &self,
+        rpc_client: &RpcClient,
+        method: &str,
+        params: &P,
+        call_timeout: Option<Duration>,
+        dispatched: Option<&AtomicBool>,
+    ) -> Result<T, RpcCallError>
+    where
+        P: serde::Serialize,
+        T: serde::de::DeserializeOwned,
+    {
+        let can_dispatch = || self.check_bound_transport().is_ok();
+        if let Some(guard) = self.initial_recovery_dispatch_guard(&can_dispatch, dispatched) {
+            return rpc_client
+                .call_guarded(method, params, call_timeout, guard)
+                .await;
+        }
+        match call_timeout {
+            Some(timeout) => rpc_client.call_with_timeout(method, params, timeout).await,
+            None => rpc_client.call(method, params).await,
+        }
     }
 
     async fn call_for_cleanup<P, T>(&self, method: &str, params: &P) -> Result<T, ExecServerError>
@@ -1450,8 +1715,25 @@ impl ExecServerClient {
         P: serde::Serialize,
         T: serde::de::DeserializeOwned,
     {
-        let rpc_client = self.inner.rpc_client().await?;
+        // Cleanup may terminate a known process on the recovered session, not start new work.
+        let rpc_client = match self
+            .bound_transport
+            .as_ref()
+            .filter(|bound| bound.startup_recovery.is_some())
+        {
+            // Initial-default recovery never authorizes reconnect, even for cleanup.
+            Some(bound) => Arc::clone(&bound.rpc),
+            None => self.inner.rpc_client().await?,
+        };
         self.map_rpc_call_result(rpc_client.call_for_cleanup(method, params).await)
+    }
+
+    fn map_operation_result<T>(
+        &self,
+        result: Result<T, RpcCallError>,
+    ) -> Result<T, ExecServerError> {
+        self.check_bound_transport()?;
+        self.map_rpc_call_result(result)
     }
 
     fn map_rpc_call_result<T>(
@@ -1481,10 +1763,16 @@ async fn cleanup_process_start(
     process_id: &ProcessId,
     state: &Arc<SessionState>,
 ) {
+    // An initial-recovery view cannot retry cleanup on a recovered transport.
+    let retry_closed = client.initial_recovery_authority().is_none();
     loop {
         match client.terminate(process_id).await {
             Ok(_) => break,
-            Err(error) if is_transport_closed_error(&error) && !client.inner.is_failed() => {
+            Err(error)
+                if retry_closed
+                    && is_transport_closed_error(&error)
+                    && !client.inner.is_failed() =>
+            {
                 continue;
             }
             Err(_) => break,
@@ -1730,6 +2018,7 @@ impl Session {
         max_bytes: Option<usize>,
         wait_ms: Option<u64>,
     ) -> Result<ReadResponse, ExecServerError> {
+        self.client.check_bound_transport()?;
         loop {
             if let Some(response) = self.state.failed_response() {
                 return Ok(response);
@@ -1746,6 +2035,7 @@ impl Session {
                 .await
             {
                 Ok(response) => return Ok(response),
+                Err(error) if self.client.bound_transport.is_some() => return Err(error),
                 Err(error)
                     if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                 {
@@ -1765,6 +2055,7 @@ impl Session {
     }
 
     pub(crate) async fn write(&self, chunk: Vec<u8>) -> Result<WriteResponse, ExecServerError> {
+        self.client.check_bound_transport()?;
         let write_id = self.state.next_write_id();
         loop {
             match self
@@ -1773,6 +2064,7 @@ impl Session {
                 .await
             {
                 Ok(response) => return Ok(response),
+                Err(error) if self.client.bound_transport.is_some() => return Err(error),
                 Err(error)
                     if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                 {
@@ -2037,14 +2329,18 @@ mod tests {
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_util::sync::CancellationToken;
     use tracing::Instrument;
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::prelude::*;
 
+    use super::ConnectionFailure;
+    use super::ConnectionStatus;
     use super::ExecServerClient;
     use super::ExecServerClientConnectOptions;
     use super::ExecServerError;
     use super::LazyRemoteExecServerClient;
+    use super::StartupRecoveryAuthority;
     use crate::Environment;
     use crate::EnvironmentObservedStatus;
     use crate::ExecutorFileSystem;
@@ -2057,12 +2353,15 @@ mod tests {
     use crate::client_api::StdioExecServerCommand;
     use crate::client_api::StdioExecServerConnectArgs;
     use crate::connection::JsonRpcConnection;
+    use crate::connection::JsonRpcConnectionEvent;
+    use crate::connection::JsonRpcTransport;
     use crate::process::ExecProcessEvent;
     use crate::protocol::EXEC_CLOSED_METHOD;
     use crate::protocol::EXEC_EXITED_METHOD;
     use crate::protocol::EXEC_METHOD;
     use crate::protocol::EXEC_OUTPUT_DELTA_METHOD;
     use crate::protocol::EXEC_READ_METHOD;
+    use crate::protocol::EXEC_TERMINATE_METHOD;
     use crate::protocol::EXEC_WRITE_METHOD;
     use crate::protocol::EnvironmentInfo;
     use crate::protocol::ExecClosedNotification;
@@ -2073,11 +2372,14 @@ mod tests {
     use crate::protocol::ExecResponse;
     use crate::protocol::FS_CLOSE_METHOD;
     use crate::protocol::FS_OPEN_METHOD;
+    use crate::protocol::FS_READ_FILE_METHOD;
     use crate::protocol::FS_WRITE_FILE_METHOD;
     use crate::protocol::FsOpenMode;
     use crate::protocol::FsOpenParams;
     use crate::protocol::FsWriteBlockParams;
     use crate::protocol::FsWriteFileParams;
+    use crate::protocol::HTTP_REQUEST_METHOD;
+    use crate::protocol::HttpRequestParams;
     use crate::protocol::INITIALIZE_METHOD;
     use crate::protocol::INITIALIZED_METHOD;
     use crate::protocol::InitializeResponse;
@@ -2111,6 +2413,515 @@ mod tests {
             .write_all(format!("{encoded}\n").as_bytes())
             .await
             .expect("json-rpc line should write");
+    }
+
+    #[tokio::test]
+    async fn connected_view_does_not_start_an_unconnected_environment() {
+        let environment =
+            Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string())).unwrap();
+        assert!(!environment.startup_finished());
+        assert!(environment.check_connected_view().is_err());
+        assert!(matches!(
+            environment.connected_view(),
+            Err(ExecServerError::Disconnected(_))
+        ));
+        assert!(!environment.startup_finished());
+
+        let local = Environment::default_for_tests();
+        let view = local.connected_view().unwrap();
+        assert!(view.check_connected_view().is_ok());
+        assert!(Arc::ptr_eq(local.filesystem_ref(), view.filesystem_ref()));
+    }
+
+    async fn connected_view_test_peer(
+        label: &'static str,
+    ) -> (ExecServerClient, tokio_util::task::AbortOnDropHandle<()>) {
+        let (client_stdin, server_reader) = duplex(1 << 20);
+        let (mut server_writer, client_stdout) = duplex(1 << 20);
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let message = serde_json::from_str(&line).unwrap();
+                let request = match message {
+                    JSONRPCMessage::Notification(notification)
+                        if notification.method == INITIALIZED_METHOD =>
+                    {
+                        continue;
+                    }
+                    JSONRPCMessage::Request(request) => request,
+                    other => panic!("unexpected message: {other:?}"),
+                };
+                let result = match request.method.as_str() {
+                    INITIALIZE_METHOD => serde_json::json!({"sessionId": "same-session"}),
+                    FS_READ_FILE_METHOD => {
+                        let data = if label == "original" { "b2xk" } else { "bmV3" };
+                        serde_json::json!({"dataBase64": data})
+                    }
+                    HTTP_REQUEST_METHOD => {
+                        let status = if label == "original" { 200 } else { 201 };
+                        serde_json::json!({"status": status, "headers": [], "bodyBase64": ""})
+                    }
+                    EXEC_METHOD => {
+                        assert!(matches!(label, "original" | "initial-recovery"));
+                        let params: ExecParams = serde_json::from_value(request.params.unwrap())
+                            .expect("process params should deserialize");
+                        serde_json::json!({"processId": params.process_id})
+                    }
+                    EXEC_TERMINATE_METHOD => {
+                        let expected_process_id = match label {
+                            "replacement" => "started-on-original",
+                            "initial-recovery" => "before-revocation",
+                            _ => panic!("unexpected termination on {label}"),
+                        };
+                        assert_eq!(
+                            request.params.unwrap()["processId"],
+                            serde_json::json!(expected_process_id)
+                        );
+                        serde_json::json!({"running": false})
+                    }
+                    other => panic!("unexpected {label} RPC: {other}"),
+                };
+                write_jsonrpc_line(
+                    &mut server_writer,
+                    JSONRPCMessage::Response(JSONRPCResponse {
+                        id: request.id,
+                        result,
+                    }),
+                )
+                .await;
+            }
+        });
+        let client = ExecServerClient::connect(
+            JsonRpcConnection::from_stdio(client_stdout, client_stdin, label.to_string()),
+            ExecServerClientConnectOptions::default(),
+        )
+        .await
+        .unwrap();
+        (client, tokio_util::task::AbortOnDropHandle::new(server))
+    }
+
+    #[tokio::test]
+    async fn connected_view_rejects_replacement_rpc_but_can_terminate_started_process() {
+        let (client, _original_peer) = connected_view_test_peer("original").await;
+        let (replacement, _replacement_peer) = connected_view_test_peer("replacement").await;
+        assert_eq!(client.session_id(), replacement.session_id());
+        let environment = Environment::remote_with_client(
+            LazyRemoteExecServerClient::from_connected(
+                client.clone(),
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            ),
+            /*local_runtime_paths*/ None,
+            codex_config::ScopedSkillsConfig::default(),
+        );
+        let original_rpc = client.rpc_client_without_recovery().unwrap();
+        let replacement_rpc = replacement.rpc_client_without_recovery().unwrap();
+        assert!(!Arc::ptr_eq(&original_rpc, &replacement_rpc));
+
+        let view = environment.connected_view().unwrap();
+        let filesystem = view.get_filesystem();
+        let http = view.get_http_client();
+        let exec = view.get_exec_backend();
+        let path = PathUri::from_host_native_path(std::env::current_dir().unwrap()).unwrap();
+        let http_params = HttpRequestParams {
+            method: "GET".to_string(),
+            url: "https://example.invalid".to_string(),
+            headers: Vec::new(),
+            body: None,
+            timeout_ms: None,
+            redirect_policy: Default::default(),
+            request_id: "view-test".to_string(),
+            stream_response: false,
+        };
+        let exec_params = ExecParams {
+            metadata: Default::default(),
+            process_id: ProcessId::from("started-on-original"),
+            argv: vec!["mocked".to_string()],
+            cwd: path.clone(),
+            shell_snapshot: None,
+            env_policy: None,
+            env: HashMap::new(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        };
+        assert_eq!(
+            filesystem
+                .read_file(&path, Default::default(), None)
+                .await
+                .unwrap(),
+            b"old".to_vec()
+        );
+        assert_eq!(
+            http.http_request(http_params.clone()).await.unwrap().status,
+            200
+        );
+        let started = exec.start(exec_params.clone()).await.unwrap();
+
+        {
+            let mut connection = client.inner.connection.lock().unwrap();
+            connection.set_status(ConnectionStatus::Recovering);
+        }
+        assert!(environment.connected_view().is_err());
+        assert!(view.check_connected_view().is_err());
+        assert!(view.wait_until_ready().await.is_err());
+        {
+            let mut connection = client.inner.connection.lock().unwrap();
+            connection.set_status(ConnectionStatus::Connected(replacement_rpc));
+        }
+        assert!(!original_rpc.is_disconnected());
+        assert!(view.connected_view().is_err());
+        assert!(matches!(
+            filesystem.read_file(&path, Default::default(), None).await,
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe
+        ));
+        assert!(matches!(
+            http.http_request(http_params.clone()).await,
+            Err(ExecServerError::Disconnected(_))
+        ));
+        let mut late_exec_params = exec_params;
+        late_exec_params.process_id = ProcessId::from("not-started-after-replacement");
+        assert!(matches!(
+            exec.start(late_exec_params).await,
+            Err(ExecServerError::Disconnected(_))
+        ));
+        assert!(matches!(
+            started.process.write(b"no replay".to_vec()).await,
+            Err(ExecServerError::Disconnected(_))
+        ));
+        started.process.terminate().await.unwrap();
+
+        let fresh = environment.connected_view().unwrap();
+        assert!(fresh.check_connected_view().is_ok());
+        assert_eq!(
+            fresh
+                .get_filesystem()
+                .read_file(&path, Default::default(), None)
+                .await
+                .unwrap(),
+            b"new".to_vec()
+        );
+        assert_eq!(
+            fresh
+                .get_http_client()
+                .http_request(http_params)
+                .await
+                .unwrap()
+                .status,
+            201
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_recovery_revokes_cached_new_io_but_allows_process_cleanup() {
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        let lazy = LazyRemoteExecServerClient::new(
+            ExecServerTransportParams::websocket_url(
+                "ws://127.0.0.1:1".to_string(),
+                DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+            ),
+            factory,
+        );
+        let environment = Environment::remote_with_client(
+            lazy.clone(),
+            /*local_runtime_paths*/ None,
+            codex_config::ScopedSkillsConfig::default(),
+        );
+        let revoked = CancellationToken::new();
+        assert!(environment.is_unattached_initial_default_recovery_candidate());
+        assert!(
+            environment
+                .connected_initial_default_recovery_view(revoked.clone())
+                .is_err()
+        );
+        assert!(!environment.startup_finished());
+
+        let (client, _peer) = connected_view_test_peer("initial-recovery").await;
+        let original_rpc = client.rpc_client_without_recovery().unwrap();
+        *lazy.current_client.lock().unwrap() = Some(client.clone());
+        let view = environment
+            .connected_initial_default_recovery_view(revoked.clone())
+            .unwrap();
+        let exec = view.get_exec_backend();
+        let cwd = PathUri::from_host_native_path(std::env::current_dir().unwrap()).unwrap();
+        let mut params = ExecParams {
+            metadata: Default::default(),
+            process_id: ProcessId::from("before-revocation"),
+            argv: vec!["mocked".to_string()],
+            cwd,
+            shell_snapshot: None,
+            env_policy: None,
+            env: HashMap::new(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        };
+        let started = exec.start(params.clone()).await.unwrap();
+        let next = environment
+            .connected_initial_default_recovery_view(CancellationToken::new())
+            .unwrap();
+        revoked.cancel();
+        params.process_id = ProcessId::from("after-revocation");
+        assert!(matches!(
+            exec.start(params).await,
+            Err(ExecServerError::Disconnected(_))
+        ));
+        assert!(matches!(
+            started.process.write(b"no new I/O".to_vec()).await,
+            Err(ExecServerError::Disconnected(_))
+        ));
+        assert!(next.check_connected_view().is_ok());
+        let (replacement, _replacement_peer) = connected_view_test_peer("replacement").await;
+        client
+            .inner
+            .connection
+            .lock()
+            .unwrap()
+            .set_status(ConnectionStatus::Connected(
+                replacement.rpc_client_without_recovery().unwrap(),
+            ));
+        assert!(next.check_connected_view().is_err());
+        assert!(
+            environment
+                .connected_initial_default_recovery_view(CancellationToken::new())
+                .is_err()
+        );
+        assert!(environment.connected_view().is_ok());
+        started.process.terminate().await.unwrap();
+
+        client
+            .inner
+            .connection
+            .lock()
+            .unwrap()
+            .set_status(ConnectionStatus::Connected(original_rpc));
+        lazy.retire_initial_recovery();
+        assert!(next.check_connected_view().is_err());
+        assert!(
+            environment
+                .connected_initial_default_recovery_view(CancellationToken::new())
+                .is_err()
+        );
+        assert!(environment.connected_view().is_ok());
+    }
+
+    /// A capacity-one transport lets these tests control dispatch without any sockets.
+    struct ControlledStartPeer {
+        client: ExecServerClient,
+        outgoing: mpsc::Sender<JSONRPCMessage>,
+        requests: mpsc::Receiver<JSONRPCMessage>,
+        _responses: mpsc::Sender<JsonRpcConnectionEvent>,
+    }
+
+    impl ControlledStartPeer {
+        async fn connect() -> Self {
+            let (outgoing, mut requests) = mpsc::channel(1);
+            let (responses, incoming_rx) = mpsc::channel(1);
+            let connection = JsonRpcConnection {
+                outgoing_tx: outgoing.clone(),
+                incoming_rx,
+                disconnected_rx: watch::channel(false).1,
+                task_handles: Vec::new(),
+                transport: JsonRpcTransport::Plain,
+            };
+            let connecting = ExecServerClient::connect(connection, Default::default());
+            tokio::pin!(connecting);
+            assert!(futures::poll!(connecting.as_mut()).is_pending());
+            let Some(JSONRPCMessage::Request(initialize)) = requests.try_recv().ok() else {
+                panic!("expected initialize request");
+            };
+            assert_eq!(initialize.method, INITIALIZE_METHOD);
+            responses
+                .try_send(JsonRpcConnectionEvent::message(JSONRPCMessage::Response(
+                    JSONRPCResponse {
+                        id: initialize.id,
+                        result: serde_json::json!({"sessionId": "controlled-start"}),
+                    },
+                )))
+                .unwrap();
+            let client = timeout(Duration::from_secs(5), connecting)
+                .await
+                .expect("initialize should complete")
+                .unwrap();
+            assert!(matches!(
+                requests.try_recv(),
+                Ok(JSONRPCMessage::Notification(notification))
+                    if notification.method == INITIALIZED_METHOD
+            ));
+            Self {
+                client,
+                outgoing,
+                requests,
+                _responses: responses,
+            }
+        }
+
+        fn initial_recovery_view(&self, turn_revoked: CancellationToken) -> ExecServerClient {
+            self.client
+                .bind_current_transport(Some(StartupRecoveryAuthority {
+                    registration_retired: CancellationToken::new(),
+                    turn_revoked,
+                }))
+                .unwrap()
+        }
+    }
+
+    fn controlled_start_params(process_id: ProcessId) -> ExecParams {
+        ExecParams {
+            metadata: Default::default(),
+            process_id,
+            argv: vec!["mocked".to_string()],
+            cwd: PathUri::from_host_native_path(std::env::current_dir().unwrap()).unwrap(),
+            shell_snapshot: None,
+            env_policy: None,
+            env: HashMap::new(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_recovery_pending_start_cleanup_stops_after_original_rpc_closes() {
+        let mut original = ControlledStartPeer::connect().await;
+        let mut replacement = ControlledStartPeer::connect().await;
+        let original_rpc = original.client.rpc_client_without_recovery().unwrap();
+        let replacement_rpc = replacement.client.rpc_client_without_recovery().unwrap();
+        let bound = original.initial_recovery_view(CancellationToken::new());
+        let process_id = ProcessId::from("start-without-receipt");
+        let starting = bound.start_process(controlled_start_params(process_id.clone()), None);
+        tokio::pin!(starting);
+        assert!(futures::poll!(starting.as_mut()).is_pending());
+        assert!(matches!(
+            timeout(Duration::from_secs(5), original.requests.recv())
+                .await
+                .unwrap(),
+            Some(JSONRPCMessage::Request(request)) if request.method == EXEC_METHOD
+        ));
+        let pending = Arc::downgrade(&original.client.inner.get_session(&process_id).unwrap());
+        original
+            .client
+            .inner
+            .connection
+            .lock()
+            .unwrap()
+            .set_status(ConnectionStatus::Connected(Arc::clone(&replacement_rpc)));
+        original_rpc.close_transport().await;
+        assert!(matches!(
+            timeout(Duration::from_secs(5), starting).await.unwrap(),
+            Err(ExecServerError::Disconnected(_))
+        ));
+        let cleanup_finished = timeout(Duration::from_secs(5), async {
+            while pending.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if cleanup_finished.is_err() {
+            // Let a broken retry loop exit so the failing test cannot hang runtime shutdown.
+            original
+                .client
+                .inner
+                .connection
+                .lock()
+                .unwrap()
+                .set_status(ConnectionStatus::Failed(ConnectionFailure::Disconnected(
+                    "test cleanup deadline".to_string(),
+                )));
+        }
+        cleanup_finished.expect("closed original RPC must not retain a cleanup worker");
+        assert!(original.client.inner.get_session(&process_id).is_none());
+        assert!(Arc::ptr_eq(
+            &original.client.rpc_client_without_recovery().unwrap(),
+            &replacement_rpc
+        ));
+        assert!(matches!(
+            replacement.requests.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn initial_recovery_revocation_denies_queued_process_start_before_dispatch() {
+        for replace_transport in [false, true] {
+            let mut original = ControlledStartPeer::connect().await;
+            let mut replacement = ControlledStartPeer::connect().await;
+            let original_rpc = original.client.rpc_client_without_recovery().unwrap();
+            let revoked = CancellationToken::new();
+            let bound = original.initial_recovery_view(revoked.clone());
+            original
+                .outgoing
+                .try_send(JSONRPCMessage::Notification(JSONRPCNotification {
+                    method: "queue-filler".to_string(),
+                    params: None,
+                }))
+                .unwrap();
+            let process_id = ProcessId::from("must-not-dispatch");
+            let starting = bound.start_process(controlled_start_params(process_id.clone()), None);
+            tokio::pin!(starting);
+            assert!(futures::poll!(starting.as_mut()).is_pending());
+            timeout(Duration::from_secs(5), async {
+                while original_rpc.pending_request_count().await != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("exec/start must be waiting on the full outgoing queue");
+            let pending = Arc::downgrade(&original.client.inner.get_session(&process_id).unwrap());
+            assert_eq!(original.outgoing.capacity(), 0);
+            let drain_filler = |peer: &mut ControlledStartPeer| {
+                assert!(matches!(
+                    peer.requests.try_recv(),
+                    Ok(JSONRPCMessage::Notification(notification)) if notification.method == "queue-filler"
+                ));
+            };
+            if replace_transport {
+                // No token is cancelled. Only the recheck after reservation sees replacement.
+                original.client.inner.connection.lock().unwrap().set_status(
+                    ConnectionStatus::Connected(
+                        replacement.client.rpc_client_without_recovery().unwrap(),
+                    ),
+                );
+                drain_filler(&mut original);
+            } else {
+                revoked.cancel();
+            }
+            assert!(matches!(
+                timeout(Duration::from_secs(5), starting).await.unwrap(),
+                Err(ExecServerError::Disconnected(_))
+            ));
+            if !replace_transport {
+                // Cancellation must return before queue capacity becomes available again.
+                drain_filler(&mut original);
+            }
+            timeout(Duration::from_secs(5), async {
+                while pending.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("an undispatched start must not send cleanup");
+            assert_eq!(original_rpc.pending_request_count().await, 0);
+            assert!(matches!(
+                original.requests.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                replacement.requests.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

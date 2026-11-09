@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
+use std::sync::Weak;
 
 use async_channel::Sender;
 use codex_exec_server::Environment;
@@ -38,6 +39,7 @@ use futures::future::BoxFuture;
 use futures::future::Shared;
 use tokio::sync::watch;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
@@ -45,6 +47,7 @@ use tracing::instrument::WithSubscriber;
 use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
 use crate::agents_md::StartupProjectInstructions;
 use crate::agents_md::read_startup_project_instructions;
+use crate::agents_md::verify_remote_project_instructions;
 use crate::config::Config;
 use crate::session::ThreadEnvironmentDefaults;
 use crate::session::turn_context::ShellSnapshotCache;
@@ -129,8 +132,19 @@ pub(crate) fn default_thread_environment_requests(
     cwd: &AbsolutePathBuf,
     workspace_roots: &[AbsolutePathBuf],
 ) -> Vec<TurnEnvironmentRequest> {
-    environment_manager
-        .default_environment_ids()
+    default_thread_environment_requests_for_ids(
+        environment_manager.default_environment_ids(),
+        cwd,
+        workspace_roots,
+    )
+}
+
+pub(crate) fn default_thread_environment_requests_for_ids(
+    environment_ids: impl IntoIterator<Item = String>,
+    cwd: &AbsolutePathBuf,
+    workspace_roots: &[AbsolutePathBuf],
+) -> Vec<TurnEnvironmentRequest> {
+    environment_ids
         .into_iter()
         .map(|environment_id| TurnEnvironmentRequest {
             environment_id,
@@ -316,6 +330,123 @@ struct ThreadEnvironmentsState {
     environments: Vec<SelectedTurnEnvironment>,
     // Keep each rejection at its original position without binding an executor.
     startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
+    default_secondary_admissions: Option<DefaultSecondaryAdmissions>,
+}
+
+/// A local-primary turn must verify its default secondaries before using their tools.
+#[derive(Clone)]
+pub(crate) struct DefaultSecondaryAdmissions {
+    turn: Arc<()>,
+    secondaries: Vec<DefaultSecondaryAdmission>,
+}
+
+/// Server-owned eligibility from the original omitted app-server startup.
+#[derive(Clone)]
+pub(crate) enum DefaultSecondaryEnvironment {
+    Ready(TurnEnvironmentSelection),
+    InitiallyUnavailable(Arc<InitialDefaultSecondary>),
+}
+
+impl DefaultSecondaryEnvironment {
+    pub(crate) fn matches_saved_selection(&self, current: &TurnEnvironmentSelection) -> bool {
+        match self {
+            Self::Ready(original) => {
+                current.config == EnvironmentConfigState::FromThread
+                    && original.has_same_workspace(current)
+            }
+            Self::InitiallyUnavailable(original) => original.rejection == *current,
+        }
+    }
+}
+
+/// The exact optional rejection and its original registration, not an ID to resolve later.
+pub(crate) struct InitialDefaultSecondary {
+    pub(crate) rejection: TurnEnvironmentSelection,
+    registration: Weak<Environment>,
+    pub(crate) revoked: CancellationToken,
+}
+
+/// The current turn's verification may be revoked independently of future eligibility.
+#[derive(Clone)]
+struct InitialDefaultSecondaryAttempt {
+    original: Arc<InitialDefaultSecondary>,
+    revoked: CancellationToken,
+}
+
+/// The inherited denial and the lifetime of a verified active-turn execution view.
+pub(crate) struct InitialTurnEnvironmentRecovery {
+    rejection: TurnEnvironmentSelection,
+    revoked: CancellationToken,
+}
+
+pub(crate) struct StartupEnvironmentAdmission {
+    pub(crate) environments: TurnEnvironmentSnapshot,
+    pub(crate) instructions: StartupProjectInstructions,
+    pub(crate) initially_unavailable: Vec<DefaultSecondaryEnvironment>,
+}
+
+#[derive(Clone)]
+struct DefaultSecondaryAdmission {
+    selection: TurnEnvironmentSelection,
+    registration: Arc<Environment>,
+    verified: Option<TurnEnvironment>,
+    initial_recovery: Option<InitialDefaultSecondaryAttempt>,
+}
+
+impl DefaultSecondaryAdmission {
+    fn matches(
+        &self,
+        selection: &TurnEnvironmentSelection,
+        config_origin: EnvironmentConfigOrigin,
+        registration: &Arc<Environment>,
+    ) -> bool {
+        // An owner can install the same normalized config without preserving its origin.
+        config_origin == EnvironmentConfigOrigin::Thread
+            && self.selection == *selection
+            && Arc::ptr_eq(&self.registration, registration)
+    }
+
+    fn unavailable(&self) -> TurnEnvironmentState {
+        let mut selection = self.selection.clone();
+        let error = format!(
+            "Environment `{}` is unavailable for this turn because its AGENTS.md discovery could not be verified.",
+            selection.environment_id,
+        );
+        // Retain the ID in inherited selections without granting tools or requiring its skills.
+        selection.config = EnvironmentConfigState::StartupUnavailable;
+        selection.selected_capability_roots = EnvironmentCapabilityRoots::default();
+        TurnEnvironmentState::Failed {
+            selection,
+            required_skills: Vec::new(),
+            error,
+        }
+    }
+
+    fn matches_initial_rejection(&self, state: &ThreadEnvironmentsState) -> bool {
+        let Some(attempt) = &self.initial_recovery else {
+            return false;
+        };
+        !attempt.revoked.is_cancelled()
+            && state.environments.first().is_some_and(|primary| {
+                primary.selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+                    && !primary.environment.is_remote()
+                    && primary.config_origin == EnvironmentConfigOrigin::Thread
+            })
+            && state
+                .startup_rejections
+                .iter()
+                .any(|(position, rejection)| {
+                    *position > 0 && *rejection == attempt.original.rejection
+                })
+            && !state
+                .startup_rejections
+                .iter()
+                .any(|(position, _)| *position == 0)
+            && self.selection.config
+                == EnvironmentConfigState::Ready(
+                    state.thread_defaults.for_selection(&self.selection),
+                )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -360,7 +491,8 @@ impl ThreadEnvironments {
         selections: &mut [TurnEnvironmentSelection],
         implicit_selection: bool,
         optional_on_resume: &HashSet<String>,
-    ) -> CodexResult<Option<(TurnEnvironmentSnapshot, StartupProjectInstructions)>> {
+        default_registrations: &HashMap<String, Arc<Environment>>,
+    ) -> CodexResult<Option<StartupEnvironmentAdmission>> {
         let local_primary = selections.first().is_some_and(|selection| {
             environment_manager
                 .get_environment(&selection.environment_id)
@@ -389,7 +521,25 @@ impl ThreadEnvironments {
         );
         discovery.update_selections(&remote_selections);
         let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
-        let ready = futures::stream::iter(discovery.snapshot_now().environments)
+        // A completed failure no longer carries its registration after readiness is refreshed.
+        let snapshot = {
+            let state = discovery
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            Self::snapshot_state(&state)
+        };
+        let original_registrations = snapshot
+            .starting()
+            .filter_map(|starting| {
+                let id = &starting.selection.environment_id;
+                let original = default_registrations.get(id)?;
+                (Arc::ptr_eq(original, &starting.environment)
+                    && original.supports_initial_default_recovery())
+                .then(|| (id.clone(), Arc::downgrade(original)))
+            })
+            .collect::<HashMap<_, _>>();
+        let ready = futures::stream::iter(snapshot.refresh_readiness().environments)
             .map(|state| async move {
                 if Instant::now() >= deadline {
                     return None;
@@ -428,6 +578,7 @@ impl ThreadEnvironments {
             .iter()
             .map(|selection| selection.environment_id.as_str())
             .collect::<HashSet<_>>();
+        let mut initially_unavailable = Vec::new();
         for selection in selections {
             let id = &selection.environment_id;
             if !requested.contains(id.as_str()) || ready.contains_key(id) {
@@ -443,8 +594,23 @@ impl ThreadEnvironments {
             }
             tracing::warn!(environment_id = %id, "optional secondary executor unavailable at thread startup");
             // Keep the failed selection so MCP cannot fall back to the global
-            // registry for this executor and the thread cannot promote it later.
+            // registry for this executor. A live permit does not change saved settings.
             selection.config = EnvironmentConfigState::StartupUnavailable;
+            if local_primary
+                && implicit_selection
+                && let Some(registration) = original_registrations.get(id)
+                && registration
+                    .upgrade()
+                    .is_some_and(|environment| environment.supports_initial_default_recovery())
+            {
+                initially_unavailable.push(DefaultSecondaryEnvironment::InitiallyUnavailable(
+                    Arc::new(InitialDefaultSecondary {
+                        rejection: selection.clone(),
+                        registration: registration.clone(),
+                        revoked: CancellationToken::new(),
+                    }),
+                ));
+            }
         }
         let mut environments = Vec::with_capacity(ready.len());
         let mut instructions = StartupProjectInstructions::default();
@@ -454,10 +620,11 @@ impl ThreadEnvironments {
                 .insert(id, (environment.selection(), docs));
             environments.push(TurnEnvironmentState::Ready(environment));
         }
-        Ok(Some((
-            TurnEnvironmentSnapshot { environments },
+        Ok(Some(StartupEnvironmentAdmission {
+            environments: TurnEnvironmentSnapshot { environments },
             instructions,
-        )))
+            initially_unavailable,
+        }))
     }
 
     pub(crate) fn new(
@@ -556,11 +723,13 @@ impl ThreadEnvironments {
                 thread_defaults: thread_defaults.clone(),
                 environments: active,
                 startup_rejections: Vec::new(),
+                default_secondary_admissions: None,
             }),
             configured: Mutex::new(ThreadEnvironmentsState {
                 thread_defaults,
                 environments,
                 startup_rejections: Vec::new(),
+                default_secondary_admissions: None,
             }),
             connection_event_tx: OnceLock::new(),
         }
@@ -670,6 +839,7 @@ impl ThreadEnvironments {
             thread_defaults,
             environments: current,
             startup_rejections,
+            ..
         } = &mut *state;
         let mut seen_environment_ids = HashSet::with_capacity(environments.len());
         let mut next = Vec::with_capacity(environments.len());
@@ -807,6 +977,15 @@ impl ThreadEnvironments {
             .collect::<Vec<_>>();
         let previous = std::mem::replace(current, next);
         *startup_rejections = rejections;
+        if let Some(admissions) = &state.default_secondary_admissions {
+            for admission in &admissions.secondaries {
+                if let Some(attempt) = &admission.initial_recovery
+                    && !admission.matches_initial_rejection(&state)
+                {
+                    attempt.revoked.cancel();
+                }
+            }
+        }
 
         // Publish after installing the new list, including pending bindings replaced by retries.
         for (completion, result) in pending_completions {
@@ -919,6 +1098,21 @@ impl ThreadEnvironments {
         self.set_thread_defaults(&self.state, defaults);
     }
 
+    pub(crate) fn revoke_active_initial_recovery(&self) {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
+    }
+
+    fn revoke_initial_attempts(admissions: Option<&DefaultSecondaryAdmissions>) {
+        if let Some(admissions) = admissions {
+            for admission in &admissions.secondaries {
+                if let Some(attempt) = &admission.initial_recovery {
+                    attempt.revoked.cancel();
+                }
+            }
+        }
+    }
+
     pub(crate) fn set_configured_thread_defaults(&self, defaults: EnvironmentConfig) {
         self.set_thread_defaults(&self.configured, defaults);
     }
@@ -929,6 +1123,9 @@ impl ThreadEnvironments {
         defaults: EnvironmentConfig,
     ) {
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.thread_defaults.common != defaults {
+            Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
+        }
         let ThreadEnvironmentsState {
             thread_defaults,
             environments,
@@ -1224,18 +1421,302 @@ impl ThreadEnvironments {
 
     /// Copies the current selection without waiting for any executor to connect.
     pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
-        Self::snapshot_state(&self.state).refresh_readiness()
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::execution_snapshot(
+            &state,
+            state.default_secondary_admissions.as_ref(),
+            /*include_initial_recovery*/ true,
+        )
+        .refresh_readiness()
     }
 
     /// Captures configured bindings without resolving readiness or losing config ownership.
     /// Inheritance and eviction retain these bindings; execution and validation resolve a view.
     pub(crate) fn configured_snapshot_now(&self) -> TurnEnvironmentSnapshot {
-        Self::snapshot_state(&self.configured)
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::snapshot_state(&configured)
     }
 
-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
+    /// Inheritance must not restore authority excluded from the active turn.
+    pub(crate) fn inherited_snapshot_now(&self) -> TurnEnvironmentSnapshot {
+        let active = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::execution_snapshot(
+            &configured,
+            active.default_secondary_admissions.as_ref(),
+            /*include_initial_recovery*/ false,
+        )
+    }
+
+    /// Keep default secondaries unavailable while their instructions are being checked.
+    pub(crate) fn begin_default_secondary_admissions(
+        &self,
+        requested: &[TurnEnvironmentSelection],
+        defaults: &[DefaultSecondaryEnvironment],
+    ) -> Option<DefaultSecondaryAdmissions> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
+        let local_primary = requested.first().is_some_and(|primary| {
+            state.environments.first().is_some_and(|active| {
+                !active.environment.is_remote() && active.selection.has_same_workspace(primary)
+            })
+        });
+        let mut secondaries = state
+            .environments
+            .iter()
+            .filter(|environment| {
+                local_primary
+                    && environment.config_origin == EnvironmentConfigOrigin::Thread
+                    && environment.environment.is_remote()
+                    && defaults.iter().any(|default| {
+                        matches!(default, DefaultSecondaryEnvironment::Ready(default)
+                            if default.has_same_workspace(&environment.selection))
+                    })
+            })
+            .map(|environment| DefaultSecondaryAdmission {
+                selection: environment.selection.clone(),
+                registration: Arc::clone(&environment.environment),
+                verified: None,
+                initial_recovery: None,
+            })
+            .collect::<Vec<_>>();
+        if local_primary {
+            secondaries.extend(defaults.iter().filter_map(|default| {
+                let DefaultSecondaryEnvironment::InitiallyUnavailable(original) = default else {
+                    return None;
+                };
+                let registration = original.registration.upgrade()?;
+                let mut input = original.rejection.clone();
+                input.config = EnvironmentConfigState::FromThread;
+                let (selection, _) = resolve_selection_config(input, &state.thread_defaults);
+                let admission = DefaultSecondaryAdmission {
+                    selection,
+                    registration,
+                    verified: None,
+                    initial_recovery: Some(InitialDefaultSecondaryAttempt {
+                        original: Arc::clone(original),
+                        revoked: original.revoked.child_token(),
+                    }),
+                };
+                admission
+                    .matches_initial_rejection(&state)
+                    .then_some(admission)
+            }));
+        }
+        let admissions = (!secondaries.is_empty()).then(|| DefaultSecondaryAdmissions {
+            turn: Arc::new(()),
+            secondaries,
+        });
+        state.default_secondary_admissions = admissions.clone();
+        admissions
+    }
+
+    fn is_current_registration(&self, admission: &DefaultSecondaryAdmission) -> bool {
+        self.environment_manager
+            .get_environment(&admission.selection.environment_id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &admission.registration))
+    }
+
+    pub(crate) async fn verify_default_secondaries(
+        &self,
+        config: &Config,
+        mut admissions: DefaultSecondaryAdmissions,
+        denied: TurnEnvironmentSnapshot,
+    ) -> TurnEnvironmentSnapshot {
+        let raw = {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .default_secondary_admissions
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.turn, &admissions.turn))
+                .map(|_| Self::snapshot_state(&state).refresh_readiness())
+        };
+        let Some(raw) = raw else {
+            return self.resolve_snapshot(denied).await;
+        };
+        let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
+        futures::stream::iter(admissions.secondaries.iter_mut())
+            .for_each_concurrent(16, |admission| {
+                let raw = &raw;
+                async move {
+                    let mut environment = if let Some(attempt) = &admission.initial_recovery {
+                        if !self.is_current_registration(admission) {
+                            return;
+                        }
+                        let Ok(bound) = admission
+                            .registration
+                            .connected_initial_default_recovery_view(attempt.revoked.clone())
+                        else {
+                            return;
+                        };
+                        let mut environment = TurnEnvironment::new(
+                            admission.selection.clone(),
+                            EnvironmentConfigOrigin::Thread,
+                            Arc::new(bound),
+                            /*shell*/ None,
+                        );
+                        environment.initial_recovery =
+                            Some(Arc::new(InitialTurnEnvironmentRecovery {
+                                rejection: attempt.original.rejection.clone(),
+                                revoked: attempt.revoked.clone(),
+                            }));
+                        environment
+                    } else {
+                        let Some(mut environment) = raw
+                            .turn_environments()
+                            .find(|environment| {
+                                admission.matches(
+                                    &environment.selection,
+                                    environment.config_origin,
+                                    &environment.environment,
+                                )
+                            })
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        let Ok(bound) = environment.environment.connected_view() else {
+                            return;
+                        };
+                        environment.environment = Arc::new(bound);
+                        environment
+                    };
+                    let verify = async {
+                        // HOME, temporary directories, and shell must describe the checked attachment.
+                        let info = environment.environment.info().await.ok()?;
+                        environment.user_home_dir = info.user_home_dir;
+                        environment.temporary_directories = info.temporary_directories;
+                        environment.executor_platform_os = info.platform_os;
+                        environment.shell = Shell::from_environment_shell_info(info.shell).ok();
+                        environment.shell_snapshot_v2_supported =
+                            info.capabilities.shell_snapshot_v2;
+                        verify_remote_project_instructions(config, &environment)
+                            .await
+                            .ok()
+                    };
+                    let Ok(Some(docs)) = tokio::time::timeout_at(deadline, verify).await else {
+                        tracing::warn!(
+                            environment_id = %admission.selection.environment_id,
+                            "default secondary AGENTS.md discovery failed for this turn"
+                        );
+                        return;
+                    };
+                    if environment.environment.check_connected_view().is_err() {
+                        return;
+                    }
+                    environment.verified_project_instructions = Some(Arc::new(docs));
+                    admission.verified = Some(environment);
+                }
+            })
+            .await;
+        let snapshot = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state
+                .default_secondary_admissions
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(&current.turn, &admissions.turn))
+            {
+                denied
+            } else {
+                for admission in &mut admissions.secondaries {
+                    let still_selected = if admission.initial_recovery.is_some() {
+                        admission.matches_initial_rejection(&state)
+                            && self.is_current_registration(admission)
+                            && admission.verified.as_ref().is_some_and(|environment| {
+                                environment.environment.check_connected_view().is_ok()
+                            })
+                    } else {
+                        state.environments.iter().any(|environment| {
+                            admission.matches(
+                                &environment.selection,
+                                environment.config_origin,
+                                &environment.environment,
+                            )
+                        })
+                    };
+                    if !still_selected {
+                        admission.verified = None;
+                    }
+                    if let Some(environment) = &mut admission.verified {
+                        // A shell snapshot from an older connection does not belong to this view.
+                        environment.shell_snapshot = Self::start_shell_snapshot_task(
+                            self.shell_snapshot.clone(),
+                            Arc::clone(&environment.environment),
+                            environment.selection.cwd.clone(),
+                            environment.shell.clone(),
+                            &environment.selection.config,
+                        );
+                        environment.shell_snapshot_cache = Arc::default();
+                    }
+                }
+                state.default_secondary_admissions = Some(admissions);
+                Self::execution_snapshot(
+                    &state,
+                    state.default_secondary_admissions.as_ref(),
+                    /*include_initial_recovery*/ true,
+                )
+            }
+        };
+        self.resolve_snapshot(snapshot).await
+    }
+
+    fn execution_snapshot(
+        state: &ThreadEnvironmentsState,
+        admissions: Option<&DefaultSecondaryAdmissions>,
+        include_initial_recovery: bool,
+    ) -> TurnEnvironmentSnapshot {
+        let mut snapshot = Self::snapshot_state(state);
+        if let Some(admissions) = admissions {
+            for admission in &admissions.secondaries {
+                if let Some(environment) = snapshot.environments.iter_mut().find(|environment| {
+                    let selection = match environment {
+                        TurnEnvironmentState::Starting(starting) => &starting.selection,
+                        TurnEnvironmentState::Ready(ready) => &ready.selection,
+                        TurnEnvironmentState::Failed { selection, .. } => selection,
+                    };
+                    selection.environment_id == admission.selection.environment_id
+                }) {
+                    let verified = admission.verified.as_ref().filter(|verified| {
+                        if admission.initial_recovery.is_some() {
+                            return include_initial_recovery
+                                && admission.matches_initial_rejection(state)
+                                && verified.environment.check_connected_view().is_ok();
+                        }
+                        let TurnEnvironmentState::Starting(starting) = &*environment else {
+                            return false;
+                        };
+                        admission.matches(
+                            &starting.selection,
+                            starting.config_origin,
+                            &starting.environment,
+                        ) && verified.environment.check_connected_view().is_ok()
+                    });
+                    // An initial recovery may only overlay its exact rejection. An owner
+                    // decision in the raw snapshot supersedes the old attempt.
+                    if admission.initial_recovery.is_some() && verified.is_none() {
+                        continue;
+                    }
+                    *environment = verified.map_or_else(
+                        || admission.unavailable(),
+                        |verified| TurnEnvironmentState::Ready(verified.clone()),
+                    );
+                } else {
+                    // An active step can remove a selection, but cannot regrant it via MCP lookup.
+                    snapshot.environments.push(admission.unavailable());
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn snapshot_state(state: &ThreadEnvironmentsState) -> TurnEnvironmentSnapshot {
         // Keep the startup results, but not the senders that would keep removed Pending work alive.
-        let state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut environments: Vec<_> = state
             .environments
             .iter()
@@ -1280,7 +1761,7 @@ impl ThreadEnvironments {
             non_blocking = non_blocking_snapshots,
         )
     )]
-    fn resolve_snapshot(
+    pub(crate) fn resolve_snapshot(
         &self,
         snapshot: TurnEnvironmentSnapshot,
     ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
@@ -1317,6 +1798,39 @@ pub(crate) enum TurnEnvironmentState {
 }
 
 impl TurnEnvironmentState {
+    fn initial_recovery_rejection(&self) -> Option<&TurnEnvironmentSelection> {
+        let Self::Ready(environment) = self else {
+            return None;
+        };
+        environment
+            .initial_recovery
+            .as_ref()
+            .map(|recovery| &recovery.rejection)
+    }
+
+    fn inheritance_rejection(&self) -> Option<&TurnEnvironmentSelection> {
+        match self {
+            Self::Failed { selection, .. }
+                if selection.config == EnvironmentConfigState::StartupUnavailable =>
+            {
+                Some(selection)
+            }
+            _ => self.initial_recovery_rejection(),
+        }
+    }
+
+    fn initial_recovery_denied(selection: TurnEnvironmentSelection) -> Self {
+        let error = selection
+            .config
+            .failure_reason()
+            .expect("initial startup rejection");
+        Self::Failed {
+            error: error.to_owned(),
+            selection,
+            required_skills: Vec::new(),
+        }
+    }
+
     fn from_resolution(
         starting: StartingTurnEnvironment,
         resolved: Option<TurnEnvironmentResult>,
@@ -1394,6 +1908,56 @@ pub struct TurnEnvironmentSnapshot {
 }
 
 impl TurnEnvironmentSnapshot {
+    pub(crate) fn without_initial_recovery(mut self) -> Self {
+        for state in &mut self.environments {
+            if let Some(rejection) = state.initial_recovery_rejection().cloned() {
+                *state = TurnEnvironmentState::initial_recovery_denied(rejection);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn revoke_initial_recovery(&self) -> bool {
+        let mut changed = false;
+        for state in &self.environments {
+            if let TurnEnvironmentState::Ready(environment) = state
+                && let Some(recovery) = &environment.initial_recovery
+                && !recovery.revoked.is_cancelled()
+            {
+                recovery.revoked.cancel();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Keep an inherited rejection in both the bound snapshot and the child's request list.
+    /// Otherwise the child can resolve a derived FromThread request against the live registry.
+    pub(crate) fn remove_initial_recovery_for_child(
+        &mut self,
+        requests: &mut Vec<TurnEnvironmentRequest>,
+    ) {
+        for (position, state) in self.environments.iter_mut().enumerate() {
+            let Some(rejection) = state.inheritance_rejection().cloned() else {
+                continue;
+            };
+            if let Some(request) = requests
+                .iter_mut()
+                .find(|request| request.environment_id == rejection.environment_id)
+            {
+                if request.config == EnvironmentConfigState::FromThread {
+                    request.config = EnvironmentConfigState::StartupUnavailable;
+                }
+            } else {
+                requests.insert(
+                    position.min(requests.len()),
+                    rejection.clone().into_request(),
+                );
+            }
+            *state = TurnEnvironmentState::initial_recovery_denied(rejection);
+        }
+    }
+
     /// Keeps the original root order for child threads and saved history.
     pub(crate) fn selected_capability_roots(&self) -> Vec<SelectedCapabilityRoot> {
         EnvironmentCapabilityRoots::collect(self.environments.iter().map(|environment| {
@@ -1432,9 +1996,12 @@ impl TurnEnvironmentSnapshot {
             .environments
             .iter()
             .map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => {
-                    TurnEnvironmentState::Ready(environment.clone())
-                }
+                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
+                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
+                        TurnEnvironmentState::initial_recovery_denied(recovery.rejection.clone())
+                    }
+                    _ => TurnEnvironmentState::Ready(environment.clone()),
+                },
                 TurnEnvironmentState::Starting(environment) => {
                     TurnEnvironmentState::from_resolution(
                         environment.clone(),
@@ -1452,7 +2019,9 @@ impl TurnEnvironmentSnapshot {
             let TurnEnvironmentState::Ready(environment) = environment else {
                 return None;
             };
-            Some(environment)
+            (environment.initial_recovery.is_none()
+                || environment.environment.check_connected_view().is_ok())
+            .then_some(environment)
         })
     }
 
@@ -1466,12 +2035,18 @@ impl TurnEnvironmentSnapshot {
     }
 
     pub(crate) fn ready_environment_handles(&self) -> HashMap<String, Arc<Environment>> {
-        self.turn_environments()
-            .map(|environment| {
-                (
+        // A recovery revoked after a caller captured its selections must still use
+        // the rejecting bound handle, never fall back to an unguarded registry entry.
+        self.environments
+            .iter()
+            .filter_map(|state| {
+                let TurnEnvironmentState::Ready(environment) = state else {
+                    return None;
+                };
+                Some((
                     environment.selection.environment_id.clone(),
                     Arc::clone(&environment.environment),
-                )
+                ))
             })
             .collect()
     }
@@ -1594,7 +2169,12 @@ impl TurnEnvironmentSnapshot {
         self.environments
             .iter()
             .filter_map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => Some(environment.selection()),
+                TurnEnvironmentState::Ready(environment) => {
+                    Some(environment.initial_recovery.as_ref().map_or_else(
+                        || environment.selection(),
+                        |recovery| recovery.rejection.clone(),
+                    ))
+                }
                 TurnEnvironmentState::Starting(environment) => Some(
                     environment
                         .config_origin
@@ -1616,7 +2196,12 @@ impl TurnEnvironmentSnapshot {
         self.environments
             .iter()
             .map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => environment.selection(),
+                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
+                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
+                        recovery.rejection.clone()
+                    }
+                    _ => environment.selection(),
+                },
                 TurnEnvironmentState::Starting(environment) => environment
                     .config_origin
                     .into_input_selection(environment.selection.clone()),
@@ -1633,7 +2218,10 @@ impl TurnEnvironmentSnapshot {
         self.environments
             .iter()
             .map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => Ok(environment.selection()),
+                TurnEnvironmentState::Ready(environment) => Ok(
+                    environment.initial_recovery.as_ref()
+                        .map_or_else(|| environment.selection(), |recovery| recovery.rejection.clone()),
+                ),
                 TurnEnvironmentState::Starting(environment) => Ok(
                     environment
                         .config_origin
@@ -1740,6 +2328,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use crate::LoadedAgentsMd;
     use crate::config::PermissionProfileSnapshot;
     use codex_exec_server::Environment;
     use codex_exec_server::ExecServerRuntimeOptions;
@@ -1835,7 +2424,7 @@ mod tests {
         }
     }
 
-    async fn serve_environment_info(listener: TcpListener) {
+    async fn serve_environment_info(listener: TcpListener) -> WebSocketStream<TcpStream> {
         let (stream, _) = listener.accept().await.expect("connection");
         let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
@@ -1874,6 +2463,184 @@ mod tests {
             ))
             .await
             .expect("environment info response");
+        websocket
+    }
+
+    #[tokio::test]
+    async fn verified_default_secondary_cannot_be_reused_after_owner_configuration() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let manager = Arc::new(
+            EnvironmentManager::create_for_tests_with_local(
+                Some(format!("ws://{}", listener.local_addr().expect("address"))),
+                test_runtime_paths(),
+            )
+            .await,
+        );
+        let server = tokio::spawn(serve_environment_info(listener));
+        let local = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+            selected_capability_roots: Default::default(),
+        };
+        let default_secondary = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            ..local.clone()
+        };
+        let mut selections = [local.clone(), default_secondary.clone()];
+        let environments = ThreadEnvironments::new(
+            manager,
+            crate::shell::default_user_shell(),
+            ThreadEnvironmentDefaults::new(test_environment_config(), SandboxType::None),
+            ShellSnapshot::disabled(),
+            TurnEnvironmentSnapshot::default(),
+            /*non_blocking_snapshots*/ false,
+        );
+        environments.update_configured_selections(&selections);
+        environments.update_selections(&selections);
+        let started = timeout(Duration::from_secs(5), environments.snapshot())
+            .await
+            .expect("executor starts");
+        let _socket = server.await.expect("keep the verified transport connected");
+        let mut verified = started
+            .turn_environments()
+            .find(|environment| environment.environment.is_remote())
+            .expect("ready remote")
+            .clone();
+        let registration = Arc::clone(&verified.environment);
+        verified.environment = Arc::new(registration.connected_view().expect("bound transport"));
+        verified.verified_project_instructions = Some(Arc::new(LoadedAgentsMd::default()));
+        let owner_selection = verified.selection.clone();
+        let mut admissions = environments
+            .begin_default_secondary_admissions(
+                &selections,
+                &[DefaultSecondaryEnvironment::Ready(default_secondary)],
+            )
+            .expect("default secondary admission");
+        admissions.secondaries[0].verified = Some(verified);
+        environments
+            .state
+            .lock()
+            .expect("environment state")
+            .default_secondary_admissions = Some(admissions);
+        assert_eq!(environments.snapshot_now().to_selections(), selections);
+        assert!(
+            environments
+                .inherited_snapshot_now()
+                .turn_environments()
+                .any(|environment| environment.environment.is_remote())
+        );
+
+        // Keep the normalized Ready config and registration identical while changing its owner.
+        selections[1] = owner_selection.clone();
+        environments.update_configured_selections(&selections);
+        environments.update_selections(&selections);
+        {
+            let state = environments.state.lock().expect("environment state");
+            let secondary = &state.environments[1];
+            assert_eq!(secondary.selection, owner_selection);
+            assert_eq!(secondary.config_origin, EnvironmentConfigOrigin::Owner);
+            assert!(Arc::ptr_eq(&secondary.environment, &registration));
+        }
+        assert_eq!(
+            environments.snapshot_now().to_selections(),
+            vec![local.clone()]
+        );
+        let denied = TurnEnvironmentSelection {
+            config: EnvironmentConfigState::StartupUnavailable,
+            ..owner_selection
+        };
+        for snapshot in [
+            environments.snapshot_now(),
+            environments.inherited_snapshot_now(),
+        ] {
+            assert_eq!(snapshot.all_selections(), [local.clone(), denied.clone()]);
+        }
+
+        environments.activate_selections(&selections);
+        assert!(
+            environments
+                .begin_default_secondary_admissions(&selections, &[])
+                .is_none()
+        );
+        assert_eq!(environments.snapshot().await.to_selections(), selections);
+    }
+
+    #[tokio::test]
+    async fn initially_unavailable_default_keeps_its_child_denial_and_revokes_active_reselection() {
+        let manager = Arc::new(EnvironmentManager::default_for_tests());
+        let remote = Arc::new(
+            Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string()))
+                .expect("unattached test registration"),
+        );
+        let local = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+            selected_capability_roots: Default::default(),
+        };
+        let rejection = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            config: EnvironmentConfigState::StartupUnavailable,
+            ..local.clone()
+        };
+        let environments =
+            resolve_turn_environments(manager, &[local.clone(), rejection.clone()]).await;
+        let original = Arc::new(InitialDefaultSecondary {
+            rejection: rejection.clone(),
+            registration: Arc::downgrade(&remote),
+            revoked: CancellationToken::new(),
+        });
+        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
+        let admissions = environments
+            .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
+            .expect("exact startup rejection");
+        let admission = &admissions.secondaries[0];
+        let attempt = admission
+            .initial_recovery
+            .as_ref()
+            .expect("initial attempt");
+        let mut verified = TurnEnvironment::new(
+            admission.selection.clone(),
+            EnvironmentConfigOrigin::Thread,
+            remote,
+            /*shell*/ None,
+        );
+        verified.initial_recovery = Some(Arc::new(InitialTurnEnvironmentRecovery {
+            rejection: rejection.clone(),
+            revoked: attempt.revoked.clone(),
+        }));
+        let inherited = TurnEnvironmentSnapshot {
+            environments: vec![TurnEnvironmentState::Ready(verified)],
+        };
+        assert_eq!(
+            inherited.inheritable_requests(),
+            [rejection.clone().into_request()]
+        );
+        let mut request = rejection.clone().into_request();
+        request.config = EnvironmentConfigState::FromThread;
+        let mut requests = vec![request];
+        let mut direct = inherited.clone();
+        direct.remove_initial_recovery_for_child(&mut requests);
+        assert_eq!(direct.all_selections(), [rejection.clone()]);
+        assert_eq!(requests, [rejection.clone().into_request()]);
+        requests[0].config = admission.selection.config.clone();
+        let mut direct = inherited;
+        direct.remove_initial_recovery_for_child(&mut requests);
+        assert_eq!(requests[0].config, admission.selection.config);
+
+        environments.update_selections(std::slice::from_ref(&local));
+        assert!(attempt.revoked.is_cancelled());
+        environments.update_selections(&[local.clone(), rejection.clone()]);
+        let state = environments.state.lock().expect("state");
+        assert!(!admission.matches_initial_rejection(&state));
+        drop(state);
+        assert_eq!(
+            environments.snapshot_now().all_selections(),
+            [local, rejection]
+        );
     }
 
     #[tokio::test]
