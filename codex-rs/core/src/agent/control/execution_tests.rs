@@ -1,4 +1,7 @@
 use crate::agent::LocalAgentControl;
+use crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
@@ -45,6 +48,28 @@ fn execution_guards_count_active_v2_subagent_turns() {
 }
 
 #[test]
+fn execution_guards_share_capacity_across_runtime_controls() {
+    let control = control_with_limit(/*max_threads*/ 1);
+    let rebound = control.runtime.control(SessionId::from(ThreadId::new()));
+    let source = SessionSource::SubAgent(SubAgentSource::Other("worker".to_string()));
+    let guard = control
+        .execution_guard(MultiAgentVersion::V2, &source)
+        .expect("running worker reserves shared execution capacity");
+
+    let error = rebound
+        .ensure_execution_capacity(MultiAgentVersion::V2, &source)
+        .expect_err("rebinding the runtime must not create a separate capacity limit");
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::AgentLimitReached { max_threads: 1 }
+    ));
+    drop(guard);
+    rebound
+        .ensure_execution_capacity(MultiAgentVersion::V2, &source)
+        .expect("dropping the original guard releases capacity for the rebound control");
+}
+
+#[test]
 fn execution_guards_ignore_root_and_v1_turns() {
     let control = control_with_limit(/*max_threads*/ 0);
 
@@ -59,6 +84,27 @@ fn execution_guards_ignore_root_and_v1_turns() {
                 MultiAgentVersion::V1,
                 &SessionSource::SubAgent(SubAgentSource::Other("worker".to_string())),
             )
+            .is_none()
+    );
+}
+
+#[test]
+fn execution_guards_ignore_goal_supervisor_turns() {
+    let control = control_with_limit(/*max_threads*/ 0);
+    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some(GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+
+    control
+        .ensure_execution_capacity(MultiAgentVersion::V2, &source)
+        .expect("goal supervisor turns do not use user-visible execution capacity");
+    assert!(
+        control
+            .execution_guard(MultiAgentVersion::V2, &source)
             .is_none()
     );
 }
