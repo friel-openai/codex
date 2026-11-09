@@ -1011,6 +1011,7 @@
         "local::rollout_migration::tests::large_native_record_tests::migration_replays_large_native_checkpoint_with_finite_history_base",
         "local::rollout_migration::tests::migration_apply_waits_for_rollout_maintenance",
         "local::rollout_migration::tests::migration_preserves_post_completion_compaction_turn_after_rollback",
+        "local::rollout_migration::tests::migration_preserves_subagent_activity_occurrence_time",
         "local::rollout_migration::tests::migration_rewrites_a_legacy_reference_after_a_native_history_base",
         "local::rollout_migration::tests::migration_selects_current_source_retained_context_for_older_readers",
         "local::rollout_migration::tests::migration_skips_malformed_lines_recovers_concatenated_record_and_trailing_partial_tail",

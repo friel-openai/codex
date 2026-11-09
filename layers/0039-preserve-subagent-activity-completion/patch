@@ -1,0 +1,233 @@
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+index f561a28028f14d7e5f0698c36a381676c4468866..7a1c6f214c58b8e75ff4c35e617b9de0b1ade0a7 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+@@ -308,7 +308,7 @@ impl LegacyRolloutCanonicalizer {
+                 if let Some(hook) = hook {
+                     self.ensure_turn(writer, &timestamp, source_index).await?;
+                     self.reasoning = None;
+-                    self.write_completed_item(writer, &timestamp, TurnItem::HookPrompt(hook))
++                    self.write_completed_item(writer, &timestamp, TurnItem::HookPrompt(hook), 0)
+                         .await?;
+                 }
+             }
+@@ -382,7 +382,8 @@ impl LegacyRolloutCanonicalizer {
+                     turn.saw_user = true;
+                 }
+                 self.reasoning = None;
+-                self.write_completed_item(writer, &timestamp, item).await?;
++                self.write_completed_item(writer, &timestamp, item, 0)
++                    .await?;
+             }
+             RolloutItem::EventMsg(EventMsg::AgentReasoning(event)) => {
+                 self.write_reasoning(
+@@ -418,6 +419,12 @@ impl LegacyRolloutCanonicalizer {
+                 if let Some((item, turn_id)) =
+                     legacy_event::completed_item(&event, &mut || self.next_item_id())?
+                 {
++                    // Legacy Desktop uses the activity's occurrence time, not the rollout
++                    // envelope timestamp. Zero remains the protocol's unknown-time sentinel.
++                    let completed_at_ms = match &event {
++                        EventMsg::SubAgentActivity(activity) => activity.occurred_at_ms,
++                        _ => 0,
++                    };
+                     match turn_id {
+                         Some(turn_id)
+                             if self
+@@ -425,8 +432,14 @@ impl LegacyRolloutCanonicalizer {
+                                 .as_ref()
+                                 .is_some_and(|turn| turn.id.as_str() != turn_id.as_str()) =>
+                         {
+-                            self.write_completed_item_to_turn(writer, &timestamp, turn_id, item)
+-                                .await?;
++                            self.write_completed_item_to_turn(
++                                writer,
++                                &timestamp,
++                                turn_id,
++                                item,
++                                completed_at_ms,
++                            )
++                            .await?;
+                         }
+                         Some(turn_id) => {
+                             if self.active_turn.is_none()
+@@ -434,23 +447,40 @@ impl LegacyRolloutCanonicalizer {
+                             {
+                                 self.reasoning = None;
+                                 self.write_completed_item_to_turn(
+-                                    writer, &timestamp, turn_id, item,
++                                    writer,
++                                    &timestamp,
++                                    turn_id,
++                                    item,
++                                    completed_at_ms,
+                                 )
+                                 .await?;
+                             } else if self.active_turn.is_none() {
+                                 self.start_implicit_turn(writer, &timestamp, turn_id)
+                                     .await?;
+                                 self.reasoning = None;
+-                                self.write_completed_item(writer, &timestamp, item).await?;
++                                self.write_completed_item(
++                                    writer,
++                                    &timestamp,
++                                    item,
++                                    completed_at_ms,
++                                )
++                                .await?;
+                             } else {
+                                 self.reasoning = None;
+-                                self.write_completed_item(writer, &timestamp, item).await?;
++                                self.write_completed_item(
++                                    writer,
++                                    &timestamp,
++                                    item,
++                                    completed_at_ms,
++                                )
++                                .await?;
+                             }
+                         }
+                         None => {
+                             self.ensure_turn(writer, &timestamp, source_index).await?;
+                             self.reasoning = None;
+-                            self.write_completed_item(writer, &timestamp, item).await?;
++                            self.write_completed_item(writer, &timestamp, item, completed_at_ms)
++                                .await?;
+                         }
+                     }
+                 } else {
+@@ -605,6 +635,7 @@ impl LegacyRolloutCanonicalizer {
+         writer: &mut W,
+         timestamp: &str,
+         item: TurnItem,
++        completed_at_ms: i64,
+     ) -> ThreadStoreResult<()>
+     where
+         W: AsyncWrite + Unpin,
+@@ -614,7 +645,7 @@ impl LegacyRolloutCanonicalizer {
+             .as_ref()
+             .map(|turn| turn.id.clone())
+             .ok_or_else(|| migration_error("completed rollout item has no active turn"))?;
+-        self.write_completed_item_to_turn(writer, timestamp, turn_id, item)
++        self.write_completed_item_to_turn(writer, timestamp, turn_id, item, completed_at_ms)
+             .await
+     }
+
+@@ -624,6 +655,7 @@ impl LegacyRolloutCanonicalizer {
+         timestamp: &str,
+         turn_id: String,
+         item: TurnItem,
++        completed_at_ms: i64,
+     ) -> ThreadStoreResult<()>
+     where
+         W: AsyncWrite + Unpin,
+@@ -636,8 +668,7 @@ impl LegacyRolloutCanonicalizer {
+                 turn_id,
+                 item,
+                 started_at_ms: None,
+-                // The legacy rollout timestamp is not an observed item completion time.
+-                completed_at_ms: 0,
++                completed_at_ms,
+             })),
+         )
+         .await
+@@ -674,7 +705,7 @@ impl LegacyRolloutCanonicalizer {
+         if self.record_generated_items {
+             self.pending_generated_item_id = Some(item.id.clone());
+         }
+-        self.write_completed_item(writer, timestamp, TurnItem::Reasoning(item))
++        self.write_completed_item(writer, timestamp, TurnItem::Reasoning(item), 0)
+             .await
+     }
+
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index aeaa1183e8345b4b28611e7b3f4027bd61bf5654..98cfaf14b338560382812a0ba8a10fb4a3d672e0 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -7644,6 +7644,86 @@ async fn migration_refuses_archived_compressed_malformed_reference_without_mater
+     assert_no_migration_artifacts(home.path(), &compressed, thread_id).await;
+ }
+
++#[tokio::test]
++async fn migration_preserves_subagent_activity_occurrence_time() {
++    let home = TempDir::new().expect("create Codex home");
++    let thread_id = ThreadId::new();
++    let mut events = vec![started("turn")];
++    let mut expected = Vec::new();
++    for (id, occurred) in [
++        ("observed", Some(201)),
++        ("negative", Some(-7)),
++        ("zero", Some(0)),
++        ("absent", None),
++    ] {
++        let mut payload = json!({
++            "type": "sub_agent_activity", "event_id": id, "kind": "started",
++            "agent_thread_id": ThreadId::new(), "agent_path": format!("/root/{id}"),
++        });
++        if let Some(time) = occurred {
++            payload["occurred_at_ms"] = json!(time);
++        }
++        let mut event = json!({"type": "event_msg", "payload": payload});
++        events.push(serde_json::from_value(event.clone()).expect("decode activity"));
++        if occurred.is_none() {
++            event["payload"]["occurred_at_ms"] = serde_json::Value::Null;
++            assert!(serde_json::from_value::<RolloutItem>(event).is_err());
++        }
++        expected.push((id.to_string(), None, occurred.filter(|time| *time != 0)));
++    }
++    events.push(exec_completion("turn", "untimed", "output"));
++    expected.push(("untimed".to_string(), None, None));
++    let legacy = build_turns_from_rollout_items(&events);
++    let legacy_times: Vec<_> = legacy
++        .iter()
++        .flat_map(|turn| &turn.items)
++        .map(|item| {
++            (
++                item.id().to_string(),
++                item.started_at_ms,
++                item.completed_at_ms,
++            )
++        })
++        .collect();
++    assert_eq!(legacy_times, expected);
++
++    let mut modern = item_completed("turn", "modern");
++    let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut modern else {
++        panic!("expected an explicit item completion");
++    };
++    event.started_at_ms = Some(100);
++    event.completed_at_ms = 200;
++    events.extend([modern, completed("turn")]);
++    expected.push(("modern".to_string(), Some(100), Some(200)));
++
++    write_rollout(home.path(), thread_id, SessionSource::Cli, events);
++    let store = indexed_store(home.path()).await;
++    store
++        .migrate_rollouts(apply_options())
++        .await
++        .expect("apply migration");
++    let page = store
++        .list_items(ListItemsParams {
++            item_ids: None,
++            thread_id,
++            turn_id: Some("turn".to_string()),
++            include_archived: false,
++            position: None,
++            page_size: 10,
++            sort_direction: SortDirection::Asc,
++            sort_key: ItemSortKey::CreatedAtOrdinal,
++            after_updated_at_ordinal: None,
++        })
++        .await
++        .expect("read materialized items");
++    let converted: Vec<_> = page
++        .items
++        .into_iter()
++        .map(|item| (item.item_id, item.started_at_ms, item.completed_at_ms))
++        .collect();
++    assert_eq!(converted, expected);
++}
++
+ #[tokio::test]
+ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
+     let home = TempDir::new().expect("create Codex home");
