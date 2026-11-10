@@ -4032,6 +4032,29 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
 
          assert!(attached.starting().next().is_none());
          let child = ThreadEnvironments::new(
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index 57185f731832063c13701ddc5ba4c04d968f4ec9..33d9dfa0f09f1a213fd736d68c6d5bb5e063643d 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -453,8 +453,7 @@ pub(crate) async fn run_turn_stop_hooks(
+
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
+-    // Building a turn can read plugins and skills from a remote executor. Check
+-    // the captured hook declarations before spending any of the shutdown deadline.
++    // A starting executor must not delay shutdown of the thread writer.
+     let environments = sess.services.turn_environments.snapshot_now();
+     let has_environment_end_hooks = environments.turn_environments().any(|environment| {
+         !environment
+@@ -467,7 +466,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
+         return;
+     }
+
+-    let turn_context = sess.new_default_turn().await;
++    let turn_context = sess.new_session_end_context(environments.clone()).await;
+     let hooks = with_environment_hooks(sess, &turn_context, &environments);
+     let preview_runs = hooks.preview_session_end();
+     if preview_runs.is_empty() {
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
 index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835a3296829 100644
 --- a/codex-rs/core/src/session/environment.rs
@@ -4194,7 +4217,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
              // Invalidate MCP before installed configuration can wake a waiting turn.
              self.mark_mcp_runtime_dirty();
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 037fa6785264ac08128c7fd9639a3502a1050483..cea55edda21c8f2816b7bc9a4e94c9c6cf4cfb79 100644
+index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112d0b30bd0 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -40,6 +40,8 @@ use crate::context::world_state::WorldStateUpdate;
@@ -4396,12 +4419,16 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..cea55edda21c8f2816b7bc9a4e94c9c6
              )
          };
          if matches!(
-@@ -5093,7 +5170,9 @@ impl Session {
+@@ -5093,7 +5170,13 @@ impl Session {
          );
          let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
          let environments = environments.or_cancel(cancellation_token).await?;
 -        let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());
-+        environments.ensure_registry_primary_ready()?;
++        // Deferred execution exposes readiness and failures through wait_for_environment.
++        // Cold resume still admits required executors before the session is constructed.
++        if !self.features.enabled(Feature::DeferredExecutor) {
++            environments.ensure_registry_primary_ready()?;
++        }
 +        let inherited_environments = inherited_environments
 +            .unwrap_or_else(|| environments.clone().without_initial_recovery());
          // Keep both preparation futures off caller stacks while they are live together.
@@ -4500,10 +4527,10 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
      pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
      pub(crate) sandbox_policy: Option<SandboxPolicy>,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9c414d3b9 100644
+index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c6c4e46ce 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -2423,6 +2423,45 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
+@@ -2423,6 +2423,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
      Ok(())
  }
 
@@ -4546,10 +4573,94 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
 +    Ok(())
 +}
 +
++#[cfg(unix)]
++#[tokio::test]
++async fn session_end_runs_local_hook_while_secondary_is_still_starting() -> anyhow::Result<()> {
++    let session = make_session_with_config(|config| {
++        assert!(config.features.disable(Feature::DeferredExecutor).is_ok());
++    })
++    .await?;
++    let home = tempfile::tempdir()?;
++    let marker = home.path().join("session-end");
++    let config = session.get_config().await;
++    let config_path = AbsolutePathBuf::try_from(home.path().join(CONFIG_TOML_FILE))?;
++    let mut user_config: codex_config::TomlValue = serde_json::from_value(serde_json::json!({
++        "hooks": {
++            "SessionEnd": [{
++                "hooks": [{
++                    "type": "command",
++                    "command": format!("printf 'closed' > '{}'", marker.display()),
++                }],
++            }],
++        },
++    }))?;
++    let hooks_config = |user_config| -> anyhow::Result<HooksConfig> {
++        Ok(HooksConfig {
++            feature_enabled: true,
++            config_layer_stack: Some(
++                config
++                    .config_layer_stack
++                    .with_user_config(&config_path, user_config)?,
++            ),
++            ..HooksConfig::default()
++        })
++    };
++    let listed = codex_hooks::list_hooks(hooks_config(user_config.clone())?);
++    let [hook] = listed.hooks.as_slice() else {
++        anyhow::bail!("expected exactly one SessionEnd hook");
++    };
++    user_config
++        .get_mut("hooks")
++        .and_then(codex_config::TomlValue::as_table_mut)
++        .expect("SessionEnd fixture has a hooks table")
++        .insert(
++            "state".to_string(),
++            serde_json::from_value(serde_json::json!({
++                hook.key.clone(): {"trusted_hash": hook.current_hash.clone()},
++            }))?,
++        );
++    let hooks = session.hooks().reconfigured(hooks_config(user_config)?);
++    assert_eq!(hooks.preview_session_end().len(), 1);
++    session.services.hooks.store(Arc::new(hooks));
++
++    // Hold the handshake longer than the shutdown budget.
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++    let environments = &session.services.turn_environments;
++    environments.environment_manager().upsert_environment(
++        "stalled".to_string(),
++        format!("ws://{}", listener.local_addr()?),
++        Some(std::time::Duration::from_secs(30)),
++    )?;
++    let local_selection = local(config.cwd.clone());
++    let remote_selection = TurnEnvironmentSelection {
++        environment_id: "stalled".to_string(),
++        ..local_selection.clone()
++    };
++    environments.update_selections(&[local_selection, remote_selection]);
++    let secondary_is_starting = || {
++        environments
++            .snapshot_now()
++            .starting()
++            .any(|environment| environment.selection.environment_id == "stalled")
++    };
++    assert!(secondary_is_starting());
++
++    let closed = tokio::time::timeout(
++        std::time::Duration::from_secs(3),
++        super::handlers::shutdown(&session, "shutdown".to_string()),
++    )
++    .await
++    .map_err(|_| anyhow::anyhow!("idle session shutdown waited for the starting secondary"))?;
++    assert!(closed);
++    assert_eq!(std::fs::read_to_string(marker)?, "closed");
++    assert!(secondary_is_starting());
++    Ok(())
++}
++
  #[tokio::test]
  async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -6572,6 +6611,7 @@ async fn set_rate_limits_retains_previous_credits() {
+@@ -6572,6 +6695,7 @@ async fn set_rate_limits_retains_previous_credits() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4557,7 +4668,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -6697,6 +6737,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+@@ -6697,6 +6821,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4565,7 +4676,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -8063,6 +8104,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+@@ -8063,6 +8188,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4573,7 +4684,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -9714,6 +9756,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -9714,6 +9840,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4581,7 +4692,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10043,6 +10086,7 @@ async fn make_session_with_config_and_rx(
+@@ -10043,6 +10170,7 @@ async fn make_session_with_config_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4589,7 +4700,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10184,6 +10228,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -10184,6 +10312,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4597,7 +4708,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -12240,6 +12285,7 @@ where
+@@ -12240,6 +12369,7 @@ where
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -4605,6 +4716,58 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
+@@ -16038,6 +16168,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
+     assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
+ }
+
++#[tokio::test]
++async fn shutdown_preserves_queued_trigger_without_starting_a_turn() -> anyhow::Result<()> {
++    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
++    let interrupted_turn_id = turn_context.sub_id.clone();
++    session
++        .start_task(
++            turn_context,
++            Vec::new(),
++            NeverEndingTask {
++                kind: TaskKind::Regular,
++                listen_to_cancellation_token: true,
++            },
++        )
++        .await;
++    session
++        .input_queue
++        .enqueue_mailbox_communication(
++            InterAgentCommunication::new(
++                AgentPath::root(),
++                AgentPath::root(),
++                Vec::new(),
++                "pending trigger".to_string(),
++                /*trigger_turn*/ true,
++            )
++            .into(),
++            Default::default(),
++        )
++        .await;
++    assert!(session.has_pending_turn_start_work().await);
++
++    let closed = tokio::time::timeout(
++        StdDuration::from_secs(3),
++        handlers::shutdown(&session, "shutdown".to_string()),
++    )
++    .await?;
++    assert!(closed);
++    assert!(session.active_turn.lock().await.is_none());
++    assert!(session.has_pending_turn_start_work().await);
++    assert_eq!(
++        session.state.lock().await.last_started_turn_id.as_deref(),
++        Some(interrupted_turn_id.as_str())
++    );
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn abort_empty_active_turn_preserves_pending_input() {
+     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
 diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
 index 1a000b9cb5fa5b584ac859f36e588c635776b49e..79a14d049e45bfa8972e9afd33cf33db0a023f2b 100644
 --- a/codex-rs/core/src/session/thread_settings.rs
@@ -4620,7 +4783,7 @@ index 1a000b9cb5fa5b584ac859f36e588c635776b49e..79a14d049e45bfa8972e9afd33cf33db
          runtime_workspace_roots,
          profile_workspace_roots,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96cacae3f2 100644
+index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba14828f1b844 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -2,9 +2,11 @@ use super::step_settings::ResolvedStepSettings;
@@ -4664,7 +4827,17 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96
  }
 
  /// The context needed for a single turn of the thread.
-@@ -1417,7 +1427,9 @@ impl Session {
+@@ -419,6 +429,9 @@ enum TurnContextBuildMode {
+     /// Captures recording settings without updating shared model/multi-agent metadata
+     /// or discovering skills. Must not initialize context or capture an execution step.
+     InjectItems,
++
++    /// Builds a shutdown hook context without preparing a new turn.
++    SessionEnd,
+ }
+
+ impl TurnContext {
+@@ -1417,7 +1430,9 @@ impl Session {
                  )
                  .await;
          }
@@ -4675,7 +4848,73 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96
          let turn_context = self
              .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
              .await;
-@@ -1728,7 +1740,10 @@ impl Session {
+@@ -1500,12 +1515,12 @@ impl Session {
+                     .insert_arc(Arc::clone(&model_info.model));
+                 self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
+             }
+-            TurnContextBuildMode::StartupPrewarm | TurnContextBuildMode::InjectItems => {
+-                per_turn_config.multi_agent_version_for_model(
+-                    self.multi_agent_version()
+-                        .or(model_info.multi_agent_version),
+-                )
+-            }
++            TurnContextBuildMode::StartupPrewarm
++            | TurnContextBuildMode::InjectItems
++            | TurnContextBuildMode::SessionEnd => per_turn_config.multi_agent_version_for_model(
++                self.multi_agent_version()
++                    .or(model_info.multi_agent_version),
++            ),
+         };
+         let plugins_input = per_turn_config.plugins_config_input();
+         let plugin_outcome = self
+@@ -1518,12 +1533,15 @@ impl Session {
+             &plugin_outcome,
+             per_turn_config.codex_home.as_path(),
+         );
+-        let skills_snapshot = if matches!(build_mode, TurnContextBuildMode::InjectItems)
+-            || crate::guardian::is_basic_session_source(&session_configuration.session_source)
+-            || (per_turn_config
+-                .features
+-                .enabled(Feature::SkipHostSkillDiscovery)
+-                && !self.services.extensions.requires_host_skill_discovery())
++        let skills_snapshot = if matches!(
++            build_mode,
++            TurnContextBuildMode::InjectItems | TurnContextBuildMode::SessionEnd
++        ) || crate::guardian::is_basic_session_source(
++            &session_configuration.session_source,
++        ) || (per_turn_config
++            .features
++            .enabled(Feature::SkipHostSkillDiscovery)
++            && !self.services.extensions.requires_host_skill_discovery())
+         {
+             // Executor and orchestrator catalogs are supplied independently of host skills.
+             HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
+@@ -1694,6 +1712,24 @@ impl Session {
+             .await
+     }
+
++    /// Uses the same readiness snapshot that selected the shutdown hooks.
++    pub(crate) async fn new_session_end_context(
++        &self,
++        environments: TurnEnvironmentSnapshot,
++    ) -> Arc<TurnContext> {
++        let session_configuration = self.default_turn_configuration().await;
++        Box::pin(self.new_turn_context_from_configuration(
++            self.next_internal_sub_id(),
++            session_configuration,
++            environments,
++            NewTurnContextOptions::default(),
++            TurnContextBuildMode::SessionEnd,
++            GitEnrichmentPolicy::Skip,
++            /*resolve_model_routing*/ false,
++        ))
++        .await
++    }
++
+     async fn new_default_turn_for(&self, build_mode: TurnContextBuildMode) -> Arc<TurnContext> {
+         let session_configuration = self.default_turn_configuration().await;
+         let turn_environments = self.services.turn_environments.snapshot().await;
+@@ -1728,7 +1764,10 @@ impl Session {
          options: NewTurnContextOptions,
      ) -> Arc<TurnContext> {
          let turn_environments = self
@@ -4687,7 +4926,7 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96
              .await;
          self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
              .await
-@@ -1758,6 +1773,7 @@ impl Session {
+@@ -1758,6 +1797,7 @@ impl Session {
                  environments,
                  NewTurnContextOptions {
                      final_output_json_schema: current.final_output_json_schema.clone(),
@@ -4696,7 +4935,7 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..fe0ebee880e0c08cf7729fcb4c0d7c96
                  },
                  TurnContextBuildMode::StartupPrewarm,
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index 92963e6db51d4e985833530dbdeac4b2c250a73b..b92611aa31dd2f2c786a4b0759ed0fca9c813609 100644
+index 92963e6db51d4e985833530dbdeac4b2c250a73b..94089ff03bd14a0ba39f5389b8e4f8bd57d661e8 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
 @@ -166,6 +166,7 @@ impl PreparedTurnInputSettings {
@@ -4707,6 +4946,27 @@ index 92963e6db51d4e985833530dbdeac4b2c250a73b..b92611aa31dd2f2c786a4b0759ed0fca
          };
          let turn_context = match kind {
              TurnStartKind::User | TurnStartKind::Recovery => Some(
+@@ -746,13 +747,17 @@ impl Session {
+         {
+             return None;
+         }
++        let state = self.state.lock().await;
++        // Shutdown aborts with Interrupted, which normally checks for queued work.
++        // Preserve the queue without starting another turn on the closing session.
++        if state.shutting_down {
++            return None;
++        }
+         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+         let previous_options = if has_trigger_turn {
+             Default::default()
+         } else {
+-            self.state
+-                .lock()
+-                .await
++            state
+                 .turn_attribution
+                 .as_ref()
+                 .map(codex_history::TurnAttribution::start_options)
 diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
 index 324099bd9ecde3d6b8fe9d0aee6591edb78751b6..09b54c3216ee1807c66b8ab1305543387d47b382 100644
 --- a/codex-rs/core/src/session/turn_suspension.rs
