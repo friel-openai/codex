@@ -10,10 +10,14 @@ use crate::agent::control::SpawnOwner;
 use crate::agent::control::effective_spawn_config;
 use crate::agent::control::fresh_child_history_and_tools;
 use crate::agent::control::inherited_exec_policy_for_parent;
+use crate::agent::control::parent_mcp_tool_snapshot_for_source;
+use crate::agent::control::parent_prompt_cache_key_for_source;
+use crate::agent::control::parent_response_continuation_for_source;
 use crate::agent::history::prepare_forked_history;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::codex_thread::CodexThread;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::session::session::AppServerClientMetadata;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_spawn::ChildSpawnSettings;
@@ -61,6 +65,17 @@ async fn prepare_spawn_inputs(
             fresh_child_history_and_tools(parent, &config, MultiAgentVersion::V2).await;
         (InitialHistory::New, mode, tools)
     };
+    let inherited_thread_state = if options.fork_mode.is_some() {
+        InheritedThreadState::builder()
+            .prompt_cache_key(parent_prompt_cache_key_for_source(&state, Some(&source)).await)
+            .response_continuation(
+                parent_response_continuation_for_source(&state, Some(&source)).await,
+            )
+            .mcp_tool_snapshot(parent_mcp_tool_snapshot_for_source(&state, Some(&source)).await)
+            .build()
+    } else {
+        InheritedThreadState::default()
+    };
     if !std::ptr::eq(state.get_thread(caller).await?.as_ref(), parent) {
         return Err(CodexErr::ThreadNotFound(caller));
     }
@@ -91,6 +106,7 @@ async fn prepare_spawn_inputs(
     let inheritance = PreparedChildInheritance {
         instructions,
         exec_policy,
+        inherited_thread_state,
         originator: parent.session.originator().await,
         attachment_source: options.fork_mode.is_some().then_some(caller),
     };
