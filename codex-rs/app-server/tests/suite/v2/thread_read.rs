@@ -603,6 +603,75 @@ async fn paginated_stored_thread_reads_unprojected_turns_through_read_apis() -> 
 }
 
 #[tokio::test]
+async fn direct_items_page_reads_compressed_leaf_at_recorded_plain_path() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(home.path())?;
+    let stamp = "2025-01-05T12-00-00";
+    let id = create_fake_paginated_rollout(
+        home.path(),
+        stamp,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        None,
+    )?;
+    let plain = rollout_path(home.path(), stamp, &id);
+    app_test_support::append_fake_paginated_user_message(&plain, &id, "Saved user message").await?;
+    // A rejected record keeps this fixture on the unprojected reader.
+    let original = std::fs::read_to_string(&plain)?;
+    let (meta, records) = original.split_once('\n').expect("session metadata");
+    let mut meta: serde_json::Value = serde_json::from_str(meta)?;
+    meta["payload"]["segment_id"] = serde_json::json!(Uuid::now_v7());
+    std::fs::write(&plain, format!("{meta}\n{{truncated\n{records}"))?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let req = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let _: ThreadReadResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req)).await??;
+    let compressed = plain.with_extension("jsonl.zst");
+    std::fs::write(
+        &compressed,
+        zstd::stream::encode_all(std::fs::File::open(&plain)?, 1)?,
+    )?;
+    std::fs::remove_file(&plain)?;
+
+    let thread_id = codex_protocol::ThreadId::from_string(&id)?;
+    let turns = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(10),
+        SortDirection::Asc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(turns.data.len(), 1);
+    let page = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("saved-turn"),
+        None,
+        Some(25),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(page.data[0].turn_id, "saved-turn");
+    assert_eq!(page.data[0].item.id(), "saved-user");
+    assert!(page.next_cursor.is_none());
+    assert!(!plain.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn paginated_segmented_history_without_index_returns_latest_five_turns() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
