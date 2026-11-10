@@ -495,6 +495,41 @@ Read the selection from `threadSettings.disabledPluginIds` in
 across resume. Forks restore the selection from the history retained at the
 requested fork boundary.
 
+# Recover a saved thread with an unavailable executor
+
+`thread/read` with `includeTurns: true` reads saved messages without loading the
+thread or connecting to its executors. To page through the messages, use
+`thread/turns/list` with `itemsView: "full"`. Reading the history does not make
+the thread available to `turn/start`.
+
+A cold `thread/resume` uses the saved environment assignments. An older
+checkpoint does not distinguish defaults from explicit selections, so those
+assignments remain required by default. Restore a required executor before
+resuming. If the thread's primary executor is local and the user has confirmed
+that an unavailable saved secondary is no longer needed for its instructions
+or work, name that secondary in the experimental `optionalEnvironmentIds`
+field for one cold resume:
+
+```json
+{"id":2,"method":"thread/resume","params":{"threadId":"<saved-thread-id>","optionalEnvironmentIds":["<saved-secondary-id>"]}}
+```
+
+The list does not replace or rewrite the saved assignments. A named executor
+that cannot finish readiness and project instruction discovery is unavailable
+to the loaded thread. Other required executors still fail by name. Omitting
+the field on a later cold resume uses the original saved policy again.
+
+With a managed local app-server, use `codex app-server proxy --sock <socket>`
+and initialize with `experimentalApi` enabled. Keep the proxy connected until
+Desktop attaches to the already loaded thread with its normal `thread/resume`.
+The resume request has no turn input, but loading a thread can let an existing
+goal continue. Do not use this as a read-only operation.
+
+To make the reviewed selection permanent, supply the retained executor IDs,
+working directories, and workspace roots in `turn/start.environments` on the
+user's next authorized turn. That turn saves the selection for later turns
+and cold resumes. Do not send an empty turn just to change the selection.
+
 # Deprecated thread personality setting
 
 `thread/start`, `thread/resume`, `thread/settings/update`, and `turn/start` still

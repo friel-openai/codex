@@ -373,6 +373,13 @@ pub struct ThreadResumeParams {
     #[ts(optional = nullable)]
     pub path: Option<PathBuf>,
 
+    /// Allow only these saved secondary registry executors to be unavailable
+    /// for this cold resume. Does not change the saved selection.
+    #[experimental("thread/resume.optionalEnvironmentIds")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub optional_environment_ids: Option<Vec<String>>,
+
     /// Configuration overrides for the resumed thread, if any.
     #[ts(optional = nullable)]
     pub model: Option<String>,
