@@ -10,6 +10,7 @@ use codex_history::RolloutItem;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -90,6 +91,17 @@ pub(super) async fn update(
         session.state.lock().await.last_started_turn_id = None;
     }
     Ok(commit.snapshot)
+}
+
+pub(super) async fn execution_settings(
+    session: &Session,
+) -> (String, Option<ReasoningEffort>, Option<String>) {
+    let snapshot = session.thread_config_snapshot().await;
+    (
+        snapshot.model,
+        snapshot.reasoning_effort,
+        snapshot.service_tier,
+    )
 }
 
 /// Converts protocol overrides into the internal settings update shape.
