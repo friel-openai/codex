@@ -21,8 +21,8 @@ use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnItemsView;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 
 // Bound recovery to recent messages when item paging is unavailable.
@@ -109,9 +109,15 @@ impl AppServerSession {
         ))
     }
 
-    pub(crate) fn with_local_codex_home(mut self, codex_home: &AbsolutePathBuf) -> Self {
-        self.task_tool_capabilities_dir =
-            Some(codex_home.join("tui-thread-reference-capabilities"));
+    /// Captures the server's startup migration policy before workspace config can change.
+    ///
+    /// Sessions without a recorded startup config conservatively assume migration is enabled.
+    pub(crate) fn with_startup_config(mut self, config: &Config) -> Self {
+        self.background_rollout_migration_enabled = config
+            .features
+            .enabled(Feature::BackgroundPaginatedRolloutMigration);
+        self.task_tool_capabilities_dir = (!self.uses_embedded_app_server())
+            .then(|| config.codex_home.join("tui-thread-reference-capabilities"));
         self
     }
 
@@ -191,8 +197,14 @@ impl AppServerSession {
                 .history_pagination
                 .get(&thread_id)
                 .is_some_and(|state| state.history_mode == ThreadHistoryMode::Legacy);
-        // Hold the maintenance lock through a full legacy resume to prevent migration.
-        let mut rollout_maintenance_guard = if cached_legacy && self.uses_embedded_app_server() {
+        let embedded = self.uses_embedded_app_server();
+        let rollout_maintenance_guard = if cached_legacy
+            && embedded
+            && !self.background_rollout_migration_enabled
+            && !config
+                .features
+                .enabled(Feature::BackgroundPaginatedRolloutMigration)
+        {
             codex_rollout::try_acquire_rollout_maintenance_lock(config.codex_home.as_path())
                 .ok()
                 .flatten()
@@ -205,14 +217,13 @@ impl AppServerSession {
             .await
             .ok();
         let known_legacy = cached_legacy
-            && (!self.uses_embedded_app_server()
+            && (!embedded
                 || (rollout_maintenance_guard.is_some()
                     && metadata
                         .is_some_and(|thread| thread.history_mode == ThreadHistoryMode::Legacy)));
         params.exclude_turns = paginated && !known_legacy;
-        if params.exclude_turns {
-            rollout_maintenance_guard = None;
-        }
+        // The embedded thread-store reacquires rollout maintenance to repair history before resume.
+        drop(rollout_maintenance_guard);
         let request_id = self.next_request_id();
         let resume_response = self
             .request_handle
@@ -221,7 +232,6 @@ impl AppServerSession {
                 params: params.clone(),
             })
             .await;
-        drop(rollout_maintenance_guard);
         let mut response: ThreadResumeResponse = match resume_response {
             Ok(response) => response,
             Err(TypedRequestError::Server { source, .. })
