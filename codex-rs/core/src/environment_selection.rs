@@ -43,7 +43,8 @@ use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
 
 use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
-use crate::agents_md::check_startup_project_instructions;
+use crate::agents_md::StartupProjectInstructions;
+use crate::agents_md::read_startup_project_instructions;
 use crate::config::Config;
 use crate::session::ThreadEnvironmentDefaults;
 use crate::session::turn_context::ShellSnapshotCache;
@@ -349,7 +350,8 @@ impl StartupRetry<'_> {
 
 impl ThreadEnvironments {
     /// Resolves and checks project instructions without allowing remote startup work.
-    /// Only remote secondaries of an implicit, local-primary selection are optional.
+    /// A local primary can skip unavailable registry secondaries from implicit
+    /// selections or explicitly nominated for this resume.
     pub(crate) async fn admit_startup_remotes(
         environment_manager: Arc<EnvironmentManager>,
         local_shell: Shell,
@@ -357,15 +359,16 @@ impl ThreadEnvironments {
         config: &Config,
         selections: &mut [TurnEnvironmentSelection],
         implicit_selection: bool,
-    ) -> CodexResult<Option<TurnEnvironmentSnapshot>> {
-        let optional_secondaries = implicit_selection
-            && selections.first().is_some_and(|selection| {
-                environment_manager
-                    .get_environment(&selection.environment_id)
-                    .is_some_and(|environment| !environment.is_remote())
-            });
+        optional_on_resume: &HashSet<String>,
+    ) -> CodexResult<Option<(TurnEnvironmentSnapshot, StartupProjectInstructions)>> {
+        let local_primary = selections.first().is_some_and(|selection| {
+            environment_manager
+                .get_environment(&selection.environment_id)
+                .is_some_and(|environment| !environment.is_remote())
+        });
         let remote_selections = selections
             .iter()
+            .filter(|selection| selection.config != EnvironmentConfigState::StartupUnavailable)
             .filter(|selection| {
                 environment_manager
                     .get_environment(&selection.environment_id)
@@ -402,10 +405,10 @@ impl ThreadEnvironments {
                     let TurnEnvironmentState::Ready(environment) = state else {
                         return None;
                     };
-                    check_startup_project_instructions(config, &environment)
+                    let instructions = read_startup_project_instructions(config, &environment)
                         .await
                         .ok()?;
-                    Some(environment)
+                    Some((environment, instructions))
                 })
                 .await
                 .ok()
@@ -413,7 +416,12 @@ impl ThreadEnvironments {
             })
             .buffer_unordered(16)
             .filter_map(std::future::ready)
-            .map(|environment| (environment.selection.environment_id.clone(), environment))
+            .map(|(environment, instructions)| {
+                (
+                    environment.selection.environment_id.clone(),
+                    (environment, instructions),
+                )
+            })
             .collect::<HashMap<_, _>>()
             .await;
         let requested = remote_selections
@@ -426,21 +434,30 @@ impl ThreadEnvironments {
                 continue;
             }
             let reason = format!(
-                "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive or select only the environments needed for this request."
+                "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive."
             );
-            if !optional_secondaries {
+            if !(local_primary && (implicit_selection || optional_on_resume.contains(id)))
+                || selection.config != EnvironmentConfigState::FromThread
+            {
                 return Err(CodexErr::InvalidRequest(reason));
             }
-            tracing::warn!(environment_id = %id, "default secondary executor unavailable at thread startup");
+            tracing::warn!(environment_id = %id, "optional secondary executor unavailable at thread startup");
             // Keep the failed selection so MCP cannot fall back to the global
             // registry for this executor and the thread cannot promote it later.
             selection.config = EnvironmentConfigState::StartupUnavailable;
         }
-        let environments = ready
-            .into_values()
-            .map(TurnEnvironmentState::Ready)
-            .collect();
-        Ok(Some(TurnEnvironmentSnapshot { environments }))
+        let mut environments = Vec::with_capacity(ready.len());
+        let mut instructions = StartupProjectInstructions::default();
+        for (id, (environment, docs)) in ready {
+            instructions
+                .by_environment
+                .insert(id, (environment.selection(), docs));
+            environments.push(TurnEnvironmentState::Ready(environment));
+        }
+        Ok(Some((
+            TurnEnvironmentSnapshot { environments },
+            instructions,
+        )))
     }
 
     pub(crate) fn new(

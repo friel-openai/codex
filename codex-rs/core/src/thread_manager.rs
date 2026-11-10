@@ -56,6 +56,7 @@ use codex_code_mode::DisabledCodeModeSessionProvider;
 use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_execpolicy::Policy;
 use codex_execpolicy::RequirementsExecPolicy;
 use codex_extension_api::ExtensionDataInit;
@@ -102,6 +103,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -529,9 +531,12 @@ pub struct StartThreadOptions {
     pub disabled_plugin_ids: Option<Vec<String>>,
 }
 
-/// Whether app-server thread/start selected its executors explicitly.
+/// Startup admission policy for an app-server start or cold resume.
 pub(crate) struct StartupEnvironmentDiscovery {
     pub(crate) implicit_selection: bool,
+    pub(crate) cold_resume: bool,
+    /// Explicit exceptions for one cold resume, never part of saved settings.
+    pub(crate) optional_on_resume: Arc<HashSet<String>>,
 }
 
 /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
@@ -552,7 +557,117 @@ impl StartThreadOptions {
     /// Bounds executor discovery for app-server thread/start before workspace startup work.
     pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
         self.thread_extension_init
-            .insert(StartupEnvironmentDiscovery { implicit_selection });
+            .insert(StartupEnvironmentDiscovery {
+                implicit_selection,
+                cold_resume: false,
+                optional_on_resume: Arc::default(),
+            });
+    }
+
+    /// Restores saved assignments for app-server cold resume. A saved secondary
+    /// is optional only when selected by default or explicitly nominated here.
+    pub fn restore_startup_environment_discovery(
+        &mut self,
+        saved: Option<&ThreadSettingsSnapshot>,
+        override_local_cwd: bool,
+        override_local_roots: bool,
+        optional_environment_ids: Option<Vec<String>>,
+    ) -> CodexResult<()> {
+        let selection = saved.and_then(|settings| settings.environments.as_ref());
+        let implicit_selection = selection.is_none_or(|saved| saved.implicit_selection);
+        if let Some(selection) = selection {
+            let named_profile = self
+                .config
+                .permissions
+                .active_permission_profile()
+                .is_some()
+                || saved.is_some_and(|settings| settings.active_permission_profile.is_some());
+            self.environments = Some(
+                selection
+                    .environments
+                    .iter()
+                    .cloned()
+                    .map(TurnEnvironmentRequest::from)
+                    .map(|mut request| {
+                        if implicit_selection
+                            && request.config == EnvironmentConfigState::StartupUnavailable
+                        {
+                            request.config = EnvironmentConfigState::FromThread;
+                        }
+                        if request.config == EnvironmentConfigState::FromThread {
+                            if request.environment_id == LOCAL_ENVIRONMENT_ID && override_local_cwd
+                            {
+                                request.cwd = PathUri::from_abs_path(&self.config.cwd);
+                            }
+                            if named_profile {
+                                let profile_roots: Vec<_> = self
+                                    .config
+                                    .permissions
+                                    .workspace_roots()
+                                    .iter()
+                                    .map(PathUri::from_abs_path)
+                                    .collect();
+                                if request.environment_id == LOCAL_ENVIRONMENT_ID {
+                                    request.workspace_roots = profile_roots;
+                                } else {
+                                    // Current policy can revoke, but must not add, saved remote roots.
+                                    request
+                                        .workspace_roots
+                                        .retain(|root| profile_roots.contains(root));
+                                }
+                            } else if request.environment_id == LOCAL_ENVIRONMENT_ID
+                                && (override_local_cwd || override_local_roots)
+                            {
+                                request.workspace_roots = self
+                                    .config
+                                    .workspace_roots
+                                    .iter()
+                                    .map(PathUri::from_abs_path)
+                                    .collect();
+                            }
+                        }
+                        request
+                    })
+                    .collect(),
+            );
+        }
+        let mut optional_on_resume = HashSet::new();
+        if let Some(ids) = optional_environment_ids
+            && !ids.is_empty()
+        {
+            let Some([primary, secondaries @ ..]) = self.environments.as_deref() else {
+                return Err(CodexErr::InvalidRequest(
+                    "`optionalEnvironmentIds` requires a saved environment selection".to_string(),
+                ));
+            };
+            if primary.environment_id != LOCAL_ENVIRONMENT_ID {
+                return Err(CodexErr::InvalidRequest(
+                    "`optionalEnvironmentIds` requires a saved local primary executor".to_string(),
+                ));
+            }
+            for id in ids {
+                if !secondaries.iter().any(|request| {
+                    request.environment_id == id
+                        && request.config == EnvironmentConfigState::FromThread
+                }) {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "environment `{id}` is not a saved secondary registry executor"
+                    )));
+                }
+                if !optional_on_resume.insert(id.clone()) {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "duplicate optional environment id `{id}`"
+                    )));
+                }
+            }
+        }
+        self.thread_extension_init
+            .insert(StartupEnvironmentDiscovery {
+                implicit_selection,
+                cold_resume: true,
+                optional_on_resume: Arc::new(optional_on_resume),
+            });
+        Ok(())
     }
 
     /// Use the spawning thread's applied text in place of the destination's live thread provider.
