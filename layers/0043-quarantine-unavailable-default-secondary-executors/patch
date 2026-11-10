@@ -1,5 +1,57 @@
+diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
+index 0b9c494f6510505cac55fe4efe71223c3c72a1c6..9191b7f021358dd83dfd0973ea70a2fde6624c0c 100644
+--- a/codex-rs/app-server/README.md
++++ b/codex-rs/app-server/README.md
+@@ -502,28 +502,31 @@ thread or connecting to its executors. To page through the messages, use
+ `thread/turns/list` with `itemsView: "full"`. Reading the history does not make
+ the thread available to `turn/start`.
+
+-A cold `thread/resume` uses the saved environment assignments. An older
+-checkpoint does not distinguish defaults from explicit selections, so those
+-assignments remain required by default. Restore a required executor before
+-resuming. If the thread's primary executor is local and the user has confirmed
+-that an unavailable saved secondary is no longer needed for its instructions
+-or work, name that secondary in the experimental `optionalEnvironmentIds`
+-field for one cold resume:
++A cold `thread/resume` by saved thread ID preserves the saved environment
++assignments. If the saved primary is local, an ordinary resume does not wait for
++saved registry secondaries. The app-server checks their readiness and project
++instructions separately. A verified secondary can join a later turn without
++changing a turn that is already running. A command that names an unavailable
++executor fails for that executor; it does not run on the local primary instead.
++A required remote primary must still be available to resume.
++
++Clients that need to control which saved registry secondaries can be
++unavailable for one cold resume can supply the experimental
++`optionalEnvironmentIds` field:
+
+ ```json
+ {"id":2,"method":"thread/resume","params":{"threadId":"<saved-thread-id>","optionalEnvironmentIds":["<saved-secondary-id>"]}}
+ ```
+
+-The list does not replace or rewrite the saved assignments. A named executor
+-that cannot finish readiness and project instruction discovery is unavailable
+-to the loaded thread. Other required executors still fail by name. Omitting
+-the field on a later cold resume uses the original saved policy again.
++The list does not replace or rewrite the saved assignments. Other required
++executors still fail by name. Omit the field to use ordinary local resume.
+
+-With a managed local app-server, use `codex app-server proxy --sock <socket>`
+-and initialize with `experimentalApi` enabled. Keep the proxy connected until
+-Desktop attaches to the already loaded thread with its normal `thread/resume`.
+-The resume request has no turn input, but loading a thread can let an existing
+-goal continue. Do not use this as a read-only operation.
++To use `optionalEnvironmentIds` through a managed local app-server, connect
++with `codex app-server proxy --sock <socket>` and initialize with
++`experimentalApi` enabled. Keep the proxy connected until Desktop attaches
++with its normal `thread/resume`. Loading a thread can let an existing goal
++continue even though the resume request has no turn input. Do not use resume as
++a read-only operation.
+
+ To make the reviewed selection permanent, supply the retained executor IDs,
+ working directories, and workspace roots in `turn/start.environments` on the
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1fb3a843720c879a3c2543fcfea3af170836e787 100644
+index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1f655bdfd2d2812a4fbc8502c6dcb72268f8a2fc 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
@@ -35,6 +87,16 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1fb3a843720c879a3c2543fcfea3af17
                  client_mcp_extensions,
                  ..start_options
              })
+@@ -6081,6 +6077,9 @@ impl ThreadRequestProcessor {
+                 override_local_cwd,
+                 override_local_roots,
+                 optional_environment_ids,
++                matches!(target, ThreadResumeTarget::Client(_))
++                    && params.history.is_none()
++                    && params.path.is_none(),
+             )
+             .map_err(|err| invalid_request(err.to_string()))?;
+         start_options.initial_history = thread_history;
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
 index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4babcfb864 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
@@ -93,18 +155,63 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
          }
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d5864e37e 100644
+index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acaddc073886 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-@@ -60,6 +60,7 @@ use pretty_assertions::assert_eq;
+@@ -60,6 +60,8 @@ use pretty_assertions::assert_eq;
  use serde_json::json;
  use tempfile::TempDir;
  use tokio::net::TcpListener;
++use tokio::sync::Notify;
 +use tokio::sync::mpsc;
  use tokio::sync::oneshot;
  use tokio::time::timeout;
  use tokio_tungstenite::tungstenite::Message;
-@@ -206,6 +207,8 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -69,9 +71,12 @@ use super::exec_server_test_support::read_exec_server_json;
+
+ const AGENTS_INSTRUCTIONS: &str = "selected environment workspace instructions";
+ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
++// Finish before an awaited remote instruction discovery could expire.
++const LOCAL_CONVERSATION_TIMEOUT: Duration = Duration::from_secs(5);
+ const SAVED_USER_MESSAGE: &str = "Saved environment selection";
+ // Three stalled lookups share one 10-second deadline, not three sequential deadlines.
+ const BOUNDED_RESUME_TIMEOUT: Duration = Duration::from_secs(20);
++const OPTIONAL_VERIFICATION_LOG_FILTER: &str = "warn,codex_core::environment_selection=debug";
+
+ fn write_mock_config(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
+     MockResponsesConfig::new(server_uri)
+@@ -91,6 +96,30 @@ fn text_turn_params(thread_id: String, prompt: &str) -> TurnStartParams {
+     }
+ }
+
++async fn wait_for_optional_secondary_verification(
++    app: &TestAppServer,
++    environment_id: &str,
++    previous_events: &[serde_json::Value],
++    verified: bool,
++) -> Result<()> {
++    let message = if verified {
++        "optional secondary executor verified"
++    } else {
++        "optional secondary executor verification failed"
++    };
++    app.wait_for_matching_json_log_event(
++        &format!("`{message}` for `{environment_id}`"),
++        |event| {
++            event["fields"]["message"] == message
++                && event["fields"]["environment_id"] == environment_id
++                && !previous_events.contains(event)
++        },
++        DEFAULT_READ_TIMEOUT,
++    )
++    .await?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_start_reports_selected_environment_metadata() -> Result<()> {
+     let server = responses::start_mock_server().await;
+@@ -206,6 +235,8 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
      const THREAD_START_TIMEOUT: Duration = Duration::from_secs(20);
      const LOCAL_INSTRUCTIONS: &str = "local workspace instructions";
      const PROJECTLESS_INSTRUCTIONS: &str = "projectless workspace instructions";
@@ -113,7 +220,15 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 
      let server = responses::start_mock_server().await;
      let response_mock = responses::mount_sse_sequence(
-@@ -223,6 +226,17 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -214,6 +245,7 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+             "explicit-environment-echo",
+             "implicit-environments",
+             "projectless-composer",
++            "move-back-and-verify-secondaries",
+         ]
+         .into_iter()
+         .map(|id| {
+@@ -223,6 +255,17 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
                  responses::ev_completed(id),
              ])
          })
@@ -131,7 +246,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
          .collect(),
      )
      .await;
-@@ -233,21 +247,26 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -233,21 +276,26 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
      let workspace_uri = PathUri::from_abs_path(&workspace);
      let local_source = workspace_uri.join("AGENTS.md")?;
      let healthy_source = workspace_uri.join("AGENTS.override.md")?;
@@ -158,7 +273,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
          .with_extra_config(&format!(
              "[mcp_servers.stalled_process]\ncommand = \"must-not-start\"\n\
               cwd = {}\nenvironment_id = \"stalled\"\nrequired = true\n",
-@@ -256,23 +275,23 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -256,26 +304,27 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
          .write(codex_home.path())?;
 
      let (stop_healthy, healthy_stop) = oneshot::channel();
@@ -194,7 +309,11 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
      let mut app_server = TestAppServer::builder()
          .with_codex_home(codex_home.path())
          .without_auto_env()
-@@ -294,6 +313,7 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
++        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+         .build_initialized()
+         .await?;
+     let start = ThreadStartParams {
+@@ -294,23 +343,46 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
      std::fs::create_dir(&projectless_cwd)?;
      std::fs::write(projectless_cwd.join("AGENTS.md"), PROJECTLESS_INSTRUCTIONS)?;
 
@@ -202,14 +321,20 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
      for (index, label) in ["Desktop echo", "cwd only", "projectless composer"]
          .into_iter()
          .enumerate()
-@@ -301,16 +321,32 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+     {
++        let previous_events = app_server.json_log_events()?;
          let request_id = app_server.send_thread_start_request(start.clone()).await?;
-         let response: ThreadStartResponse =
-             timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
+-        let response: ThreadStartResponse =
+-            timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
 -        assert_eq!(
 -            response.instruction_sources,
 -            vec![local_source.clone().into(), healthy_source.clone().into()],
 -        );
++        let response: ThreadStartResponse = timeout(
++            LOCAL_CONVERSATION_TIMEOUT,
++            app_server.read_response(request_id),
++        )
++        .await??;
          let thread_id = response.thread.id;
          let mut reported = response
              .thread
@@ -226,66 +351,156 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +            reported_ids,
 +            ["healthy", LOCAL_ENVIRONMENT_ID, "remaining", "stalled"],
 +        );
-+        let expected_sources = reported
-+            .iter()
-+            .filter_map(|environment| match environment.environment_id.as_str() {
-+                LOCAL_ENVIRONMENT_ID => Some(local_source.clone().into()),
-+                "healthy" => Some(healthy_source.clone().into()),
-+                "remaining" => Some(remaining_source.clone().into()),
-+                "stalled" => None,
-+                id => unreachable!("unexpected environment ID: {id}"),
-+            })
-+            .collect::<Vec<LegacyAppPathString>>();
-+        assert_eq!(response.instruction_sources, expected_sources);
++        assert_eq!(
++            response.instruction_sources,
++            [LegacyAppPathString::from(local_source.clone())]
++        );
++        for environment_id in ["healthy", "remaining"] {
++            wait_for_optional_secondary_verification(
++                &app_server,
++                environment_id,
++                &previous_events,
++                /*verified*/ true,
++            )
++            .await?;
++        }
          let projectless = index == 2;
          let local_cwd = if projectless {
              // The projectless composer changes only the primary local entry.
-@@ -352,7 +388,11 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
-         } else {
-             LOCAL_INSTRUCTIONS
-         };
--        for expected in [local_instructions, AGENTS_INSTRUCTIONS] {
+@@ -329,122 +401,1271 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+                 cwd: environment.cwd,
+                 runtime_workspace_roots: Some(environment.runtime_workspace_roots),
+             })
+-            .collect();
+-        let stalled_index = echoed
++            .collect();
++        let stalled_index = echoed
++            .iter()
++            .position(|environment| environment.environment_id == "stalled")
++            .context("thread/start should report its unavailable secondary")?;
++        let completed = timeout(
++            DEFAULT_READ_TIMEOUT,
++            app_server.start_turn_and_wait_for_completion(TurnStartParams {
++                cwd: Some(local_cwd.clone()),
++                environments: (index != 1).then(|| echoed.clone()),
++                ..text_turn_params(thread_id.clone(), label)
++            }),
++        )
++        .await??;
++        assert_eq!(completed.turn.status, TurnStatus::Completed);
++        let requests = response_mock.requests();
++        assert_eq!(requests.len(), index + 1);
++        let input = requests[index].message_input_texts("user");
++        let local_instructions = if projectless {
++            PROJECTLESS_INSTRUCTIONS
++        } else {
++            LOCAL_INSTRUCTIONS
++        };
 +        for expected in [
 +            local_instructions,
 +            AGENTS_INSTRUCTIONS,
 +            REMAINING_INSTRUCTIONS,
 +        ] {
-             assert!(
-                 input.iter().any(|text| text.contains(expected)),
-                 "{input:?}"
-@@ -396,7 +436,11 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
-                     local_cwd.clone(),
-                     rerooted,
-                 ),
--                ("change the fallback cwd", other_workspace.clone(), echoed),
++            assert!(
++                input.iter().any(|text| text.contains(expected)),
++                "{input:?}"
++            );
++        }
++
++        if projectless {
++            assert!(!input.iter().any(|text| text.contains(LOCAL_INSTRUCTIONS)));
++            let request_id = app_server
++                .send_thread_read_request(ThreadReadParams {
++                    thread_id: thread_id.clone(),
++                    include_turns: false,
++                })
++                .await?;
++            let updated: ThreadReadResponse =
++                timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
++            assert_eq!(updated.thread.environments, Some(reported));
++
++            let mut promoted = echoed.clone();
++            promoted.swap(0, stalled_index);
++            let mut moved = echoed.clone();
++            moved[0].cwd = LegacyAppPathString::from_path(workspace.as_path());
++            moved[stalled_index].cwd = LegacyAppPathString::from_path(&other_workspace);
++            let mut rerooted = echoed.clone();
++            rerooted[stalled_index].runtime_workspace_roots =
++                Some(vec![LegacyAppPathString::from_path(&other_workspace)]);
++            for (label, cwd, environments) in [
++                (
++                    "request only the stalled executor",
++                    local_cwd.clone(),
++                    vec![echoed[stalled_index].clone()],
++                ),
++                ("promote the stalled executor", local_cwd.clone(), promoted),
++                (
++                    "move the stalled executor cwd",
++                    workspace.to_path_buf(),
++                    moved,
++                ),
++                (
++                    "change the stalled executor roots",
++                    local_cwd.clone(),
++                    rerooted,
++                ),
 +                (
 +                    "change the fallback cwd",
 +                    other_workspace.clone(),
 +                    echoed.clone(),
 +                ),
-             ] {
-                 let request_id = app_server
-                     .send_turn_start_request(TurnStartParams {
-@@ -418,13 +462,14 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
-                 );
-             }
-             assert_eq!(response_mock.requests().len(), index + 1);
++            ] {
++                let denied_id = environments
++                    .iter()
++                    .find(|environment| environment.environment_id != LOCAL_ENVIRONMENT_ID)
++                    .context("an explicit request for an unavailable secondary")?
++                    .environment_id
++                    .clone();
++                let request_id = app_server
++                    .send_turn_start_request(TurnStartParams {
++                        cwd: Some(cwd),
++                        environments: Some(environments),
++                        ..text_turn_params(thread_id.clone(), label)
++                    })
++                    .await?;
++                let error = timeout(
++                    DEFAULT_READ_TIMEOUT,
++                    app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
++                )
++                .await??;
++                assert_eq!(error.error.code, -32600, "{label}");
++                assert_eq!(
++                    error.error.message,
++                    format!(
++                        "invalid thread settings override: invalid value for `environments`: `{denied_id}` is not in the allowed set owner-provided environment configuration (set by <unspecified>)"
++                    ),
++                    "{label}"
++                );
++            }
++            assert_eq!(response_mock.requests().len(), index + 1);
 +            projectless_thread = Some((thread_id, echoed));
-         }
-     }
-
-     let request_id = app_server
-         .send_thread_start_request(ThreadStartParams {
-             environments: Some(vec![denied]),
--            ..start
++        }
++    }
++
++    let request_id = app_server
++        .send_thread_start_request(ThreadStartParams {
++            environments: Some(vec![denied]),
 +            ..start.clone()
-         })
-         .await?;
-     let error = timeout(
-@@ -440,14 +485,915 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
-         "{error:?}",
-     );
-
++        })
++        .await?;
++    let error = timeout(
++        THREAD_START_TIMEOUT,
++        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
++    )
++    .await??;
++    assert_eq!(error.error.code, -32600);
++    assert!(
++        error.error.message.contains(
++            "Environment `stalled` did not complete executor readiness and AGENTS.md discovery."
++        ),
++        "{error:?}",
++    );
++
 +    let (thread_id, mut environments) = projectless_thread.context("projectless thread")?;
 +    let healthy_selection = environments
 +        .iter()
@@ -295,10 +510,11 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    let original_local_path = LegacyAppPathString::from_path(workspace.as_path());
 +    environments[0].cwd = original_local_path.clone();
 +    environments[0].runtime_workspace_roots = Some(vec![original_local_path]);
++    let previous_events = app_server.json_log_events()?;
 +    fail_healthy_metadata
 +        .send(())
 +        .expect("healthy fixture is still running");
-+    let completed = timeout(
++    let primed = timeout(
 +        DEFAULT_READ_TIMEOUT,
 +        app_server.start_turn_and_wait_for_completion(TurnStartParams {
 +            cwd: Some(workspace.to_path_buf()),
@@ -310,17 +526,33 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        }),
 +    )
 +    .await??;
-+    assert_eq!(completed.turn.status, TurnStatus::Completed);
++    assert_eq!(primed.turn.status, TurnStatus::Completed);
 +    timeout(DEFAULT_READ_TIMEOUT, healthy_metadata_error_seen).await??;
++    wait_for_optional_secondary_verification(
++        &app_server,
++        "remaining",
++        &previous_events,
++        /*verified*/ true,
++    )
++    .await?;
++    let completed = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app_server.start_turn_and_wait_for_completion(text_turn_params(
++            thread_id.clone(),
++            "Try the quarantined executor, then continue locally",
++        )),
++    )
++    .await??;
++    assert_eq!(completed.turn.status, TurnStatus::Completed);
 +
 +    let requests = responses::received_responses_requests(&server).await;
-+    assert_eq!(requests.len(), 5);
++    assert_eq!(requests.len(), 6);
 +    assert!(
-+        requests[3].body_json()["tools"]
++        requests[4].body_json()["tools"]
 +            .as_array()
 +            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "exec_command"))
 +    );
-+    let instructions = requests[3].message_input_texts("user");
++    let instructions = requests[4].message_input_texts("user");
 +    let root = workspace_uri.inferred_native_path_string();
 +    let expected = format!(
 +        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nThese AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\nfor `local` with root {root}\n\n{LOCAL_INSTRUCTIONS}\n\nfor `remaining` with root {root}\n\n{REMAINING_INSTRUCTIONS}\n</INSTRUCTIONS>",
@@ -331,7 +563,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +            .rfind(|text| text.starts_with("# AGENTS.md instructions")),
 +        Some(&expected),
 +    );
-+    let (output, success) = requests[4]
++    let (output, success) = requests[5]
 +        .function_call_output_content_and_success(QUARANTINED_EXEC_CALL)
 +        .context("quarantined exec_command output")?;
 +    let output = output.context("quarantined exec_command denial text")?;
@@ -390,15 +622,13 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    );
 +    assert_eq!(
 +        responses::received_responses_requests(&server).await.len(),
-+        5
++        6
 +    );
 +
-     let _ = stop_healthy.send(());
++    let _ = stop_healthy.send(());
 +    let _ = stop_remaining.send(());
-     let _ = stop_stalled.send(());
-     timeout(DEFAULT_READ_TIMEOUT, healthy_server).await???;
--    timeout(DEFAULT_READ_TIMEOUT, stalled_server).await???;
--    assert!(stalled_requests.stalled_metadata.load(Ordering::Relaxed) > 0);
++    let _ = stop_stalled.send(());
++    timeout(DEFAULT_READ_TIMEOUT, healthy_server).await???;
 +    timeout(DEFAULT_READ_TIMEOUT, remaining_server).await???;
 +    let stalled_metadata_requests = timeout(DEFAULT_READ_TIMEOUT, stalled_server).await???;
 +    assert!(stalled_metadata_requests > 0);
@@ -488,6 +718,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    let mut app = TestAppServer::builder()
 +        .with_codex_home(codex_home.path())
 +        .without_auto_env()
++        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
 +        .build_initialized()
 +        .await?;
 +    let start_id = app
@@ -508,16 +739,14 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    assert_eq!(reported_ids.first().copied(), Some(LOCAL_ENVIRONMENT_ID));
 +    reported_ids.sort_unstable();
 +    assert_eq!(reported_ids, [LOCAL_ENVIRONMENT_ID, REMOTE_ID, "remaining"]);
-+    let expected_sources = saved_environments
-+        .iter()
-+        .map(|selection| match selection.environment_id.as_str() {
-+            LOCAL_ENVIRONMENT_ID => local_source.clone().into(),
-+            REMOTE_ID => remote_source.clone().into(),
-+            "remaining" => remaining_source.clone().into(),
-+            id => unreachable!("unexpected environment ID: {id}"),
-+        })
-+        .collect::<Vec<LegacyAppPathString>>();
-+    assert_eq!(start.instruction_sources, expected_sources);
++    assert_eq!(
++        start.instruction_sources,
++        [LegacyAppPathString::from(local_source)]
++    );
++    for environment_id in [REMOTE_ID, "remaining"] {
++        wait_for_optional_secondary_verification(&app, environment_id, &[], /*verified*/ true)
++            .await?;
++    }
 +    let opened = timeout(
 +        DEFAULT_READ_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
@@ -563,6 +792,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    let later = responses::mount_sse_sequence(
 +        &server,
 +        vec![
++            create_final_assistant_message_sse_response("checking executor availability")?,
 +            responses::sse(vec![
 +                responses::ev_response_created("write-to-terminal"),
 +                responses::ev_function_call(
@@ -584,9 +814,27 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        ],
 +    )
 +    .await;
++    let previous_events = app.json_log_events()?;
 +    enable_fault
 +        .send(())
 +        .expect("remote RPC is still connected");
++    let primed = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app.start_turn_and_wait_for_completion(text_turn_params(
++            thread_id.clone(),
++            "Check whether the secondary executors are still available.",
++        )),
++    )
++    .await??;
++    assert_eq!(primed.turn.status, TurnStatus::Completed);
++    timeout(DEFAULT_READ_TIMEOUT, metadata_error_seen).await??;
++    wait_for_optional_secondary_verification(
++        &app,
++        "remaining",
++        &previous_events,
++        /*verified*/ true,
++    )
++    .await?;
 +    let completed = timeout(
 +        DEFAULT_READ_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
@@ -596,10 +844,9 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    )
 +    .await??;
 +    assert_eq!(completed.turn.status, TurnStatus::Completed);
-+    timeout(DEFAULT_READ_TIMEOUT, metadata_error_seen).await??;
 +    let requests = later.requests();
-+    assert_eq!(requests.len(), 3);
-+    let instructions = requests[0].message_input_texts("user");
++    assert_eq!(requests.len(), 4);
++    let instructions = requests[1].message_input_texts("user");
 +    let latest = instructions
 +        .iter()
 +        .rfind(|text| text.starts_with("# AGENTS.md instructions"))
@@ -607,7 +854,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    assert!(latest.contains(LOCAL_INSTRUCTIONS), "{latest}");
 +    assert!(latest.contains(REMAINING_INSTRUCTIONS), "{latest}");
 +    assert!(!latest.contains(AGENTS_INSTRUCTIONS), "{latest}");
-+    let (output, success) = requests[1]
++    let (output, success) = requests[2]
 +        .function_call_output_content_and_success(WRITE_CALL)
 +        .context("write_stdin output")?;
 +    assert_ne!(success, Some(true));
@@ -615,7 +862,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        output.as_deref(),
 +        Some("The terminal's environment `quarantined` is unavailable for this turn."),
 +    );
-+    let (output, success) = requests[2]
++    let (output, success) = requests[3]
 +        .function_call_output_content_and_success(LOCAL_CALL)
 +        .context("local continuation output")?;
 +    assert_ne!(success, Some(false));
@@ -643,9 +890,9 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        ),
 +        "the executor must see no writes to the old terminal"
 +    );
-     Ok(())
- }
-
++    Ok(())
++}
++
 +#[tokio::test]
 +async fn initially_unavailable_default_secondary_joins_an_ordinary_later_turn() -> Result<()> {
 +    check_initial_default_secondary_admission(/*replace_registration*/ false).await
@@ -698,6 +945,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        vec![
 +            call(EARLY_CALL),
 +            create_final_assistant_message_sse_response("continued locally")?,
++            create_final_assistant_message_sse_response("checking the registered executor")?,
 +            call(LATER_CALL),
 +            create_final_assistant_message_sse_response(if replace_registration {
 +                "continued locally after replacement"
@@ -757,6 +1005,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        .with_codex_home(codex_home.path())
 +        .with_mock_chatgpt_backend()
 +        .without_auto_env()
++        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
 +        .build_initialized()
 +        .await?;
 +    let request_id = app
@@ -785,6 +1034,8 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        [LOCAL_ENVIRONMENT_ID, REMOTE_ID],
 +    );
 +    let thread_id = started.thread.id;
++    wait_for_optional_secondary_verification(&app, REMOTE_ID, &[], /*verified*/ false).await?;
++    let previous_events = app.json_log_events()?;
 +    let first = timeout(
 +        DEFAULT_READ_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
@@ -804,6 +1055,13 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        .context("denial of exec on the unattached executor")?;
 +    assert_ne!(success, Some(true));
 +    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++    wait_for_optional_secondary_verification(
++        &app,
++        REMOTE_ID,
++        &previous_events,
++        /*verified*/ false,
++    )
++    .await?;
 +
 +    let request_id = app
 +        .send_raw_request(
@@ -866,6 +1124,19 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    assert_eq!(info.shell.name, "bash");
 +    assert_eq!(info.shell.path, "/bin/bash");
 +
++    let primed = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app.start_turn_and_wait_for_completion(text_turn_params(
++            thread_id.clone(),
++            "Check the default executor without using it yet.",
++        )),
++    )
++    .await??;
++    assert_eq!(primed.turn.status, TurnStatus::Completed);
++    if !replace_registration {
++        wait_for_optional_secondary_verification(&app, REMOTE_ID, &[], /*verified*/ true).await?;
++    }
++
 +    let later = timeout(
 +        DEFAULT_READ_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
@@ -877,8 +1148,14 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    assert_eq!(later.turn.status, TurnStatus::Completed);
 +    assert_ne!(first.turn.id, later.turn.id);
 +    let requests = mock.requests();
-+    assert_eq!(requests.len(), 4);
-+    let input = requests[2].message_input_texts("user");
++    assert_eq!(requests.len(), 5);
++    let priming_input = requests[2].message_input_texts("user");
++    assert!(
++        !priming_input
++            .iter()
++            .any(|text| text.contains(REMOTE_INSTRUCTIONS))
++    );
++    let input = requests[3].message_input_texts("user");
 +    let instructions = input
 +        .iter()
 +        .rfind(|text| text.starts_with("# AGENTS.md instructions"))
@@ -892,7 +1169,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +                .all(|text| !text.contains(REMOTE_INSTRUCTIONS)),
 +            "the replacement's instructions must not reach this thread"
 +        );
-+        let (output, success) = requests[3]
++        let (output, success) = requests[4]
 +            .function_call_output_content_and_success(LATER_CALL)
 +            .context("denial of exec on the replacement registration")?;
 +        assert_ne!(success, Some(true));
@@ -909,7 +1186,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +        return Ok(());
 +    }
 +    assert!(instructions.contains(REMOTE_INSTRUCTIONS), "{instructions}");
-+    let (output, success) = requests[3]
++    let (output, success) = requests[4]
 +        .function_call_output_content_and_success(LATER_CALL)
 +        .context("exec output from the newly attached executor")?;
 +    assert_ne!(success, Some(false));
@@ -1028,12 +1305,21 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    );
 +
 +    // Changing the roots invalidates the instruction cache without changing the AGENTS.md candidate.
-+    selection.runtime_workspace_roots =
-+        Some(vec![cwd, LegacyAppPathString::from_path(&additional_root)]);
++    selection.runtime_workspace_roots = Some(vec![
++        cwd.clone(),
++        LegacyAppPathString::from_path(&additional_root),
++    ]);
 +    enable_fault.send(()).expect("executor fixture is running");
 +    let request_id = app
 +        .send_turn_start_request(TurnStartParams {
-+            environments: Some(vec![selection]),
++            environments: Some(vec![
++                selection,
++                TurnEnvironmentParams {
++                    environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
++                    cwd: cwd.clone(),
++                    runtime_workspace_roots: Some(vec![cwd]),
++                },
++            ]),
 +            ..text_turn_params(thread_id.clone(), "Use the changed workspace roots.")
 +        })
 +        .await?;
@@ -1197,10 +1483,424 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    }
 +}
 +
- #[tokio::test]
- async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments()
- -> Result<()> {
-@@ -1272,3 +2218,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
++#[tokio::test]
++async fn ordinary_cold_resume_and_sends_do_not_wait_for_saved_secondaries() -> Result<()> {
++    const STALLED: &str = "stalled";
++    const MISSING: &str = "retired";
++    const FIRST_CALL: &str = "exec-on-stalled-secondary";
++    const LATER_CALL: &str = "exec-on-retired-secondary";
++    const LOCAL_INSTRUCTIONS: &str = "local instructions for the resumed thread";
++    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
++
++    let server = responses::start_mock_server().await;
++    let call = |id: &str, environment_id: &str| {
++        responses::sse(vec![
++            responses::ev_response_created(id),
++            responses::ev_exec_command_call_with_args(
++                id,
++                &json!({"cmd": "echo must-not-run", "environment_id": environment_id, "login": false}),
++            ),
++            responses::ev_completed(id),
++        ])
++    };
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            call(FIRST_CALL, STALLED),
++            create_final_assistant_message_sse_response("continued locally on first send")?,
++            call(LATER_CALL, MISSING),
++            create_final_assistant_message_sse_response("continued locally on later send")?,
++        ],
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    let workspace_dir = TempDir::new()?;
++    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
++    std::fs::write(workspace.join("AGENTS.md"), LOCAL_INSTRUCTIONS)?;
++    let workspace_uri = PathUri::from_abs_path(&workspace);
++    let local_source = workspace_uri.join("AGENTS.md")?;
++    let listener = TcpListener::bind("127.0.0.1:0").await?;
++    std::fs::write(
++        codex_home.path().join("environments.toml"),
++        format!(
++            "[[environments]]\nid = {STALLED:?}\nurl = \"ws://{}\"\n",
++            listener.local_addr()?
++        ),
++    )?;
++    MockResponsesConfig::new(&server.uri())
++        .with_model("gpt-5.4")
++        .with_sandbox_mode("danger-full-access")
++        .with_provider_config("supports_websockets = false")
++        .enable_feature(Feature::UnifiedExec)
++        .write(codex_home.path())?;
++    let (stop, stopped) = oneshot::channel();
++    let requests = Arc::new(InstructionDiscoveryRequests::default());
++    let executor = tokio::spawn(serve_instruction_discovery_executor(
++        listener,
++        InstructionDiscoveryExecutor::Stalled,
++        Arc::clone(&requests),
++        stopped,
++    ));
++    let selections = [LOCAL_ENVIRONMENT_ID, STALLED, MISSING];
++    let thread_id = seed_resume_with_saved_environments(
++        codex_home.path(),
++        &workspace,
++        &selections,
++        /*implicit_selection*/ false,
++        /*previously_unavailable*/ None,
++    )?;
++    let remote_primary_id = seed_resume_with_saved_environments(
++        codex_home.path(),
++        &workspace,
++        &[MISSING, LOCAL_ENVIRONMENT_ID],
++        /*implicit_selection*/ false,
++        /*previously_unavailable*/ None,
++    )?;
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let resumed: ThreadResumeResponse = timeout(LOCAL_CONVERSATION_TIMEOUT, async {
++        let request_id = app
++            .send_thread_resume_request(ThreadResumeParams {
++                thread_id: thread_id.clone(),
++                ..Default::default()
++            })
++            .await?;
++        requests.stalled_metadata_seen.notified().await;
++        app.read_response(request_id).await
++    })
++    .await
++    .context("ordinary resume should return while the secondary's metadata RPC is held")??;
++    assert_eq!(resumed.thread.id, thread_id);
++    assert_eq!(
++        resumed.instruction_sources,
++        [LegacyAppPathString::from(local_source)]
++    );
++    assert_eq!(
++        resumed
++            .thread
++            .environments
++            .as_ref()
++            .context("the resume should report the saved selections")?
+             .iter()
+-            .position(|environment| environment.environment_id == "stalled")
+-            .context("thread/start should report its unavailable secondary")?;
++            .map(|selection| selection.environment_id.as_str())
++            .collect::<Vec<_>>(),
++        selections,
++    );
++    let rollout = resumed.thread.path.context("resumed thread rollout")?;
++    let saved_thread_id = ThreadId::from_string(&thread_id)?;
++    let saved = latest_owned_settings(&rollout, saved_thread_id).await?;
++    let saved_environments = saved.environments.context("owned saved environments")?;
++    assert!(!saved_environments.implicit_selection);
++    assert!(saved_environments.environments.iter().all(|selection| {
++        !selection.startup_unavailable
++            && TurnEnvironmentRequest::from(selection.clone()).config
++                == EnvironmentConfigState::FromThread
++            && selection.cwd == workspace_uri
++            && selection.workspace_roots == [workspace_uri.clone()]
++    }));
++
++    let mut previous_turn_id = None;
++    for prompt in ["First ordinary send", "Later ordinary send"] {
+         let completed = timeout(
+-            DEFAULT_READ_TIMEOUT,
+-            app_server.start_turn_and_wait_for_completion(TurnStartParams {
+-                cwd: Some(local_cwd.clone()),
+-                environments: (index != 1).then(|| echoed.clone()),
+-                ..text_turn_params(thread_id.clone(), label)
+-            }),
++            LOCAL_CONVERSATION_TIMEOUT,
++            app.start_turn_and_wait_for_completion(text_turn_params(thread_id.clone(), prompt)),
+         )
+-        .await??;
++        .await
++        .with_context(|| format!("{prompt} should finish with remote metadata still held"))??;
+         assert_eq!(completed.turn.status, TurnStatus::Completed);
+-        let requests = response_mock.requests();
+-        assert_eq!(requests.len(), index + 1);
+-        let input = requests[index].message_input_texts("user");
+-        let local_instructions = if projectless {
+-            PROJECTLESS_INSTRUCTIONS
+-        } else {
+-            LOCAL_INSTRUCTIONS
+-        };
+-        for expected in [local_instructions, AGENTS_INSTRUCTIONS] {
+-            assert!(
+-                input.iter().any(|text| text.contains(expected)),
+-                "{input:?}"
+-            );
+-        }
+-
+-        if projectless {
+-            assert!(!input.iter().any(|text| text.contains(LOCAL_INSTRUCTIONS)));
+-            let request_id = app_server
+-                .send_thread_read_request(ThreadReadParams {
+-                    thread_id: thread_id.clone(),
+-                    include_turns: false,
+-                })
+-                .await?;
+-            let updated: ThreadReadResponse =
+-                timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+-            assert_eq!(updated.thread.environments, Some(reported));
+-
+-            let mut promoted = echoed.clone();
+-            promoted.swap(0, stalled_index);
+-            let mut moved = echoed.clone();
+-            moved[0].cwd = LegacyAppPathString::from_path(workspace.as_path());
+-            moved[stalled_index].cwd = LegacyAppPathString::from_path(&other_workspace);
+-            let mut rerooted = echoed.clone();
+-            rerooted[stalled_index].runtime_workspace_roots =
+-                Some(vec![LegacyAppPathString::from_path(&other_workspace)]);
+-            for (label, cwd, environments) in [
+-                (
+-                    "request only the stalled executor",
+-                    local_cwd.clone(),
+-                    vec![echoed[stalled_index].clone()],
+-                ),
+-                ("promote the stalled executor", local_cwd.clone(), promoted),
+-                (
+-                    "move the stalled executor cwd",
+-                    workspace.to_path_buf(),
+-                    moved,
+-                ),
+-                (
+-                    "change the stalled executor roots",
+-                    local_cwd.clone(),
+-                    rerooted,
+-                ),
+-                ("change the fallback cwd", other_workspace.clone(), echoed),
+-            ] {
+-                let request_id = app_server
+-                    .send_turn_start_request(TurnStartParams {
+-                        cwd: Some(cwd),
+-                        environments: Some(environments),
+-                        ..text_turn_params(thread_id.clone(), label)
+-                    })
+-                    .await?;
+-                let error = timeout(
+-                    DEFAULT_READ_TIMEOUT,
+-                    app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+-                )
+-                .await??;
+-                assert_eq!(error.error.code, -32600, "{label}");
+-                assert_eq!(
+-                    error.error.message,
+-                    "invalid thread settings override: invalid value for `environments`: `stalled` is not in the allowed set owner-provided environment configuration (set by <unspecified>)",
+-                    "{label}"
+-                );
+-            }
+-            assert_eq!(response_mock.requests().len(), index + 1);
+-        }
++        assert_ne!(previous_turn_id.as_ref(), Some(&completed.turn.id));
++        previous_turn_id = Some(completed.turn.id);
+     }
+-
+-    let request_id = app_server
+-        .send_thread_start_request(ThreadStartParams {
+-            environments: Some(vec![denied]),
+-            ..start
+-        })
+-        .await?;
+-    let error = timeout(
+-        THREAD_START_TIMEOUT,
+-        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+-    )
+-    .await??;
+-    assert_eq!(error.error.code, -32600);
++    let model_requests = mock.requests();
++    assert_eq!(model_requests.len(), 4);
+     assert!(
+-        error.error.message.contains(
+-            "Environment `stalled` did not complete executor readiness and AGENTS.md discovery."
+-        ),
+-        "{error:?}",
++        model_requests[0]
++            .message_input_texts("user")
++            .iter()
++            .any(|text| text.contains(LOCAL_INSTRUCTIONS))
+     );
++    for (request, call_id) in [
++        (&model_requests[1], FIRST_CALL),
++        (&model_requests[3], LATER_CALL),
++    ] {
++        let (output, success) = request
++            .function_call_output_content_and_success(call_id)
++            .with_context(|| format!("missing denial for {call_id}"))?;
++        assert_ne!(success, Some(true));
++        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++    }
++    let saved_after = latest_owned_settings(&rollout, saved_thread_id).await?;
++    assert_eq!(saved_after.environments, Some(saved_environments));
++    assert_saved_resume_requires_environment(&mut app, &remote_primary_id, None, MISSING).await?;
+
+-    let _ = stop_healthy.send(());
+-    let _ = stop_stalled.send(());
+-    timeout(DEFAULT_READ_TIMEOUT, healthy_server).await???;
+-    timeout(DEFAULT_READ_TIMEOUT, stalled_server).await???;
+-    assert!(stalled_requests.stalled_metadata.load(Ordering::Relaxed) > 0);
++    stop.send(()).expect("stalled executor is still connected");
++    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
+     Ok(())
+ }
+
+@@ -458,6 +1679,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+             responses::ev_assistant_message("msg-2", "continued"),
+             responses::ev_completed("resp-2"),
+         ]),
++        create_final_assistant_message_sse_response("continued on the recovered executor")?,
+     ])
+     .await;
+     let codex_home = TempDir::new()?;
+@@ -565,6 +1787,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+     let mut app_server = TestAppServer::builder()
+         .with_codex_home(codex_home.path())
+         .without_auto_env()
++        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+         .build_initialized()
+         .await?;
+     let request_id = app_server
+@@ -574,13 +1797,21 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+             ..Default::default()
+         })
+         .await?;
+-    let response: ThreadResumeResponse =
+-        timeout(BOUNDED_RESUME_TIMEOUT, app_server.read_response(request_id)).await??;
++    let response: ThreadResumeResponse = timeout(
++        LOCAL_CONVERSATION_TIMEOUT,
++        app_server.read_response(request_id),
++    )
++    .await??;
+     assert_eq!(response.thread.id, implicit_id);
+     assert!(response.thread.turns.is_empty());
+     let expected_instruction_sources: Vec<LegacyAppPathString> =
+         vec![local_source.clone().into(), healthy_source.into()];
+-    assert_eq!(response.instruction_sources, expected_instruction_sources);
++    assert_eq!(
++        response.instruction_sources,
++        [LegacyAppPathString::from(local_source.clone())]
++    );
++    wait_for_optional_secondary_verification(&app_server, "healthy", &[], /*verified*/ true)
++        .await?;
+     assert_eq!(
+         healthy_requests
+             .instruction_reads
+@@ -589,17 +1820,19 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+     );
+     for (id, requests, _, _) in &executors {
+         if *id != "healthy" {
+-            assert!(
+-                requests.stalled_metadata.load(Ordering::Relaxed) > 0,
+-                "{id} never received an instruction metadata request"
+-            );
++            timeout(
++                DEFAULT_READ_TIMEOUT,
++                requests.stalled_metadata_seen.notified(),
++            )
++            .await
++            .with_context(|| format!("{id} never received an instruction metadata request"))?;
+         }
+     }
+
+     assert_saved_resume_requires_environment(
+         &mut app_server,
+         &required_id,
+-        /*optional_ids*/ None,
++        /*optional_ids*/ Some(&[]),
+         "stalled",
+     )
+     .await?;
+@@ -809,6 +2042,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+     healthy_requests
+         .instruction_reads
+         .store(0, Ordering::Relaxed);
++    let previous_events = app_server.json_log_events()?;
+     let request_id = app_server
+         .send_thread_resume_request(ThreadResumeParams {
+             thread_id: required_id.clone(),
+@@ -818,8 +2052,18 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+     let reopened: ThreadResumeResponse =
+         timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+     assert_eq!(reopened.thread.id, required_id);
+-    assert_eq!(reopened.instruction_sources, expected_instruction_sources);
++    assert_eq!(
++        reopened.instruction_sources,
++        [LegacyAppPathString::from(local_source.clone())]
++    );
+     assert_eq!(saved_user_item(&reopened.thread)?, &original_user_item);
++    wait_for_optional_secondary_verification(
++        &app_server,
++        "healthy",
++        &previous_events,
++        /*verified*/ true,
++    )
++    .await?;
+     assert_eq!(
+         healthy_requests.instruction_reads.load(Ordering::Relaxed),
+         1
+@@ -837,6 +2081,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+
+     // Only the fake's filesystem changes; the server, registration, and websocket stay in place.
+     recovered.store(true, Ordering::Relaxed);
++    let previous_events = app_server.json_log_events()?;
+     let request_id = app_server
+         .send_thread_resume_request(ThreadResumeParams {
+             thread_id: retry_id.clone(),
+@@ -849,7 +2094,31 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+     assert_eq!(response.thread.id, retry_id);
+     assert_eq!(
+         response.instruction_sources,
+-        vec![local_source.into(), recovered_source.into()],
++        [LegacyAppPathString::from(local_source)],
++    );
++    wait_for_optional_secondary_verification(
++        &app_server,
++        "stalled",
++        &previous_events,
++        /*verified*/ true,
++    )
++    .await?;
++    let recovered_turn = timeout(
++        DEFAULT_READ_TIMEOUT,
++        app_server.start_turn_and_wait_for_completion(text_turn_params(
++            retry_id,
++            "Continue after recovery",
++        )),
++    )
++    .await??;
++    assert_eq!(recovered_turn.turn.status, TurnStatus::Completed);
++    let requests = responses::received_responses_requests(&server).await;
++    assert_eq!(requests.len(), 3);
++    assert!(
++        requests[2]
++            .message_input_texts("user")
++            .iter()
++            .any(|text| text.contains(AGENTS_INSTRUCTIONS))
+     );
+
+     for (_, _, stop, task) in executors {
+@@ -1004,7 +2273,7 @@ enum InstructionDiscoveryExecutor {
+ #[derive(Default)]
+ struct InstructionDiscoveryRequests {
+     total: AtomicUsize,
+-    stalled_metadata: AtomicUsize,
++    stalled_metadata_seen: Notify,
+     instruction_reads: AtomicUsize,
+     allow_repeated_instruction_reads: AtomicBool,
+ }
+@@ -1044,7 +2313,7 @@ async fn serve_instruction_discovery_executor(
+         let result = match request["method"].as_str() {
+             Some("environment/info") => environment_info.clone(),
+             Some("fs/getMetadata") if stalled => {
+-                requests.stalled_metadata.fetch_add(1, Ordering::Relaxed);
++                requests.stalled_metadata_seen.notify_one();
+                 continue;
+             }
+             Some("fs/getMetadata") => json!({
+@@ -1272,3 +2541,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
 
      Ok(())
  }
@@ -1642,7 +2342,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..219427423688c589192529c477fa534d
 +    ))
 +}
 diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
-index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6fffe10182 100644
+index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df884832adc 100644
 --- a/codex-rs/core/src/agents_md.rs
 +++ b/codex-rs/core/src/agents_md.rs
 @@ -123,6 +123,22 @@ pub(crate) async fn load_project_instructions_with_startup(
@@ -1678,7 +2378,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
                  error!(
                      environment_id = turn_environment.selection.environment_id,
                      "error trying to find AGENTS.md docs: {error:#}"
-@@ -201,6 +218,29 @@ pub(crate) async fn read_startup_project_instructions(
+@@ -201,19 +218,47 @@ pub(crate) async fn read_startup_project_instructions(
      .await
  }
 
@@ -1708,7 +2408,35 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
  async fn read_environment_agents_md(
      config: &Config,
      environment: &TurnEnvironment,
-@@ -232,12 +272,33 @@ async fn read_agents_md(
+     max_total: usize,
+     sandbox: Option<&FileSystemSandboxContext>,
+ ) -> io::Result<Option<LoadedAgentsMd>> {
+-    read_agents_md(
++    read_agents_md_with_policy(
+         config,
+         environment.environment.get_filesystem().as_ref(),
+         &environment.selection.environment_id,
+         environment.cwd(),
+         max_total,
+         sandbox,
++        if environment.environment.is_remote() {
++            FindUpErrorPolicy::Propagate
++        } else {
++            FindUpErrorPolicy::Ignore
++        },
+     )
+     .await
+ }
+@@ -224,7 +269,7 @@ async fn read_environment_agents_md(
+ /// discovered doc. If no documentation file is found the function returns
+ /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
+ /// decide how to handle them.
+-#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
++#[cfg(test)]
+ async fn read_agents_md(
+     config: &Config,
+     fs: &dyn ExecutorFileSystem,
+@@ -232,12 +277,34 @@ async fn read_agents_md(
      cwd: &PathUri,
      max_total: usize,
      sandbox: Option<&FileSystemSandboxContext>,
@@ -1725,6 +2453,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
 +    .await
 +}
 +
++#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
 +async fn read_agents_md_with_policy(
 +    config: &Config,
 +    fs: &dyn ExecutorFileSystem,
@@ -1743,7 +2472,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
      if paths.is_empty() {
          return Ok(None);
      }
-@@ -252,7 +313,12 @@ async fn read_agents_md(
+@@ -252,7 +319,12 @@ async fn read_agents_md(
 
          let mut data = match fs.read_file(&p, ReadFileOptions::default(), sandbox).await {
              Ok(data) => data,
@@ -1757,7 +2486,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
              Err(err) => return Err(err),
          };
          let size = data.len() as u64;
-@@ -289,14 +355,25 @@ async fn read_agents_md(
+@@ -289,14 +361,25 @@ async fn read_agents_md(
      }
  }
 
@@ -1784,7 +2513,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..6eb297649d2065e92840a4ca9cc66a6f
  ) -> io::Result<Vec<PathUri>> {
      let dir = cwd.clone();
 
-@@ -315,14 +392,9 @@ async fn agents_md_paths(
+@@ -315,14 +398,9 @@ async fn agents_md_paths(
              default_project_root_markers()
          }
      };
@@ -1879,7 +2608,7 @@ index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8
      pub fn client_mcp_extensions(&self) -> ClientMcpExtensions {
          self.session.services.client_mcp_extensions.clone()
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86f07d7752 100644
+index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a9424069fc94 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
 @@ -6,6 +6,7 @@ use std::sync::Arc;
@@ -1890,15 +2619,19 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 
  use async_channel::Sender;
  use codex_exec_server::Environment;
-@@ -38,6 +39,7 @@ use futures::future::BoxFuture;
+@@ -36,8 +37,11 @@ use futures::FutureExt;
+ use futures::StreamExt;
+ use futures::future::BoxFuture;
  use futures::future::Shared;
++use tokio::sync::Semaphore;
++use tokio::sync::oneshot;
  use tokio::sync::watch;
  use tokio::time::Instant;
 +use tokio_util::sync::CancellationToken;
  use tokio_util::task::AbortOnDropHandle;
  use tracing::Instrument;
  use tracing::instrument::WithSubscriber;
-@@ -45,6 +47,7 @@ use tracing::instrument::WithSubscriber;
+@@ -45,6 +49,7 @@ use tracing::instrument::WithSubscriber;
  use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
  use crate::agents_md::StartupProjectInstructions;
  use crate::agents_md::read_startup_project_instructions;
@@ -1906,7 +2639,15 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
  use crate::config::Config;
  use crate::session::ThreadEnvironmentDefaults;
  use crate::session::turn_context::ShellSnapshotCache;
-@@ -129,8 +132,19 @@ pub(crate) fn default_thread_environment_requests(
+@@ -53,6 +58,7 @@ use crate::session::turn_context::TurnEnvironment;
+ use crate::shell::Shell;
+ use crate::shell_snapshot::ShellSnapshot;
+ use crate::shell_snapshot::SnapshotCredentialBrokerState;
++use crate::thread_manager::StartupEnvironmentDiscovery;
+
+ // Reject pathological selected cwd values at the environment-selection boundary.
+ const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
+@@ -129,8 +135,19 @@ pub(crate) fn default_thread_environment_requests(
      cwd: &AbsolutePathBuf,
      workspace_roots: &[AbsolutePathBuf],
  ) -> Vec<TurnEnvironmentRequest> {
@@ -1928,7 +2669,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          .into_iter()
          .map(|environment_id| TurnEnvironmentRequest {
              environment_id,
-@@ -316,6 +330,123 @@ struct ThreadEnvironmentsState {
+@@ -316,6 +333,251 @@ struct ThreadEnvironmentsState {
      environments: Vec<SelectedTurnEnvironment>,
      // Keep each rejection at its original position without binding an executor.
      startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
@@ -1942,7 +2683,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +    secondaries: Vec<DefaultSecondaryAdmission>,
 +}
 +
-+/// Server-owned eligibility from the original omitted app-server startup.
++/// Server-owned eligibility for a secondary selected by ordinary local conversation.
 +#[derive(Clone)]
 +pub(crate) enum DefaultSecondaryEnvironment {
 +    Ready(TurnEnvironmentSelection),
@@ -1966,6 +2707,132 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +    pub(crate) rejection: TurnEnvironmentSelection,
 +    registration: Weak<Environment>,
 +    pub(crate) revoked: CancellationToken,
++    background: Option<BackgroundSecondaryVerification>,
++}
++
++/// Optional read-only verification can prepare a later turn, but cannot change an active turn.
++struct BackgroundSecondaryVerification {
++    limit: Arc<Semaphore>,
++    pending: Mutex<Option<SecondaryVerification>>,
++}
++
++/// One verification of the selected workspace, permissions and executor attachment.
++struct SecondaryVerification {
++    config: Arc<Config>,
++    selection: TurnEnvironmentSelection,
++    revoked: CancellationToken,
++    result: oneshot::Receiver<Option<(TurnEnvironment, Instant)>>,
++    _task: AbortOnDropHandle<()>,
++}
++
++impl InitialDefaultSecondary {
++    fn take_verified_or_start(
++        &self,
++        config: &Arc<Config>,
++        selection: &TurnEnvironmentSelection,
++        registration: &Arc<Environment>,
++    ) -> Option<(TurnEnvironment, CancellationToken)> {
++        let background = self.background.as_ref()?;
++        let mut pending = background
++            .pending
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner);
++        if let Some(mut verification) = pending.take() {
++            if !verification.revoked.is_cancelled()
++                && &verification.selection == selection
++                && verification.config.active_project.is_untrusted()
++                    == config.active_project.is_untrusted()
++                && verification.config.project_doc_max_bytes == config.project_doc_max_bytes
++                && verification.config.project_doc_fallback_filenames
++                    == config.project_doc_fallback_filenames
++                && verification.config.config_layer_stack == config.config_layer_stack
++            {
++                match (&mut verification.result).now_or_never() {
++                    Some(Ok(Some((environment, completed))))
++                        if completed.elapsed() < REMOTE_AGENTS_MD_DISCOVERY_BUDGET
++                            && environment.environment.check_connected_view().is_ok() =>
++                    {
++                        return Some((environment, verification.revoked));
++                    }
++                    None => {
++                        *pending = Some(verification);
++                        return None;
++                    }
++                    Some(_) => {}
++                }
++            }
++            verification.revoked.cancel();
++        }
++        if self.revoked.is_cancelled() {
++            return None;
++        }
++        let revoked = self.revoked.child_token();
++        let (result_tx, result) = oneshot::channel();
++        let task = {
++            let limit = Arc::clone(&background.limit);
++            let config = Arc::clone(config);
++            let selection = selection.clone();
++            let registration = Arc::clone(registration);
++            let revoked = revoked.clone();
++            AbortOnDropHandle::new(tokio::spawn(async move {
++                let environment_id = selection.environment_id.clone();
++                let verify = async {
++                    let _permit = limit.acquire().await.ok()?;
++                    registration.wait_until_ready().await.ok()?;
++                    let bound = registration.connected_registry_view(revoked.clone()).ok()?;
++                    let mut environment = TurnEnvironment::new(
++                        selection,
++                        EnvironmentConfigOrigin::Thread,
++                        Arc::new(bound),
++                        /*shell*/ None,
++                    );
++                    verify_secondary_instructions(&config, &mut environment).await?;
++                    Some((environment, Instant::now()))
++                };
++                let result = tokio::select! {
++                    _ = revoked.cancelled() => None,
++                    result = tokio::time::timeout(REMOTE_AGENTS_MD_DISCOVERY_BUDGET, verify) => {
++                        result.ok().flatten()
++                    }
++                };
++                let verified = result.is_some();
++                if result_tx.send(result).is_ok() {
++                    if verified {
++                        tracing::debug!(%environment_id, "optional secondary executor verified");
++                    } else {
++                        tracing::debug!(%environment_id, "optional secondary executor verification failed");
++                    }
++                }
++            }))
++        };
++        *pending = Some(SecondaryVerification {
++            config: Arc::clone(config),
++            selection: selection.clone(),
++            revoked,
++            result,
++            _task: task,
++        });
++        None
++    }
++}
++
++async fn verify_secondary_instructions(
++    config: &Config,
++    environment: &mut TurnEnvironment,
++) -> Option<()> {
++    // HOME, temporary directories, and shell must describe the checked attachment.
++    let info = environment.environment.info().await.ok()?;
++    environment.user_home_dir = info.user_home_dir;
++    environment.temporary_directories = info.temporary_directories;
++    environment.executor_platform_os = info.platform_os;
++    environment.shell = Shell::from_environment_shell_info(info.shell).ok();
++    environment.shell_snapshot_v2_supported = info.capabilities.shell_snapshot_v2;
++    let docs = verify_remote_project_instructions(config, environment)
++        .await
++        .ok()?;
++    environment.environment.check_connected_view().ok()?;
++    environment.verified_project_instructions = Some(Arc::new(docs));
++    Some(())
 +}
 +
 +/// The current turn's verification may be revoked independently of future eligibility.
@@ -1985,6 +2852,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +    pub(crate) environments: TurnEnvironmentSnapshot,
 +    pub(crate) instructions: StartupProjectInstructions,
 +    pub(crate) initially_unavailable: Vec<DefaultSecondaryEnvironment>,
++    /// Temporary registry refusals on this resume, not changes to saved settings.
++    pub(crate) deferred_on_resume: HashSet<String>,
 +}
 +
 +#[derive(Clone)]
@@ -2052,17 +2921,91 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
  }
 
  #[derive(Clone, Copy)]
-@@ -360,7 +491,8 @@ impl ThreadEnvironments {
+@@ -358,14 +620,62 @@ impl ThreadEnvironments {
+         thread_defaults: ThreadEnvironmentDefaults,
+         config: &Config,
          selections: &mut [TurnEnvironmentSelection],
-         implicit_selection: bool,
-         optional_on_resume: &HashSet<String>,
+-        implicit_selection: bool,
+-        optional_on_resume: &HashSet<String>,
 -    ) -> CodexResult<Option<(TurnEnvironmentSnapshot, StartupProjectInstructions)>> {
-+        default_registrations: &HashMap<String, Arc<Environment>>,
++        startup: &StartupEnvironmentDiscovery,
 +    ) -> CodexResult<Option<StartupEnvironmentAdmission>> {
          let local_primary = selections.first().is_some_and(|selection| {
              environment_manager
                  .get_environment(&selection.environment_id)
-@@ -389,7 +521,25 @@ impl ThreadEnvironments {
+                 .is_some_and(|environment| !environment.is_remote())
+         });
++        let mut initially_unavailable = Vec::new();
++        let mut deferred_on_resume = HashSet::new();
++        if startup.defer_registry_secondaries
++            && local_primary
++            && let Some((primary, secondaries)) = selections.split_first_mut()
++            && primary.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++            && primary.config == EnvironmentConfigState::FromThread
++        {
++            let limit = Arc::new(Semaphore::new(16));
++            let config = Arc::new(config.clone());
++            for selection in secondaries {
++                if selection.config != EnvironmentConfigState::FromThread {
++                    continue;
++                }
++                let current = environment_manager.get_environment(&selection.environment_id);
++                if current
++                    .as_ref()
++                    .is_some_and(|environment| !environment.is_remote())
++                {
++                    continue;
++                }
++                let registration = current.filter(|current| {
++                    startup.cold_resume
++                        || startup
++                            .default_registrations
++                            .get(&selection.environment_id)
++                            .is_some_and(|original| Arc::ptr_eq(current, original))
++                });
++                let (normalized, _) = resolve_selection_config(selection.clone(), &thread_defaults);
++                selection.config = EnvironmentConfigState::StartupUnavailable;
++                if startup.cold_resume {
++                    deferred_on_resume.insert(selection.environment_id.clone());
++                }
++                if let Some(registration) = registration {
++                    let original = Arc::new(InitialDefaultSecondary {
++                        rejection: selection.clone(),
++                        registration: Arc::downgrade(&registration),
++                        revoked: CancellationToken::new(),
++                        background: Some(BackgroundSecondaryVerification {
++                            limit: Arc::clone(&limit),
++                            pending: Mutex::new(None),
++                        }),
++                    });
++                    let _ = original.take_verified_or_start(&config, &normalized, &registration);
++                    initially_unavailable
++                        .push(DefaultSecondaryEnvironment::InitiallyUnavailable(original));
++                }
++            }
++        }
+         let remote_selections = selections
+             .iter()
+             .filter(|selection| selection.config != EnvironmentConfigState::StartupUnavailable)
+@@ -377,7 +687,16 @@ impl ThreadEnvironments {
+             .cloned()
+             .collect::<Vec<_>>();
+         if remote_selections.is_empty() {
+-            return Ok(None);
++            return Ok(
++                (!initially_unavailable.is_empty() || !deferred_on_resume.is_empty()).then(|| {
++                    StartupEnvironmentAdmission {
++                        environments: TurnEnvironmentSnapshot::default(),
++                        instructions: StartupProjectInstructions::default(),
++                        initially_unavailable,
++                        deferred_on_resume,
++                    }
++                }),
++            );
+         }
+         let discovery = Self::new(
+             environment_manager,
+@@ -389,7 +708,25 @@ impl ThreadEnvironments {
          );
          discovery.update_selections(&remote_selections);
          let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
@@ -2079,7 +3022,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +            .starting()
 +            .filter_map(|starting| {
 +                let id = &starting.selection.environment_id;
-+                let original = default_registrations.get(id)?;
++                let original = startup.default_registrations.get(id)?;
 +                (Arc::ptr_eq(original, &starting.environment)
 +                    && original.supports_initial_default_recovery())
 +                .then(|| (id.clone(), Arc::downgrade(original)))
@@ -2089,15 +3032,16 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
              .map(|state| async move {
                  if Instant::now() >= deadline {
                      return None;
-@@ -428,6 +578,7 @@ impl ThreadEnvironments {
-             .iter()
-             .map(|selection| selection.environment_id.as_str())
-             .collect::<HashSet<_>>();
-+        let mut initially_unavailable = Vec::new();
-         for selection in selections {
-             let id = &selection.environment_id;
-             if !requested.contains(id.as_str()) || ready.contains_key(id) {
-@@ -443,8 +594,23 @@ impl ThreadEnvironments {
+@@ -436,15 +773,32 @@ impl ThreadEnvironments {
+             let reason = format!(
+                 "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive."
+             );
+-            if !(local_primary && (implicit_selection || optional_on_resume.contains(id)))
++            if !(local_primary
++                && (startup.implicit_selection || startup.optional_on_resume.contains(id)))
+                 || selection.config != EnvironmentConfigState::FromThread
+             {
+                 return Err(CodexErr::InvalidRequest(reason));
              }
              tracing::warn!(environment_id = %id, "optional secondary executor unavailable at thread startup");
              // Keep the failed selection so MCP cannot fall back to the global
@@ -2105,7 +3049,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +            // registry for this executor. A live permit does not change saved settings.
              selection.config = EnvironmentConfigState::StartupUnavailable;
 +            if local_primary
-+                && implicit_selection
++                && startup.implicit_selection
 +                && let Some(registration) = original_registrations.get(id)
 +                && registration
 +                    .upgrade()
@@ -2116,13 +3060,14 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +                        rejection: selection.clone(),
 +                        registration: registration.clone(),
 +                        revoked: CancellationToken::new(),
++                        background: None,
 +                    }),
 +                ));
 +            }
          }
          let mut environments = Vec::with_capacity(ready.len());
          let mut instructions = StartupProjectInstructions::default();
-@@ -454,10 +620,11 @@ impl ThreadEnvironments {
+@@ -454,10 +808,12 @@ impl ThreadEnvironments {
                  .insert(id, (environment.selection(), docs));
              environments.push(TurnEnvironmentState::Ready(environment));
          }
@@ -2133,11 +3078,12 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
              instructions,
 -        )))
 +            initially_unavailable,
++            deferred_on_resume,
 +        }))
      }
 
      pub(crate) fn new(
-@@ -556,11 +723,13 @@ impl ThreadEnvironments {
+@@ -556,11 +912,13 @@ impl ThreadEnvironments {
                  thread_defaults: thread_defaults.clone(),
                  environments: active,
                  startup_rejections: Vec::new(),
@@ -2151,7 +3097,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
              }),
              connection_event_tx: OnceLock::new(),
          }
-@@ -670,6 +839,7 @@ impl ThreadEnvironments {
+@@ -670,6 +1028,7 @@ impl ThreadEnvironments {
              thread_defaults,
              environments: current,
              startup_rejections,
@@ -2159,7 +3105,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          } = &mut *state;
          let mut seen_environment_ids = HashSet::with_capacity(environments.len());
          let mut next = Vec::with_capacity(environments.len());
-@@ -807,6 +977,15 @@ impl ThreadEnvironments {
+@@ -807,6 +1166,15 @@ impl ThreadEnvironments {
              .collect::<Vec<_>>();
          let previous = std::mem::replace(current, next);
          *startup_rejections = rejections;
@@ -2175,7 +3121,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 
          // Publish after installing the new list, including pending bindings replaced by retries.
          for (completion, result) in pending_completions {
-@@ -919,6 +1098,21 @@ impl ThreadEnvironments {
+@@ -919,6 +1287,21 @@ impl ThreadEnvironments {
          self.set_thread_defaults(&self.state, defaults);
      }
 
@@ -2197,7 +3143,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
      pub(crate) fn set_configured_thread_defaults(&self, defaults: EnvironmentConfig) {
          self.set_thread_defaults(&self.configured, defaults);
      }
-@@ -929,6 +1123,9 @@ impl ThreadEnvironments {
+@@ -929,6 +1312,9 @@ impl ThreadEnvironments {
          defaults: EnvironmentConfig,
      ) {
          let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2207,7 +3153,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          let ThreadEnvironmentsState {
              thread_defaults,
              environments,
-@@ -1224,18 +1421,302 @@ impl ThreadEnvironments {
+@@ -1224,18 +1610,335 @@ impl ThreadEnvironments {
 
      /// Copies the current selection without waiting for any executor to connect.
      pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
@@ -2230,8 +3176,9 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +            .lock()
 +            .unwrap_or_else(PoisonError::into_inner);
 +        Self::snapshot_state(&configured)
-+    }
-+
+     }
+
+-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
 +    /// Inheritance must not restore authority excluded from the active turn.
 +    pub(crate) fn inherited_snapshot_now(&self) -> TurnEnvironmentSnapshot {
 +        let active = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2307,9 +3254,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +        });
 +        state.default_secondary_admissions = admissions.clone();
 +        admissions
-     }
-
--    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
++    }
++
 +    fn is_current_registration(&self, admission: &DefaultSecondaryAdmission) -> bool {
 +        self.environment_manager
 +            .get_environment(&admission.selection.environment_id)
@@ -2333,13 +3279,46 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +        let Some(raw) = raw else {
 +            return self.resolve_snapshot(denied).await;
 +        };
++        let background_config = admissions
++            .secondaries
++            .iter()
++            .any(|admission| {
++                admission
++                    .initial_recovery
++                    .as_ref()
++                    .is_some_and(|attempt| attempt.original.background.is_some())
++            })
++            .then(|| Arc::new(config.clone()));
 +        let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
 +        futures::stream::iter(admissions.secondaries.iter_mut())
 +            .for_each_concurrent(16, |admission| {
 +                let raw = &raw;
++                let background_config = background_config.as_ref();
 +                async move {
-+                    let mut environment = if let Some(attempt) = &admission.initial_recovery {
-+                        if !self.is_current_registration(admission) {
++                    if admission.initial_recovery.is_some()
++                        && !self.is_current_registration(admission)
++                    {
++                        return;
++                    }
++                    let mut environment = if let Some(attempt) = &mut admission.initial_recovery {
++                        if attempt.original.background.is_some() {
++                            let original = Arc::clone(&attempt.original);
++                            if let Some(config) = background_config
++                                && let Some((mut environment, revoked)) = original
++                                    .take_verified_or_start(
++                                        config,
++                                        &admission.selection,
++                                        &admission.registration,
++                                    )
++                            {
++                                attempt.revoked = revoked.clone();
++                                environment.initial_recovery =
++                                    Some(Arc::new(InitialTurnEnvironmentRecovery {
++                                        rejection: original.rejection.clone(),
++                                        revoked,
++                                    }));
++                                admission.verified = Some(environment);
++                            }
 +                            return;
 +                        }
 +                        let Ok(bound) = admission
@@ -2380,41 +3359,38 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +                        environment.environment = Arc::new(bound);
 +                        environment
 +                    };
-+                    let verify = async {
-+                        // HOME, temporary directories, and shell must describe the checked attachment.
-+                        let info = environment.environment.info().await.ok()?;
-+                        environment.user_home_dir = info.user_home_dir;
-+                        environment.temporary_directories = info.temporary_directories;
-+                        environment.executor_platform_os = info.platform_os;
-+                        environment.shell = Shell::from_environment_shell_info(info.shell).ok();
-+                        environment.shell_snapshot_v2_supported =
-+                            info.capabilities.shell_snapshot_v2;
-+                        verify_remote_project_instructions(config, &environment)
-+                            .await
-+                            .ok()
-+                    };
-+                    let Ok(Some(docs)) = tokio::time::timeout_at(deadline, verify).await else {
++                    let Ok(Some(())) = tokio::time::timeout_at(
++                        deadline,
++                        verify_secondary_instructions(config, &mut environment),
++                    )
++                    .await
++                    else {
 +                        tracing::warn!(
 +                            environment_id = %admission.selection.environment_id,
 +                            "default secondary AGENTS.md discovery failed for this turn"
 +                        );
 +                        return;
 +                    };
-+                    if environment.environment.check_connected_view().is_err() {
-+                        return;
-+                    }
-+                    environment.verified_project_instructions = Some(Arc::new(docs));
 +                    admission.verified = Some(environment);
 +                }
 +            })
 +            .await;
 +        let snapshot = {
 +            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-+            if state
++            if !state
 +                .default_secondary_admissions
 +                .as_ref()
-+                .is_none_or(|current| !Arc::ptr_eq(&current.turn, &admissions.turn))
++                .is_some_and(|current| {
++                    Arc::ptr_eq(&current.turn, &admissions.turn)
++                        && current.secondaries.iter().all(|admission| {
++                            admission
++                                .initial_recovery
++                                .as_ref()
++                                .is_none_or(|attempt| !attempt.revoked.is_cancelled())
++                        })
++                })
 +            {
++                Self::revoke_initial_attempts(Some(&admissions));
 +                denied
 +            } else {
 +                for admission in &mut admissions.secondaries {
@@ -2434,6 +3410,9 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +                        })
 +                    };
 +                    if !still_selected {
++                        if let Some(attempt) = &admission.initial_recovery {
++                            attempt.revoked.cancel();
++                        }
 +                        admission.verified = None;
 +                    }
 +                    if let Some(environment) = &mut admission.verified {
@@ -2514,7 +3493,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          let mut environments: Vec<_> = state
              .environments
              .iter()
-@@ -1280,7 +1761,7 @@ impl ThreadEnvironments {
+@@ -1280,7 +1983,7 @@ impl ThreadEnvironments {
              non_blocking = non_blocking_snapshots,
          )
      )]
@@ -2523,7 +3502,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          &self,
          snapshot: TurnEnvironmentSnapshot,
      ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
-@@ -1317,6 +1798,39 @@ pub(crate) enum TurnEnvironmentState {
+@@ -1317,6 +2020,39 @@ pub(crate) enum TurnEnvironmentState {
  }
 
  impl TurnEnvironmentState {
@@ -2563,7 +3542,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
      fn from_resolution(
          starting: StartingTurnEnvironment,
          resolved: Option<TurnEnvironmentResult>,
-@@ -1394,6 +1908,56 @@ pub struct TurnEnvironmentSnapshot {
+@@ -1394,6 +2130,56 @@ pub struct TurnEnvironmentSnapshot {
  }
 
  impl TurnEnvironmentSnapshot {
@@ -2620,7 +3599,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
      /// Keeps the original root order for child threads and saved history.
      pub(crate) fn selected_capability_roots(&self) -> Vec<SelectedCapabilityRoot> {
          EnvironmentCapabilityRoots::collect(self.environments.iter().map(|environment| {
-@@ -1432,9 +1996,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1432,9 +2218,12 @@ impl TurnEnvironmentSnapshot {
              .environments
              .iter()
              .map(|environment| match environment {
@@ -2636,7 +3615,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
                  TurnEnvironmentState::Starting(environment) => {
                      TurnEnvironmentState::from_resolution(
                          environment.clone(),
-@@ -1452,7 +2019,9 @@ impl TurnEnvironmentSnapshot {
+@@ -1452,7 +2241,9 @@ impl TurnEnvironmentSnapshot {
              let TurnEnvironmentState::Ready(environment) = environment else {
                  return None;
              };
@@ -2647,7 +3626,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          })
      }
 
-@@ -1466,12 +2035,18 @@ impl TurnEnvironmentSnapshot {
+@@ -1466,12 +2257,18 @@ impl TurnEnvironmentSnapshot {
      }
 
      pub(crate) fn ready_environment_handles(&self) -> HashMap<String, Arc<Environment>> {
@@ -2670,7 +3649,44 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
              })
              .collect()
      }
-@@ -1594,7 +2169,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1493,7 +2290,35 @@ impl TurnEnvironmentSnapshot {
+     }
+
+     pub(crate) fn primary(&self) -> Option<&TurnEnvironment> {
+-        self.turn_environments().next()
++        let Some(TurnEnvironmentState::Ready(environment)) = self.environments.first() else {
++            return None;
++        };
++        (environment.initial_recovery.is_none()
++            || environment.environment.check_connected_view().is_ok())
++        .then_some(environment)
++    }
++
++    pub(crate) fn ensure_registry_primary_ready(&self) -> CodexResult<()> {
++        let unavailable = match self.environments.first() {
++            Some(TurnEnvironmentState::Starting(starting))
++                if starting.config_origin == EnvironmentConfigOrigin::Thread =>
++            {
++                &starting.selection
++            }
++            Some(TurnEnvironmentState::Failed { selection, .. })
++                if selection.config == EnvironmentConfigState::FromThread =>
++            {
++                selection
++            }
++            _ => return Ok(()),
++        };
++        if unavailable.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID {
++            return Ok(());
++        }
++        Err(CodexErr::InvalidRequest(format!(
++            "Environment `{}` is not ready. Retry when it is responsive.",
++            unavailable.environment_id
++        )))
+     }
+
+     /// Returns the first selection's executor paths, even when setup is not ready yet.
+@@ -1594,7 +2419,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .filter_map(|environment| match environment {
@@ -2684,7 +3700,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
                  TurnEnvironmentState::Starting(environment) => Some(
                      environment
                          .config_origin
-@@ -1616,7 +2196,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1616,7 +2446,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
@@ -2698,7 +3714,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
                  TurnEnvironmentState::Starting(environment) => environment
                      .config_origin
                      .into_input_selection(environment.selection.clone()),
-@@ -1633,7 +2218,10 @@ impl TurnEnvironmentSnapshot {
+@@ -1633,7 +2468,10 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
@@ -2710,7 +3726,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
                  TurnEnvironmentState::Starting(environment) => Ok(
                      environment
                          .config_origin
-@@ -1740,6 +2328,7 @@ mod tests {
+@@ -1740,6 +2578,7 @@ mod tests {
 
      use std::time::Duration;
 
@@ -2718,7 +3734,15 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
      use crate::config::PermissionProfileSnapshot;
      use codex_exec_server::Environment;
      use codex_exec_server::ExecServerRuntimeOptions;
-@@ -1835,7 +2424,7 @@ mod tests {
+@@ -1749,6 +2588,7 @@ mod tests {
+     use codex_http_client::HttpClientFactory;
+     use codex_http_client::OutboundProxyPolicy;
+     use codex_protocol::config_types::WindowsSandboxLevel;
++    use codex_protocol::error::CodexErrorDetails;
+     use codex_protocol::models::ActivePermissionProfile;
+     use codex_protocol::models::PermissionProfile;
+     use codex_protocol::permissions::FileSystemSandboxPolicyContext;
+@@ -1835,7 +2675,7 @@ mod tests {
          }
      }
 
@@ -2727,7 +3751,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
          let (stream, _) = listener.accept().await.expect("connection");
          let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
-@@ -1874,6 +2463,184 @@ mod tests {
+@@ -1874,6 +2714,185 @@ mod tests {
              ))
              .await
              .expect("environment info response");
@@ -2860,6 +3884,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
 +            rejection: rejection.clone(),
 +            registration: Arc::downgrade(&remote),
 +            revoked: CancellationToken::new(),
++            background: None,
 +        });
 +        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
 +        let admissions = environments
@@ -2912,6 +3937,101 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0adbb99d6ba339e25176cb766df9fd86
      }
 
      #[tokio::test]
+@@ -2089,6 +3108,66 @@ url = "ws://127.0.0.1:8765"
+         );
+     }
+
++    #[tokio::test]
++    async fn registry_primary_failure_is_distinct_from_pending_owner_configuration() {
++        let local = TurnEnvironmentSelection {
++            selected_capability_roots: Default::default(),
++            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
++            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
++            workspace_roots: Vec::new(),
++            config: EnvironmentConfigState::Ready(test_environment_config()),
++        };
++        let remote = TurnEnvironmentSelection {
++            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
++            config: EnvironmentConfigState::FromThread,
++            ..local.clone()
++        };
++        let mut snapshot = TurnEnvironmentSnapshot {
++            environments: vec![
++                TurnEnvironmentState::Failed {
++                    selection: remote.clone(),
++                    required_skills: Vec::new(),
++                    error: "connection failed".to_string(),
++                },
++                TurnEnvironmentState::Ready(TurnEnvironment::new(
++                    local,
++                    EnvironmentConfigOrigin::Thread,
++                    Arc::new(Environment::default_for_tests()),
++                    /*shell*/ None,
++                )),
++            ],
++        };
++
++        assert!(snapshot.primary().is_none());
++        assert!(snapshot.local().is_some());
++        let error = snapshot
++            .ensure_registry_primary_ready()
++            .expect_err("a failed registry primary must not fall back to the local secondary");
++        assert!(matches!(
++            error.details(),
++            CodexErrorDetails::InvalidRequest(message) if message.contains(REMOTE_ENVIRONMENT_ID)
++        ));
++
++        let (completion, _) = watch::channel(None);
++        snapshot.environments[0] = TurnEnvironmentState::Starting(StartingTurnEnvironment {
++            selection: TurnEnvironmentSelection {
++                config: EnvironmentConfigState::Pending,
++                ..remote
++            },
++            config_origin: EnvironmentConfigOrigin::Owner,
++            resolution: futures::future::pending().boxed().shared(),
++            environment: Arc::new(
++                Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string()))
++                    .expect("unattached test registration"),
++            ),
++            owner_config_result: Some(pending_configuration(&completion)),
++        });
++        assert!(snapshot.primary().is_none());
++        snapshot
++            .ensure_registry_primary_ready()
++            .expect("owner attachment can still supply configuration");
++    }
++
+     #[tokio::test]
+     async fn unresolved_environment_selections_are_skipped() {
+         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+@@ -2286,8 +3365,16 @@ url = "ws://127.0.0.1:8765"
+         resolution.await.expect("local environment should resolve");
+         turn_environments.update_selections(&[remote.clone(), local.clone()]);
+         let initial = turn_environments.snapshot().await;
++        assert!(initial.primary().is_none());
++        let error = initial
++            .ensure_registry_primary_ready()
++            .expect_err("an unready registry primary must not fall back to the local secondary");
++        assert!(matches!(
++            error.details(),
++            CodexErrorDetails::InvalidRequest(message) if message.contains(REMOTE_ENVIRONMENT_ID)
++        ));
+         assert_eq!(
+-            initial.primary().expect("local environment").config(),
++            initial.local().expect("local environment").config(),
+             &EnvironmentConfig {
+                 windows_sandbox_type: local_sandbox,
+                 ..test_environment_config()
+@@ -2363,6 +3450,9 @@ url = "ws://127.0.0.1:8765"
+         assert!(next_starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
+         assert!(!starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
+         let attached = starting.refresh_readiness();
++        attached
++            .ensure_registry_primary_ready()
++            .expect("selected remote is now ready");
+
+         assert!(attached.starting().next().is_none());
+         let child = ThreadEnvironments::new(
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
 index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835a3296829 100644
 --- a/codex-rs/core/src/session/environment.rs
@@ -3074,7 +4194,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
              // Invalidate MCP before installed configuration can wake a waiting turn.
              self.mark_mcp_runtime_dirty();
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdecf997a410 100644
+index 037fa6785264ac08128c7fd9639a3502a1050483..cea55edda21c8f2816b7bc9a4e94c9c6cf4cfb79 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -40,6 +40,8 @@ use crate::context::world_state::WorldStateUpdate;
@@ -3134,7 +4254,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
              model_info_overrides: config.to_models_manager_config().into(),
              developer_instructions: config.developer_instructions.clone(),
              base_instructions,
-@@ -1380,7 +1388,11 @@ impl Session {
+@@ -1380,7 +1388,12 @@ impl Session {
                  || !config.features.enabled(Feature::DeferredExecutor))
          {
              debug_assert!(inherited_environments.is_none());
@@ -3143,18 +4263,23 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
 +                environments,
 +                instructions,
 +                initially_unavailable,
++                deferred_on_resume,
 +            }) = ThreadEnvironments::admit_startup_remotes(
                  Arc::clone(&environment_manager),
                  session_configuration
                      .user_shell_override
-@@ -1394,9 +1406,32 @@ impl Session {
+@@ -1392,11 +1405,36 @@ impl Session {
+                 ),
+                 config.as_ref(),
                  &mut environment_selections,
-                 discovery.implicit_selection,
-                 &discovery.optional_on_resume,
-+                &discovery.default_registrations,
+-                discovery.implicit_selection,
+-                &discovery.optional_on_resume,
++                &discovery,
              )
              .await?
              {
++                Arc::make_mut(&mut session_configuration.resume_optional_environment_ids)
++                    .extend(deferred_on_resume);
 +                if !discovery.cold_resume
 +                    && discovery.implicit_selection
 +                    && let Some((primary, secondaries)) = environment_selections.split_first()
@@ -3176,11 +4301,13 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
 +                        .map(DefaultSecondaryEnvironment::Ready)
 +                        .chain(initially_unavailable)
 +                        .collect();
++                } else {
++                    session_configuration.default_secondary_environments = initially_unavailable;
 +                }
                  thread_extension_init.insert(instructions);
                  Some(environments)
              } else {
-@@ -3005,9 +3040,30 @@ impl Session {
+@@ -3005,9 +3043,30 @@ impl Session {
              // Save new environment defaults for future turns. The running turn keeps its own.
              windows_sandbox_changed =
                  state.session_configuration.windows_sandbox_level != updated.windows_sandbox_level;
@@ -3212,7 +4339,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
              if updated.environments != state.session_configuration.environments {
                  self.services
                      .turn_environments
-@@ -3101,11 +3157,11 @@ impl Session {
+@@ -3101,11 +3160,11 @@ impl Session {
          let snapshot = {
              let _state = self.state.lock().await;
              if self.features.enabled(Feature::SubagentThreadEnvironments) {
@@ -3226,7 +4353,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
      }
 
      pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
-@@ -3127,6 +3183,23 @@ impl Session {
+@@ -3127,6 +3186,23 @@ impl Session {
              .restorable_thread_settings(state.session_configuration.environments.clone())
      }
 
@@ -3250,7 +4377,17 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
      pub(crate) async fn set_app_server_client_info(
          &self,
          app_server_client_name: Option<String>,
-@@ -5064,7 +5137,7 @@ impl Session {
+@@ -3259,7 +3335,8 @@ impl Session {
+     pub(crate) async fn refresh_hooks(&self, mut config: Arc<Config>) {
+         loop {
+             let disabled_plugin_ids = self.state.lock().await.active_disabled_plugin_ids.clone();
+-            let environments = self.services.turn_environments.snapshot().await;
++            // Refresh runs before turn selection. Remote readiness cannot choose a host hook shell.
++            let environments = self.services.turn_environments.snapshot_now();
+             let hooks_config = build_hooks_config(
+                 config.as_ref(),
+                 self.services.plugins_manager.as_ref(),
+@@ -5064,7 +5141,7 @@ impl Session {
                  self.services.turn_environments.snapshot(),
                  self.features
                      .enabled(Feature::SubagentThreadEnvironments)
@@ -3259,11 +4396,12 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..e7e3e0b4776df578ea2daed6f3b4cdec
              )
          };
          if matches!(
-@@ -5093,7 +5166,8 @@ impl Session {
+@@ -5093,7 +5170,9 @@ impl Session {
          );
          let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
          let environments = environments.or_cancel(cancellation_token).await?;
 -        let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());
++        environments.ensure_registry_primary_ready()?;
 +        let inherited_environments = inherited_environments
 +            .unwrap_or_else(|| environments.clone().without_initial_recovery());
          // Keep both preparation futures off caller stacks while they are live together.
@@ -3362,10 +4500,56 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
      pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
      pub(crate) sandbox_policy: Option<SandboxPolicy>,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c5a555994 100644
+index 8e3b4a9129f986cf30864e12f846adcf48c23046..e5f65eacc75550103be046a56d8242c9c414d3b9 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -6572,6 +6572,7 @@ async fn set_rate_limits_retains_previous_credits() {
+@@ -2423,6 +2423,45 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
+     Ok(())
+ }
+
++#[tokio::test]
++async fn refresh_hooks_does_not_wait_for_previous_remote_selection() -> anyhow::Result<()> {
++    let session = make_session_with_config(|_| {}).await?;
++    // Keep the listener open without completing the executor handshake.
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++    let environments = &session.services.turn_environments;
++    environments.environment_manager().upsert_environment(
++        "stalled".to_string(),
++        format!("ws://{}", listener.local_addr()?),
++        Some(std::time::Duration::from_secs(30)),
++    )?;
++    let config = session.get_config().await;
++    let local_selection = local(config.cwd.clone());
++    let remote_selection = TurnEnvironmentSelection {
++        environment_id: "stalled".to_string(),
++        ..local_selection.clone()
++    };
++    environments.update_selections(&[local_selection, remote_selection]);
++    assert!(
++        environments
++            .snapshot_now()
++            .starting()
++            .any(|environment| environment.selection.environment_id == "stalled")
++    );
++
++    tokio::time::timeout(
++        std::time::Duration::from_secs(3),
++        session.refresh_hooks(config),
++    )
++    .await?;
++    assert!(
++        environments
++            .snapshot_now()
++            .starting()
++            .any(|environment| environment.selection.environment_id == "stalled")
++    );
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
+     let (session, _turn_context) = make_session_and_context().await;
+@@ -6572,6 +6611,7 @@ async fn set_rate_limits_retains_previous_credits() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3373,7 +4557,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -6697,6 +6698,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+@@ -6697,6 +6737,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3381,7 +4565,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -8063,6 +8065,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+@@ -8063,6 +8104,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3389,7 +4573,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -9714,6 +9717,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -9714,6 +9756,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3397,7 +4581,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10043,6 +10047,7 @@ async fn make_session_with_config_and_rx(
+@@ -10043,6 +10086,7 @@ async fn make_session_with_config_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3405,7 +4589,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10184,6 +10189,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -10184,6 +10228,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3413,7 +4597,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..32a97b0c2619490150088a247e7e2e4c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -12240,6 +12246,7 @@ where
+@@ -12240,6 +12285,7 @@ where
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -3564,7 +4748,7 @@ index e4bd2e88c4257fa22266596dce6f551a6804e46b..20f7b4bfa176ceded5825befbd754a3e
              self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                  .await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4c11e6fc1 100644
+index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d2572f72d 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -24,6 +24,7 @@ use crate::config::ThreadStoreConfig;
@@ -3583,8 +4767,12 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4
  use codex_exec_server::EnvironmentManager;
  use codex_exec_server::LOCAL_ENVIRONMENT_ID;
  use codex_execpolicy::Policy;
-@@ -537,6 +539,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
+@@ -535,8 +537,12 @@ pub struct StartThreadOptions {
+ pub(crate) struct StartupEnvironmentDiscovery {
+     pub(crate) implicit_selection: bool,
      pub(crate) cold_resume: bool,
++    /// Ordinary local conversation does not await registry secondaries.
++    pub(crate) defer_registry_secondaries: bool,
      /// Explicit exceptions for one cold resume, never part of saved settings.
      pub(crate) optional_on_resume: Arc<HashSet<String>>,
 +    /// Present only for the actual local-primary registry selection at a new app-server start.
@@ -3592,7 +4780,7 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4
  }
 
  /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
-@@ -555,12 +559,40 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
+@@ -555,23 +561,54 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
 
  impl StartThreadOptions {
      /// Bounds executor discovery for app-server thread/start before workspace startup work.
@@ -3617,11 +4805,12 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4
 +            if bindings.first().is_some_and(|(id, environment)| {
 +                id == LOCAL_ENVIRONMENT_ID && !environment.is_remote()
 +            }) {
-+                default_registrations.extend(bindings.into_iter().skip(1).filter(
-+                    |(_, environment)| {
-+                        environment.is_unattached_initial_default_recovery_candidate()
-+                    },
-+                ));
++                default_registrations.extend(
++                    bindings
++                        .into_iter()
++                        .skip(1)
++                        .filter(|(_, environment)| environment.is_remote()),
++                );
 +            }
 +            requests
 +        }));
@@ -3629,14 +4818,40 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..c2682f2cd94683bb58c8b4ddb62633d4
              .insert(StartupEnvironmentDiscovery {
                  implicit_selection,
                  cold_resume: false,
++                defer_registry_secondaries: implicit_selection,
                  optional_on_resume: Arc::default(),
 +                default_registrations,
              });
      }
 
-@@ -666,6 +698,7 @@ impl StartThreadOptions {
+-    /// Restores saved assignments for app-server cold resume. A saved secondary
+-    /// is optional only when selected by default or explicitly nominated here.
++    /// Restores saved assignments without requiring registry secondaries for an ordinary
++    /// client resume. An explicit optional list instead controls this resume's admission.
+     pub fn restore_startup_environment_discovery(
+         &mut self,
+         saved: Option<&ThreadSettingsSnapshot>,
+         override_local_cwd: bool,
+         override_local_roots: bool,
+         optional_environment_ids: Option<Vec<String>>,
++        ordinary_client_resume: bool,
+     ) -> CodexResult<()> {
+         let selection = saved.and_then(|settings| settings.environments.as_ref());
+         let implicit_selection = selection.is_none_or(|saved| saved.implicit_selection);
+@@ -631,6 +668,8 @@ impl StartThreadOptions {
+                     .collect(),
+             );
+         }
++        let defer_registry_secondaries =
++            ordinary_client_resume && optional_environment_ids.is_none();
+         let mut optional_on_resume = HashSet::new();
+         if let Some(ids) = optional_environment_ids
+             && !ids.is_empty()
+@@ -665,7 +704,9 @@ impl StartThreadOptions {
+             .insert(StartupEnvironmentDiscovery {
                  implicit_selection,
                  cold_resume: true,
++                defer_registry_secondaries,
                  optional_on_resume: Arc::new(optional_on_resume),
 +                default_registrations: HashMap::new(),
              });
@@ -3702,7 +4917,7 @@ index ec7a7d24aa87a8b28d9380f2aa8338b541c18057..e7dccd5fe07704d10f2a8b3227df52c7
  }
 
 diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
-index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeafbc3f96f7 100644
+index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed018578090973cf2ac5e 100644
 --- a/codex-rs/exec-server/src/client.rs
 +++ b/codex-rs/exec-server/src/client.rs
 @@ -4,6 +4,7 @@ use std::future::Future;
@@ -3730,7 +4945,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      connection_changed: watch::Sender<()>,
      // The remote transport delivers one shared notification stream for every
      // process on the connection. Keep a local process_id -> session registry so
-@@ -356,6 +360,25 @@ enum RecoveryPolicy {
+@@ -356,6 +360,26 @@ enum RecoveryPolicy {
  pub struct ExecServerClient {
      inner: Arc<Inner>,
      recovery_policy: RecoveryPolicy,
@@ -3745,10 +4960,11 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +    startup_recovery: Option<StartupRecoveryAuthority>,
 +}
 +
-+/// A first-attachment view remains valid only while its registration and turn are current.
++/// A scoped view remains valid only while its registration and turn are current.
 +struct StartupRecoveryAuthority {
 +    registration_retired: CancellationToken,
 +    turn_revoked: CancellationToken,
++    only_initial_transport: bool,
 +}
 +
 +fn bound_transport_unavailable() -> ExecServerError {
@@ -3756,7 +4972,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
  }
 
  /// State carried from a Noise readiness wait into the initialize RPC.
-@@ -403,10 +426,13 @@ pub(crate) struct LazyRemoteExecServerClient {
+@@ -403,10 +427,13 @@ pub(crate) struct LazyRemoteExecServerClient {
      transport_params: Option<ExecServerTransportParams>,
      http_client_factory: HttpClientFactory,
      recovery_policy: RecoveryPolicy,
@@ -3770,7 +4986,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      reconnect: Arc<StdMutex<Option<Arc<ConnectionAttempt>>>>,
      refresh_lock: Arc<Mutex<()>>,
      pub(super) connection_observer: Arc<OnceLock<ConnectionObserver>>,
-@@ -422,8 +448,10 @@ impl LazyRemoteExecServerClient {
+@@ -422,8 +449,10 @@ impl LazyRemoteExecServerClient {
              transport_params: Some(transport_params),
              http_client_factory,
              recovery_policy: RecoveryPolicy::Wait,
@@ -3781,7 +4997,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
              reconnect: Arc::new(StdMutex::new(None)),
              refresh_lock: Arc::new(Mutex::new(())),
              connection_observer: Default::default(),
-@@ -439,6 +467,9 @@ impl LazyRemoteExecServerClient {
+@@ -439,6 +468,9 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn start_connecting(&self) -> Option<AbortOnDropHandle<()>> {
@@ -3791,7 +5007,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          // Stdio starts a process, so keep it lazy until the environment is used.
          if matches!(
              self.transport_params,
-@@ -464,6 +495,9 @@ impl LazyRemoteExecServerClient {
+@@ -464,6 +496,9 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn readiness_result(&self) -> Option<Result<(), ExecServerError>> {
@@ -3801,7 +5017,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          if let Some(client) = self.cached_client() {
              return client.readiness_result();
          }
-@@ -511,11 +545,77 @@ impl LazyRemoteExecServerClient {
+@@ -511,11 +546,89 @@ impl LazyRemoteExecServerClient {
          }
      }
 
@@ -3839,6 +5055,17 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +        if !self.supports_initial_default_recovery() || self.is_attachment_bound() {
 +            return Err(bound_transport_unavailable());
 +        }
++        self.connected_registry_view(turn_revoked, /*only_initial_transport*/ true)
++    }
++
++    pub(crate) fn connected_registry_view(
++        &self,
++        turn_revoked: CancellationToken,
++        only_initial_transport: bool,
++    ) -> Result<Self, ExecServerError> {
++        if self.is_attachment_bound() {
++            return Err(bound_transport_unavailable());
++        }
 +        let client = self
 +            .cached_client()
 +            .ok_or_else(bound_transport_unavailable)?;
@@ -3847,6 +5074,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +                client.bind_current_transport(Some(StartupRecoveryAuthority {
 +                    registration_retired: self.initial_recovery_retired.clone(),
 +                    turn_revoked,
++                    only_initial_transport,
 +                }))?,
 +            ),
 +            ..self.clone()
@@ -3879,7 +5107,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          if matches!(self.recovery_policy, RecoveryPolicy::FailFast) {
              let client = match self.cached_client() {
                  Some(client) => client,
-@@ -621,6 +721,11 @@ impl LazyRemoteExecServerClient {
+@@ -621,6 +734,11 @@ impl LazyRemoteExecServerClient {
      }
 
      pub(crate) fn cached_executor_registration_id(&self) -> Option<String> {
@@ -3891,7 +5119,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          self.cached_client()
              .and_then(|client| client.executor_registration_id())
      }
-@@ -757,6 +862,62 @@ impl ExecServerClient {
+@@ -757,6 +875,66 @@ impl ExecServerClient {
          Ok(Self {
              inner: Arc::clone(&self.inner),
              recovery_policy: RecoveryPolicy::FailFast,
@@ -3908,7 +5136,11 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +            return Ok(self.clone());
 +        }
 +        let rpc = self.rpc_client_without_recovery()?;
-+        if startup_recovery.is_some() && !self.inner.initial_rpc.ptr_eq(&Arc::downgrade(&rpc)) {
++        if startup_recovery
++            .as_ref()
++            .is_some_and(|authority| authority.only_initial_transport)
++            && !self.inner.initial_rpc.ptr_eq(&Arc::downgrade(&rpc))
++        {
 +            return Err(bound_transport_unavailable());
 +        }
 +        let bound = Self {
@@ -3954,7 +5186,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          })
      }
 
-@@ -766,6 +927,22 @@ impl ExecServerClient {
+@@ -766,6 +944,22 @@ impl ExecServerClient {
              .connection
              .lock()
              .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3977,7 +5209,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          match &connection.status {
              ConnectionStatus::Connected(rpc_client) if !rpc_client.is_disconnected() => {
                  Ok(Arc::clone(rpc_client))
-@@ -872,11 +1049,19 @@ impl ExecServerClient {
+@@ -872,11 +1066,19 @@ impl ExecServerClient {
 
      /// Returns shared cached executor metadata, fetching it lazily if initialization omitted it.
      pub async fn environment_info(&self) -> Result<Arc<EnvironmentInfo>, ExecServerError> {
@@ -4001,7 +5233,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      }
 
      /// Fetches executor metadata over RPC without reading or updating the cache.
-@@ -908,10 +1093,15 @@ impl ExecServerClient {
+@@ -908,10 +1110,15 @@ impl ExecServerClient {
      pub async fn environment_status(&self) -> Result<EnvironmentStatus, ExecServerError> {
          // Health checks only reuse an existing RPC connection and never initiate recovery.
          let rpc_client = self.rpc_client_without_recovery()?;
@@ -4021,7 +5253,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          )
      }
 
-@@ -1046,6 +1236,11 @@ impl ExecServerClient {
+@@ -1046,6 +1253,11 @@ impl ExecServerClient {
          &self,
          params: FsCloseParams,
      ) -> Result<FsCloseResponse, ExecServerError> {
@@ -4033,7 +5265,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          self.call_for_cleanup(FS_CLOSE_METHOD, &params).await
      }
 
-@@ -1076,11 +1271,18 @@ impl ExecServerClient {
+@@ -1076,11 +1288,18 @@ impl ExecServerClient {
          if !self.environment_info().await?.capabilities.fs_watch_missing {
              return Ok(None);
          }
@@ -4055,7 +5287,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      }
 
      pub async fn fs_get_metadata(
-@@ -1171,6 +1373,9 @@ impl ExecServerClient {
+@@ -1171,6 +1390,9 @@ impl ExecServerClient {
          loop {
              let rpc_client = self.rpc_client().await?;
              if !self.inner.begin_process_start(&rpc_client) {
@@ -4065,7 +5297,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                  continue;
              }
 
-@@ -1209,10 +1414,22 @@ impl ExecServerClient {
+@@ -1209,10 +1431,22 @@ impl ExecServerClient {
              let (result_received_tx, result_received_rx) = tokio::sync::oneshot::channel();
              let process_start_task = async move {
                  let _active_start = active_start;
@@ -4092,7 +5324,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                      Ok(response) => {
                          state.recoverable.store(true, Ordering::Release);
                          let session = Session {
-@@ -1231,7 +1448,10 @@ impl ExecServerClient {
+@@ -1231,7 +1465,10 @@ impl ExecServerClient {
                          }
                      }
                      Err(error) => {
@@ -4104,7 +5336,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                              tokio::spawn(async move {
                                  cleanup_process_start(&client, &process_id, &state).await;
                              });
-@@ -1255,6 +1475,7 @@ impl ExecServerClient {
+@@ -1255,6 +1492,7 @@ impl ExecServerClient {
                  ));
              }
              if matches!(&result, Ok(Ok(_))) {
@@ -4112,7 +5344,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                  pending_start.armed = false;
                  let _ = result_received_tx.send(());
              }
-@@ -1349,6 +1570,7 @@ impl ExecServerClient {
+@@ -1349,6 +1587,7 @@ impl ExecServerClient {
          let session_id = OnceLock::new();
          let (connection_changed, _connection_changed_rx) = watch::channel(());
          let inner = Arc::new(Inner {
@@ -4120,7 +5352,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
              connection: StdMutex::new(ConnectionState {
                  status: ConnectionStatus::Connected(Arc::clone(&rpc_client)),
                  executor_registration_id: noise_context
-@@ -1377,6 +1599,7 @@ impl ExecServerClient {
+@@ -1377,6 +1616,7 @@ impl ExecServerClient {
          let client = Self {
              inner,
              recovery_policy: RecoveryPolicy::Wait,
@@ -4128,7 +5360,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          };
          // An explicit resume can redirect notifications from running processes
          // before initialize returns. Drain them immediately so a burst cannot
-@@ -1415,14 +1638,26 @@ impl ExecServerClient {
+@@ -1415,14 +1655,26 @@ impl ExecServerClient {
      {
          let rpc_client = self.rpc_client().await?;
          // Bound sending as well as receiving: a stuck transport can fill the outbound queue.
@@ -4158,7 +5390,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                      // Retire only the connection we probed; recovery ignores a stale client.
                      rpc_client.close_transport().await;
                      self.inner.request_recovery(rpc_client, error.to_string());
-@@ -1442,7 +1677,37 @@ impl ExecServerClient {
+@@ -1442,7 +1694,37 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
@@ -4197,7 +5429,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      }
 
      async fn call_for_cleanup<P, T>(&self, method: &str, params: &P) -> Result<T, ExecServerError>
-@@ -1450,10 +1715,27 @@ impl ExecServerClient {
+@@ -1450,10 +1732,27 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
@@ -4226,7 +5458,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      fn map_rpc_call_result<T>(
          &self,
          result: Result<T, RpcCallError>,
-@@ -1481,10 +1763,16 @@ async fn cleanup_process_start(
+@@ -1481,10 +1780,16 @@ async fn cleanup_process_start(
      process_id: &ProcessId,
      state: &Arc<SessionState>,
  ) {
@@ -4244,7 +5476,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                  continue;
              }
              Err(_) => break,
-@@ -1730,6 +2018,7 @@ impl Session {
+@@ -1730,6 +2035,7 @@ impl Session {
          max_bytes: Option<usize>,
          wait_ms: Option<u64>,
      ) -> Result<ReadResponse, ExecServerError> {
@@ -4252,7 +5484,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          loop {
              if let Some(response) = self.state.failed_response() {
                  return Ok(response);
-@@ -1746,6 +2035,7 @@ impl Session {
+@@ -1746,6 +2052,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -4260,7 +5492,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -1765,6 +2055,7 @@ impl Session {
+@@ -1765,6 +2072,7 @@ impl Session {
      }
 
      pub(crate) async fn write(&self, chunk: Vec<u8>) -> Result<WriteResponse, ExecServerError> {
@@ -4268,7 +5500,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
          let write_id = self.state.next_write_id();
          loop {
              match self
-@@ -1773,6 +2064,7 @@ impl Session {
+@@ -1773,6 +2081,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -4276,7 +5508,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -2037,14 +2329,18 @@ mod tests {
+@@ -2037,14 +2346,18 @@ mod tests {
      use tokio_tungstenite::WebSocketStream;
      use tokio_tungstenite::accept_async;
      use tokio_tungstenite::tungstenite::Message;
@@ -4295,7 +5527,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      use crate::Environment;
      use crate::EnvironmentObservedStatus;
      use crate::ExecutorFileSystem;
-@@ -2057,12 +2353,15 @@ mod tests {
+@@ -2057,12 +2370,15 @@ mod tests {
      use crate::client_api::StdioExecServerCommand;
      use crate::client_api::StdioExecServerConnectArgs;
      use crate::connection::JsonRpcConnection;
@@ -4311,7 +5543,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      use crate::protocol::EXEC_WRITE_METHOD;
      use crate::protocol::EnvironmentInfo;
      use crate::protocol::ExecClosedNotification;
-@@ -2073,11 +2372,14 @@ mod tests {
+@@ -2073,11 +2389,14 @@ mod tests {
      use crate::protocol::ExecResponse;
      use crate::protocol::FS_CLOSE_METHOD;
      use crate::protocol::FS_OPEN_METHOD;
@@ -4326,7 +5558,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
      use crate::protocol::INITIALIZE_METHOD;
      use crate::protocol::INITIALIZED_METHOD;
      use crate::protocol::InitializeResponse;
-@@ -2113,6 +2415,515 @@ mod tests {
+@@ -2113,6 +2432,532 @@ mod tests {
              .expect("json-rpc line should write");
      }
 
@@ -4609,6 +5841,16 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +                .is_err()
 +        );
 +        assert!(environment.connected_view().is_ok());
++        let registry_revoked = CancellationToken::new();
++        let registry_view = environment
++            .connected_registry_view(registry_revoked.clone())
++            .unwrap();
++        assert!(registry_view.check_connected_view().is_ok());
++        registry_revoked.cancel();
++        assert!(registry_view.check_connected_view().is_err());
++        let registry_view = environment
++            .connected_registry_view(CancellationToken::new())
++            .unwrap();
 +        started.process.terminate().await.unwrap();
 +
 +        client
@@ -4619,6 +5861,12 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +            .set_status(ConnectionStatus::Connected(original_rpc));
 +        lazy.retire_initial_recovery();
 +        assert!(next.check_connected_view().is_err());
++        assert!(registry_view.check_connected_view().is_err());
++        assert!(
++            environment
++                .connected_registry_view(CancellationToken::new())
++                .is_err()
++        );
 +        assert!(
 +            environment
 +                .connected_initial_default_recovery_view(CancellationToken::new())
@@ -4683,6 +5931,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..c2b1b28a2438c9e7ff600d6b981faeaf
 +                .bind_current_transport(Some(StartupRecoveryAuthority {
 +                    registration_retired: CancellationToken::new(),
 +                    turn_revoked,
++                    only_initial_transport: true,
 +                }))
 +                .unwrap()
 +        }
@@ -4911,7 +6160,7 @@ index 43cae9282040133e650a7cf20eef8dc72fab5876..274e898015f0e0b0f8f0d59dffa989d4
                          self.environment_connection_state_tx.clone(),
                      );
 diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
-index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..9e54a287401bf13723bdfc46e5954dfd02d7c049 100644
+index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..b3eb8387413efbd5b32ea69d576db7e7283f403f 100644
 --- a/codex-rs/exec-server/src/environment.rs
 +++ b/codex-rs/exec-server/src/environment.rs
 @@ -17,6 +17,7 @@ use codex_http_client::OutboundProxyPolicy;
@@ -4985,7 +6234,7 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..9e54a287401bf13723bdfc46e5954dfd
          let mut startup_task = environment
              .startup_task
              .lock()
-@@ -1197,6 +1215,63 @@ impl Environment {
+@@ -1197,6 +1215,77 @@ impl Environment {
          Arc::clone(&self.filesystem)
      }
 
@@ -4999,6 +6248,20 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..9e54a287401bf13723bdfc46e5954dfd
 +            return Ok(self.clone());
 +        };
 +        Ok(self.with_bound_client(client.connected_view()?))
++    }
++
++    /// Binds optional verification to one transport and revokes dispatch if the registration
++    /// is replaced or the owning admission ends.
++    pub fn connected_registry_view(
++        &self,
++        revoked: CancellationToken,
++    ) -> Result<Self, ExecServerError> {
++        let client = self.remote_client.as_ref().ok_or_else(|| {
++            ExecServerError::Disconnected("no remote attachment for optional verification".into())
++        })?;
++        Ok(self.with_bound_client(
++            client.connected_registry_view(revoked, /*only_initial_transport*/ false)?,
++        ))
 +    }
 +
 +    /// Whether a skipped startup may verify the first attachment of this direct endpoint.
