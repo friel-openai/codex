@@ -7,6 +7,7 @@ use crate::catalog::CatalogState;
 use crate::catalog::ModelOrigin;
 use crate::catalog::SelectedCatalog;
 use crate::collaboration_mode_presets::builtin_collaboration_mode_presets;
+use crate::config::CustomModelConfig;
 use crate::config::ModelsManagerConfig;
 use crate::model_info;
 use chrono::DateTime;
@@ -23,6 +24,7 @@ use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -211,11 +213,27 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Return the auth manager used for picker filtering.
     fn auth_manager(&self) -> Option<&AuthManager>;
 
+    /// Return configured user-defined model aliases.
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig>;
+
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
         remote_models.sort_by_key(|model| model.priority);
 
-        let mut presets: Vec<ModelPreset> = remote_models.into_iter().map(Into::into).collect();
+        let mut presets: Vec<ModelPreset> = remote_models.iter().cloned().map(Into::into).collect();
+        let mut existing_models: HashSet<String> =
+            presets.iter().map(|preset| preset.model.clone()).collect();
+        let mut custom_presets = self
+            .custom_models()
+            .iter()
+            .filter(|(alias, _custom_model)| existing_models.insert((*alias).clone()))
+            .map(|(alias, custom_model)| {
+                let backing = find_model_from_candidates(&custom_model.model, &remote_models);
+                construct_model_info_for_custom_alias(alias, custom_model, backing).into()
+            })
+            .collect::<Vec<ModelPreset>>();
+        custom_presets.sort_by(|left, right| left.model.cmp(&right.model));
+        presets.extend(custom_presets);
         let uses_codex_backend = self
             .auth_manager()
             .is_some_and(AuthManager::current_auth_uses_codex_backend);
@@ -323,6 +341,7 @@ impl CatalogSource {
 pub struct OpenAiModelsManager {
     originator_managers: std::sync::Mutex<HashMap<ModelCatalogOriginator, SharedModelsManager>>,
     remote_models: RwLock<CatalogState>,
+    custom_models: HashMap<String, CustomModelConfig>,
     cache: Option<Arc<dyn ModelsCache>>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
@@ -334,6 +353,7 @@ pub struct OpenAiModelsManager {
 #[derive(Debug)]
 pub struct StaticModelsManager {
     remote_models: Vec<ModelInfo>,
+    custom_models: HashMap<String, CustomModelConfig>,
     auth_manager: Option<Arc<AuthManager>>,
     origin: ModelOrigin,
 }
@@ -345,6 +365,15 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
+        Self::new_with_custom_models(codex_home, endpoint_client, auth_manager, HashMap::new())
+    }
+
+    pub fn new_with_custom_models(
+        codex_home: PathBuf,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         Self::new_with_optional_cache(
             Some(Arc::new(FileModelsCache::new(
@@ -353,6 +382,7 @@ impl OpenAiModelsManager {
             ))),
             endpoint_client,
             auth_manager,
+            custom_models,
         )
     }
 
@@ -361,7 +391,20 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
-        Self::new_with_optional_cache(/*cache*/ None, endpoint_client, auth_manager)
+        Self::new_without_cache_and_custom_models(endpoint_client, auth_manager, HashMap::new())
+    }
+
+    pub fn new_without_cache_and_custom_models(
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> Self {
+        Self::new_with_optional_cache(
+            /*cache*/ None,
+            endpoint_client,
+            auth_manager,
+            custom_models,
+        )
     }
 
     /// Constructs an OpenAI-compatible model manager with a caller-provided cache.
@@ -373,13 +416,23 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
-        Self::new_with_optional_cache(Some(cache), endpoint_client, auth_manager)
+        Self::new_with_cache_and_custom_models(cache, endpoint_client, auth_manager, HashMap::new())
+    }
+
+    pub fn new_with_cache_and_custom_models(
+        cache: Arc<dyn ModelsCache>,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> Self {
+        Self::new_with_optional_cache(Some(cache), endpoint_client, auth_manager, custom_models)
     }
 
     fn new_with_optional_cache(
         cache: Option<Arc<dyn ModelsCache>>,
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> Self {
         Self {
             originator_managers: std::sync::Mutex::new(HashMap::new()),
@@ -390,6 +443,7 @@ impl OpenAiModelsManager {
                 identity: endpoint_client.identity(),
                 models: load_remote_models_from_file().unwrap_or_default(),
             })),
+            custom_models,
             cache,
             api_key_model_discovery_enabled: Arc::new(AtomicBool::new(false)),
             endpoint_client,
@@ -414,8 +468,18 @@ impl StaticModelsManager {
         model_catalog: ModelsResponse,
         origin: ModelOrigin,
     ) -> Self {
+        Self::new_with_custom_models(auth_manager, model_catalog, origin, HashMap::new())
+    }
+
+    pub fn new_with_custom_models(
+        auth_manager: Option<Arc<AuthManager>>,
+        model_catalog: ModelsResponse,
+        origin: ModelOrigin,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> Self {
         Self {
             remote_models: model_catalog.models,
+            custom_models,
             auth_manager,
             origin,
         }
@@ -455,7 +519,12 @@ impl ModelsManager for OpenAiModelsManager {
             .cache
             .as_ref()
             .and_then(|cache| cache.for_originator(originator));
-        let mut manager = Self::new_with_optional_cache(cache, endpoint, self.auth_manager.clone());
+        let mut manager = Self::new_with_optional_cache(
+            cache,
+            endpoint,
+            self.auth_manager.clone(),
+            self.custom_models.clone(),
+        );
         if matches!(self.catalog_source, CatalogSource::ExplicitProvider(_)) {
             manager = manager.with_provider_catalog();
         }
@@ -536,6 +605,15 @@ impl ModelsManager for OpenAiModelsManager {
                     SelectedCatalog::CurrentSnapshot(models)
                     | SelectedCatalog::Fallback(models) => models,
                 };
+                if let Some(custom_model) = config
+                    .custom_models
+                    .get(model)
+                    .or_else(|| self.custom_models().get(model))
+                {
+                    return resolve_custom_alias(model, models, config, custom_model, |slug| {
+                        entry.model_origin(&selected, slug)
+                    });
+                }
                 let model = match &self.catalog_source {
                     CatalogSource::Default => find_model_from_candidates(model, models),
                     CatalogSource::ExplicitProvider(_) => models
@@ -550,6 +628,10 @@ impl ModelsManager for OpenAiModelsManager {
             };
             construct_model_info(model, remote, config)
         })
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -879,6 +961,19 @@ impl ModelsManager for StaticModelsManager {
         config: &'a ModelsManagerConfig,
     ) -> ModelsManagerFuture<'a, CatalogModel> {
         Box::pin(async move {
+            if let Some(custom_model) = config
+                .custom_models
+                .get(model)
+                .or_else(|| self.custom_models().get(model))
+            {
+                return resolve_custom_alias(
+                    model,
+                    &self.remote_models,
+                    config,
+                    custom_model,
+                    |_| self.origin,
+                );
+            }
             construct_model_info_from_candidates(model, &self.remote_models, self.origin, config)
         })
     }
@@ -929,6 +1024,10 @@ impl ModelsManager for StaticModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.auth_manager.as_deref()
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -1019,11 +1118,40 @@ pub(crate) fn construct_model_info_from_candidates(
     origin: ModelOrigin,
     config: &ModelsManagerConfig,
 ) -> CatalogModel {
+    if let Some(custom_model) = config.custom_models.get(model) {
+        return resolve_custom_alias(model, candidates, config, custom_model, |_| origin);
+    }
     let remote = find_model_from_candidates(model, candidates).map(|model| CatalogModel {
         model: model.into(),
         origin,
     });
     construct_model_info(model, remote, config)
+}
+
+fn resolve_custom_alias(
+    alias: &str,
+    candidates: &[ModelInfo],
+    config: &ModelsManagerConfig,
+    custom_model: &CustomModelConfig,
+    origin_for_slug: impl FnOnce(&str) -> ModelOrigin,
+) -> CatalogModel {
+    let backing = find_model_from_candidates(&custom_model.model, candidates);
+    // Use the backing slug before rewriting it to the alias.
+    let origin = backing
+        .as_ref()
+        .map_or(ModelOrigin::Synthetic, |model| origin_for_slug(&model.slug));
+    let mut config = config.clone();
+    config.model_context_window = custom_model
+        .model_context_window
+        .or(config.model_context_window);
+    config.model_auto_compact_token_limit = custom_model
+        .model_auto_compact_token_limit
+        .or(config.model_auto_compact_token_limit);
+    let metadata = construct_model_info_for_custom_alias(alias, custom_model, backing);
+    CatalogModel {
+        model: model_info::with_config_overrides(metadata, &config).into(),
+        origin,
+    }
 }
 
 fn construct_model_info(
@@ -1039,6 +1167,27 @@ fn construct_model_info(
     metadata.slug = model.to_owned();
     resolved.model = model_info::with_config_overrides(metadata, config).into();
     resolved
+}
+
+fn construct_model_info_for_custom_alias(
+    alias: &str,
+    custom_model: &CustomModelConfig,
+    backing: Option<ModelInfo>,
+) -> ModelInfo {
+    if let Some(backing) = backing {
+        ModelInfo {
+            slug: alias.to_string(),
+            request_model: Some(custom_model.model.clone()),
+            display_name: alias.to_string(),
+            ..backing
+        }
+    } else {
+        let mut fallback_model = model_info::model_info_from_slug(&custom_model.model);
+        fallback_model.slug = alias.to_string();
+        fallback_model.request_model = Some(custom_model.model.clone());
+        fallback_model.display_name = alias.to_string();
+        fallback_model
+    }
 }
 
 #[cfg(test)]

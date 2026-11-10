@@ -1,5 +1,6 @@
 //! Vertex AI provider routing, command-backed credentials, and supported model capabilities.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,6 +9,8 @@ use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
+use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
@@ -141,13 +144,7 @@ impl ModelProvider for GcpModelProvider {
         &self,
         _codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
-    ) -> SharedModelsManager {
-        self.models_manager_without_cache(config_model_catalog)
-    }
-
-    fn models_manager_without_cache(
-        &self,
-        config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         let origin = if config_model_catalog.is_some() {
             codex_models_manager::ModelOrigin::ExplicitConfig
@@ -170,11 +167,29 @@ impl ModelProvider for GcpModelProvider {
             model.tool_mode = Some(ToolMode::Direct);
             model.apply_patch_tool_type = None;
         }
-        Arc::new(StaticModelsManager::new(
+        Arc::new(StaticModelsManager::new_with_custom_models(
             self.auth_manager.clone(),
             model_catalog,
             origin,
+            custom_models,
         ))
+    }
+
+    fn models_manager_without_cache(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+    ) -> SharedModelsManager {
+        self.models_manager(PathBuf::new(), config_model_catalog, HashMap::new())
+    }
+
+    fn models_manager_with_cache(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+        cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> SharedModelsManager {
+        drop(cache);
+        self.models_manager(PathBuf::new(), config_model_catalog, custom_models)
     }
 }
 
