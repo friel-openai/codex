@@ -50,6 +50,47 @@ index 0b9c494f6510505cac55fe4efe71223c3c72a1c6..9191b7f021358dd83dfd0973ea70a2fd
 
  To make the reviewed selection permanent, supply the retained executor IDs,
  working directories, and workspace roots in `turn/start.environments` on the
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index a23587d87dcde063e5f440e5360e8bde001f8f19..dcde7ce943155f15b8a3a85b31b03dde77559ee6 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -666,6 +666,22 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
+ fn resolve_turn_environment_requests(
+     thread_manager: &ThreadManager,
+     environments: Option<Vec<TurnEnvironmentParams>>,
++) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
++    let requests = parse_turn_environment_requests(environments)?;
++    if let Some(requests) = &requests {
++        validate_environment_ids_and_cwds(
++            &thread_manager.environment_manager(),
++            requests
++                .iter()
++                .map(|request| (request.environment_id.as_str(), &request.cwd)),
++        )
++        .map_err(environment_selection_error)?;
++    }
++    Ok(requests)
++}
++
++fn parse_turn_environment_requests(
++    environments: Option<Vec<TurnEnvironmentParams>>,
+ ) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
+     let Some(environments) = environments else {
+         return Ok(None);
+@@ -707,13 +723,6 @@ fn resolve_turn_environment_requests(
+             config: EnvironmentConfigState::FromThread,
+         });
+     }
+-    validate_environment_ids_and_cwds(
+-        &thread_manager.environment_manager(),
+-        requests
+-            .iter()
+-            .map(|request| (request.environment_id.as_str(), &request.cwd)),
+-    )
+-    .map_err(environment_selection_error)?;
+     Ok(Some(requests))
+ }
+
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
 index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e71cf7b6c 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
@@ -172,10 +213,18 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
              .map_err(|err| invalid_request(err.to_string()))?;
          start_options.initial_history = thread_history;
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4babcfb864 100644
+index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06d07ac83a 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -124,7 +124,7 @@ struct ThreadEnvironmentOverride {
+@@ -5,6 +5,7 @@ use codex_app_server_protocol::ThreadGuardianAssessment;
+ use codex_app_server_protocol::ThreadGuardianReviewParams;
+ use codex_app_server_protocol::ThreadGuardianReviewResponse;
+ use codex_app_server_protocol::ThreadItem;
++use codex_core::validate_environment_restatement_ids_and_cwds;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::FunctionCallOutputBody;
+@@ -124,7 +125,7 @@ struct ThreadEnvironmentOverride {
      runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
  }
 
@@ -184,7 +233,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
      current: &TurnEnvironmentRequests,
      requested: &TurnEnvironmentRequests,
  ) -> bool {
-@@ -140,9 +140,6 @@ fn restates_unavailable_startup_secondaries(
+@@ -140,9 +141,6 @@ fn restates_unavailable_startup_secondaries(
          && primary.config == EnvironmentConfigState::FromThread
          && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
          && requested_primary.config == EnvironmentConfigState::FromThread
@@ -194,14 +243,46 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
          && secondaries.len() == requested_secondaries.len()
          && secondaries
              .iter()
-@@ -834,12 +831,12 @@ impl TurnRequestProcessor {
+@@ -662,8 +660,7 @@ impl TurnRequestProcessor {
+         let runtime_workspace_roots = params
+             .runtime_workspace_roots
+             .map(resolve_runtime_workspace_roots);
+-        let environment_requests =
+-            resolve_turn_environment_requests(self.thread_manager.as_ref(), params.environments)?;
++        let environment_requests = parse_turn_environment_requests(params.environments)?;
+
+         let turn_has_input = !params.input.is_empty();
+         let input = if let Some(tool_output) = params.tool_output {
+@@ -705,7 +702,7 @@ impl TurnRequestProcessor {
+                 runtime_workspace_roots,
+                 environment_requests,
+             )
+-            .await;
++            .await?;
+         let thread_settings = self
+             .build_thread_settings_overrides(
+                 thread.as_ref(),
+@@ -813,9 +810,9 @@ impl TurnRequestProcessor {
+         cwd: Option<AbsolutePathBuf>,
+         workspace_roots: Option<Vec<AbsolutePathBuf>>,
+         environment_requests: Option<Vec<TurnEnvironmentRequest>>,
+-    ) -> ThreadEnvironmentOverride {
++    ) -> Result<ThreadEnvironmentOverride, JSONRPCErrorError> {
+         if cwd.is_none() && workspace_roots.is_none() && environment_requests.is_none() {
+-            return ThreadEnvironmentOverride::default();
++            return Ok(ThreadEnvironmentOverride::default());
+         }
+
+         // Explicit environment requests own their workspace roots. Top-level
+@@ -834,19 +831,18 @@ impl TurnRequestProcessor {
              };
              let mut requested =
                  TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
 -            // Thread.environments cannot represent StartupUnavailable. A restated secondary
 -            // is not a new selection when the client is only setting the local workspace.
++            let mut unchanged_restatement = false;
 +            // Thread.environments cannot represent startup provenance or StartupUnavailable.
-+            // An exact echo of existing secondaries is not a new remote selection.
++            // An exact echo may retain a secondary whose ID is no longer registered.
              if requested.environment_requests.len() > 1
                  && requested.environment_requests[0].environment_id == LOCAL_ENVIRONMENT_ID
 -                && let Some(current) = thread.restorable_thread_settings().await.environments
@@ -211,25 +292,73 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
              {
                  let local = &requested.environment_requests[0];
                  let local_changed = *local != current.environment_requests[0];
-@@ -888,11 +885,12 @@ impl TurnRequestProcessor {
+                 let same_fallback = requested.legacy_fallback_cwd == current.legacy_fallback_cwd;
+-                if !local_changed && same_fallback {
+-                    return ThreadEnvironmentOverride::default();
+-                }
++                unchanged_restatement = !local_changed && same_fallback;
+                 if local_changed
+                     && (same_fallback
+                         || local.cwd.to_abs_path().ok().as_ref()
+@@ -855,10 +851,24 @@ impl TurnRequestProcessor {
+                     requested.preserve_secondary_workspaces = true;
+                 }
+             }
+-            return ThreadEnvironmentOverride {
++            let environment_manager = self.thread_manager.environment_manager();
++            let ids_and_cwds = requested
++                .environment_requests
++                .iter()
++                .map(|request| (request.environment_id.as_str(), &request.cwd));
++            if unchanged_restatement || requested.preserve_secondary_workspaces {
++                validate_environment_restatement_ids_and_cwds(&environment_manager, ids_and_cwds)
++            } else {
++                validate_environment_ids_and_cwds(&environment_manager, ids_and_cwds)
++            }
++            .map_err(environment_selection_error)?;
++            if unchanged_restatement {
++                return Ok(ThreadEnvironmentOverride::default());
++            }
++            return Ok(ThreadEnvironmentOverride {
+                 environment_requests: Some(requested),
+                 ..Default::default()
+-            };
++            });
+         }
+
+         // Default-environment updates retain the task's fallback roots, not its active roots.
+@@ -888,13 +898,14 @@ impl TurnRequestProcessor {
              request.cwd = PathUri::from_abs_path(&legacy_fallback_cwd);
              request.workspace_roots = workspace_roots.iter().map(PathUri::from_abs_path).collect();
          }
-+        let mut environment_requests =
-+            TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
-+                .with_implicit_selection(current_environments.implicit_selection);
-+        environment_requests.retain_default_secondaries = true;
-         ThreadEnvironmentOverride {
+-        ThreadEnvironmentOverride {
 -            environment_requests: Some(
 -                TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
 -                    .with_implicit_selection(current_environments.implicit_selection),
 -            ),
++        let mut environment_requests =
++            TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
++                .with_implicit_selection(current_environments.implicit_selection);
++        environment_requests.retain_default_secondaries = true;
++        Ok(ThreadEnvironmentOverride {
 +            environment_requests: Some(environment_requests),
              runtime_workspace_roots: Some(workspace_roots),
-         }
+-        }
++        })
      }
+
+     async fn build_thread_settings_overrides(
+@@ -1058,7 +1069,7 @@ impl TurnRequestProcessor {
+                 /*workspace_roots*/ None,
+                 /*environment_requests*/ None,
+             )
+-            .await;
++            .await?;
+         let thread_settings = self
+             .build_thread_settings_overrides(
+                 thread.as_ref(),
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c927b08d0 100644
+index c53c73bd8c7a04887018256d1e04dd6553b470ba..f770186f7a393843de1fc268c10894bbd635ba93 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 @@ -60,6 +60,8 @@ use pretty_assertions::assert_eq;
@@ -441,12 +570,21 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
          let projectless = index == 2;
          let local_cwd = if projectless {
              // The projectless composer changes only the primary local entry.
-@@ -329,122 +401,1298 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
-                 cwd: environment.cwd,
-                 runtime_workspace_roots: Some(environment.runtime_workspace_roots),
-             })
--            .collect();
--        let stalled_index = echoed
+@@ -323,128 +395,1374 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+         };
+         let echoed: Vec<_> = reported
+             .iter()
+-            .cloned()
+-            .map(|environment| TurnEnvironmentParams {
+-                environment_id: environment.environment_id,
+-                cwd: environment.cwd,
+-                runtime_workspace_roots: Some(environment.runtime_workspace_roots),
++            .cloned()
++            .map(|environment| TurnEnvironmentParams {
++                environment_id: environment.environment_id,
++                cwd: environment.cwd,
++                runtime_workspace_roots: Some(environment.runtime_workspace_roots),
++            })
 +            .collect();
 +        let stalled_index = echoed
 +            .iter()
@@ -1593,6 +1731,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
 +            create_final_assistant_message_sse_response("continued locally on first send")?,
 +            call(LATER_CALL, MISSING),
 +            create_final_assistant_message_sse_response("continued locally on later send")?,
++            create_final_assistant_message_sse_response("continued in the new local workspace")?,
 +        ],
 +    )
 +    .await;
@@ -1679,19 +1818,25 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
 +        resumed.instruction_sources,
 +        [LegacyAppPathString::from(local_source)]
 +    );
++    let reported = resumed
++        .thread
++        .environments
++        .context("the resume should report the saved selections")?;
 +    assert_eq!(
-+        resumed
-+            .thread
-+            .environments
-+            .as_ref()
-+            .context("the resume should report the saved selections")?
-             .iter()
--            .position(|environment| environment.environment_id == "stalled")
--            .context("thread/start should report its unavailable secondary")?;
++        reported
++            .iter()
 +            .map(|selection| selection.environment_id.as_str())
 +            .collect::<Vec<_>>(),
 +        selections,
 +    );
++    let echoed = reported
++        .into_iter()
++        .map(|selection| TurnEnvironmentParams {
++            environment_id: selection.environment_id,
++            cwd: selection.cwd,
++            runtime_workspace_roots: Some(selection.runtime_workspace_roots),
++        })
++        .collect::<Vec<_>>();
 +    let rollout = resumed.thread.path.context("resumed thread rollout")?;
 +    let saved_thread_id = ThreadId::from_string(&thread_id)?;
 +    let saved = latest_owned_settings(&rollout, saved_thread_id).await?;
@@ -1706,21 +1851,75 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
 +    }));
 +
 +    let mut previous_turn_id = None;
-+    for prompt in ["First ordinary send", "Later ordinary send"] {
-         let completed = timeout(
--            DEFAULT_READ_TIMEOUT,
++    for (prompt, environments) in [
++        ("Ordinary send without environments", None),
++        ("Send with the saved environments", Some(echoed.clone())),
++    ] {
++        let completed = timeout(
++            LOCAL_CONVERSATION_TIMEOUT,
++            app.start_turn_and_wait_for_completion(TurnStartParams {
++                environments,
++                ..text_turn_params(thread_id.clone(), prompt)
++            }),
++        )
++        .await
++        .with_context(|| format!("{prompt} should finish with remote metadata still held"))??;
++        assert_eq!(completed.turn.status, TurnStatus::Completed);
++        assert_ne!(previous_turn_id.as_ref(), Some(&completed.turn.id));
++        previous_turn_id = Some(completed.turn.id);
++    }
++    let model_requests = mock.requests();
++    assert_eq!(model_requests.len(), 4);
++    assert!(
++        model_requests[0]
++            .message_input_texts("user")
++            .iter()
++            .any(|text| text.contains(LOCAL_INSTRUCTIONS))
++    );
++    for (request, call_id) in [
++        (&model_requests[1], FIRST_CALL),
++        (&model_requests[3], LATER_CALL),
++    ] {
++        let (output, success) = request
++            .function_call_output_content_and_success(call_id)
++            .with_context(|| format!("missing denial for {call_id}"))?;
++        assert_ne!(success, Some(true));
++        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++    }
++    let mut promoted = echoed.clone();
++    promoted.swap(0, 2);
++    let mut rerooted = echoed.clone();
++    rerooted[2].runtime_workspace_roots = Some(Vec::new());
++    let mut reordered = echoed.clone();
++    reordered.swap(1, 2);
++    for (prompt, environments) in [
++        ("Promote the retired executor", promoted),
++        ("Reroot the retired executor", rerooted),
++        ("Reorder the saved secondaries", reordered),
++    ] {
++        let request_id = app
++            .send_turn_start_request(TurnStartParams {
++                environments: Some(environments),
++                ..text_turn_params(thread_id.clone(), prompt)
+             })
+-            .collect();
+-        let stalled_index = echoed
+-            .iter()
+-            .position(|environment| environment.environment_id == "stalled")
+-            .context("thread/start should report its unavailable secondary")?;
+-        let completed = timeout(
++            .await?;
++        let error = timeout(
+             DEFAULT_READ_TIMEOUT,
 -            app_server.start_turn_and_wait_for_completion(TurnStartParams {
 -                cwd: Some(local_cwd.clone()),
 -                environments: (index != 1).then(|| echoed.clone()),
 -                ..text_turn_params(thread_id.clone(), label)
 -            }),
-+            LOCAL_CONVERSATION_TIMEOUT,
-+            app.start_turn_and_wait_for_completion(text_turn_params(thread_id.clone(), prompt)),
++            app.read_stream_until_error_message(RequestId::Integer(request_id)),
          )
--        .await??;
-+        .await
-+        .with_context(|| format!("{prompt} should finish with remote metadata still held"))??;
-         assert_eq!(completed.turn.status, TurnStatus::Completed);
+         .await??;
+-        assert_eq!(completed.turn.status, TurnStatus::Completed);
 -        let requests = response_mock.requests();
 -        assert_eq!(requests.len(), index + 1);
 -        let input = requests[index].message_input_texts("user");
@@ -1796,10 +1995,17 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
 -            }
 -            assert_eq!(response_mock.requests().len(), index + 1);
 -        }
-+        assert_ne!(previous_turn_id.as_ref(), Some(&completed.turn.id));
-+        previous_turn_id = Some(completed.turn.id);
++        assert_eq!(error.error.code, -32600, "{prompt}");
++        assert_eq!(
++            error.error.message,
++            format!("unknown turn environment id `{MISSING}`"),
++            "{prompt}"
++        );
      }
--
++    assert_eq!(mock.requests().len(), 4);
++    let saved_after = latest_owned_settings(&rollout, saved_thread_id).await?;
++    assert_eq!(saved_after.environments.as_ref(), Some(&saved_environments));
+
 -    let request_id = app_server
 -        .send_thread_start_request(ThreadStartParams {
 -            environments: Some(vec![denied]),
@@ -1809,33 +2015,37 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
 -    let error = timeout(
 -        THREAD_START_TIMEOUT,
 -        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
--    )
--    .await??;
++    let new_local_cwd = workspace.join("new-local-workspace");
++    std::fs::create_dir(&new_local_cwd)?;
++    let mut local_update = echoed;
++    local_update[0].cwd = LegacyAppPathString::from_path(&new_local_cwd);
++    local_update[0].runtime_workspace_roots =
++        Some(vec![LegacyAppPathString::from_path(&new_local_cwd)]);
++    let completed = timeout(
++        LOCAL_CONVERSATION_TIMEOUT,
++        app.start_turn_and_wait_for_completion(TurnStartParams {
++            cwd: Some(new_local_cwd.to_path_buf()),
++            environments: Some(local_update),
++            ..text_turn_params(thread_id.clone(), "Change only the local workspace")
++        }),
+     )
+     .await??;
 -    assert_eq!(error.error.code, -32600);
-+    let model_requests = mock.requests();
-+    assert_eq!(model_requests.len(), 4);
-     assert!(
+-    assert!(
 -        error.error.message.contains(
 -            "Environment `stalled` did not complete executor readiness and AGENTS.md discovery."
 -        ),
 -        "{error:?}",
-+        model_requests[0]
-+            .message_input_texts("user")
-+            .iter()
-+            .any(|text| text.contains(LOCAL_INSTRUCTIONS))
-     );
-+    for (request, call_id) in [
-+        (&model_requests[1], FIRST_CALL),
-+        (&model_requests[3], LATER_CALL),
-+    ] {
-+        let (output, success) = request
-+            .function_call_output_content_and_success(call_id)
-+            .with_context(|| format!("missing denial for {call_id}"))?;
-+        assert_ne!(success, Some(true));
-+        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
-+    }
-+    let saved_after = latest_owned_settings(&rollout, saved_thread_id).await?;
-+    assert_eq!(saved_after.environments, Some(saved_environments));
+-    );
++    assert_eq!(completed.turn.status, TurnStatus::Completed);
++    assert_eq!(mock.requests().len(), 5);
++    let mut expected = saved_environments;
++    expected.legacy_fallback_cwd = new_local_cwd.clone();
++    let new_local_cwd = PathUri::from_abs_path(&new_local_cwd);
++    expected.environments[0].cwd = new_local_cwd.clone();
++    expected.environments[0].workspace_roots = vec![new_local_cwd];
++    let saved_after_local_update = latest_owned_settings(&rollout, saved_thread_id).await?;
++    assert_eq!(saved_after_local_update.environments, Some(expected));
 +    assert_saved_resume_requires_environment(&mut app, &remote_primary_id, None, MISSING).await?;
 
 -    let _ = stop_healthy.send(());
@@ -1848,7 +2058,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      Ok(())
  }
 
-@@ -458,6 +1706,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -458,6 +1776,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
              responses::ev_assistant_message("msg-2", "continued"),
              responses::ev_completed("resp-2"),
          ]),
@@ -1856,7 +2066,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      ])
      .await;
      let codex_home = TempDir::new()?;
-@@ -565,6 +1814,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -565,6 +1884,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      let mut app_server = TestAppServer::builder()
          .with_codex_home(codex_home.path())
          .without_auto_env()
@@ -1864,7 +2074,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
          .build_initialized()
          .await?;
      let request_id = app_server
-@@ -574,13 +1824,21 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -574,13 +1894,21 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
              ..Default::default()
          })
          .await?;
@@ -1889,7 +2099,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      assert_eq!(
          healthy_requests
              .instruction_reads
-@@ -589,17 +1847,19 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -589,17 +1917,19 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      );
      for (id, requests, _, _) in &executors {
          if *id != "healthy" {
@@ -1914,7 +2124,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
          "stalled",
      )
      .await?;
-@@ -809,6 +2069,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -809,6 +2139,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      healthy_requests
          .instruction_reads
          .store(0, Ordering::Relaxed);
@@ -1922,7 +2132,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      let request_id = app_server
          .send_thread_resume_request(ThreadResumeParams {
              thread_id: required_id.clone(),
-@@ -818,8 +2079,18 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -818,8 +2149,18 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      let reopened: ThreadResumeResponse =
          timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
      assert_eq!(reopened.thread.id, required_id);
@@ -1942,7 +2152,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      assert_eq!(
          healthy_requests.instruction_reads.load(Ordering::Relaxed),
          1
-@@ -837,6 +2108,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -837,6 +2178,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
 
      // Only the fake's filesystem changes; the server, registration, and websocket stay in place.
      recovered.store(true, Ordering::Relaxed);
@@ -1950,7 +2160,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      let request_id = app_server
          .send_thread_resume_request(ThreadResumeParams {
              thread_id: retry_id.clone(),
-@@ -849,7 +2121,31 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -849,7 +2191,31 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      assert_eq!(response.thread.id, retry_id);
      assert_eq!(
          response.instruction_sources,
@@ -1983,7 +2193,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      );
 
      for (_, _, stop, task) in executors {
-@@ -1004,7 +2300,7 @@ enum InstructionDiscoveryExecutor {
+@@ -1004,7 +2370,7 @@ enum InstructionDiscoveryExecutor {
  #[derive(Default)]
  struct InstructionDiscoveryRequests {
      total: AtomicUsize,
@@ -1992,7 +2202,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
      instruction_reads: AtomicUsize,
      allow_repeated_instruction_reads: AtomicBool,
  }
-@@ -1044,7 +2340,7 @@ async fn serve_instruction_discovery_executor(
+@@ -1044,7 +2410,7 @@ async fn serve_instruction_discovery_executor(
          let result = match request["method"].as_str() {
              Some("environment/info") => environment_info.clone(),
              Some("fs/getMetadata") if stalled => {
@@ -2001,7 +2211,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c
                  continue;
              }
              Some("fs/getMetadata") => json!({
-@@ -1272,3 +2568,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
+@@ -1272,3 +2638,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
 
      Ok(())
  }
@@ -2709,7 +2919,7 @@ index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8
      pub fn client_mcp_extensions(&self) -> ClientMcpExtensions {
          self.session.services.client_mcp_extensions.clone()
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a9424069fc94 100644
+index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373cd5ac70ba 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
 @@ -6,6 +6,7 @@ use std::sync::Arc;
@@ -2770,7 +2980,64 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          .into_iter()
          .map(|environment_id| TurnEnvironmentRequest {
              environment_id,
-@@ -316,6 +333,251 @@ struct ThreadEnvironmentsState {
+@@ -145,9 +162,34 @@ pub(crate) fn default_thread_environment_requests(
+ pub fn validate_environment_ids_and_cwds<'a>(
+     environment_manager: &EnvironmentManager,
+     environments: impl IntoIterator<Item = (&'a str, &'a PathUri)>,
++) -> CodexResult<()> {
++    validate_environment_requests(
++        environment_manager,
++        environments,
++        /*retains_secondaries*/ false,
++    )
++}
++
++/// Validates an ordered restatement whose secondaries the caller has already matched to the
++/// saved selections. A restatement cannot select a retired executor, but may retain its binding.
++pub fn validate_environment_restatement_ids_and_cwds<'a>(
++    environment_manager: &EnvironmentManager,
++    environments: impl IntoIterator<Item = (&'a str, &'a PathUri)>,
++) -> CodexResult<()> {
++    validate_environment_requests(
++        environment_manager,
++        environments,
++        /*retains_secondaries*/ true,
++    )
++}
++
++fn validate_environment_requests<'a>(
++    environment_manager: &EnvironmentManager,
++    environments: impl IntoIterator<Item = (&'a str, &'a PathUri)>,
++    retains_secondaries: bool,
+ ) -> CodexResult<()> {
+     let mut environment_ids = HashSet::new();
+-    for (environment_id, cwd) in environments {
++    for (index, (environment_id, cwd)) in environments.into_iter().enumerate() {
+         if cwd.inferred_native_path_string().len() > MAX_TURN_ENVIRONMENT_CWD_BYTES {
+             return Err(CodexErr::InvalidRequest(
+                 "turn environment working directory exceeds the maximum size".to_string(),
+@@ -158,11 +200,15 @@ pub fn validate_environment_ids_and_cwds<'a>(
+                 "duplicate turn environment id `{environment_id}`"
+             )));
+         }
+-        environment_manager
+-            .get_environment(environment_id)
+-            .ok_or_else(|| {
+-                CodexErr::InvalidRequest(format!("unknown turn environment id `{environment_id}`"))
+-            })?;
++        if (index == 0 || !retains_secondaries)
++            && environment_manager
++                .get_environment(environment_id)
++                .is_none()
++        {
++            return Err(CodexErr::InvalidRequest(format!(
++                "unknown turn environment id `{environment_id}`"
++            )));
++        }
+     }
+     Ok(())
+ }
+@@ -316,6 +362,251 @@ struct ThreadEnvironmentsState {
      environments: Vec<SelectedTurnEnvironment>,
      // Keep each rejection at its original position without binding an executor.
      startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
@@ -3022,7 +3289,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
  }
 
  #[derive(Clone, Copy)]
-@@ -358,14 +620,62 @@ impl ThreadEnvironments {
+@@ -358,14 +649,62 @@ impl ThreadEnvironments {
          thread_defaults: ThreadEnvironmentDefaults,
          config: &Config,
          selections: &mut [TurnEnvironmentSelection],
@@ -3088,7 +3355,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          let remote_selections = selections
              .iter()
              .filter(|selection| selection.config != EnvironmentConfigState::StartupUnavailable)
-@@ -377,7 +687,16 @@ impl ThreadEnvironments {
+@@ -377,7 +716,16 @@ impl ThreadEnvironments {
              .cloned()
              .collect::<Vec<_>>();
          if remote_selections.is_empty() {
@@ -3106,7 +3373,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          }
          let discovery = Self::new(
              environment_manager,
-@@ -389,7 +708,25 @@ impl ThreadEnvironments {
+@@ -389,7 +737,25 @@ impl ThreadEnvironments {
          );
          discovery.update_selections(&remote_selections);
          let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
@@ -3133,7 +3400,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
              .map(|state| async move {
                  if Instant::now() >= deadline {
                      return None;
-@@ -436,15 +773,32 @@ impl ThreadEnvironments {
+@@ -436,15 +802,32 @@ impl ThreadEnvironments {
              let reason = format!(
                  "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive."
              );
@@ -3168,7 +3435,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          }
          let mut environments = Vec::with_capacity(ready.len());
          let mut instructions = StartupProjectInstructions::default();
-@@ -454,10 +808,12 @@ impl ThreadEnvironments {
+@@ -454,10 +837,12 @@ impl ThreadEnvironments {
                  .insert(id, (environment.selection(), docs));
              environments.push(TurnEnvironmentState::Ready(environment));
          }
@@ -3184,7 +3451,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      }
 
      pub(crate) fn new(
-@@ -556,11 +912,13 @@ impl ThreadEnvironments {
+@@ -556,11 +941,13 @@ impl ThreadEnvironments {
                  thread_defaults: thread_defaults.clone(),
                  environments: active,
                  startup_rejections: Vec::new(),
@@ -3198,7 +3465,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
              }),
              connection_event_tx: OnceLock::new(),
          }
-@@ -670,6 +1028,7 @@ impl ThreadEnvironments {
+@@ -670,6 +1057,7 @@ impl ThreadEnvironments {
              thread_defaults,
              environments: current,
              startup_rejections,
@@ -3206,7 +3473,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          } = &mut *state;
          let mut seen_environment_ids = HashSet::with_capacity(environments.len());
          let mut next = Vec::with_capacity(environments.len());
-@@ -807,6 +1166,15 @@ impl ThreadEnvironments {
+@@ -807,6 +1195,15 @@ impl ThreadEnvironments {
              .collect::<Vec<_>>();
          let previous = std::mem::replace(current, next);
          *startup_rejections = rejections;
@@ -3222,7 +3489,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
 
          // Publish after installing the new list, including pending bindings replaced by retries.
          for (completion, result) in pending_completions {
-@@ -919,6 +1287,21 @@ impl ThreadEnvironments {
+@@ -919,6 +1316,21 @@ impl ThreadEnvironments {
          self.set_thread_defaults(&self.state, defaults);
      }
 
@@ -3244,7 +3511,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      pub(crate) fn set_configured_thread_defaults(&self, defaults: EnvironmentConfig) {
          self.set_thread_defaults(&self.configured, defaults);
      }
-@@ -929,6 +1312,9 @@ impl ThreadEnvironments {
+@@ -929,6 +1341,9 @@ impl ThreadEnvironments {
          defaults: EnvironmentConfig,
      ) {
          let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3254,7 +3521,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          let ThreadEnvironmentsState {
              thread_defaults,
              environments,
-@@ -1224,18 +1610,335 @@ impl ThreadEnvironments {
+@@ -1224,18 +1639,335 @@ impl ThreadEnvironments {
 
      /// Copies the current selection without waiting for any executor to connect.
      pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
@@ -3277,9 +3544,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
 +            .lock()
 +            .unwrap_or_else(PoisonError::into_inner);
 +        Self::snapshot_state(&configured)
-     }
-
--    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
++    }
++
 +    /// Inheritance must not restore authority excluded from the active turn.
 +    pub(crate) fn inherited_snapshot_now(&self) -> TurnEnvironmentSnapshot {
 +        let active = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3292,8 +3558,9 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
 +            active.default_secondary_admissions.as_ref(),
 +            /*include_initial_recovery*/ false,
 +        )
-+    }
-+
+     }
+
+-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
 +    /// Keep default secondaries unavailable while their instructions are being checked.
 +    pub(crate) fn begin_default_secondary_admissions(
 +        &self,
@@ -3594,7 +3861,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          let mut environments: Vec<_> = state
              .environments
              .iter()
-@@ -1280,7 +1983,7 @@ impl ThreadEnvironments {
+@@ -1280,7 +2012,7 @@ impl ThreadEnvironments {
              non_blocking = non_blocking_snapshots,
          )
      )]
@@ -3603,7 +3870,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          &self,
          snapshot: TurnEnvironmentSnapshot,
      ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
-@@ -1317,6 +2020,39 @@ pub(crate) enum TurnEnvironmentState {
+@@ -1317,6 +2049,39 @@ pub(crate) enum TurnEnvironmentState {
  }
 
  impl TurnEnvironmentState {
@@ -3643,7 +3910,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      fn from_resolution(
          starting: StartingTurnEnvironment,
          resolved: Option<TurnEnvironmentResult>,
-@@ -1394,6 +2130,56 @@ pub struct TurnEnvironmentSnapshot {
+@@ -1394,6 +2159,56 @@ pub struct TurnEnvironmentSnapshot {
  }
 
  impl TurnEnvironmentSnapshot {
@@ -3700,7 +3967,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      /// Keeps the original root order for child threads and saved history.
      pub(crate) fn selected_capability_roots(&self) -> Vec<SelectedCapabilityRoot> {
          EnvironmentCapabilityRoots::collect(self.environments.iter().map(|environment| {
-@@ -1432,9 +2218,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1432,9 +2247,12 @@ impl TurnEnvironmentSnapshot {
              .environments
              .iter()
              .map(|environment| match environment {
@@ -3716,7 +3983,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
                  TurnEnvironmentState::Starting(environment) => {
                      TurnEnvironmentState::from_resolution(
                          environment.clone(),
-@@ -1452,7 +2241,9 @@ impl TurnEnvironmentSnapshot {
+@@ -1452,7 +2270,9 @@ impl TurnEnvironmentSnapshot {
              let TurnEnvironmentState::Ready(environment) = environment else {
                  return None;
              };
@@ -3727,7 +3994,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          })
      }
 
-@@ -1466,12 +2257,18 @@ impl TurnEnvironmentSnapshot {
+@@ -1466,12 +2286,18 @@ impl TurnEnvironmentSnapshot {
      }
 
      pub(crate) fn ready_environment_handles(&self) -> HashMap<String, Arc<Environment>> {
@@ -3750,7 +4017,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
              })
              .collect()
      }
-@@ -1493,7 +2290,35 @@ impl TurnEnvironmentSnapshot {
+@@ -1493,7 +2319,35 @@ impl TurnEnvironmentSnapshot {
      }
 
      pub(crate) fn primary(&self) -> Option<&TurnEnvironment> {
@@ -3787,7 +4054,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      }
 
      /// Returns the first selection's executor paths, even when setup is not ready yet.
-@@ -1594,7 +2419,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1594,7 +2448,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .filter_map(|environment| match environment {
@@ -3801,7 +4068,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
                  TurnEnvironmentState::Starting(environment) => Some(
                      environment
                          .config_origin
-@@ -1616,7 +2446,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1616,7 +2475,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
@@ -3815,7 +4082,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
                  TurnEnvironmentState::Starting(environment) => environment
                      .config_origin
                      .into_input_selection(environment.selection.clone()),
-@@ -1633,7 +2468,10 @@ impl TurnEnvironmentSnapshot {
+@@ -1633,7 +2497,10 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
@@ -3827,7 +4094,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
                  TurnEnvironmentState::Starting(environment) => Ok(
                      environment
                          .config_origin
-@@ -1740,6 +2578,7 @@ mod tests {
+@@ -1740,6 +2607,7 @@ mod tests {
 
      use std::time::Duration;
 
@@ -3835,7 +4102,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      use crate::config::PermissionProfileSnapshot;
      use codex_exec_server::Environment;
      use codex_exec_server::ExecServerRuntimeOptions;
-@@ -1749,6 +2588,7 @@ mod tests {
+@@ -1749,6 +2617,7 @@ mod tests {
      use codex_http_client::HttpClientFactory;
      use codex_http_client::OutboundProxyPolicy;
      use codex_protocol::config_types::WindowsSandboxLevel;
@@ -3843,7 +4110,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      use codex_protocol::models::ActivePermissionProfile;
      use codex_protocol::models::PermissionProfile;
      use codex_protocol::permissions::FileSystemSandboxPolicyContext;
-@@ -1835,7 +2675,7 @@ mod tests {
+@@ -1835,7 +2704,7 @@ mod tests {
          }
      }
 
@@ -3852,7 +4119,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
          let (stream, _) = listener.accept().await.expect("connection");
          let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
-@@ -1874,6 +2714,185 @@ mod tests {
+@@ -1874,6 +2743,185 @@ mod tests {
              ))
              .await
              .expect("environment info response");
@@ -4038,7 +4305,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      }
 
      #[tokio::test]
-@@ -2089,6 +3108,66 @@ url = "ws://127.0.0.1:8765"
+@@ -2089,6 +3137,66 @@ url = "ws://127.0.0.1:8765"
          );
      }
 
@@ -4105,7 +4372,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
      #[tokio::test]
      async fn unresolved_environment_selections_are_skipped() {
          let cwd = AbsolutePathBuf::current_dir().expect("cwd");
-@@ -2286,8 +3365,16 @@ url = "ws://127.0.0.1:8765"
+@@ -2286,8 +3394,16 @@ url = "ws://127.0.0.1:8765"
          resolution.await.expect("local environment should resolve");
          turn_environments.update_selections(&[remote.clone(), local.clone()]);
          let initial = turn_environments.snapshot().await;
@@ -4123,7 +4390,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..0b15563ea0ced0966b33b311bca6a942
              &EnvironmentConfig {
                  windows_sandbox_type: local_sandbox,
                  ..test_environment_config()
-@@ -2363,6 +3450,9 @@ url = "ws://127.0.0.1:8765"
+@@ -2363,6 +3479,9 @@ url = "ws://127.0.0.1:8765"
          assert!(next_starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
          assert!(!starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
          let attached = starting.refresh_readiness();
@@ -4156,6 +4423,15 @@ index 57185f731832063c13701ddc5ba4c04d968f4ec9..33d9dfa0f09f1a213fd736d68c6d5bb5
      let hooks = with_environment_hooks(sess, &turn_context, &environments);
      let preview_runs = hooks.preview_session_end();
      if preview_runs.is_empty() {
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 52b5c380ca921aeacf63b023a3bf08647ce9b629..a7b2aa3673ec99e0c03728c79627fab5cce828e4 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -283,3 +283,4 @@ pub mod otel_init;
+ // Captured environment bindings can be passed back to ThreadManager by internal reviewers.
+ pub use environment_selection::TurnEnvironmentSnapshot;
+ pub use environment_selection::validate_environment_ids_and_cwds;
++pub use environment_selection::validate_environment_restatement_ids_and_cwds;
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
 index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835a3296829 100644
 --- a/codex-rs/core/src/session/environment.rs
