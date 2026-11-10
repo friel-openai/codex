@@ -20,6 +20,7 @@
 use crate::config::Config;
 use crate::context::UserInstructions as ContextUserInstructions;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::session::turn_context::TurnEnvironment;
 use codex_config::ConfigLayerSource;
 use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
@@ -36,6 +37,7 @@ use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 use std::io;
+use std::time::Duration;
 use toml::Value as TomlValue;
 use tracing::error;
 
@@ -52,6 +54,7 @@ const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 // This covers typical project hierarchies in one remote round trip without monopolizing that
 // transport when independent startup discovery runs concurrently.
 const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
+pub(crate) const REMOTE_AGENTS_MD_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 
 /// Loads project AGENTS.md content and combines it with host-provided user
 /// instructions.
@@ -71,22 +74,28 @@ pub(crate) async fn load_project_instructions(
             break;
         }
 
-        let filesystem = turn_environment.environment.get_filesystem();
-        let sandbox = (!turn_environment
-            .permission_profile()
-            .file_system_sandbox_policy()
-            .has_full_disk_read_access())
-        .then(|| turn_environment.sandbox_context(/*additional_permissions*/ None));
-        match read_agents_md(
-            config,
-            filesystem.as_ref(),
-            &turn_environment.selection.environment_id,
-            turn_environment.cwd(),
-            remaining,
-            sandbox.as_ref(),
-        )
-        .await
-        {
+        let sandbox = instruction_discovery_sandbox(turn_environment);
+        let read =
+            read_environment_agents_md(config, turn_environment, remaining, sandbox.as_ref());
+        // An executor can finish its handshake and stop answering filesystem calls.
+        let result = if turn_environment.environment.is_remote() {
+            // A deadline is not a completed scan. Do not admit the workspace with
+            // a partial set of instructions, even when it allows full disk reads.
+            tokio::time::timeout(REMOTE_AGENTS_MD_DISCOVERY_BUDGET, read)
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "AGENTS.md discovery timed out for environment `{}`. Retry when it is responsive or select only the environments needed for this request.",
+                            turn_environment.selection.environment_id,
+                        ),
+                    )
+                })?
+        } else {
+            read.await
+        };
+        match result {
             Ok(Some(docs)) => {
                 for entry in docs.entries {
                     remaining = remaining.saturating_sub(entry.contents.len());
@@ -113,6 +122,52 @@ pub(crate) async fn load_project_instructions(
     }
 
     Ok((!loaded.is_empty()).then_some(loaded))
+}
+
+fn instruction_discovery_sandbox(
+    environment: &TurnEnvironment,
+) -> Option<FileSystemSandboxContext> {
+    (!environment
+        .permission_profile()
+        .file_system_sandbox_policy()
+        .has_full_disk_read_access())
+    .then(|| environment.sandbox_context(/*additional_permissions*/ None))
+}
+
+/// Checks that a remote workspace can supply project instructions before startup admits it.
+pub(crate) async fn check_startup_project_instructions(
+    config: &Config,
+    environment: &TurnEnvironment,
+) -> io::Result<()> {
+    if config.active_project.is_untrusted() {
+        return Ok(());
+    }
+    let sandbox = instruction_discovery_sandbox(environment);
+    read_environment_agents_md(
+        config,
+        environment,
+        config.project_doc_max_bytes,
+        sandbox.as_ref(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn read_environment_agents_md(
+    config: &Config,
+    environment: &TurnEnvironment,
+    max_total: usize,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> io::Result<Option<LoadedAgentsMd>> {
+    read_agents_md(
+        config,
+        environment.environment.get_filesystem().as_ref(),
+        &environment.selection.environment_id,
+        environment.cwd(),
+        max_total,
+        sandbox,
+    )
+    .await
 }
 
 /// Attempt to locate and load AGENTS.md documentation.
