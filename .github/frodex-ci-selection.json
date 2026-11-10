@@ -402,6 +402,8 @@
         "session::tests::compaction_checkpoint_waits_for_accepted_settings_persistence",
         "session::tests::compaction_persists_resume_metadata_and_companion_records::cleared_previous_turn_settings",
         "session::tests::compaction_persists_resume_metadata_and_companion_records::established_previous_turn_settings",
+        "session::tests::config_refresh_tests::file_reload_updates_auto_review_ultrafast_for_new_turns",
+        "session::tests::config_refresh_tests::file_reload_uses_effective_auto_review_ultrafast_from_selected_profile",
         "session::tests::configured_multi_agent_v2_preserves_persisted_v1_history",
         "session::tests::dynamic_tools_tests::dynamic_tools_update_keeps_catalog_when_persistence_fails",
         "session::tests::dynamic_tools_tests::dynamic_tools_update_requires_host_opt_in_only_for_persistent_threads",
