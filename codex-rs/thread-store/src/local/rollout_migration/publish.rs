@@ -211,12 +211,30 @@ pub(super) async fn remove_file_if_present(
     .map_err(migration_error)
 }
 
+#[cfg(test)]
 pub(super) async fn write_migration_journal(
     path: &Path,
     locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
+    write_migration_marker(path, locks, None).await
+}
+
+pub(super) async fn write_migration_journal_guarded(
+    path: &Path,
+    locks: &Arc<MigrationLocks>,
+    guard: Arc<super::archive_gate::ArchivePublicationGuard>,
+) -> ThreadStoreResult<()> {
+    write_migration_marker(path, locks, Some(guard)).await
+}
+
+async fn write_migration_marker(
+    path: &Path,
+    locks: &Arc<MigrationLocks>,
+    guard: Option<Arc<super::archive_gate::ArchivePublicationGuard>>,
+) -> ThreadStoreResult<()> {
     let path = path.to_path_buf();
     physical_io::run(locks, move || {
+        let _publication_guard = guard;
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("rollout migration journal has no parent directory"))?;
@@ -227,9 +245,14 @@ pub(super) async fn write_migration_journal(
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .write(true)
             .open(&path)?;
+        if file.metadata()?.len() != 0 {
+            return Err(io::Error::other(
+                "refusing to replace a nonempty migration journal",
+            ));
+        }
         file.sync_all()?;
         drop(file);
         physical_io::sync_parent_directory_blocking(&path)
