@@ -283,3 +283,4 @@ pub mod otel_init;
 // Captured environment bindings can be passed back to ThreadManager by internal reviewers.
 pub use environment_selection::TurnEnvironmentSnapshot;
 pub use environment_selection::validate_environment_ids_and_cwds;
+pub use environment_selection::validate_environment_restatement_ids_and_cwds;

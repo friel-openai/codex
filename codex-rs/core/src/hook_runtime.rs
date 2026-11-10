@@ -453,8 +453,7 @@ pub(crate) async fn run_turn_stop_hooks(
 
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
-    // Building a turn can read plugins and skills from a remote executor. Check
-    // the captured hook declarations before spending any of the shutdown deadline.
+    // A starting executor must not delay shutdown of the thread writer.
     let environments = sess.services.turn_environments.snapshot_now();
     let has_environment_end_hooks = environments.turn_environments().any(|environment| {
         !environment
@@ -467,7 +466,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
         return;
     }
 
-    let turn_context = sess.new_default_turn().await;
+    let turn_context = sess.new_session_end_context(environments.clone()).await;
     let hooks = with_environment_hooks(sess, &turn_context, &environments);
     let preview_runs = hooks.preview_session_end();
     if preview_runs.is_empty() {
