@@ -2637,6 +2637,27 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
 
 #[tokio::test]
 async fn cursors_are_bound_to_the_selected_rollout_generation() {
+    async fn check_resume_anchors(store: &LocalThreadStore, id: ThreadId) {
+        let turns = store
+            .list_turns(turn_params(
+                id,
+                None,
+                1,
+                SortDirection::Desc,
+                StoredTurnItemsView::NotLoaded,
+            ))
+            .await
+            .unwrap();
+        let items = store
+            .list_items(item_params(id, None, None, 1, SortDirection::Desc))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.resume_backwards_cursors(id).await.unwrap(),
+            (turns.backwards_cursor, items.backwards_cursor)
+        );
+    }
+
     let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let first_rollout_id = ThreadId::new();
     let second_rollout_id = ThreadId::new();
@@ -2645,6 +2666,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
     write_rollout(first_path.as_path(), thread_id, /*history_base*/ None);
     write_rollout(second_path.as_path(), thread_id, /*history_base*/ None);
     select_rollout_path(&store, thread_id, first_path).await;
+    check_resume_anchors(&store, thread_id).await;
 
     let db = history_db(&store).await;
     for (rollout_id, prefix) in [(first_rollout_id, "first"), (second_rollout_id, "second")] {
@@ -2673,6 +2695,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
         }
     }
 
+    check_resume_anchors(&store, thread_id).await;
     let first_turn_page = store
         .list_turns(turn_params(
             thread_id,
@@ -2851,6 +2874,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
     assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
 
     select_rollout_path(&store, thread_id, second_path).await;
+    check_resume_anchors(&store, thread_id).await;
 
     for cursor in history_cursors.drain(..2) {
         let error = store
