@@ -17,6 +17,7 @@ use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::turn_input::AnnotatedResponseItem;
 use codex_protocol::turn_input::ResponseItemAnnotations;
+use codex_utils_path_uri::PathUri;
 use futures::FutureExt;
 
 use crate::error_code::OVERLOADED_ERROR_CODE;
@@ -819,30 +820,23 @@ impl TurnRequestProcessor {
                 legacy_fallback_cwd.clone(),
             ),
         };
-        let mut environment_requests = self
-            .thread_manager
-            .default_environment_requests(&legacy_fallback_cwd, &workspace_roots);
-        // Regenerating default workspace roots must not revive an executor
-        // that this thread could not admit at startup.
-        for unavailable in current_environments
-            .environment_requests
-            .into_iter()
-            .filter(|current| current.config == EnvironmentConfigState::StartupUnavailable)
+        let mut environment_requests = current_environments.environment_requests;
+        // A cwd or root update is not an environment reselection.
+        let local = environment_requests
+            .iter()
+            .position(|request| request.environment_id == LOCAL_ENVIRONMENT_ID);
+        let retarget = local.or_else(|| current_environments.implicit_selection.then_some(0));
+        if let Some(request) = retarget.and_then(|index| environment_requests.get_mut(index))
+            && request.config == EnvironmentConfigState::FromThread
         {
-            if let Some(request) = environment_requests
-                .iter_mut()
-                .find(|request| request.environment_id == unavailable.environment_id)
-            {
-                request.config = EnvironmentConfigState::StartupUnavailable;
-            } else {
-                environment_requests.push(unavailable);
-            }
+            request.cwd = PathUri::from_abs_path(&legacy_fallback_cwd);
+            request.workspace_roots = workspace_roots.iter().map(PathUri::from_abs_path).collect();
         }
         ThreadEnvironmentOverride {
-            environment_requests: Some(TurnEnvironmentRequests::new(
-                legacy_fallback_cwd,
-                environment_requests,
-            )),
+            environment_requests: Some(
+                TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests)
+                    .with_implicit_selection(current_environments.implicit_selection),
+            ),
             runtime_workspace_roots: Some(workspace_roots),
         }
     }

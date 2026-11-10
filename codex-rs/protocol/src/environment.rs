@@ -88,6 +88,9 @@ impl From<PersistedEnvironmentSelection> for TurnEnvironmentRequest {
 pub struct PersistedEnvironmentSelections {
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environments: Vec<PersistedEnvironmentSelection>,
+    /// The registry supplied the selection. An older checkpoint cannot prove this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implicit_selection: bool,
 }
 
 impl From<TurnEnvironmentSelections> for PersistedEnvironmentSelections {
@@ -99,6 +102,7 @@ impl From<TurnEnvironmentSelections> for PersistedEnvironmentSelections {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            implicit_selection: selections.implicit_selection,
         }
     }
 }
@@ -174,6 +178,8 @@ impl TurnEnvironmentSelection {
 pub struct TurnEnvironmentSelections {
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environments: Vec<TurnEnvironmentSelection>,
+    /// Whether the environment list came from registry defaults.
+    pub implicit_selection: bool,
 }
 
 impl TurnEnvironmentSelections {
@@ -184,6 +190,7 @@ impl TurnEnvironmentSelections {
         Self {
             legacy_fallback_cwd,
             environments,
+            implicit_selection: false,
         }
     }
 
@@ -196,6 +203,7 @@ impl TurnEnvironmentSelections {
                 .into_iter()
                 .map(TurnEnvironmentSelection::into_request)
                 .collect(),
+            implicit_selection: self.implicit_selection,
         }
     }
 }
@@ -206,6 +214,8 @@ impl TurnEnvironmentSelections {
 pub struct TurnEnvironmentRequests {
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environment_requests: Vec<TurnEnvironmentRequest>,
+    /// Whether the environment list came from registry defaults.
+    pub implicit_selection: bool,
 }
 
 impl TurnEnvironmentRequests {
@@ -216,7 +226,13 @@ impl TurnEnvironmentRequests {
         Self {
             legacy_fallback_cwd,
             environment_requests,
+            implicit_selection: false,
         }
+    }
+
+    pub fn with_implicit_selection(mut self, implicit_selection: bool) -> Self {
+        self.implicit_selection = implicit_selection;
+        self
     }
 
     /// Constructs selections with the receiving thread's roots, including roots retained
@@ -229,6 +245,7 @@ impl TurnEnvironmentRequests {
                 .into_iter()
                 .map(|request| TurnEnvironmentSelection::new(request, roots))
                 .collect(),
+            implicit_selection: self.implicit_selection,
         }
     }
 }
