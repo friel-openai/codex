@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::runtime::McpRuntimeContext;
@@ -164,7 +165,9 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
     auth: McpServerAuth,
+    ema_owner: Option<Arc<OnceLock<crate::ema_auth::EmaAuthContext>>>,
     pub(crate) credential_policy: McpCredentialPolicy,
+    server_name: String,
     transport: McpServerTransportConfig,
     environment_id: String,
     host_plugin_root: Option<PathUri>,
@@ -181,8 +184,11 @@ pub(crate) struct McpServerConnectionIdentity {
     codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
+    effective_protocol_mode: Option<crate::McpProtocolMode>,
     agent_plugin: bool,
     requires_read_only_mcp_tools: bool,
+    catalog_item_limit: usize,
+    track_tool_list_changes: bool,
 }
 
 impl McpServerConnectionIdentity {
@@ -202,6 +208,8 @@ impl McpServerConnectionIdentity {
         client_elicitation_capability: ElicitationCapability,
         client_mcp_extensions: ClientMcpExtensions,
         previous_identity: Option<&Self>,
+        effective_protocol_mode: Option<crate::McpProtocolMode>,
+        catalog_item_limit: usize,
     ) -> Self {
         let config = server.config();
         let valid_http_header_value = |value: &str| {
@@ -287,10 +295,12 @@ impl McpServerConnectionIdentity {
             .ok()
             .and_then(Option::as_ref)
             .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
-
         Self {
             auth: config.auth.clone(),
+            ema_owner: matches!(config.auth, McpServerAuth::EmaAuth)
+                .then(|| Arc::new(OnceLock::new())),
             credential_policy: server.credential_policy(),
+            server_name: server_name.to_string(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
             host_plugin_root: host_plugin_root.cloned(),
@@ -309,9 +319,39 @@ impl McpServerConnectionIdentity {
             codex_apps_cache_identity,
             client_elicitation_capability,
             client_mcp_extensions,
+            effective_protocol_mode,
             agent_plugin: server.is_agent_plugin(),
             requires_read_only_mcp_tools: server.requires_read_only_mcp_tools(),
+            catalog_item_limit,
+            track_tool_list_changes: false,
         }
+    }
+
+    pub(crate) fn with_ema_owner(
+        mut self,
+        owner: Arc<OnceLock<crate::ema_auth::EmaAuthContext>>,
+    ) -> Self {
+        if self.is_ema() {
+            self.ema_owner = Some(owner);
+        }
+        self
+    }
+
+    pub(crate) fn is_ema(&self) -> bool {
+        matches!(self.auth, McpServerAuth::EmaAuth)
+    }
+
+    pub(crate) fn with_tool_list_change_tracking(mut self, track: bool) -> Self {
+        self.track_tool_list_changes = track && !self.is_ema();
+        self
+    }
+
+    pub(crate) fn with_effective_protocol_mode(
+        mut self,
+        mode: Option<crate::McpProtocolMode>,
+    ) -> Self {
+        self.effective_protocol_mode = mode;
+        self
     }
 
     pub(crate) fn has_same_connection_config(&self, other: &Self) -> bool {
@@ -328,8 +368,15 @@ impl McpServerConnectionIdentity {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
+        let same_ema_owner = match (&self.ema_owner, &other.ema_owner) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
         self.auth == other.auth
+            && same_ema_owner
             && self.credential_policy == other.credential_policy
+            && self.server_name == other.server_name
             && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.host_plugin_root == other.host_plugin_root
@@ -348,8 +395,11 @@ impl McpServerConnectionIdentity {
             && self.codex_apps_cache_identity == other.codex_apps_cache_identity
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
+            && self.effective_protocol_mode == other.effective_protocol_mode
             && self.agent_plugin == other.agent_plugin
             && self.requires_read_only_mcp_tools == other.requires_read_only_mcp_tools
+            && self.catalog_item_limit == other.catalog_item_limit
+            && self.track_tool_list_changes == other.track_tool_list_changes
     }
 
     pub(crate) fn oauth_credentials(&self) -> Result<Option<&StoredOAuthTokens>, &String> {
