@@ -170,7 +170,12 @@ impl Session {
             self.services.turn_environments.environment_manager(),
             local_process_cwd,
         )
-        .with_connection_pool(self.services.mcp_manager.connection_pool())
+        .with_connection_pool(
+            self.services
+                .local_agent_runtime
+                .mcp_connection_pool()
+                .clone(),
+        )
         .with_selected_environments(
             environments.all_selections().into(),
             environments.ready_environment_handles(),
@@ -262,9 +267,9 @@ impl Session {
                 mcp_projection,
                 &ready_selected_capability_roots,
                 Some(self.mcp_elicitation_reviewer()),
+                codex_mcp::McpConnectionPoolMode::Reuse,
             )
             .await;
-            *self.services.mcp_tool_snapshot.lock().await = None;
             refresh_invalidation.published = true;
         }
     }
@@ -354,6 +359,7 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
+            codex_mcp::McpConnectionPoolMode::Replace,
         );
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
@@ -363,12 +369,18 @@ impl Session {
             .scope(self.services.mcp_runtime.replace_fresh(input))
             .await;
         self.services.thread_extension_data.insert(selected_plugins);
-        refresh_invalidation.published = refreshed.is_ok();
-        refreshed
+        let tools = refreshed?;
+        self.clear_inherited_mcp_tool_snapshot().await;
+        refresh_invalidation.published = true;
+        Ok(tools)
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {
         self.mcp_refresh.invalidate();
+    }
+
+    pub(super) async fn clear_inherited_mcp_tool_snapshot(&self) {
+        *self.services.mcp_tool_snapshot.lock().await = None;
     }
 
     #[tracing::instrument(
@@ -458,6 +470,9 @@ impl Session {
             let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
             Arc::new(codex_mcp::McpBinding::empty(config))
         };
+        // A fork inherits the exact parent catalog so the shared prompt prefix remains stable.
+        // Automatic Reuse publications may finish while the child is starting; only an explicit
+        // replacement may discard the inherited catalog.
         let inherited_tools = self
             .services
             .mcp_tool_snapshot
@@ -916,9 +931,10 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            codex_mcp::McpConnectionPoolMode::Replace,
         )
         .await;
-        *self.services.mcp_tool_snapshot.lock().await = None;
+        self.clear_inherited_mcp_tool_snapshot().await;
         refresh_invalidation.published = true;
     }
 
