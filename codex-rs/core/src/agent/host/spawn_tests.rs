@@ -8,6 +8,7 @@ use crate::HostThreadSpawnReservation;
 use crate::HostToolInvocationLookup;
 use crate::ThreadManager;
 use crate::agent::host::InvocationReservation;
+use crate::agent::types::SpawnAgentForkMode;
 use crate::config::ConfigBuilder;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_spawn::ThreadCreateRequest;
@@ -27,8 +28,11 @@ use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_tools::ToolName;
 use pretty_assertions::assert_eq;
+use std::future::Future;
+use std::future::poll_fn;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -249,6 +253,114 @@ async fn same_manager_creation_retains_step_executor_and_shares_exec_policy() ->
         Err(ThreadSpawnError::Preparation(message)) if message == "spawning tool call finished"
     ));
     child.shutdown_and_wait().await?;
+    parent.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_spawn_captures_policy_after_fork_history() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    config.features.enable(Feature::MultiAgentV2)?;
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        home.path().to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let parent = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await?
+        .thread;
+    let session = &parent.session;
+    let call = spawn_call(&parent).await?;
+    let reservation = InvocationReservation::default();
+    reservation.reserve(session, &call.turn, &call.call_id)?;
+    let _guard = reservation.activate(&call);
+    let invocation = parent.tool_invocation(&call.turn.sub_id, &call.call_id)?;
+    let (request, _) = crate::thread_spawn::prepare(
+        session,
+        &call.step_context,
+        &call.call_id,
+        ThreadCreateRequest {
+            task_name: "worker".into(),
+            fork_mode: Some(SpawnAgentForkMode::FullHistory),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await?;
+    let rollout = parent
+        .rollout_path()
+        .expect("local parent has a rollout path");
+    assert!(!rollout.try_exists()?);
+    let mut preparation = std::pin::pin!(super::prepare_spawn_inputs(&parent, request));
+    // Pause the fork as soon as it materializes the parent's rollout, then amend the policy.
+    let materialized = poll_fn(|cx| {
+        if rollout.exists() {
+            return Poll::Ready(());
+        }
+        assert!(
+            preparation.as_mut().poll(cx).is_pending(),
+            "fork finished before materializing history"
+        );
+        Poll::Pending
+    });
+    tokio::time::timeout(Duration::from_secs(10), materialized).await?;
+    let command = vec!["late_fork_policy_test".to_owned()];
+    let parent_policy = &session.services.exec_policy;
+    parent_policy
+        .append_amendment_and_update(home.path(), &ExecPolicyAmendment::new(command.clone()))
+        .await?;
+    let (thread_options, inheritance, _) =
+        tokio::time::timeout(Duration::from_secs(10), preparation).await??;
+    assert_eq!(
+        inheritance.inherited_thread_state.prompt_cache_key(),
+        Some(session.prompt_cache_key())
+    );
+    assert_eq!(
+        thread_options.prompt_cache_key,
+        session.services.model_client.prompt_cache_key_policy()
+    );
+    let inherited_tools = inheritance
+        .inherited_thread_state
+        .mcp_tool_snapshot()
+        .map(|snapshot| serde_json::to_value(&snapshot.tools))
+        .transpose()?;
+    let parent_tools = session
+        .services
+        .mcp_runtime
+        .current_binding()
+        .await
+        .map(|binding| serde_json::to_value(binding.tools()))
+        .transpose()?;
+    assert_eq!(inherited_tools, parent_tools);
+    let shared_policy = inheritance.exec_policy.expect("same-manager policy");
+    assert!(Arc::ptr_eq(parent_policy, &shared_policy));
+    assert!(
+        shared_policy
+            .current()
+            .get_allowed_prefixes()
+            .contains(&command)
+    );
+    let prepared_context = parent.prepare_child(&invocation).await?;
+    let later = vec!["after_prepare_policy_test".to_owned()];
+    parent_policy
+        .append_amendment_and_update(home.path(), &ExecPolicyAmendment::new(later.clone()))
+        .await?;
+    let prefixes = prepared_context.exec_policy.get_allowed_prefixes();
+    assert!(prefixes.contains(&command));
+    assert!(!prefixes.contains(&later));
+    assert!(
+        shared_policy
+            .current()
+            .get_allowed_prefixes()
+            .contains(&later)
+    );
     parent.shutdown_and_wait().await?;
     Ok(())
 }
