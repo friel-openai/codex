@@ -79,9 +79,9 @@ impl<'a> McpEnvironmentScope<'a> {
         };
         match &selection.config {
             EnvironmentConfigState::FromThread => McpEnvironmentAuthority::Unrestricted,
-            EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => {
-                McpEnvironmentAuthority::Unavailable
-            }
+            EnvironmentConfigState::Pending
+            | EnvironmentConfigState::Failed(_)
+            | EnvironmentConfigState::StartupUnavailable => McpEnvironmentAuthority::Unavailable,
             EnvironmentConfigState::Ready(config) => config
                 .mcp_policy
                 .as_ref()
