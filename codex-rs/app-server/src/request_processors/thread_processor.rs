@@ -5554,6 +5554,13 @@ impl ThreadRequestProcessor {
                 "`permissions` cannot be combined with `sandbox`",
             ));
         }
+        if params.optional_environment_ids.is_some()
+            && (params.history.is_some() || params.path.is_some())
+        {
+            return Err(invalid_request(
+                "`optionalEnvironmentIds` requires a cold resume by saved thread ID",
+            ));
+        }
         let redact_resume_payloads =
             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
@@ -5613,6 +5620,7 @@ impl ThreadRequestProcessor {
             thread_id,
             history,
             path,
+            optional_environment_ids,
             model,
             model_provider,
             service_tier,
@@ -5630,6 +5638,8 @@ impl ThreadRequestProcessor {
             initial_turns_page,
         } = params.clone();
         let include_turns = !exclude_turns;
+        let override_local_cwd = cwd.is_some();
+        let override_local_roots = runtime_workspace_roots.is_some();
 
         let prepared_model_context = prepared_config
             .as_mut()
@@ -5813,6 +5823,11 @@ impl ThreadRequestProcessor {
             && let Some((source, _)) = thread_history.get_resumed_session_sources()
             && !can_accept_direct_input(thread_history.get_multi_agent_version(), &source)
         {
+            if optional_environment_ids.is_some() {
+                return Err(invalid_request(
+                    "`optionalEnvironmentIds` cannot change a parent-owned agent's executors",
+                ));
+            }
             let ThreadResumeTarget::Client(request_id) = target else {
                 return Ok(ControlFlow::Break(()));
             };
@@ -6050,22 +6065,26 @@ impl ThreadRequestProcessor {
             }
         }
         let response_history = thread_history.clone();
-
-        match self
-            .thread_manager
-            .start_thread(StartThreadOptions {
-                initial_history: thread_history,
-                parent_trace: match target {
-                    ThreadResumeTarget::Client(request_id) => {
-                        self.request_trace_context(request_id).await
-                    }
-                    ThreadResumeTarget::DaemonRecovery(_) => None,
-                },
-                client_mcp_extensions,
-                ..StartThreadOptions::new(config)
-            })
-            .await
-        {
+        let mut start_options = StartThreadOptions {
+            parent_trace: match target {
+                ThreadResumeTarget::Client(request_id) => {
+                    self.request_trace_context(request_id).await
+                }
+                ThreadResumeTarget::DaemonRecovery(_) => None,
+            },
+            client_mcp_extensions,
+            ..StartThreadOptions::new(config)
+        };
+        start_options
+            .restore_startup_environment_discovery(
+                history_settings,
+                override_local_cwd,
+                override_local_roots,
+                optional_environment_ids,
+            )
+            .map_err(|err| invalid_request(err.to_string()))?;
+        start_options.initial_history = thread_history;
+        match self.thread_manager.start_thread(start_options).await {
             Ok(NewThread {
                 thread_id,
                 thread: codex_thread,
@@ -6465,6 +6484,11 @@ impl ThreadRequestProcessor {
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
+            if params.optional_environment_ids.is_some() {
+                return Err(invalid_request(
+                    "`optionalEnvironmentIds` requires a cold resume; this thread is already loaded",
+                ));
+            }
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
             let existing_thread_rollout_path = existing_thread.rollout_path();

@@ -3,7 +3,9 @@
 //! Isolated reviewers can pin a captured repository snapshot without executor discovery.
 
 use crate::agents_md::LoadedAgentsMd;
+use crate::agents_md::StartupProjectInstructions;
 use crate::agents_md::load_project_instructions;
+use crate::agents_md::load_project_instructions_with_startup;
 use crate::config::Config;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use codex_extension_api::Instructions;
@@ -70,6 +72,15 @@ impl AgentsMdManager {
         config: &Config,
         environments: &TurnEnvironmentSnapshot,
     ) -> (CodexResult<Option<Arc<LoadedAgentsMd>>>, Vec<String>) {
+        self.refresh_with_startup(config, environments, None).await
+    }
+
+    pub(crate) async fn refresh_with_startup(
+        &self,
+        config: &Config,
+        environments: &TurnEnvironmentSnapshot,
+        startup: Option<&StartupProjectInstructions>,
+    ) -> (CodexResult<Option<Arc<LoadedAgentsMd>>>, Vec<String>) {
         // Serialize overlapping captures without blocking reads of the applied snapshot.
         let Ok(_refresh_guard) = self.refresh_lock.acquire().await else {
             return (
@@ -127,9 +138,26 @@ impl AgentsMdManager {
             let loaded = if let Some(project) = &instructions.project_snapshot {
                 project.as_ref().clone()
             } else if refresh_repository {
-                load_project_instructions(config, /*user_instructions*/ None, environments)
-                    .await?
-                    .unwrap_or_default()
+                match startup {
+                    Some(startup) => {
+                        load_project_instructions_with_startup(
+                            config,
+                            /*user_instructions*/ None,
+                            environments,
+                            Some(startup),
+                        )
+                        .await?
+                    }
+                    None => {
+                        load_project_instructions(
+                            config,
+                            /*user_instructions*/ None,
+                            environments,
+                        )
+                        .await?
+                    }
+                }
+                .unwrap_or_default()
             } else {
                 cached.as_deref().cloned().unwrap_or_default()
             }
