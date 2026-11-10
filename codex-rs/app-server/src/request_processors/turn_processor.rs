@@ -11,6 +11,7 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference as CoreImageReference;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
@@ -804,8 +805,11 @@ impl TurnRequestProcessor {
         }
 
         // Default-environment updates retain the task's fallback roots, not its active roots.
-        let snapshot = thread.thread_settings_snapshot().await;
-        let current_cwd = snapshot.cwd;
+        let snapshot = thread.restorable_thread_settings().await;
+        let current_environments = snapshot
+            .environments
+            .expect("live thread settings include environment requests");
+        let current_cwd = current_environments.legacy_fallback_cwd;
         let legacy_fallback_cwd = cwd.unwrap_or_else(|| current_cwd.clone());
         let workspace_roots = match workspace_roots {
             Some(workspace_roots) => workspace_roots,
@@ -815,9 +819,25 @@ impl TurnRequestProcessor {
                 legacy_fallback_cwd.clone(),
             ),
         };
-        let environment_requests = self
+        let mut environment_requests = self
             .thread_manager
             .default_environment_requests(&legacy_fallback_cwd, &workspace_roots);
+        // Regenerating default workspace roots must not revive an executor
+        // that this thread could not admit at startup.
+        for unavailable in current_environments
+            .environment_requests
+            .into_iter()
+            .filter(|current| current.config == EnvironmentConfigState::StartupUnavailable)
+        {
+            if let Some(request) = environment_requests
+                .iter_mut()
+                .find(|request| request.environment_id == unavailable.environment_id)
+            {
+                request.config = EnvironmentConfigState::StartupUnavailable;
+            } else {
+                environment_requests.push(unavailable);
+            }
+        }
         ThreadEnvironmentOverride {
             environment_requests: Some(TurnEnvironmentRequests::new(
                 legacy_fallback_cwd,
