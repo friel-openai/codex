@@ -7,6 +7,7 @@ use std::io::SeekFrom;
 use std::path::Path;
 
 use codex_protocol::protocol::ThreadHistoryMode;
+use serde::Deserialize;
 
 use crate::RolloutItem;
 use crate::reverse_jsonl_scanner::ReverseJsonlScanner;
@@ -16,6 +17,20 @@ use crate::reverse_jsonl_scanner::ScanOutcome;
 pub(crate) enum RolloutOrdinalState {
     Legacy,
     Paginated { next: Option<u64> },
+}
+
+/// The only record field needed to resume a paginated rollout writer.
+///
+/// Payload schemas can outlive the binary reading the rollout. Decoding a complete `RolloutLine`
+/// here made a valid but incompatible final payload look absent and reused the preceding ordinal.
+#[derive(Deserialize)]
+struct RolloutOrdinalEnvelope {
+    ordinal: Option<u64>,
+}
+
+/// Reads a physical record's ordinal without decoding its payload.
+pub fn rollout_ordinal_from_slice(bytes: &[u8]) -> Result<Option<u64>, serde_json::Error> {
+    serde_json::from_slice::<RolloutOrdinalEnvelope>(bytes).map(|record| record.ordinal)
 }
 
 impl RolloutOrdinalState {
@@ -65,7 +80,7 @@ pub(crate) fn ordinal_state_for_rollout(
 
     let mut scanner = ReverseJsonlScanner::new(file)?;
     let record = loop {
-        match scanner.scan_next_rollout_line()? {
+        match scanner.scan_next::<RolloutOrdinalEnvelope>()? {
             Some(ScanOutcome::Parsed(record)) => break record,
             Some(ScanOutcome::Rejected(_)) => continue,
             None => {
@@ -109,9 +124,15 @@ fn read_history_metadata(
         if line.trim().is_empty() {
             continue;
         }
-        let record = crate::parse_rollout_line(line.as_str()).map_err(|error| {
+        let value = serde_json::from_str(line.as_str()).map_err(|error| {
             io::Error::other(format!(
                 "failed to parse first rollout record at {}: {error}",
+                path.display()
+            ))
+        })?;
+        let record = crate::decode_rollout_line(value).map_err(|error| {
+            io::Error::other(format!(
+                "failed to decode first rollout record at {}: {error}",
                 path.display()
             ))
         })?;
