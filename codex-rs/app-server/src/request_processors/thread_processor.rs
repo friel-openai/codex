@@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
             }
         }
 
-        let implicit_environment_selection = environment_requests.is_none();
-        let environment_requests = environment_requests.unwrap_or_else(|| {
-            listener_task_context
-                .thread_manager
-                .default_environment_requests(&config.cwd, &config.workspace_roots)
-        });
         let dynamic_tools = dynamic_tools.unwrap_or_default();
         if !dynamic_tools.is_empty() {
             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
@@ -1941,7 +1935,10 @@ impl ThreadRequestProcessor {
         }
         let mut start_options = StartThreadOptions::new(config);
         start_options.thread_extension_init = thread_extension_init;
-        start_options.bound_startup_environment_discovery(implicit_environment_selection);
+        start_options.bound_startup_environment_discovery(
+            &listener_task_context.thread_manager,
+            environment_requests,
+        );
         let reserved_thread_id = if start_options.config.ephemeral {
             None
         } else {
@@ -1982,7 +1979,6 @@ impl ThreadRequestProcessor {
                 dynamic_tools,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
-                environments: Some(environment_requests),
                 client_mcp_extensions,
                 ..start_options
             })
@@ -5644,39 +5640,46 @@ impl ThreadRequestProcessor {
         let prepared_model_context = prepared_config
             .as_mut()
             .and_then(|prepared| prepared.model_context.take());
-        let resume_result = if let Some(history) = history {
-            self.resume_thread_from_history(history.as_slice())
-                .await
-                .map(|thread_history| (thread_history, None))
-        } else if let Some(stored_thread) = stored_thread_from_running_probe {
-            self.load_resume_initial_history_from_stored_thread_with_options(
-                *stored_thread,
-                prepared_model_context,
-                include_turns,
-            )
-            .await
-            .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread)))
-        } else {
-            match self
-                .read_stored_thread_for_resume(
-                    &thread_id,
-                    path.as_ref(),
-                    /*include_history*/ false,
+        let (mut thread_history, resume_source_thread, selected_home_rollout) =
+            if let Some(history) = history {
+                (
+                    self.resume_thread_from_history(history.as_slice()).await?,
+                    None,
+                    false,
                 )
-                .await
-            {
-                Ok(stored_thread) => self
+            } else {
+                let stored_thread = match stored_thread_from_running_probe {
+                    Some(stored_thread) => *stored_thread,
+                    None => {
+                        self.read_stored_thread_for_resume(
+                            &thread_id,
+                            path.as_ref(),
+                            /*include_history*/ false,
+                        )
+                        .await?
+                    }
+                };
+                let source_id = stored_thread.thread_id;
+                let resolved_path = path
+                    .as_ref()
+                    .and(stored_thread.rollout_path.as_ref())
+                    .filter(|path| path.starts_with(self.config.codex_home.as_path()))
+                    .cloned();
+                let (history, stored_thread) = self
                     .load_resume_initial_history_from_stored_thread_with_options(
                         stored_thread,
                         prepared_model_context,
                         include_turns,
                     )
-                    .await
-                    .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread))),
-                Err(error) => Err(error),
-            }
-        };
-        let (mut thread_history, resume_source_thread) = resume_result?;
+                    .await?;
+                // The loader checks the selected rollout for in-home paths. A full Legacy
+                // reread must retain that ID and path to use the same deferral as an ID resume.
+                let selected_home_rollout = resolved_path.is_some_and(|resolved_path| {
+                    stored_thread.thread_id == source_id
+                        && stored_thread.rollout_path.as_ref() == Some(&resolved_path)
+                });
+                (history, Some(stored_thread), selected_home_rollout)
+            };
         // Path-based resume can use an empty request thread ID. Coordinate once its real
         // identity is known; unrelated loaded threads never wait for this cold startup.
         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
@@ -6081,6 +6084,9 @@ impl ThreadRequestProcessor {
                 override_local_cwd,
                 override_local_roots,
                 optional_environment_ids,
+                matches!(target, ThreadResumeTarget::Client(_))
+                    && params.history.is_none()
+                    && (params.path.is_none() || selected_home_rollout),
             )
             .map_err(|err| invalid_request(err.to_string()))?;
         start_options.initial_history = thread_history;
