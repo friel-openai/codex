@@ -407,6 +407,7 @@ mod job {
                 }
                 RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
