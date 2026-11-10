@@ -97,9 +97,19 @@ struct LegacyRolloutGeneration {
 
 impl LegacyRolloutGeneration {
     async fn capture(path: &Path) -> std::io::Result<Self> {
-        let metadata = tokio::fs::metadata(path).await?;
+        let (path, metadata) = match tokio::fs::metadata(path).await {
+            Ok(metadata) => (path.to_path_buf(), metadata),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let physical = codex_rollout::existing_rollout_path(path)
+                    .await
+                    .ok_or(err)?;
+                let metadata = tokio::fs::metadata(&physical).await?;
+                (physical, metadata)
+            }
+            Err(err) => return Err(err),
+        };
         Ok(Self {
-            path: path.to_path_buf(),
+            path,
             len: metadata.len(),
             modified_at: metadata.modified().ok(),
             #[cfg(unix)]
@@ -5196,7 +5206,14 @@ impl ThreadRequestProcessor {
         let page_size = thread_turns_page_size(limit);
 
         tokio::task::spawn_blocking(move || {
-            let mut scanner = ReverseJsonlScanner::new(File::open(rollout_path)?)?;
+            let file = match File::open(rollout_path) {
+                Ok(file) => file,
+                // Compression can remove the recorded plain name. The reference reader
+                // opens its compressed sibling and still reports a genuinely missing leaf.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(err),
+            };
+            let mut scanner = ReverseJsonlScanner::new(file)?;
             let mut reversed_items = Vec::new();
             let mut started_turns = 0;
 
