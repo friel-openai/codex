@@ -917,6 +917,9 @@ impl CodexThread {
                 approval_policy,
                 approvals_reviewer,
             },
+            preserve_secondary_workspaces: environment_requests
+                .as_ref()
+                .is_some_and(|requests| requests.preserve_secondary_workspaces),
             environments: environment_requests
                 .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
             runtime_workspace_roots,
