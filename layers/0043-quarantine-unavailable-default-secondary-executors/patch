@@ -51,7 +51,7 @@ index 0b9c494f6510505cac55fe4efe71223c3c72a1c6..9191b7f021358dd83dfd0973ea70a2fd
  To make the reviewed selection permanent, supply the retained executor IDs,
  working directories, and workspace roots in `turn/start.environments` on the
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1f655bdfd2d2812a4fbc8502c6dcb72268f8a2fc 100644
+index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e71cf7b6c 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
@@ -87,13 +87,87 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..1f655bdfd2d2812a4fbc8502c6dcb722
                  client_mcp_extensions,
                  ..start_options
              })
-@@ -6081,6 +6077,9 @@ impl ThreadRequestProcessor {
+@@ -5644,39 +5640,46 @@ impl ThreadRequestProcessor {
+         let prepared_model_context = prepared_config
+             .as_mut()
+             .and_then(|prepared| prepared.model_context.take());
+-        let resume_result = if let Some(history) = history {
+-            self.resume_thread_from_history(history.as_slice())
+-                .await
+-                .map(|thread_history| (thread_history, None))
+-        } else if let Some(stored_thread) = stored_thread_from_running_probe {
+-            self.load_resume_initial_history_from_stored_thread_with_options(
+-                *stored_thread,
+-                prepared_model_context,
+-                include_turns,
+-            )
+-            .await
+-            .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread)))
+-        } else {
+-            match self
+-                .read_stored_thread_for_resume(
+-                    &thread_id,
+-                    path.as_ref(),
+-                    /*include_history*/ false,
++        let (mut thread_history, resume_source_thread, selected_home_rollout) =
++            if let Some(history) = history {
++                (
++                    self.resume_thread_from_history(history.as_slice()).await?,
++                    None,
++                    false,
+                 )
+-                .await
+-            {
+-                Ok(stored_thread) => self
++            } else {
++                let stored_thread = match stored_thread_from_running_probe {
++                    Some(stored_thread) => *stored_thread,
++                    None => {
++                        self.read_stored_thread_for_resume(
++                            &thread_id,
++                            path.as_ref(),
++                            /*include_history*/ false,
++                        )
++                        .await?
++                    }
++                };
++                let source_id = stored_thread.thread_id;
++                let resolved_path = path
++                    .as_ref()
++                    .and(stored_thread.rollout_path.as_ref())
++                    .filter(|path| path.starts_with(self.config.codex_home.as_path()))
++                    .cloned();
++                let (history, stored_thread) = self
+                     .load_resume_initial_history_from_stored_thread_with_options(
+                         stored_thread,
+                         prepared_model_context,
+                         include_turns,
+                     )
+-                    .await
+-                    .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread))),
+-                Err(error) => Err(error),
+-            }
+-        };
+-        let (mut thread_history, resume_source_thread) = resume_result?;
++                    .await?;
++                // The loader checks the selected rollout for in-home paths. A full Legacy
++                // reread must retain that ID and path to use the same deferral as an ID resume.
++                let selected_home_rollout = resolved_path.is_some_and(|resolved_path| {
++                    stored_thread.thread_id == source_id
++                        && stored_thread.rollout_path.as_ref() == Some(&resolved_path)
++                });
++                (history, Some(stored_thread), selected_home_rollout)
++            };
+         // Path-based resume can use an empty request thread ID. Coordinate once its real
+         // identity is known; unrelated loaded threads never wait for this cold startup.
+         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
+@@ -6081,6 +6084,9 @@ impl ThreadRequestProcessor {
                  override_local_cwd,
                  override_local_roots,
                  optional_environment_ids,
 +                matches!(target, ThreadResumeTarget::Client(_))
 +                    && params.history.is_none()
-+                    && params.path.is_none(),
++                    && (params.path.is_none() || selected_home_rollout),
              )
              .map_err(|err| invalid_request(err.to_string()))?;
          start_options.initial_history = thread_history;
@@ -155,7 +229,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..2448894622133a7eda8b1a701d087f4b
          }
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acaddc073886 100644
+index c53c73bd8c7a04887018256d1e04dd6553b470ba..c939e8b687b293108d3f3d94991e293c927b08d0 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 @@ -60,6 +60,8 @@ use pretty_assertions::assert_eq;
@@ -367,7 +441,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
          let projectless = index == 2;
          let local_cwd = if projectless {
              // The projectless composer changes only the primary local entry.
-@@ -329,122 +401,1271 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -329,122 +401,1298 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
                  cwd: environment.cwd,
                  runtime_workspace_roots: Some(environment.runtime_workspace_roots),
              })
@@ -1485,6 +1559,15 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
 +
 +#[tokio::test]
 +async fn ordinary_cold_resume_and_sends_do_not_wait_for_saved_secondaries() -> Result<()> {
++    for by_path in [false, true] {
++        cold_resume_and_sends_do_not_wait_for_saved_secondaries(by_path)
++            .await
++            .with_context(|| format!("cold resume with explicit path: {by_path}"))?;
++    }
++    Ok(())
++}
++
++async fn cold_resume_and_sends_do_not_wait_for_saved_secondaries(by_path: bool) -> Result<()> {
 +    const STALLED: &str = "stalled";
 +    const MISSING: &str = "retired";
 +    const FIRST_CALL: &str = "exec-on-stalled-secondary";
@@ -1561,10 +1644,25 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
 +        .without_auto_env()
 +        .build_initialized()
 +        .await?;
++    let path = if by_path {
++        let request_id = app
++            .send_thread_read_request(ThreadReadParams {
++                thread_id: thread_id.clone(),
++                include_turns: false,
++            })
++            .await?;
++        let saved: ThreadReadResponse =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
++        Some(saved.thread.path.context("selected saved rollout path")?)
++    } else {
++        None
++    };
 +    let resumed: ThreadResumeResponse = timeout(LOCAL_CONVERSATION_TIMEOUT, async {
 +        let request_id = app
 +            .send_thread_resume_request(ThreadResumeParams {
 +                thread_id: thread_id.clone(),
++                path: path.clone(),
++                exclude_turns: by_path,
 +                ..Default::default()
 +            })
 +            .await?;
@@ -1574,6 +1672,9 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
 +    .await
 +    .context("ordinary resume should return while the secondary's metadata RPC is held")??;
 +    assert_eq!(resumed.thread.id, thread_id);
++    if let Some(path) = path {
++        assert_eq!(resumed.thread.path.as_ref(), Some(&path));
++    }
 +    assert_eq!(
 +        resumed.instruction_sources,
 +        [LegacyAppPathString::from(local_source)]
@@ -1747,7 +1848,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      Ok(())
  }
 
-@@ -458,6 +1679,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -458,6 +1706,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
              responses::ev_assistant_message("msg-2", "continued"),
              responses::ev_completed("resp-2"),
          ]),
@@ -1755,7 +1856,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      ])
      .await;
      let codex_home = TempDir::new()?;
-@@ -565,6 +1787,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -565,6 +1814,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      let mut app_server = TestAppServer::builder()
          .with_codex_home(codex_home.path())
          .without_auto_env()
@@ -1763,7 +1864,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
          .build_initialized()
          .await?;
      let request_id = app_server
-@@ -574,13 +1797,21 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -574,13 +1824,21 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
              ..Default::default()
          })
          .await?;
@@ -1788,7 +1889,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      assert_eq!(
          healthy_requests
              .instruction_reads
-@@ -589,17 +1820,19 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -589,17 +1847,19 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      );
      for (id, requests, _, _) in &executors {
          if *id != "healthy" {
@@ -1813,7 +1914,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
          "stalled",
      )
      .await?;
-@@ -809,6 +2042,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -809,6 +2069,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      healthy_requests
          .instruction_reads
          .store(0, Ordering::Relaxed);
@@ -1821,7 +1922,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      let request_id = app_server
          .send_thread_resume_request(ThreadResumeParams {
              thread_id: required_id.clone(),
-@@ -818,8 +2052,18 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -818,8 +2079,18 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      let reopened: ThreadResumeResponse =
          timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
      assert_eq!(reopened.thread.id, required_id);
@@ -1841,7 +1942,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      assert_eq!(
          healthy_requests.instruction_reads.load(Ordering::Relaxed),
          1
-@@ -837,6 +2081,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -837,6 +2108,7 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
 
      // Only the fake's filesystem changes; the server, registration, and websocket stay in place.
      recovered.store(true, Ordering::Relaxed);
@@ -1849,7 +1950,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      let request_id = app_server
          .send_thread_resume_request(ThreadResumeParams {
              thread_id: retry_id.clone(),
-@@ -849,7 +2094,31 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
+@@ -849,7 +2121,31 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
      assert_eq!(response.thread.id, retry_id);
      assert_eq!(
          response.instruction_sources,
@@ -1882,7 +1983,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      );
 
      for (_, _, stop, task) in executors {
-@@ -1004,7 +2273,7 @@ enum InstructionDiscoveryExecutor {
+@@ -1004,7 +2300,7 @@ enum InstructionDiscoveryExecutor {
  #[derive(Default)]
  struct InstructionDiscoveryRequests {
      total: AtomicUsize,
@@ -1891,7 +1992,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
      instruction_reads: AtomicUsize,
      allow_repeated_instruction_reads: AtomicBool,
  }
-@@ -1044,7 +2313,7 @@ async fn serve_instruction_discovery_executor(
+@@ -1044,7 +2340,7 @@ async fn serve_instruction_discovery_executor(
          let result = match request["method"].as_str() {
              Some("environment/info") => environment_info.clone(),
              Some("fs/getMetadata") if stalled => {
@@ -1900,7 +2001,7 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..e89c43a8adb09345e8da2d8040e9acad
                  continue;
              }
              Some("fs/getMetadata") => json!({
-@@ -1272,3 +2541,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
+@@ -1272,3 +2568,440 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
 
      Ok(())
  }
