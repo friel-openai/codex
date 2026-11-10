@@ -8811,7 +8811,7 @@ index 34a3acf1c17d5b12bc495f4b98534c0e5f287465..07060788cbb474c12488991b0f492e07
      }
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 3bba11719da4585fdbe2e6f3481b7c789bccaa51..2b5d29ccab4ee2ec3872e1b4a862a7128e952621 100644
+index 3bba11719da4585fdbe2e6f3481b7c789bccaa51..2c4b54129478e89954c016ea44ad51969b9aba58 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -32,6 +32,7 @@ use crate::init_state_db;
@@ -10729,7 +10729,7 @@ index 3bba11719da4585fdbe2e6f3481b7c789bccaa51..2b5d29ccab4ee2ec3872e1b4a862a712
 
      let root_history = root_thread.session.clone_history().await;
      assert!(!history_contains_assistant_inter_agent_communication(
-@@ -6793,23 +8076,1763 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
+@@ -6793,23 +8076,2034 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
          .expect("tree shutdown after resume should succeed");
  }
 
@@ -11276,6 +11276,277 @@ index 3bba11719da4585fdbe2e6f3481b7c789bccaa51..2b5d29ccab4ee2ec3872e1b4a862a712
 +        .release_spawned_thread(worker_thread_id);
 +    let _ = harness.control.shutdown_live_agent(helper_thread_id).await;
 +    let _ = parent_thread.submit(Op::Shutdown {}).await;
++}
++
++#[test]
++fn goal_supervisor_invalidation_retry_stops_for_paused_or_missing_goal() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "goal_supervisor_invalidation_retry_stops_for_paused_or_missing_goal",
++        goal_supervisor_invalidation_retry_stops_for_paused_or_missing_goal_inner(),
++    )
++}
++
++async fn goal_supervisor_invalidation_retry_stops_for_paused_or_missing_goal_inner()
++-> anyhow::Result<()> {
++    let (home, mut config) = test_config().await;
++    let _ = config.features.enable(Feature::Goals);
++    let _ = config.features.enable(Feature::GoalSupervisor);
++    let _ = config.features.enable(Feature::Sqlite);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let db = harness.state_db.as_ref().expect("sqlite state db");
++    let (thread_id, thread) = harness.start_thread().await;
++    thread
++        .session
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    thread.session.flush_rollout().await?;
++    let (goal_id, _) =
++        create_active_thread_goal_for_test(db, thread_id, &thread.session, "Pause the goal")
++            .await?;
++    db.thread_goals()
++        .update_thread_goal(
++            thread_id,
++            codex_state::GoalUpdate {
++                objective: None,
++                status: Some(codex_state::ThreadGoalStatus::Paused),
++                token_budget: None,
++                expected_goal_id: Some(goal_id.clone()),
++            },
++        )
++        .await?
++        .expect("goal is present");
++    crate::goal_supervisor::set_pending_snooze_invalidation_for_test(
++        &thread.session,
++        goal_id.clone(),
++    )
++    .await;
++    crate::goal_supervisor::schedule_pending_invalidation_retry_for_test(&thread.session).await;
++    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&thread.session).await;
++    assert_eq!(
++        None,
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++    );
++    db.thread_goals().delete_thread_goal(thread_id).await?;
++    crate::goal_supervisor::set_pending_snooze_invalidation_for_test(&thread.session, goal_id)
++        .await;
++    crate::goal_supervisor::schedule_pending_invalidation_retry_for_test(&thread.session).await;
++    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&thread.session).await;
++    assert_eq!(
++        None,
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++    );
++    let _ = thread.submit(Op::Shutdown {}).await;
++    Ok(())
++}
++
++#[test]
++fn goal_supervisor_pending_clear_preserves_replacement_goal_snooze() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "goal_supervisor_pending_clear_preserves_replacement_goal_snooze",
++        goal_supervisor_pending_clear_preserves_replacement_goal_snooze_inner(),
++    )
++}
++
++async fn goal_supervisor_pending_clear_preserves_replacement_goal_snooze_inner()
++-> anyhow::Result<()> {
++    let (home, mut config) = test_config().await;
++    let _ = config.features.enable(Feature::Goals);
++    let _ = config.features.enable(Feature::GoalSupervisor);
++    let _ = config.features.enable(Feature::Sqlite);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let db = harness.state_db.as_ref().expect("sqlite state db");
++    let (thread_id, thread) = harness.start_thread().await;
++    thread
++        .session
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    thread.session.flush_rollout().await?;
++    let (old_id, _) =
++        create_active_thread_goal_for_test(db, thread_id, &thread.session, "Old goal").await?;
++    crate::goal_supervisor::set_pending_snooze_invalidation_for_test(&thread.session, old_id).await;
++    let (new_id, new_goal) =
++        create_active_thread_goal_for_test(db, thread_id, &thread.session, "Replacement goal")
++            .await?;
++    let deadline = chrono::Utc::now().timestamp_millis() + 60_000;
++    db.thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &new_id, Some(deadline))
++        .await?;
++    crate::goal_supervisor::maybe_start_supervisor_checkin(&thread.session, &new_id, &new_goal)
++        .await?;
++    assert_eq!(
++        Some(deadline),
++        db.thread_goals()
++            .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &new_id)
++            .await?
++    );
++    crate::goal_supervisor::set_unknown_snooze_invalidation_for_test(&thread.session).await;
++    crate::goal_supervisor::maybe_start_supervisor_checkin(&thread.session, &new_id, &new_goal)
++        .await?;
++    assert_eq!(
++        Some(deadline),
++        db.thread_goals()
++            .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &new_id)
++            .await?,
++        "an unknown original goal must not clear the replacement's snooze"
++    );
++    let _ = thread.submit(Op::Shutdown {}).await;
++    Ok(())
++}
++
++#[test]
++fn goal_supervisor_new_turn_storage_failure_retries_without_resnoozing() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "goal_supervisor_new_turn_storage_failure_retries_without_resnoozing",
++        goal_supervisor_new_turn_storage_failure_retries_without_resnoozing_inner(),
++    )
++}
++
++async fn goal_supervisor_new_turn_storage_failure_retries_without_resnoozing_inner()
++-> anyhow::Result<()> {
++    let (home, mut config) = test_config().await;
++    let _ = config.features.enable(Feature::Goals);
++    let _ = config.features.enable(Feature::GoalSupervisor);
++    let _ = config.features.enable(Feature::Sqlite);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let state_db = harness.state_db.as_ref().expect("sqlite state db");
++    let (thread_id, thread) = harness.start_thread().await;
++    thread
++        .session
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    thread.session.flush_rollout().await?;
++    let (goal_id, goal) = create_active_thread_goal_for_test(
++        state_db,
++        thread_id,
++        &thread.session,
++        "Retry the failed deletion.",
++    )
++    .await?;
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal_id,
++            Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
++        )
++        .await?;
++    crate::goal_supervisor::maybe_start_supervisor_checkin(&thread.session, &goal_id, &goal)
++        .await?;
++    state_db.close().await;
++    crate::goal_supervisor::invalidate_snooze_for_new_user_turn(&thread.session).await;
++    let first_wake =
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++            .expect("turn-start storage failure must schedule a retry");
++    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&thread.session).await;
++    let second_wake =
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++            .expect("outer idle storage failure must retain a retry");
++    assert_ne!(first_wake, second_wake);
++    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&thread.session).await;
++    assert!(
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++            .is_some(),
++        "a prolonged storage failure must keep retrying"
++    );
++    assert!(
++        crate::goal_supervisor::maybe_start_supervisor_checkin(&thread.session, &goal_id, &goal)
++            .await
++            .is_err()
++    );
++    assert!(
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(&thread.session)
++            .await
++            .is_some(),
++        "a failed clear must schedule a retry"
++    );
++    let _ = thread.submit(Op::Shutdown {}).await;
++    Ok(())
++}
++
++#[test]
++fn goal_supervisor_new_user_turn_clears_snooze() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "goal_supervisor_new_user_turn_clears_snooze",
++        goal_supervisor_new_user_turn_clears_snooze_inner(),
++    )
++}
++
++async fn goal_supervisor_new_user_turn_clears_snooze_inner() -> anyhow::Result<()> {
++    let (home, mut config) = test_config().await;
++    let _ = config.features.enable(Feature::Goals);
++    let _ = config.features.enable(Feature::GoalSupervisor);
++    let _ = config.features.enable(Feature::Sqlite);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let state_db = harness.state_db.as_ref().expect("sqlite state db");
++    let (parent_thread_id, parent_thread) = harness.start_thread().await;
++    parent_thread
++        .session
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    parent_thread.session.flush_rollout().await?;
++    let (goal_id, goal) = create_active_thread_goal_for_test(
++        state_db,
++        parent_thread_id,
++        &parent_thread.session,
++        "Continue after a new turn.",
++    )
++    .await?;
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            parent_thread_id,
++            goal_id.as_str(),
++            Some(chrono::Utc::now().timestamp_millis() + 60_000),
++        )
++        .await?;
++    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent_thread.session, &goal_id, &goal)
++        .await?;
++    assert!(
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
++            &parent_thread.session
++        )
++        .await
++        .is_some()
++    );
++    parent_thread
++        .start_or_steer_turn(TurnInputRequest::user_input(text_input("new user turn")))
++        .await?;
++    assert_eq!(
++        None,
++        state_db
++            .thread_goals()
++            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id)
++            .await?
++    );
++    assert_eq!(
++        None,
++        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
++            &parent_thread.session
++        )
++        .await
++    );
++    let before_idle = harness.manager.list_thread_ids().await;
++    parent_thread
++        .session
++        .abort_all_tasks(TurnAbortReason::Interrupted)
++        .await;
++    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent_thread.session, &goal_id, &goal)
++        .await?;
++    let child_id = spawned_thread_id_after(&harness.manager, &before_idle).await;
++    let child = harness.manager.get_thread(child_id).await?;
++    assert_matches!(
++        child.config_snapshot().await.session_source,
++        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++            agent_role: Some(agent_role), ..
++        }) if agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
++    );
++    let _ = parent_thread.submit(Op::Shutdown {}).await;
++    Ok(())
 +}
 +
 +#[test]
@@ -12508,7 +12779,7 @@ index 3bba11719da4585fdbe2e6f3481b7c789bccaa51..2b5d29ccab4ee2ec3872e1b4a862a712
          )
          .await
          .expect("child spawn should succeed");
-@@ -7208,3 +10231,389 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
+@@ -7208,3 +10502,389 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
          .await
          .expect("tree shutdown after partial subtree resume should succeed");
  }
@@ -13803,10 +14074,10 @@ index ce7bf9c8f84e2c76109e8c468f00077cb5a8777f..ccb22f98f0632791a12cda792de2f34f
                  .refresh_readiness()
 diff --git a/codex-rs/core/src/goal_supervisor.rs b/codex-rs/core/src/goal_supervisor.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf445c4a82
+index 0000000000000000000000000000000000000000..8ec6f91302c184f2926d6c64bddf7eb10f64ad28
 --- /dev/null
 +++ b/codex-rs/core/src/goal_supervisor.rs
-@@ -0,0 +1,1276 @@
+@@ -0,0 +1,1503 @@
 +use crate::agent::api::AgentInput;
 +use crate::agent::api::SpawnRequest;
 +use crate::agent::next_thread_spawn_depth;
@@ -13854,6 +14125,7 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +    active_helper_id: Mutex<Option<ThreadId>>,
 +    active_goal_id: Mutex<Option<String>>,
 +    snoozed_until: Mutex<Option<SupervisorWakeDeadline>>,
++    snooze_invalidation_pending: Mutex<Option<SnoozeInvalidation>>,
 +    scheduled_wakeup: Mutex<Option<ScheduledSupervisorWakeup>>,
 +    wakeup_generation: AtomicU64,
 +    failure_backoff: Mutex<SupervisorFailureBackoff>,
@@ -13868,6 +14140,7 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +            active_helper_id: Mutex::new(None),
 +            active_goal_id: Mutex::new(None),
 +            snoozed_until: Mutex::new(None),
++            snooze_invalidation_pending: Mutex::new(None),
 +            scheduled_wakeup: Mutex::new(None),
 +            wakeup_generation: AtomicU64::new(0),
 +            failure_backoff: Mutex::new(SupervisorFailureBackoff::default()),
@@ -13875,6 +14148,37 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +            snooze_records: Mutex::new(Vec::new()),
 +        }
 +    }
++}
++
++/// The goal whose snooze must be removed after a user turn starts.
++#[derive(Clone, Debug)]
++enum SnoozeInvalidation {
++    KnownGoal(String),
++    UnknownGoal,
++    NoGoal,
++}
++
++#[cfg(test)]
++pub(crate) async fn set_pending_snooze_invalidation_for_test(session: &Session, goal_id: String) {
++    *session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await = Some(SnoozeInvalidation::KnownGoal(goal_id));
++}
++
++#[cfg(test)]
++pub(crate) async fn set_unknown_snooze_invalidation_for_test(session: &Session) {
++    *session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await = Some(SnoozeInvalidation::UnknownGoal);
++}
++
++#[cfg(test)]
++pub(crate) async fn schedule_pending_invalidation_retry_for_test(session: &Arc<Session>) {
++    schedule_pending_invalidation_retry_locked(session).await;
 +}
 +
 +/// One in-memory supervisor deadline scoped to the goal that created it.
@@ -14054,6 +14358,27 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +        return Ok(());
 +    }
 +
++    let invalidation_pending = session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await
++        .is_some();
++    if invalidation_pending {
++        if let Err(err) = clear_new_turn_snooze_locked(session, true).await {
++            let retry = next_failure_retry(session, goal_id).await;
++            schedule_supervisor_wakeup(
++                session,
++                SupervisorWakeDeadline {
++                    goal_id: goal_id.to_string(),
++                    deadline: Instant::now() + retry.delay,
++                },
++            )
++            .await;
++            return Err(err);
++        }
++    }
++
 +    let active_helper_id = *session
 +        .goal_supervisor_runtime
 +        .active_helper_id
@@ -14171,7 +14496,138 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +            )
 +            .await?;
 +    }
++    *session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await = None;
 +    maybe_start_supervisor_checkin_locked(session, goal_id, goal).await
++}
++
++pub(crate) async fn invalidate_snooze_for_new_user_turn(session: &Arc<Session>) {
++    let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
++        .lock_owned()
++        .await;
++    let known_goal = session
++        .goal_supervisor_runtime
++        .snoozed_until
++        .lock()
++        .await
++        .as_ref()
++        .map(|wake| wake.goal_id.clone())
++        .or(session
++            .goal_supervisor_runtime
++            .active_goal_id
++            .lock()
++            .await
++            .clone());
++    let pending = if let Some(state_db) = session.state_db().as_ref() {
++        match state_db
++            .thread_goals()
++            .get_thread_goal(session.thread_id)
++            .await
++        {
++            Ok(Some(goal)) => SnoozeInvalidation::KnownGoal(goal.goal_id),
++            Ok(None) => SnoozeInvalidation::NoGoal,
++            Err(err) => {
++                warn!(thread_id = %session.thread_id, "failed to identify goal for supervisor snooze invalidation: {err}");
++                known_goal
++                    .map(SnoozeInvalidation::KnownGoal)
++                    .unwrap_or(SnoozeInvalidation::UnknownGoal)
++            }
++        }
++    } else if let Some(goal_id) = known_goal {
++        SnoozeInvalidation::KnownGoal(goal_id)
++    } else {
++        SnoozeInvalidation::NoGoal
++    };
++    *session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await = Some(pending);
++    if let Err(err) = clear_new_turn_snooze_locked(session, false).await {
++        warn!(thread_id = %session.thread_id, "failed to clear goal supervisor snooze for new turn; will retry before the next check-in: {err}");
++        schedule_pending_invalidation_retry_locked(session).await;
++    }
++}
++
++async fn clear_new_turn_snooze_locked(
++    session: &Arc<Session>,
++    allow_unknown: bool,
++) -> anyhow::Result<()> {
++    let active_helper_id = *session
++        .goal_supervisor_runtime
++        .active_helper_id
++        .lock()
++        .await;
++    if let Some(helper_id) = active_helper_id {
++        finish_supervisor_helper_locked(session, helper_id).await?;
++    }
++    invalidate_supervisor_wakeup(session).await;
++    *session.goal_supervisor_runtime.snoozed_until.lock().await = None;
++    if let Some(state_db) = session.state_db().as_ref() {
++        let pending = session
++            .goal_supervisor_runtime
++            .snooze_invalidation_pending
++            .lock()
++            .await
++            .clone();
++        let goal_id = match pending {
++            Some(SnoozeInvalidation::KnownGoal(goal_id)) => Some(goal_id),
++            Some(SnoozeInvalidation::UnknownGoal) if allow_unknown => {
++                // The original goal identity was unavailable. A replacement goal may
++                // have been created since then, so preserve its stored snooze.
++                state_db
++                    .thread_goals()
++                    .get_thread_goal(session.thread_id)
++                    .await?;
++                warn!(thread_id = %session.thread_id, "supervisor snooze identity was unavailable at turn start; preserving the current goal's stored snooze");
++                None
++            }
++            Some(SnoozeInvalidation::UnknownGoal) => anyhow::bail!(
++                "cannot safely clear a supervisor snooze without the original goal identity"
++            ),
++            Some(SnoozeInvalidation::NoGoal) => None,
++            None => None,
++        };
++        if let Some(goal_id) = goal_id {
++            state_db
++                .thread_goals()
++                .set_thread_goal_supervisor_snoozed_until_ms(session.thread_id, &goal_id, None)
++                .await?;
++        }
++    }
++    *session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await = None;
++    reset_failure_backoff(session).await;
++    Ok(())
++}
++
++async fn schedule_pending_invalidation_retry_locked(session: &Arc<Session>) {
++    let goal_id = match session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await
++        .clone()
++    {
++        Some(SnoozeInvalidation::KnownGoal(goal_id)) => goal_id,
++        Some(SnoozeInvalidation::UnknownGoal | SnoozeInvalidation::NoGoal) => String::new(),
++        None => return,
++    };
++    let retry = next_failure_retry(session, &goal_id).await;
++    schedule_supervisor_wakeup(
++        session,
++        SupervisorWakeDeadline {
++            goal_id,
++            deadline: Instant::now() + retry.delay,
++        },
++    )
++    .await;
 +}
 +
 +pub(crate) async fn defer_failed_supervisor_helper(
@@ -14907,50 +15363,56 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +    }
 +}
 +
-+async fn schedule_supervisor_wakeup(session: &Arc<Session>, wake: SupervisorWakeDeadline) {
-+    let mut scheduled = session
-+        .goal_supervisor_runtime
-+        .scheduled_wakeup
-+        .lock()
-+        .await;
-+    if scheduled.as_ref().is_some_and(|scheduled| {
-+        scheduled.wake.goal_id == wake.goal_id && scheduled.wake.deadline == wake.deadline
-+    }) {
-+        return;
-+    }
-+    if let Some(scheduled) = scheduled.take() {
-+        scheduled.abort_handle.abort();
-+    }
-+    let generation = session
-+        .goal_supervisor_runtime
-+        .wakeup_generation
-+        .fetch_add(1, Ordering::SeqCst)
-+        .wrapping_add(1);
-+
-+    let session = Arc::clone(session);
-+    let task_wake = wake.clone();
-+    let scheduled_task = tokio::spawn(async move {
-+        let delay = task_wake.deadline.saturating_duration_since(Instant::now());
-+        if let Err(err) = session
-+            .services
-+            .time_provider
-+            .sleep(session.thread_id, delay)
-+            .await
-+        {
-+            warn!(
-+                thread_id = %session.thread_id,
-+                "failed to wait for goal supervisor wakeup: {err}"
-+            );
-+            clear_scheduled_supervisor_wakeup(&session, generation).await;
++// The wakeup can schedule its own retry; boxing breaks the recursive future type.
++fn schedule_supervisor_wakeup(
++    session: &Arc<Session>,
++    wake: SupervisorWakeDeadline,
++) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
++    Box::pin(async move {
++        let mut scheduled = session
++            .goal_supervisor_runtime
++            .scheduled_wakeup
++            .lock()
++            .await;
++        if scheduled.as_ref().is_some_and(|scheduled| {
++            scheduled.wake.goal_id == wake.goal_id && scheduled.wake.deadline == wake.deadline
++        }) {
 +            return;
 +        }
-+        fire_scheduled_supervisor_wakeup(&session, generation).await;
-+    });
-+    *scheduled = Some(ScheduledSupervisorWakeup {
-+        wake,
-+        generation,
-+        abort_handle: scheduled_task.abort_handle(),
-+    });
++        if let Some(scheduled) = scheduled.take() {
++            scheduled.abort_handle.abort();
++        }
++        let generation = session
++            .goal_supervisor_runtime
++            .wakeup_generation
++            .fetch_add(1, Ordering::SeqCst)
++            .wrapping_add(1);
++
++        let session = Arc::clone(session);
++        let task_wake = wake.clone();
++        let scheduled_task = tokio::spawn(async move {
++            let delay = task_wake.deadline.saturating_duration_since(Instant::now());
++            if let Err(err) = session
++                .services
++                .time_provider
++                .sleep(session.thread_id, delay)
++                .await
++            {
++                warn!(
++                    thread_id = %session.thread_id,
++                    "failed to wait for goal supervisor wakeup: {err}"
++                );
++                clear_scheduled_supervisor_wakeup(&session, generation).await;
++                return;
++            }
++            fire_scheduled_supervisor_wakeup(&session, generation).await;
++        });
++        *scheduled = Some(ScheduledSupervisorWakeup {
++            wake,
++            generation,
++            abort_handle: scheduled_task.abort_handle(),
++        });
++    })
 +}
 +
 +async fn fire_scheduled_supervisor_wakeup(session: &Arc<Session>, generation: u64) {
@@ -14973,6 +15435,42 @@ index 0000000000000000000000000000000000000000..dfa29f2cb186dd2c8144bd998f5a9fbf
 +    session
 +        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
 +        .await;
++    let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
++        .lock_owned()
++        .await;
++    if session
++        .goal_supervisor_runtime
++        .wakeup_generation
++        .load(Ordering::SeqCst)
++        != generation.wrapping_add(1)
++    {
++        return;
++    }
++    let pending = session
++        .goal_supervisor_runtime
++        .snooze_invalidation_pending
++        .lock()
++        .await
++        .is_some();
++    if !pending {
++        return;
++    }
++    let should_retry = if let Some(state_db) = session.state_db().as_ref() {
++        match state_db
++            .thread_goals()
++            .get_thread_goal(session.thread_id)
++            .await
++        {
++            Ok(Some(goal)) => goal.status == codex_state::ThreadGoalStatus::Active,
++            Ok(None) => false,
++            Err(_) => true,
++        }
++    } else {
++        false
++    };
++    if should_retry {
++        schedule_pending_invalidation_retry_locked(session).await;
++    }
 +}
 +
 +async fn clear_scheduled_supervisor_wakeup(session: &Session, generation: u64) -> bool {
@@ -15641,10 +16139,18 @@ index 4f0317a7079f0042274df1efeafac7d6da6746e1..231f79de628f1316f85cb70981f5567e
  pub(super) fn prepare_update(
      overrides: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index f03639af2ac9787cf2c23e11d9a38bde956079a3..1b2c119623232abdc3f3583a7b2e96adab5bed70 100644
+index f03639af2ac9787cf2c23e11d9a38bde956079a3..d23cb6ef57cf5a8a4aeff0c161fbec47164a87c8 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
-@@ -501,7 +501,7 @@ async fn start_if_idle(
+@@ -445,6 +445,7 @@ async fn start_or_steer(
+             else {
+                 unreachable!("explicit user input can enter Plan mode");
+             };
++            crate::goal_supervisor::invalidate_snooze_for_new_user_turn(session).await;
+             turn_context
+                 .turn_metadata_state
+                 .update_responsesapi_client_metadata(responsesapi_client_metadata);
+@@ -501,7 +502,7 @@ async fn start_if_idle(
          responsesapi_client_metadata,
          ..
      } = request;
@@ -15653,7 +16159,7 @@ index f03639af2ac9787cf2c23e11d9a38bde956079a3..1b2c119623232abdc3f3583a7b2e96ad
          return Ok(TurnInputSubmission::NotSubmitted {
              reason: NotSubmittedReason::PendingTriggerTurn,
          });
-@@ -555,7 +555,7 @@ async fn start_if_idle(
+@@ -555,7 +556,7 @@ async fn start_if_idle(
          Arc::clone(&active_turn.turn_state)
      };
 
@@ -15662,6 +16168,16 @@ index f03639af2ac9787cf2c23e11d9a38bde956079a3..1b2c119623232abdc3f3583a7b2e96ad
          session.clear_reserved_idle_turn(&turn_state).await;
          session.maybe_start_turn_for_pending_work().await;
          return Ok(TurnInputSubmission::NotSubmitted {
+@@ -595,6 +596,9 @@ async fn start_if_idle(
+             return Err(error);
+         }
+     };
++    if kind == TurnStartKind::User {
++        crate::goal_supervisor::invalidate_snooze_for_new_user_turn(session).await;
++    }
+     turn_context
+         .turn_metadata_state
+         .update_responsesapi_client_metadata(responsesapi_client_metadata);
 diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
 index c8df7c18d28d5a8733abe833eec67edd6566ab01..8d5d7cac778e4f2c5b8aefa305e9c70dd5efb2b6 100644
 --- a/codex-rs/core/src/session/turn_input_tests.rs
