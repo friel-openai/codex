@@ -18,6 +18,7 @@ use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::codex_thread::CodexThread;
 use crate::inherited_thread_state::InheritedThreadState;
+use crate::session::ForkStartupItems;
 use crate::session::session::AppServerClientMetadata;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_spawn::ChildSpawnSettings;
@@ -54,17 +55,36 @@ async fn prepare_spawn_inputs(
     let snapshot = options.environments.as_ref().ok_or_else(|| {
         CodexErr::InvalidRequest("prepared spawn requires captured environments".into())
     })?;
-    let (initial_history, history_mode, dynamic_tools) = if options.fork_mode.is_some() {
-        let (history, mode) =
-            prepare_forked_history(&state, &source, &options, &config, MultiAgentVersion::V2)
-                .await
-                .map_err(|error| error.with_agent_context(AgentErrorContext::ForkHistory))?;
-        (history, mode, Vec::new())
-    } else {
-        let (mode, tools) =
-            fresh_child_history_and_tools(parent, &config, MultiAgentVersion::V2).await;
-        (InitialHistory::New, mode, tools)
-    };
+    let (initial_history, history_mode, dynamic_tools, fork_startup_items, fork_source_reservation) =
+        if options.fork_mode.is_some() {
+            let prepared = prepare_forked_history(
+                &state,
+                &source,
+                &options,
+                &config,
+                MultiAgentVersion::V2,
+                /*allow_rollout_references*/ true,
+            )
+            .await
+            .map_err(|error| error.with_agent_context(AgentErrorContext::ForkHistory))?;
+            (
+                prepared.history,
+                prepared.history_mode,
+                Vec::new(),
+                prepared.startup_items,
+                prepared.source_reservation,
+            )
+        } else {
+            let (mode, tools) =
+                fresh_child_history_and_tools(parent, &config, MultiAgentVersion::V2).await;
+            (
+                InitialHistory::New,
+                mode,
+                tools,
+                ForkStartupItems::default(),
+                None,
+            )
+        };
     let inherited_thread_state = if options.fork_mode.is_some() {
         InheritedThreadState::builder()
             .prompt_cache_key(parent_prompt_cache_key_for_source(&state, Some(&source)).await)
@@ -109,6 +129,8 @@ async fn prepare_spawn_inputs(
         inherited_thread_state,
         originator: parent.session.originator().await,
         attachment_source: options.fork_mode.is_some().then_some(caller),
+        fork_startup_items,
+        fork_source_reservation,
     };
     Ok((thread_options, inheritance, client_metadata))
 }
@@ -148,6 +170,7 @@ pub(super) async fn create_spawn(
         .into());
     }
     options.reserved_thread_id = Some(reservation.thread_id);
+    let source_reservation = inheritance.fork_source_reservation.clone();
     let child = state
         .spawn_host_child_thread(
             options,
@@ -160,12 +183,13 @@ pub(super) async fn create_spawn(
         )
         .await
         .map_err(|error| error.with_agent_context(AgentErrorContext::ChildStartup))?;
-    let pending = PendingSpawn::new(
+    let mut pending = PendingSpawn::new(
         Arc::clone(&state),
         child.thread_id,
         membership,
         SpawnOwner::Host,
     );
+    pending.hold_source_reservation(source_reservation);
     child.thread.emit_thread_ready_lifecycle().await;
     child
         .thread
@@ -173,6 +197,7 @@ pub(super) async fn create_spawn(
         .await;
     if child.session_configured.forked_from_id.is_some() {
         child.thread.ensure_rollout_materialized().await;
+        state.flush_fork_or_shutdown(&child).await?;
     }
     let config = effective_spawn_config(&child.thread).await?;
     let status = child.thread.io.agent_status.borrow().clone();
