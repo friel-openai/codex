@@ -20,6 +20,88 @@ enum RootLayout {
     Symlink,
 }
 
+#[test_case::test_case(false; "missing_policy_cwd_on_executor")]
+#[test_case::test_case(true; "existing_local_policy_cwd")]
+#[tokio::test]
+async fn metadata_rules_below_policy_cwd_preserve_access(policy_cwd_exists: bool) {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = AbsolutePathBuf::try_from(temp.path())
+        .expect("absolute tempdir")
+        .join("home");
+    std::fs::create_dir(&home).expect("create executor home");
+    let chat = home.join("date/chat");
+    let command_cwd = if policy_cwd_exists {
+        std::fs::create_dir_all(&chat).expect("create local chat cwd");
+        std::fs::write(chat.join("private"), "chat only").expect("write local deny fixture");
+        &chat
+    } else {
+        &home
+    };
+    std::fs::write(home.join("private"), "host only").expect("write deny fixture");
+    let mut entries = vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(home.clone().into(), FileSystemAccessMode::Write),
+        FileSystemSandboxEntry::new(chat.clone().into(), FileSystemAccessMode::Write),
+        FileSystemSandboxEntry::new(home.join("private").into(), FileSystemAccessMode::Deny),
+        FileSystemSandboxEntry::new(chat.join("private").into(), FileSystemAccessMode::Deny),
+    ];
+    for name in [".git", ".agents", ".codex", ".aws"] {
+        entries.push(FileSystemSandboxEntry::new(
+            chat.join(name).into(),
+            FileSystemAccessMode::Read,
+        ));
+    }
+    let permissions = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(entries),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let output = std::process::Command::new(super::codex_linux_sandbox_exe())
+        .current_dir(command_cwd)
+        .arg("--command-cwd")
+        .arg(command_cwd.as_path())
+        .arg("--sandbox-policy-cwd")
+        .arg(chat.as_path())
+        .arg("--permission-profile")
+        .arg(serde_json::to_string(&permissions).expect("serialize profile"))
+        .args(["--", "/bin/sh", "-ec"])
+        .arg(
+            r#"
+test "$(pwd -P)" = "$1"
+if cat "$2/private"; then exit 1; fi
+if cat "$3/private"; then exit 4; fi
+if mkdir -p "$3/.codex" && touch "$3/.codex/new"; then exit 2; fi
+if touch "$2/../outside"; then exit 3; fi
+printf allowed > marker
+"#,
+        )
+        .arg("test")
+        .arg(command_cwd.as_path())
+        .arg(home.as_path())
+        .arg(chat.as_path())
+        .output()
+        .expect("launch helper");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(command_cwd.join("marker")).expect("allowed write"),
+        b"allowed"
+    );
+    assert_eq!(home.join("date").exists(), policy_cwd_exists);
+}
+
 #[test_case::test_case(RootLayout::Directory, ""; "home_cwd")]
 #[test_case::test_case(RootLayout::Directory, ".codex/visualizations/thread"; "visualization_cwd")]
 #[test_case::test_case(RootLayout::Symlink, ""; "symlink_home_cwd")]
