@@ -112,6 +112,7 @@ impl RequestSerializationQueueKey {
 }
 
 pub(crate) struct QueuedInitializedRequest {
+    method: &'static str,
     gate: Option<Arc<ConnectionRpcGate>>,
     future: BoxFutureUnit,
 }
@@ -122,6 +123,7 @@ impl QueuedInitializedRequest {
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Self {
         Self {
+            method: "internal",
             gate: Some(gate),
             future: Box::pin(future),
         }
@@ -129,13 +131,19 @@ impl QueuedInitializedRequest {
 
     fn new_background(future: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
+            method: "internal",
             gate: None,
             future: Box::pin(future),
         }
     }
 
+    pub(crate) fn with_method(mut self, method: &'static str) -> Self {
+        self.method = method;
+        self
+    }
+
     pub(crate) async fn run(self) {
-        let Self { gate, future } = self;
+        let Self { gate, future, .. } = self;
         match gate {
             Some(gate) => gate.run(future).await,
             None => future.await,
@@ -145,7 +153,29 @@ impl QueuedInitializedRequest {
     async fn run_serialized(self, key: &RequestSerializationQueueKey) {
         // The drain owns the map entry. A handler that unwinds must not take
         // the drain with it or later requests will enqueue without a worker.
-        if AssertUnwindSafe(self.run()).catch_unwind().await.is_err() {
+        let method = self.method;
+        let work = AssertUnwindSafe(self.run()).catch_unwind();
+        tokio::pin!(work);
+        let outcome = if matches!(
+            key,
+            RequestSerializationQueueKey::Thread { .. }
+                | RequestSerializationQueueKey::ThreadPath { .. }
+        ) {
+            let start = std::time::Instant::now();
+            tokio::select! {
+                biased;
+                done = &mut work => done,
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    // Do not inherit a request span carrying identifiers. Observing a
+                    // slow owner neither releases its key nor drops its future.
+                    tracing::warn!(parent: None, method, age_ms = start.elapsed().as_millis() as u64, "slow serialized thread request");
+                    work.await
+                }
+            }
+        } else {
+            work.await
+        };
+        if outcome.is_err() {
             let thread_id = match key {
                 RequestSerializationQueueKey::Thread { thread_id } => Some(thread_id.as_str()),
                 _ => None,
