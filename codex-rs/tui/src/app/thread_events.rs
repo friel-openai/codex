@@ -595,6 +595,22 @@ fn file_change_item_changes(
     }
 }
 
+/// Identify a channel instance so delayed notifications cannot reach a recreated thread channel.
+#[derive(Clone)]
+pub(crate) struct ThreadEventChannelIdentity(Arc<Mutex<ThreadEventStore>>);
+
+impl std::fmt::Debug for ThreadEventChannelIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThreadEventChannelIdentity")
+    }
+}
+
+impl ThreadEventChannelIdentity {
+    pub(super) fn matches(&self, channel: &ThreadEventChannel) -> bool {
+        Arc::ptr_eq(&self.0, &channel.store)
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ThreadEventChannel {
     /// Set on backend handoff so a retained channel is detached through its owning session.
@@ -606,6 +622,10 @@ pub(super) struct ThreadEventChannel {
 }
 
 impl ThreadEventChannel {
+    pub(super) fn identity(&self) -> ThreadEventChannelIdentity {
+        ThreadEventChannelIdentity(Arc::clone(&self.store))
+    }
+
     pub(super) fn new(capacity: usize) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
         Self {
