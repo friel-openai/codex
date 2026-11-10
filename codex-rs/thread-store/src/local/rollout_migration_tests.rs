@@ -6189,15 +6189,35 @@ async fn assert_migration_process_death_recovers_every_durable_phase(
 
 #[tokio::test]
 async fn migration_preserves_archived_compressed_segmented_lineage_and_sources() {
-    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Legacy).await;
+    assert_migration_preserves_archived_compressed_lineage(
+        ThreadHistoryMode::Legacy,
+        /*stale_indexed_plain_path*/ false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn native_history_base_migration_preserves_archived_compressed_lineage_and_sources() {
-    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Paginated).await;
+    assert_migration_preserves_archived_compressed_lineage(
+        ThreadHistoryMode::Paginated,
+        /*stale_indexed_plain_path*/ false,
+    )
+    .await;
 }
 
-async fn assert_migration_preserves_archived_compressed_lineage(history_mode: ThreadHistoryMode) {
+#[tokio::test]
+async fn migration_preserves_archived_compressed_lineage_with_stale_indexed_plain_path() {
+    assert_migration_preserves_archived_compressed_lineage(
+        ThreadHistoryMode::Legacy,
+        /*stale_indexed_plain_path*/ true,
+    )
+    .await;
+}
+
+async fn assert_migration_preserves_archived_compressed_lineage(
+    history_mode: ThreadHistoryMode,
+    stale_indexed_plain_path: bool,
+) {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let segment_ids = [SegmentId::new(), SegmentId::new()];
@@ -6258,6 +6278,35 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
         fs::read(archived.as_path()).expect("read compressed active"),
     ];
     let store = indexed_store(home.path()).await;
+    let stale_index = if stale_indexed_plain_path {
+        let state_db = store.state_db.as_ref().expect("indexed archive");
+        let mut expected = state_db
+            .get_thread(thread_id)
+            .await
+            .expect("read selected archive metadata")
+            .expect("indexed archive row");
+        assert_eq!(expected.rollout_path, archived);
+        let archived_at = expected.archived_at.expect("archived row");
+        assert_eq!(codex_rollout::plain_rollout_path(&archived), archived_plain);
+        assert!(!archived_plain.exists());
+        assert!(
+            state_db
+                .replace_rollout_path_if_current(thread_id, &archived, &archived_plain)
+                .await
+                .expect("set the missing plain sibling as the indexed path")
+        );
+        expected.rollout_path = archived_plain;
+        assert_eq!(
+            state_db
+                .get_thread(thread_id)
+                .await
+                .expect("read the stale archive row"),
+            Some(expected),
+        );
+        Some((state_db, archived_at))
+    } else {
+        None
+    };
 
     let report = store
         .migrate_rollouts(apply_options())
@@ -6268,7 +6317,7 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
         report.outcomes[0].status,
         RolloutMigrationStatus::Migrated,
         "{:?}",
-        report.outcomes[0].message
+        report.outcomes[0],
     );
     let selected_path = report.outcomes[0].rollout_path.clone();
     assert!(selected_path.starts_with(home.path().join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)));
@@ -6276,6 +6325,16 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
         selected_path.extension().and_then(|value| value.to_str()),
         Some("zst")
     );
+    if let Some((state_db, archived_at)) = stale_index {
+        let selected = state_db
+            .get_thread(thread_id)
+            .await
+            .expect("read migrated archive metadata")
+            .expect("migrated archive row");
+        assert_ne!(selected_path, archived);
+        assert_eq!(selected.rollout_path, selected_path);
+        assert_eq!(selected.archived_at, Some(archived_at));
+    }
     assert_eq!(
         [
             fs::read(immutable.as_path()).expect("reread compressed predecessor"),
@@ -6305,6 +6364,134 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
     let json = serde_json::to_string(&materialized).expect("serialize history");
     assert!(json.contains("compressed predecessor"));
     assert!(json.contains("archived active"));
+}
+
+#[tokio::test]
+async fn archived_lineage_recovery_refuses_a_different_existing_selection_before_publication() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let [predecessor_id, selected_id, replacement_id] = std::array::from_fn(|_| SegmentId::new());
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor_plain = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(predecessor_id.to_string())
+        .join(&filename);
+    write_legacy_segment(
+        &predecessor_plain,
+        home.path(),
+        thread_id,
+        predecessor_id,
+        vec![user_message("predecessor")],
+    );
+    let active = home.path().join("sessions/2025/01/03").join(filename);
+    write_legacy_segment(
+        &active,
+        home.path(),
+        thread_id,
+        selected_id,
+        vec![
+            segment_reference(predecessor_plain.clone(), thread_id, predecessor_id),
+            user_message("original selection"),
+        ],
+    );
+    let predecessor = compress_rollout(&predecessor_plain);
+    let archived = compress_rollout(&move_to_archived(home.path(), active));
+    let store = indexed_store(home.path()).await;
+    let state_db = store.state_db.as_ref().expect("indexed archive");
+    let mut expected = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("read selected archive metadata")
+        .expect("indexed archive row");
+    assert_eq!(expected.rollout_path, archived);
+    assert!(expected.archived_at.is_some());
+
+    let journal_path = migration_journal_path(home.path(), thread_id);
+    let plan = plan_legacy_lineage(home.path(), &archived)
+        .await
+        .expect("plan archived lineage");
+    let mut limiter = RolloutMigrationRateLimiter::new(None).expect("migration limiter");
+    let stopped = store
+        .migrate_legacy_lineage_until_phase_for_test(
+            &archived,
+            &journal_path,
+            plan,
+            &mut limiter,
+            LineageMigrationPhase::ProjectionDurable,
+        )
+        .await
+        .expect_err("stop before publication");
+    assert!(
+        stopped
+            .to_string()
+            .contains("injected lineage migration stop")
+    );
+    let journal = read_lineage_migration_journal(&journal_path)
+        .await
+        .expect("read durable journal");
+    assert_eq!(journal.phase, LineageMigrationPhase::ProjectionDurable);
+    assert!(journal.targets.iter().all(|target| !target.path.exists()));
+    let journal_bytes = fs::read(&journal_path).expect("read durable journal bytes");
+
+    let replacement = archived
+        .parent()
+        .expect("archive directory")
+        .join(format!("rollout-2025-01-04T12-00-00-{thread_id}.jsonl"));
+    write_legacy_segment(
+        &replacement,
+        home.path(),
+        thread_id,
+        replacement_id,
+        vec![user_message("different selection")],
+    );
+    let replacement_meta = codex_rollout::read_session_meta_line(&replacement)
+        .await
+        .expect("read replacement selection metadata");
+    assert_eq!(replacement_meta.meta.id, thread_id);
+    assert_eq!(replacement_meta.meta.segment_id, Some(replacement_id));
+    let sources = [&predecessor, &archived, &replacement];
+    let source_bytes = sources.map(|path| fs::read(path).expect("read source bytes"));
+    assert!(
+        state_db
+            .replace_rollout_path_if_current(thread_id, &archived, &replacement)
+            .await
+            .expect("select a different existing rollout for the same thread")
+    );
+    expected.rollout_path = replacement.clone();
+
+    let locks = store
+        .acquire_migration_locks_for_test(thread_id)
+        .await
+        .expect("lock archive for direct recovery");
+    let error = store
+        .recover_legacy_lineage(thread_id, &journal_path, &mut limiter, &locks)
+        .await
+        .expect_err("recovery must refuse the changed selection");
+    assert!(
+        journal.targets.iter().all(|target| !target.path.exists()),
+        "recovery published targets after selection changed: {error}"
+    );
+    assert_eq!(
+        fs::read(&journal_path).expect("read journal after refusal"),
+        journal_bytes,
+    );
+    assert_eq!(
+        sources.map(|path| fs::read(path).expect("reread source bytes")),
+        source_bytes,
+    );
+    assert_eq!(
+        state_db
+            .get_thread(thread_id)
+            .await
+            .expect("read selection after refusal"),
+        Some(expected),
+    );
+    assert!(
+        matches!(error, ThreadStoreError::Internal { .. }),
+        "{error}"
+    );
 }
 
 #[tokio::test]
