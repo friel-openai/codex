@@ -114,6 +114,7 @@ pub(crate) fn serialize_tiered_input(
             RolloutItem::InterAgentCommunication(message) => Some(message.to_model_input_item()),
             RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
