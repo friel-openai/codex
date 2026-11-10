@@ -4,6 +4,20 @@ use super::*;
 use codex_thread_store::ReadThreadsParams;
 
 impl ThreadRequestProcessor {
+    pub(super) async fn wait_for_resume_shutdown_drain(
+        thread_id: ThreadId,
+        mut drain: watch::Receiver<bool>,
+    ) -> Result<(), JSONRPCErrorError> {
+        // Only the wait can expire. The old listener still owns terminal events.
+        let _ = tokio::time::timeout(
+            THREAD_LISTENER_DRAIN_TIMEOUT,
+            drain.wait_for(|drained| *drained),
+        )
+        .await
+        .map_err(|_| thread_closing_for_resume(thread_id))?;
+        Ok(())
+    }
+
     pub(super) async fn acquire_thread_resume_permit(
         &self,
         params: &ThreadResumeParams,
@@ -82,5 +96,80 @@ impl ThreadRequestProcessor {
             // changed while migration ran. Existing resume checks run again under this permit.
             return Ok(permit);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection_rpc_gate::ConnectionRpcGate;
+    use crate::request_serialization::QueuedInitializedRequest;
+    use crate::request_serialization::RequestSerializationAccess;
+    use crate::request_serialization::RequestSerializationQueueKey;
+    use crate::request_serialization::RequestSerializationQueues;
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_resume_with_pending_shutdown_drain_releases_thread_queue() {
+        let thread_id = ThreadId::new();
+        let key = RequestSerializationQueueKey::Thread {
+            thread_id: thread_id.to_string(),
+        };
+        let state_manager = Arc::new(ThreadStateManager::new());
+        let state = state_manager.thread_state(thread_id).await;
+        let queues = RequestSerializationQueues::default();
+        let gate = Arc::new(ConnectionRpcGate::new());
+        let (old_listener, drain) = watch::channel(false);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let (follower_tx, follower_rx) = oneshot::channel();
+
+        queues
+            .enqueue(
+                key.clone(),
+                RequestSerializationAccess::Exclusive,
+                QueuedInitializedRequest::new(Arc::clone(&gate), {
+                    let state_manager = Arc::clone(&state_manager);
+                    let drain = drain.clone();
+                    async move {
+                        let _guard = state_manager.lock_goal_resume(thread_id).await;
+                        started_tx.send(()).unwrap();
+                        let result = ThreadRequestProcessor::wait_for_resume_shutdown_drain(
+                            thread_id, drain,
+                        )
+                        .await;
+                        resume_tx.send(result).unwrap();
+                    }
+                }),
+            )
+            .await;
+        started_rx.await.unwrap();
+        queues
+            .enqueue(
+                key,
+                RequestSerializationAccess::Exclusive,
+                QueuedInitializedRequest::new(gate, {
+                    let state_manager = Arc::clone(&state_manager);
+                    async move {
+                        let _guard = state_manager.lock_goal_resume(thread_id).await;
+                        follower_tx.send(()).unwrap();
+                    }
+                }),
+            )
+            .await;
+        let start = tokio::time::Instant::now();
+        let error = resume_rx.await.unwrap().unwrap_err();
+        assert_eq!(error.message, thread_closing_for_resume(thread_id).message);
+        assert!(start.elapsed() >= THREAD_LISTENER_DRAIN_TIMEOUT);
+        follower_rx.await.unwrap();
+        assert!(Arc::ptr_eq(
+            &state,
+            &state_manager.thread_state(thread_id).await
+        ));
+        assert!(!*drain.borrow());
+
+        old_listener.send_replace(true);
+        ThreadRequestProcessor::wait_for_resume_shutdown_drain(thread_id, drain)
+            .await
+            .unwrap();
     }
 }
