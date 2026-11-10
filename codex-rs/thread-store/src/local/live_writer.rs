@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,9 +15,6 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
 use codex_rollout::into_persisted_rollout_items;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncReadExt;
-use tokio::io::BufReader;
 use tracing::warn;
 
 use super::LocalThreadStore;
@@ -472,17 +471,6 @@ async fn build_segmented_legacy_history_projection(
     }
 
     let lineage = segmented_legacy_rollout_paths(store, thread_id, rollout_path).await?;
-    for segment in &lineage {
-        if segment
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".jsonl.zst"))
-        {
-            return Err(ThreadStoreError::Unsupported {
-                operation: "compressed_legacy_history_projection",
-            });
-        }
-    }
 
     let rollout_id = super::thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
         rollout_path,
@@ -490,16 +478,15 @@ async fn build_segmented_legacy_history_projection(
         ThreadHistoryMode::Legacy,
     )?;
     let projection = super::thread_history::projection_state(store, rollout_id).await?;
-    let active_rollout_len = tokio::fs::metadata(rollout_path)
+    let active_rollout_len = legacy_rollout_jsonl_len(rollout_path)
         .await
-        .map_err(thread_store_io_error)?
-        .len();
+        .map_err(thread_store_io_error)?;
     if projection
         .is_some_and(|state| state.next_ordinal > 0 && state.next_byte_offset == active_rollout_len)
     {
         return stream_segmented_legacy_history_builder(
             &lineage,
-            RolloutItem::SessionMeta(session_meta),
+            RolloutItem::SessionMeta(Box::new(session_meta)),
         )
         .await;
     }
@@ -560,6 +547,22 @@ async fn build_segmented_legacy_history_projection(
         return Err(error);
     }
     Ok(builder)
+}
+
+/// Projection offsets address JSONL bytes, including for a compressed active rollout.
+pub(super) async fn legacy_rollout_jsonl_len(path: &std::path::Path) -> std::io::Result<u64> {
+    let path = path.to_path_buf();
+    let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
+    let length = tokio::task::spawn_blocking(move || {
+        // A pledged frame size is only a lower bound when zstd frames are concatenated.
+        // The existing reader decodes every frame without replacing the durable rollout.
+        let mut reader = codex_rollout::open_rollout_seekable_reader(&path, || stop.is_closed())?;
+        reader.seek(SeekFrom::End(0))
+    })
+    .await
+    .map_err(std::io::Error::other)?;
+    drop(keep_running);
+    length
 }
 
 async fn segmented_legacy_rollout_paths(
@@ -688,21 +691,19 @@ async fn stream_segmented_legacy_history_builder(
     let mut builder = ThreadHistoryBuilder::new();
     builder.handle_rollout_item_with_changes(&canonical_session_meta);
     for rollout_path in lineage {
-        let file = tokio::fs::File::open(rollout_path)
+        // The reducer needs complete history even when SQLite is current. Decode immutable
+        // compressed segments without replacing their files, and bound reads in JSONL bytes.
+        let Some(mut reader) =
+            super::thread_history_materialization::open_legacy_projection_reader(
+                rollout_path,
+                /*start_offset*/ 0,
+            )
             .await
-            .map_err(thread_store_io_error)?;
-        let read_limit = file.metadata().await.map_err(thread_store_io_error)?.len();
-        let mut reader = BufReader::new(file.take(read_limit));
-        let mut line_bytes = Vec::new();
-        loop {
-            line_bytes.clear();
-            let bytes_read = reader
-                .read_until(b'\n', &mut line_bytes)
-                .await
-                .map_err(thread_store_io_error)?;
-            if bytes_read == 0 || !line_bytes.ends_with(b"\n") {
-                break;
-            }
+            .map_err(thread_store_io_error)?
+        else {
+            continue;
+        };
+        while let Some(line_bytes) = reader.next_line().await.map_err(thread_store_io_error)? {
             if line_bytes.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
