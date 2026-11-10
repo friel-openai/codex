@@ -137,6 +137,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
         /*started_item*/ None,
         Some(candidate),
         fallback,
+        CompactionReporting::Immediate,
     )
     .await
     .expect("reject stale result without failing compaction");
