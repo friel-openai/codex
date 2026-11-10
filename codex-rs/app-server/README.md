@@ -502,28 +502,31 @@ thread or connecting to its executors. To page through the messages, use
 `thread/turns/list` with `itemsView: "full"`. Reading the history does not make
 the thread available to `turn/start`.
 
-A cold `thread/resume` uses the saved environment assignments. An older
-checkpoint does not distinguish defaults from explicit selections, so those
-assignments remain required by default. Restore a required executor before
-resuming. If the thread's primary executor is local and the user has confirmed
-that an unavailable saved secondary is no longer needed for its instructions
-or work, name that secondary in the experimental `optionalEnvironmentIds`
-field for one cold resume:
+A cold `thread/resume` by saved thread ID preserves the saved environment
+assignments. If the saved primary is local, an ordinary resume does not wait for
+saved registry secondaries. The app-server checks their readiness and project
+instructions separately. A verified secondary can join a later turn without
+changing a turn that is already running. A command that names an unavailable
+executor fails for that executor; it does not run on the local primary instead.
+A required remote primary must still be available to resume.
+
+Clients that need to control which saved registry secondaries can be
+unavailable for one cold resume can supply the experimental
+`optionalEnvironmentIds` field:
 
 ```json
 {"id":2,"method":"thread/resume","params":{"threadId":"<saved-thread-id>","optionalEnvironmentIds":["<saved-secondary-id>"]}}
 ```
 
-The list does not replace or rewrite the saved assignments. A named executor
-that cannot finish readiness and project instruction discovery is unavailable
-to the loaded thread. Other required executors still fail by name. Omitting
-the field on a later cold resume uses the original saved policy again.
+The list does not replace or rewrite the saved assignments. Other required
+executors still fail by name. Omit the field to use ordinary local resume.
 
-With a managed local app-server, use `codex app-server proxy --sock <socket>`
-and initialize with `experimentalApi` enabled. Keep the proxy connected until
-Desktop attaches to the already loaded thread with its normal `thread/resume`.
-The resume request has no turn input, but loading a thread can let an existing
-goal continue. Do not use this as a read-only operation.
+To use `optionalEnvironmentIds` through a managed local app-server, connect
+with `codex app-server proxy --sock <socket>` and initialize with
+`experimentalApi` enabled. Keep the proxy connected until Desktop attaches
+with its normal `thread/resume`. Loading a thread can let an existing goal
+continue even though the resume request has no turn input. Do not use resume as
+a read-only operation.
 
 To make the reviewed selection permanent, supply the retained executor IDs,
 working directories, and workspace roots in `turn/start.environments` on the

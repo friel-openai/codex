@@ -24,6 +24,7 @@ use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_requests;
+use crate::environment_selection::default_thread_environment_requests_for_ids;
 use crate::exec_policy::ExecPolicyManager;
 use crate::exec_policy::InheritedExecPolicy;
 use crate::inherited_thread_state::InheritedThreadState;
@@ -55,6 +56,7 @@ use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::DisabledCodeModeSessionProvider;
 use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
 use codex_core_plugins::PluginsManager;
+use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_execpolicy::Policy;
@@ -535,8 +537,12 @@ pub struct StartThreadOptions {
 pub(crate) struct StartupEnvironmentDiscovery {
     pub(crate) implicit_selection: bool,
     pub(crate) cold_resume: bool,
+    /// Ordinary local conversation does not await registry secondaries.
+    pub(crate) defer_registry_secondaries: bool,
     /// Explicit exceptions for one cold resume, never part of saved settings.
     pub(crate) optional_on_resume: Arc<HashSet<String>>,
+    /// Present only for the actual local-primary registry selection at a new app-server start.
+    pub(crate) default_registrations: HashMap<String, Arc<Environment>>,
 }
 
 /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
@@ -555,23 +561,54 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
 
 impl StartThreadOptions {
     /// Bounds executor discovery for app-server thread/start before workspace startup work.
-    pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
+    pub fn bound_startup_environment_discovery(
+        &mut self,
+        thread_manager: &ThreadManager,
+        requests: Option<Vec<TurnEnvironmentRequest>>,
+    ) {
+        let implicit_selection = requests.is_none();
+        let mut default_registrations = HashMap::new();
+        self.environments = Some(requests.unwrap_or_else(|| {
+            let bindings = thread_manager
+                .state
+                .environment_manager
+                .default_environment_bindings();
+            let requests = default_thread_environment_requests_for_ids(
+                bindings.iter().map(|(id, _)| id.clone()),
+                &self.config.cwd,
+                &self.config.workspace_roots,
+            );
+            if bindings.first().is_some_and(|(id, environment)| {
+                id == LOCAL_ENVIRONMENT_ID && !environment.is_remote()
+            }) {
+                default_registrations.extend(
+                    bindings
+                        .into_iter()
+                        .skip(1)
+                        .filter(|(_, environment)| environment.is_remote()),
+                );
+            }
+            requests
+        }));
         self.thread_extension_init
             .insert(StartupEnvironmentDiscovery {
                 implicit_selection,
                 cold_resume: false,
+                defer_registry_secondaries: implicit_selection,
                 optional_on_resume: Arc::default(),
+                default_registrations,
             });
     }
 
-    /// Restores saved assignments for app-server cold resume. A saved secondary
-    /// is optional only when selected by default or explicitly nominated here.
+    /// Restores saved assignments without requiring registry secondaries for an ordinary
+    /// client resume. An explicit optional list instead controls this resume's admission.
     pub fn restore_startup_environment_discovery(
         &mut self,
         saved: Option<&ThreadSettingsSnapshot>,
         override_local_cwd: bool,
         override_local_roots: bool,
         optional_environment_ids: Option<Vec<String>>,
+        ordinary_client_resume: bool,
     ) -> CodexResult<()> {
         let selection = saved.and_then(|settings| settings.environments.as_ref());
         let implicit_selection = selection.is_none_or(|saved| saved.implicit_selection);
@@ -631,6 +668,8 @@ impl StartThreadOptions {
                     .collect(),
             );
         }
+        let defer_registry_secondaries =
+            ordinary_client_resume && optional_environment_ids.is_none();
         let mut optional_on_resume = HashSet::new();
         if let Some(ids) = optional_environment_ids
             && !ids.is_empty()
@@ -665,7 +704,9 @@ impl StartThreadOptions {
             .insert(StartupEnvironmentDiscovery {
                 implicit_selection,
                 cold_resume: true,
+                defer_registry_secondaries,
                 optional_on_resume: Arc::new(optional_on_resume),
+                default_registrations: HashMap::new(),
             });
         Ok(())
     }
