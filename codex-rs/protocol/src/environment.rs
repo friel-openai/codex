@@ -41,6 +41,9 @@ pub struct PersistedEnvironmentSelection {
     /// Missing in older checkpoints, which restored thread-derived configuration.
     #[serde(default)]
     pub config_source: PersistedEnvironmentConfigSource,
+    /// An implicit executor rejected during startup has no owner to finish a pending setup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub startup_unavailable: bool,
 }
 
 impl From<TurnEnvironmentSelection> for PersistedEnvironmentSelection {
@@ -53,8 +56,12 @@ impl From<TurnEnvironmentSelection> for PersistedEnvironmentSelection {
                 EnvironmentConfigState::FromThread => PersistedEnvironmentConfigSource::Thread,
                 EnvironmentConfigState::Pending
                 | EnvironmentConfigState::Ready(_)
-                | EnvironmentConfigState::Failed(_) => PersistedEnvironmentConfigSource::Owner,
+                | EnvironmentConfigState::Failed(_)
+                | EnvironmentConfigState::StartupUnavailable => {
+                    PersistedEnvironmentConfigSource::Owner
+                }
             },
+            startup_unavailable: selection.config == EnvironmentConfigState::StartupUnavailable,
         }
     }
 }
@@ -67,6 +74,9 @@ impl From<PersistedEnvironmentSelection> for TurnEnvironmentRequest {
             workspace_roots: selection.workspace_roots,
             config: match selection.config_source {
                 PersistedEnvironmentConfigSource::Thread => EnvironmentConfigState::FromThread,
+                PersistedEnvironmentConfigSource::Owner if selection.startup_unavailable => {
+                    EnvironmentConfigState::StartupUnavailable
+                }
                 PersistedEnvironmentConfigSource::Owner => EnvironmentConfigState::Pending,
             },
         }
@@ -236,6 +246,20 @@ pub enum EnvironmentConfigState {
     Ready(EnvironmentConfig),
     /// The owner could not supply configuration for this environment attachment.
     Failed(String),
+    /// An implicit executor did not complete startup discovery and is not admitted on this thread.
+    StartupUnavailable,
+}
+
+impl EnvironmentConfigState {
+    pub fn failure_reason(&self) -> Option<&str> {
+        match self {
+            Self::Failed(error) => Some(error),
+            Self::StartupUnavailable => Some(
+                "Executor did not complete startup discovery. Start a new thread when it is responsive.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// Full Access requires no approvals and unrestricted permissions everywhere selected.
@@ -261,7 +285,9 @@ pub fn has_full_access<'a>(
                         PermissionProfile::Disabled
                     )
                 }
-                EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => false,
+                EnvironmentConfigState::Pending
+                | EnvironmentConfigState::Failed(_)
+                | EnvironmentConfigState::StartupUnavailable => false,
             })
         }
 }

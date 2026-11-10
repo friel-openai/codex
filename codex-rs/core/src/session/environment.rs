@@ -60,7 +60,8 @@ pub(super) fn validate_environment_configs(
         match &selection.config {
             EnvironmentConfigState::FromThread
             | EnvironmentConfigState::Pending
-            | EnvironmentConfigState::Failed(_) => {}
+            | EnvironmentConfigState::Failed(_)
+            | EnvironmentConfigState::StartupUnavailable => {}
             EnvironmentConfigState::Ready(config) => {
                 validate_environment_config(selection, config, features).map_err(|error| {
                     ConstraintError::InvalidValue {
