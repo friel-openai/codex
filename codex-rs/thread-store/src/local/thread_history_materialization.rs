@@ -1,5 +1,6 @@
 //! Reads durable history into bounded batches ending at complete records, each with a checkpoint.
 
+use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
@@ -14,10 +15,6 @@ use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeekExt;
-use tokio::io::BufReader as AsyncBufReader;
 use tracing::warn;
 
 use super::LocalThreadStore;
@@ -85,6 +82,22 @@ async fn materialize_to_sqlite_with_state_db(
         Some(base) => base.end_ordinal_exclusive,
         None => first_rollout_ordinal(rollout_path).await?.unwrap_or(0),
     };
+    if projection_state.is_none()
+        && (session_meta.history_base.is_some()
+            || super::rollout_lineage::leading_same_thread_reference_ordinal(
+                rollout_path,
+                session_meta.id,
+            )
+            .await?
+            .is_some())
+    {
+        super::thread_history::begin_incomplete_paginated_projection(
+            store,
+            thread_id,
+            initial_ordinal,
+        )
+        .await?;
+    }
     let subagent_history_start_ordinal = session_meta.subagent_history_start_ordinal;
     let expected_ordinal = projection_state
         .as_ref()
@@ -108,7 +121,14 @@ pub(super) async fn materialize_legacy_to_sqlite(
     rollout_path: &Path,
     builder: &mut ThreadHistoryBuilder,
 ) -> ThreadStoreResult<()> {
-    materialize_legacy_to_sqlite_backfill(store, thread_id, rollout_path, builder, true).await
+    materialize_legacy_to_sqlite_backfill(
+        store,
+        thread_id,
+        rollout_path,
+        builder,
+        /*complete*/ true,
+    )
+    .await
 }
 
 pub(super) async fn materialize_legacy_to_sqlite_backfill(
@@ -150,51 +170,25 @@ async fn materialize_legacy_to_sqlite_inner(
         .as_ref()
         .map_or(0, |state| state.next_ordinal);
     let initial_ordinal = next_rollout_ordinal;
-    let end_offset = match tokio::fs::metadata(rollout_path).await {
-        Ok(metadata) => metadata.len(),
+    let mut reader = match open_legacy_projection_reader(rollout_path, batch_start_offset).await {
+        Ok(Some(reader)) => reader,
+        Ok(None) => return Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && batch_start_offset == 0 => {
             return Ok(());
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
-    let byte_count =
-        end_offset
-            .checked_sub(batch_start_offset)
-            .ok_or_else(|| ThreadStoreError::Internal {
-                message: "durable rollout shrank before legacy projection".to_string(),
-            })?;
-    if byte_count == 0 {
-        return Ok(());
-    }
-
-    let mut file = tokio::fs::File::open(rollout_path)
-        .await
-        .map_err(thread_store_io_error)?;
-    file.seek(SeekFrom::Start(batch_start_offset))
-        .await
-        .map_err(thread_store_io_error)?;
-    let mut reader = AsyncBufReader::new(file.take(byte_count));
-    let mut line_bytes = Vec::new();
     let mut next_offset = batch_start_offset;
     let mut projections = Vec::with_capacity(MAX_PROJECTION_BATCH_RECORDS);
 
-    loop {
-        line_bytes.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut line_bytes)
-            .await
-            .map_err(thread_store_io_error)?;
-        if bytes_read == 0 || !line_bytes.ends_with(b"\n") {
-            break;
-        }
-
+    while let Some(line_bytes) = reader.next_line().await.map_err(thread_store_io_error)? {
         let start_byte_offset = next_offset;
         next_offset = next_offset
-            .checked_add(
-                u64::try_from(bytes_read).map_err(|_| ThreadStoreError::Internal {
+            .checked_add(u64::try_from(line_bytes.len()).map_err(|_| {
+                ThreadStoreError::Internal {
                     message: "legacy rollout line exceeds addressable range".to_string(),
-                })?,
-            )
+                }
+            })?)
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "legacy rollout byte offset overflow".to_string(),
             })?;
@@ -260,7 +254,7 @@ async fn materialize_legacy_to_sqlite_inner(
                 next_offset,
                 initial_ordinal,
                 batch,
-                false,
+                /*complete*/ false,
             )
             .await?;
             batch_start_offset = next_offset;
@@ -390,8 +384,13 @@ fn read_projection_batches(
             }
         };
         let raw_ordinal = value.get("ordinal").and_then(serde_json::Value::as_u64);
-        let line = match codex_rollout::decode_rollout_line(value) {
-            Ok(line) => line,
+        let line = match codex_rollout::RolloutRecorder::parse_rollout_line_value(value) {
+            Ok(Some(line)) => line,
+            Ok(None) => {
+                next_offset = line_end_offset;
+                line_start_offset = line_end_offset;
+                continue;
+            }
             Err(err) => {
                 warn!(
                     thread_id = %thread_id,
@@ -544,6 +543,7 @@ fn read_projection_batches(
     Ok(())
 }
 
+/// Rejected records and ordinal gaps observed while projecting persisted history.
 #[derive(Clone, Copy)]
 enum ProjectionAnomaly {
     MalformedJson,
@@ -594,6 +594,107 @@ fn thread_history_error(err: impl std::fmt::Display) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: format!("failed to project thread history: {err}"),
     }
+}
+
+struct LegacyProjectionReader {
+    batches: tokio::sync::mpsc::Receiver<Vec<Vec<u8>>>,
+    pending_lines: std::vec::IntoIter<Vec<u8>>,
+    worker: Option<tokio::task::JoinHandle<io::Result<()>>>,
+    _keep_running: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl LegacyProjectionReader {
+    async fn next_line(&mut self) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            if let Some(line) = self.pending_lines.next() {
+                return Ok(Some(line));
+            }
+            match self.batches.recv().await {
+                Some(lines) => self.pending_lines = lines.into_iter(),
+                None => {
+                    // A closed channel is not proof of a complete read: join before allowing
+                    // the consumer to publish projection-complete metadata.
+                    if let Some(worker) = self.worker.take() {
+                        worker.await.map_err(io::Error::other)??;
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+async fn open_legacy_projection_reader(
+    path: &Path,
+    start_offset: u64,
+) -> io::Result<Option<LegacyProjectionReader>> {
+    let path = path.to_path_buf();
+    let (sender, batches) = tokio::sync::mpsc::channel(2);
+    let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
+    let (ready, opened) = tokio::sync::oneshot::channel();
+    let worker = tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let is_cancelled = || stop.is_closed();
+        let mut file = codex_rollout::open_rollout_seekable_reader(&path, &is_cancelled)?;
+        let end_offset = file.seek(SeekFrom::End(0))?;
+        let byte_count = end_offset
+            .checked_sub(start_offset)
+            .ok_or_else(|| io::Error::other("durable rollout shrank before legacy projection"))?;
+        file.seek(SeekFrom::Start(start_offset))?;
+        ready
+            .send(byte_count)
+            .map_err(|_| io::Error::other("legacy projection consumer stopped"))?;
+        let mut reader = BufReader::new(file.take(byte_count));
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0_u64;
+        loop {
+            if is_cancelled() {
+                return Err(io::Error::other("rollout read cancelled"));
+            }
+            if batch_bytes >= BATCH_SOURCE_BYTES || batch.len() >= BATCH_STEPS {
+                sender
+                    .blocking_send(std::mem::take(&mut batch))
+                    .map_err(|_| io::Error::other("legacy projection consumer stopped"))?;
+                batch_bytes = 0;
+            }
+            let mut line_bytes = Vec::new();
+            if reader.read_until(b'\n', &mut line_bytes)? == 0 || !line_bytes.ends_with(b"\n") {
+                break;
+            }
+            batch_bytes = batch_bytes.saturating_add(line_bytes.len() as u64);
+            batch.push(line_bytes);
+        }
+        if reader.get_ref().limit() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "durable rollout shrank during legacy projection",
+            ));
+        }
+        if !batch.is_empty() {
+            sender
+                .blocking_send(batch)
+                .map_err(|_| io::Error::other("legacy projection consumer stopped"))?;
+        }
+        Ok(())
+    });
+    let byte_count = match opened.await {
+        Ok(byte_count) => byte_count,
+        Err(_) => {
+            worker.await.map_err(io::Error::other)??;
+            return Err(io::Error::other(
+                "legacy projection reader stopped before initialization",
+            ));
+        }
+    };
+    if byte_count == 0 {
+        worker.await.map_err(io::Error::other)??;
+        return Ok(None);
+    }
+    Ok(Some(LegacyProjectionReader {
+        batches,
+        pending_lines: Vec::new().into_iter(),
+        worker: Some(worker),
+        _keep_running: keep_running,
+    }))
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
