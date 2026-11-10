@@ -317,6 +317,7 @@ async fn indexed_same_thread_lineage_from_resolved(
 
     Ok(Some(RolloutLineage {
         root_rollout_id: rollout_id,
+        has_attached_visibility: session_meta.history_base.is_some(),
         segments: vec![RolloutLineageSegment {
             thread_id,
             rollout_id,
