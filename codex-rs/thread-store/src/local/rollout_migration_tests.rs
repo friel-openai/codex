@@ -7645,6 +7645,86 @@ async fn migration_refuses_archived_compressed_malformed_reference_without_mater
 }
 
 #[tokio::test]
+async fn migration_preserves_subagent_activity_occurrence_time() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let mut events = vec![started("turn")];
+    let mut expected = Vec::new();
+    for (id, occurred) in [
+        ("observed", Some(201)),
+        ("negative", Some(-7)),
+        ("zero", Some(0)),
+        ("absent", None),
+    ] {
+        let mut payload = json!({
+            "type": "sub_agent_activity", "event_id": id, "kind": "started",
+            "agent_thread_id": ThreadId::new(), "agent_path": format!("/root/{id}"),
+        });
+        if let Some(time) = occurred {
+            payload["occurred_at_ms"] = json!(time);
+        }
+        let mut event = json!({"type": "event_msg", "payload": payload});
+        events.push(serde_json::from_value(event.clone()).expect("decode activity"));
+        if occurred.is_none() {
+            event["payload"]["occurred_at_ms"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<RolloutItem>(event).is_err());
+        }
+        expected.push((id.to_string(), None, occurred.filter(|time| *time != 0)));
+    }
+    events.push(exec_completion("turn", "untimed", "output"));
+    expected.push(("untimed".to_string(), None, None));
+    let legacy = build_turns_from_rollout_items(&events);
+    let legacy_times: Vec<_> = legacy
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .map(|item| {
+            (
+                item.id().to_string(),
+                item.started_at_ms,
+                item.completed_at_ms,
+            )
+        })
+        .collect();
+    assert_eq!(legacy_times, expected);
+
+    let mut modern = item_completed("turn", "modern");
+    let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut modern else {
+        panic!("expected an explicit item completion");
+    };
+    event.started_at_ms = Some(100);
+    event.completed_at_ms = 200;
+    events.extend([modern, completed("turn")]);
+    expected.push(("modern".to_string(), Some(100), Some(200)));
+
+    write_rollout(home.path(), thread_id, SessionSource::Cli, events);
+    let store = indexed_store(home.path()).await;
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("apply migration");
+    let page = store
+        .list_items(ListItemsParams {
+            item_ids: None,
+            thread_id,
+            turn_id: Some("turn".to_string()),
+            include_archived: false,
+            position: None,
+            page_size: 10,
+            sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
+        })
+        .await
+        .expect("read materialized items");
+    let converted: Vec<_> = page
+        .items
+        .into_iter()
+        .map(|item| (item.item_id, item.started_at_ms, item.completed_at_ms))
+        .collect();
+    assert_eq!(converted, expected);
+}
+
+#[tokio::test]
 async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
