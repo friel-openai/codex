@@ -8,18 +8,31 @@ use app_test_support::PathBufExt;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
 use codex_shell_command::shell_detect::ShellType;
 use codex_shell_command::shell_detect::detect_shell_type;
+use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
+use futures::SinkExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::Message;
+
+use super::exec_server_test_support::accept_exec_server_environment;
+use super::exec_server_test_support::read_exec_server_json;
 
 const AGENTS_INSTRUCTIONS: &str = "selected environment workspace instructions";
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -145,6 +158,192 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
     assert_eq!(instructions, &expected_instructions);
 
     Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls()
+-> Result<()> {
+    const THREAD_START_TIMEOUT: Duration = Duration::from_secs(20);
+    const LOCAL_INSTRUCTIONS: &str = "local workspace instructions";
+
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    std::fs::write(workspace.join("AGENTS.md"), LOCAL_INSTRUCTIONS)?;
+    let workspace_uri = PathUri::from_abs_path(&workspace);
+    let local_source = workspace_uri.join("AGENTS.md")?;
+    let healthy_source = workspace_uri.join("AGENTS.override.md")?;
+
+    let healthy = TcpListener::bind("127.0.0.1:0").await?;
+    let stalled = TcpListener::bind("127.0.0.1:0").await?;
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "[[environments]]\nid = \"healthy\"\nurl = \"ws://{}\"\n\n\
+             [[environments]]\nid = \"stalled\"\nurl = \"ws://{}\"\n",
+            healthy.local_addr()?,
+            stalled.local_addr()?,
+        ),
+    )?;
+    MockResponsesConfig::new(&server.uri())
+        .with_sandbox_mode("danger-full-access")
+        .with_provider_config("supports_websockets = false")
+        .with_extra_config(&format!(
+            "[mcp_servers.stalled_process]\ncommand = \"must-not-start\"\n\
+             cwd = {}\nenvironment_id = \"stalled\"\nrequired = true\n",
+            json!(workspace.to_string_lossy()),
+        ))
+        .write(codex_home.path())?;
+
+    let (stop_healthy, healthy_stop) = oneshot::channel();
+    let (stop_stalled, stalled_stop) = oneshot::channel();
+    let healthy_server = tokio::spawn(serve_instruction_discovery_executor(
+        healthy,
+        Some(healthy_source.clone()),
+        healthy_stop,
+    ));
+    let stalled_server = tokio::spawn(serve_instruction_discovery_executor(
+        stalled,
+        None,
+        stalled_stop,
+    ));
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let start = ThreadStartParams {
+        cwd: Some(workspace.to_string_lossy().into_owned()),
+        ephemeral: Some(true),
+        ..Default::default()
+    };
+
+    let request_id = app_server
+        .send_raw_request(
+            "thread/start",
+            Some(json!({"cwd": workspace, "ephemeral": true})),
+        )
+        .await?;
+    let response: ThreadStartResponse =
+        timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
+    assert_eq!(
+        response.instruction_sources,
+        vec![local_source.into(), healthy_source.into()],
+    );
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.start_turn_and_wait_for_completion(TurnStartParams {
+            cwd: Some(workspace.to_path_buf()),
+            ..text_turn_params(response.thread.id, "inspect workspace instructions")
+        }),
+    )
+    .await??;
+    let input = response_mock.single_request().message_input_texts("user");
+    for expected in [LOCAL_INSTRUCTIONS, AGENTS_INSTRUCTIONS] {
+        assert!(
+            input.iter().any(|text| text.contains(expected)),
+            "{input:?}"
+        );
+    }
+
+    let request_id = app_server
+        .send_thread_start_request(ThreadStartParams {
+            environments: Some(vec![TurnEnvironmentParams {
+                environment_id: "stalled".to_string(),
+                cwd: LegacyAppPathString::from_path(workspace.as_path()),
+                runtime_workspace_roots: None,
+            }]),
+            ..start
+        })
+        .await?;
+    let error = timeout(
+        THREAD_START_TIMEOUT,
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert!(
+        error.error.message.contains(
+            "Environment `stalled` did not complete executor readiness and AGENTS.md discovery."
+        ),
+        "{error:?}",
+    );
+
+    let _ = stop_healthy.send(());
+    let _ = stop_stalled.send(());
+    timeout(DEFAULT_READ_TIMEOUT, healthy_server).await???;
+    let stalled_metadata_requests = timeout(DEFAULT_READ_TIMEOUT, stalled_server).await???;
+    assert!(stalled_metadata_requests > 0);
+    Ok(())
+}
+
+async fn serve_instruction_discovery_executor(
+    listener: TcpListener,
+    instruction_source: Option<PathUri>,
+    mut stop: oneshot::Receiver<()>,
+) -> Result<usize> {
+    let environment_info = json!({"shell": {"name": "bash", "path": "/bin/bash"}});
+    let mut websocket = accept_exec_server_environment(listener, environment_info.clone()).await?;
+    let instruction_path = serde_json::to_value(&instruction_source)?;
+    let mut stalled_metadata_requests = 0;
+    loop {
+        let request = tokio::select! {
+            biased;
+            request = read_exec_server_json(&mut websocket) => request?,
+            _ = &mut stop => return Ok(stalled_metadata_requests),
+        };
+        let id = &request["id"];
+        let is_instruction_path = request["params"]["path"] == instruction_path;
+        let result = match request["method"].as_str() {
+            Some("environment/info") => environment_info.clone(),
+            Some("fs/getMetadata") if instruction_source.is_none() => {
+                stalled_metadata_requests += 1;
+                continue;
+            }
+            Some("fs/getMetadata") => json!({
+                "isDirectory": false,
+                "isFile": is_instruction_path,
+                "isSymlink": false,
+                "size": if is_instruction_path { AGENTS_INSTRUCTIONS.len() } else { 0 },
+                "createdAtMs": 0,
+                "modifiedAtMs": 0,
+            }),
+            Some("fs/readFile") if is_instruction_path => {
+                json!({"dataBase64": BASE64_STANDARD.encode(AGENTS_INSTRUCTIONS)})
+            }
+            Some("environmentConfig/read") if instruction_source.is_none() => {
+                anyhow::bail!("unexpected MCP discovery on the stalled executor: {request}")
+            }
+            Some("environmentConfig/read") => json!({
+                "codexHomeDir": "file:///codex-home",
+                "config": {"layers": [], "cloudInsertionIndex": 0},
+                "requirements": {"layers": [], "cloudInsertionIndex": 0},
+            }),
+            Some("process/start") => anyhow::bail!("unexpected process/start: {request}"),
+            _ => {
+                let error = json!({"code": -32601, "message": "not supported by test executor"});
+                let response = json!({"id": id, "error": error});
+                websocket
+                    .send(Message::Text(response.to_string().into()))
+                    .await?;
+                continue;
+            }
+        };
+        let response = json!({"id": id, "result": result});
+        websocket
+            .send(Message::Text(response.to_string().into()))
+            .await?;
+    }
 }
 
 #[tokio::test]
