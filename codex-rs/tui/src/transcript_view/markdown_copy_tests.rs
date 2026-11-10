@@ -328,7 +328,14 @@ fn reply_answer_distinguishes_whitespace_from_nonprinting_markdown() {
     ] {
         let rows: Vec<_> = reply_rows("Why?", answer, /*width*/ 60)
             .into_iter()
-            .map(|row| row.line.to_string())
+            .map(|row| {
+                let alignment = row
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.user_message.as_ref())
+                    .map_or(0, |layout| layout.alignment_prefix_bytes);
+                row.line.to_string()[alignment..].trim_end().to_string()
+            })
             .collect();
         assert_eq!(rows, expected);
     }
@@ -343,10 +350,10 @@ fn reply_caption_clips_on_overflow_and_copies_with_its_markdown_answer() {
             width,
         );
         let last = &rows[2]; // The cell starts with one padding row and two caption rows.
-        assert_eq!(last.line.to_string().ends_with('…'), clipped);
+        assert_eq!(last.line.to_string().trim_end().ends_with('…'), clipped);
         assert_eq!(
             last.hyperlinks.last().unwrap().columns.end,
-            last.width() - usize::from(clipped)
+            crate::width::display_width(last.line.to_string().trim_end()) - usize::from(clipped)
         );
         let tail = rows
             .iter()
@@ -378,7 +385,7 @@ fn full_reply_caption_preserves_links_and_partial_selections() {
             layout
                 .text()
                 .trim_start()
-                .starts_with(first.trim_start_matches("↪ ").trim_end()),
+                .starts_with(first.trim_start().trim_start_matches("↪ ").trim_end()),
             "{}",
             layout.text()
         );
