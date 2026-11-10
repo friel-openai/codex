@@ -26,9 +26,14 @@ use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -41,8 +46,130 @@ type PendingInterruptQueue = Vec<ConnectionRequestId>;
 // listener attachment only after that unload finishes cleanup.
 pub(crate) type PendingThreadUnloads = Arc<Mutex<HashMap<ThreadId, watch::Sender<()>>>>;
 
+/// Measures resume preparation without retaining request or thread contents.
+#[derive(Clone)]
+pub(crate) struct ThreadResumeTimings {
+    started: Instant,
+    span: tracing::Span,
+    pub(crate) permit: Duration,
+    pub(crate) permit_preparation: Duration,
+    pub(crate) lookup: Duration,
+    pub(crate) config: Duration,
+    pub(crate) persist: Duration,
+    pub(crate) history: Duration,
+    pub(crate) page: Duration,
+    pub(crate) listener_setup: Duration,
+    pub(crate) cold_startup: Duration,
+    pub(crate) response_send: Duration,
+    queued_at: Option<Instant>,
+    listener_started: Option<Instant>,
+    listener_queue: Duration,
+    listener_precompose: Duration,
+    pub(crate) first_probe_completed: bool,
+    pub(crate) first_probe_loaded: bool,
+    pub(crate) history_mode_known: bool,
+    pub(crate) paginated: bool,
+    pub(crate) include_turns: bool,
+    pub(crate) initial_page: bool,
+    pub(crate) delegated: bool,
+    reported: Arc<AtomicBool>,
+}
+
+impl ThreadResumeTimings {
+    pub(crate) fn new(include_turns: bool, initial_page: bool) -> Self {
+        Self {
+            started: Instant::now(),
+            span: tracing::Span::current(),
+            permit: Duration::ZERO,
+            permit_preparation: Duration::ZERO,
+            lookup: Duration::ZERO,
+            config: Duration::ZERO,
+            persist: Duration::ZERO,
+            history: Duration::ZERO,
+            page: Duration::ZERO,
+            listener_setup: Duration::ZERO,
+            cold_startup: Duration::ZERO,
+            response_send: Duration::ZERO,
+            queued_at: None,
+            listener_started: None,
+            listener_queue: Duration::ZERO,
+            listener_precompose: Duration::ZERO,
+            first_probe_completed: false,
+            first_probe_loaded: false,
+            history_mode_known: false,
+            paginated: false,
+            include_turns,
+            initial_page,
+            delegated: false,
+            reported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) async fn measure<T>(slot: &mut Duration, future: impl Future<Output = T>) -> T {
+        let started = Instant::now();
+        let result = future.await;
+        *slot = slot.saturating_add(started.elapsed());
+        result
+    }
+
+    pub(crate) fn queued(&mut self) {
+        self.queued_at = Some(Instant::now());
+    }
+
+    pub(crate) fn listener_started(&mut self) {
+        let now = Instant::now();
+        self.listener_queue = self.queued_at.map_or(Duration::ZERO, |queued| now - queued);
+        self.listener_started = Some(now);
+    }
+
+    pub(crate) fn listener_composing(&mut self) {
+        self.listener_precompose = self
+            .listener_started
+            .map_or(Duration::ZERO, |start| start.elapsed());
+    }
+
+    /// Emit at most one event, and only for resumes slow enough to investigate.
+    pub(crate) fn report(&mut self, response_prepared: bool) {
+        if self.reported.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let elapsed = self.started.elapsed();
+        if elapsed < Duration::from_secs(2) {
+            return;
+        }
+        let ms = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        tracing::warn!(
+            parent: &self.span,
+            event.name = "codex.app_server.thread_resume_slow",
+            elapsed_ms = ms(elapsed),
+            permit_wait_ms = ms(self.permit),
+            permit_preparation_ms = ms(self.permit_preparation),
+            lookup_ms = ms(self.lookup),
+            config_ms = ms(self.config),
+            persist_ms = ms(self.persist),
+            history_ms = ms(self.history),
+            page_ms = ms(self.page),
+            listener_setup_ms = ms(self.listener_setup),
+            cold_startup_ms = ms(self.cold_startup),
+            response_send_ms = ms(self.response_send),
+            listener_queue_ms = ms(self.listener_queue),
+            listener_precompose_ms = ms(self.listener_precompose),
+            first_probe_completed = self.first_probe_completed,
+            first_probe_loaded = self.first_probe_loaded,
+            history_mode_known = self.history_mode_known,
+            paginated = self.paginated,
+            include_turns = self.include_turns,
+            initial_page = self.initial_page,
+            listener_started = self.listener_started.is_some(),
+            listener_response_prepared = response_prepared,
+            "slow thread resume"
+        );
+    }
+}
+
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
+    pub(crate) timings: ThreadResumeTimings,
     pub(crate) history_items: Vec<RolloutItem>,
     /// Usage attribution already resolved while cold-loading a paginated child.
     pub(crate) cold_resume_token_usage_turn_id: Option<String>,
@@ -331,6 +458,109 @@ mod tests {
     use codex_protocol::config_types::Settings;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn slow_resume_timing_is_thresholded_and_reported_once() {
+        use std::io::Write;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct Writer(Arc<StdMutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Writer {
+            type Writer = Self;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let output = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_writer(Writer(Arc::clone(&output)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("resume_test", rpc.request_id = 17);
+            span.in_scope(|| {
+                let mut fast = ThreadResumeTimings::new(false, false);
+                fast.report(true);
+                let mut slow = ThreadResumeTimings::new(false, true);
+                slow.started -= Duration::from_secs(3);
+                slow.permit = Duration::from_millis(120);
+                slow.first_probe_completed = true;
+                slow.first_probe_loaded = true;
+                slow.history_mode_known = true;
+                slow.paginated = true;
+                slow.listener_started();
+                slow.listener_composing();
+                let mut cloned = slow.clone();
+                slow.report(true);
+                cloned.report(false);
+            });
+        });
+        let output = output.lock().unwrap();
+        let lines = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let fields = event["fields"].as_object().unwrap();
+        let actual = fields
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected: std::collections::BTreeSet<_> = [
+            "event.name",
+            "message",
+            "elapsed_ms",
+            "permit_wait_ms",
+            "permit_preparation_ms",
+            "lookup_ms",
+            "config_ms",
+            "persist_ms",
+            "history_ms",
+            "page_ms",
+            "listener_setup_ms",
+            "cold_startup_ms",
+            "response_send_ms",
+            "listener_queue_ms",
+            "listener_precompose_ms",
+            "first_probe_completed",
+            "first_probe_loaded",
+            "history_mode_known",
+            "paginated",
+            "include_turns",
+            "initial_page",
+            "listener_started",
+            "listener_response_prepared",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            event["fields"]["event.name"],
+            "codex.app_server.thread_resume_slow"
+        );
+        assert_eq!(event["fields"]["permit_wait_ms"], 120);
+        assert_eq!(event["fields"]["first_probe_loaded"], true);
+        assert_eq!(event["fields"]["paginated"], true);
+        assert_eq!(event["fields"]["include_turns"], false);
+        assert_eq!(event["fields"]["initial_page"], true);
+        assert_eq!(event["fields"]["listener_response_prepared"], true);
+        assert_eq!(event["span"]["rpc.request_id"], 17);
+    }
 
     #[test]
     fn note_thread_settings_reports_only_effective_changes() {
