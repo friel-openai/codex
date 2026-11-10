@@ -166,6 +166,7 @@ impl PreparedTurnInputSettings {
         let options = NewTurnContextOptions {
             final_output_json_schema,
             cyber_access_program,
+            allow_initial_default_recovery: matches!(kind, TurnStartKind::User),
         };
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(

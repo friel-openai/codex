@@ -61,6 +61,14 @@ pub(crate) enum RpcCallError {
     PendingRequestLimitExceeded { limit: usize },
 }
 
+/// An optional authorization check for dispatch, not for waiting for an admitted response.
+pub(crate) struct RpcDispatchGuard<'a> {
+    pub(crate) revoked: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    pub(crate) can_dispatch: &'a (dyn Fn() -> bool + Sync),
+    // Process-start cleanup is only needed after the start was admitted.
+    pub(crate) dispatched: Option<&'a AtomicBool>,
+}
+
 #[path = "rpc_pending_request.rs"]
 mod pending_request;
 use pending_request::PendingRequestGuard;
@@ -555,6 +563,7 @@ impl RpcClient {
         &self,
         missing: Vec<codex_utils_path_uri::PathUri>,
         present: Option<codex_utils_path_uri::PathUri>,
+        dispatch_guard: Option<RpcDispatchGuard<'_>>,
     ) -> Result<Option<oneshot::Receiver<()>>, RpcCallError> {
         let (tx, rx) = oneshot::channel();
         let watch_id = {
@@ -566,16 +575,16 @@ impl RpcClient {
             watch.invalidated = Some(tx);
             watch.id
         };
-        let response: crate::protocol::FsWatchMissingResponse = self
-            .call(
-                crate::protocol::FS_WATCH_MISSING_METHOD,
-                &crate::protocol::FsWatchMissingParams {
-                    watch_id,
-                    missing,
-                    present,
-                },
-            )
-            .await?;
+        let method = crate::protocol::FS_WATCH_MISSING_METHOD;
+        let params = crate::protocol::FsWatchMissingParams {
+            watch_id,
+            missing,
+            present,
+        };
+        let response: crate::protocol::FsWatchMissingResponse = match dispatch_guard {
+            Some(guard) => self.call_guarded(method, &params, None, guard).await?,
+            None => self.call(method, &params).await?,
+        };
         Ok(response.watching.then_some(rx))
     }
 
@@ -641,7 +650,8 @@ impl RpcClient {
     {
         record_client_request(self.metrics.as_ref(), method);
         let _call_slot = self.acquire_regular_call_slot()?;
-        self.call_inner(method, params, RpcCallTimeout::None).await
+        self.call_inner(method, params, RpcCallTimeout::None, None)
+            .await
     }
 
     pub(crate) async fn call_with_timeout<P, T>(
@@ -656,8 +666,36 @@ impl RpcClient {
     {
         record_client_request(self.metrics.as_ref(), method);
         let _call_slot = self.acquire_regular_call_slot()?;
-        self.call_inner(method, params, RpcCallTimeout::After(call_timeout))
+        self.call_inner(method, params, RpcCallTimeout::After(call_timeout), None)
             .await
+    }
+
+    #[tracing::instrument(
+        name = "codex.exec_server.request",
+        level = "info",
+        skip_all,
+        fields(otel.kind = "client", otel.name = method, method)
+    )]
+    pub(crate) async fn call_guarded<P, T>(
+        &self,
+        method: &str,
+        params: &P,
+        call_timeout: Option<Duration>,
+        dispatch_guard: RpcDispatchGuard<'_>,
+    ) -> Result<T, RpcCallError>
+    where
+        P: Serialize,
+        T: DeserializeOwned,
+    {
+        record_client_request(self.metrics.as_ref(), method);
+        let _call_slot = self.acquire_regular_call_slot()?;
+        self.call_inner(
+            method,
+            params,
+            call_timeout.map_or(RpcCallTimeout::None, RpcCallTimeout::After),
+            Some(dispatch_guard),
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -690,7 +728,8 @@ impl RpcClient {
                 }
             },
         };
-        self.call_inner(method, params, RpcCallTimeout::None).await
+        self.call_inner(method, params, RpcCallTimeout::None, None)
+            .await
     }
 
     async fn call_inner<P, T>(
@@ -698,6 +737,7 @@ impl RpcClient {
         method: &str,
         params: &P,
         call_timeout: RpcCallTimeout,
+        dispatch_guard: Option<RpcDispatchGuard<'_>>,
     ) -> Result<T, RpcCallError>
     where
         P: Serialize,
@@ -725,7 +765,14 @@ impl RpcClient {
         };
         let params = serde_json::to_value(params).map_err(RpcCallError::Json)?;
         let response = self
-            .send_request_and_wait(method, request_id, params, response_rx, call_timeout)
+            .send_request_and_wait(
+                method,
+                request_id,
+                params,
+                response_rx,
+                call_timeout,
+                dispatch_guard,
+            )
             .await?;
         serde_json::from_value(response).map_err(RpcCallError::Json)
     }
@@ -740,19 +787,31 @@ impl RpcClient {
         params: Value,
         response_rx: oneshot::Receiver<RpcCompletion>,
         call_timeout: RpcCallTimeout,
+        dispatch_guard: Option<RpcDispatchGuard<'_>>,
     ) -> Result<Value, RpcCallError> {
         let enqueue_started = Instant::now();
-        if self
-            .write_tx
-            .send(JSONRPCMessage::Request(JSONRPCRequest {
-                id: request_id.clone(),
-                method: method.to_string(),
-                params: Some(params),
-                trace: codex_otel::current_span_w3c_trace_context(),
-            }))
-            .await
-            .is_err()
-        {
+        let request = JSONRPCMessage::Request(JSONRPCRequest {
+            id: request_id,
+            method: method.to_string(),
+            params: Some(params),
+            trace: codex_otel::current_span_w3c_trace_context(),
+        });
+        if let Some(guard) = dispatch_guard {
+            let permit = tokio::select! {
+                biased;
+                _ = guard.revoked => return Err(RpcCallError::Closed),
+                permit = self.write_tx.reserve() => permit.map_err(|_| RpcCallError::Closed)?,
+            };
+            // Authorize at this recheck, after queue reservation. The send does not
+            // yield, and later revocation does not cancel an already admitted request.
+            if !(guard.can_dispatch)() {
+                return Err(RpcCallError::Closed);
+            }
+            if let Some(dispatched) = guard.dispatched {
+                dispatched.store(true, Ordering::Relaxed);
+            }
+            permit.send(request);
+        } else if self.write_tx.send(request).await.is_err() {
             return Err(RpcCallError::Closed);
         }
         tracing::event!(

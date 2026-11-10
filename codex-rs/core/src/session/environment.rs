@@ -21,6 +21,7 @@ use crate::config::ConstraintError;
 use crate::config::ConstraintResult;
 use crate::config::ManagedFeatures;
 use crate::config::NetworkProxySpec;
+use crate::environment_selection::DefaultSecondaryEnvironment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::session::Session;
 use crate::session::session::SessionConfiguration;
@@ -123,10 +124,11 @@ fn update_local_workspace(
         let mut environments = current.environments.clone();
         environments[0].cwd = requested_local.cwd.clone();
         environments[0].workspace_roots = requested_local.workspace_roots.clone();
-        return Ok(TurnEnvironmentSelections::new(
-            requested.legacy_fallback_cwd.clone(),
+        return Ok(TurnEnvironmentSelections {
+            legacy_fallback_cwd: requested.legacy_fallback_cwd.clone(),
             environments,
-        ));
+            implicit_selection: current.implicit_environment_selection,
+        });
     }
     Err(ConstraintError::InvalidValue {
         field_name: "environments",
@@ -213,6 +215,12 @@ enum ConfigUpdateSource {
 }
 
 impl Session {
+    pub(crate) fn revoke_turn_initial_recovery(&self, turn_context: &TurnContext) {
+        if turn_context.initial_environments.revoke_initial_recovery() {
+            self.mark_mcp_runtime_dirty();
+        }
+    }
+
     pub(super) fn apply_session_settings(
         &self,
         current: &SessionConfiguration,
@@ -220,7 +228,16 @@ impl Session {
     ) -> ConstraintResult<SessionConfiguration> {
         let current_environments = &current.environments;
         let adjusted;
-        let updates = if updates.preserve_secondary_workspaces
+        let retain_initial_rejection = updates.retain_default_secondaries
+            && updates.environments.as_ref().is_some_and(|requested| {
+                requested.environments.first().is_some_and(|primary| {
+                    primary.environment_id == LOCAL_ENVIRONMENT_ID
+                        && primary.config == EnvironmentConfigState::FromThread
+                }) && requested.environments.iter().skip(1).any(|environment| {
+                    environment.config == EnvironmentConfigState::StartupUnavailable
+                })
+            });
+        let updates = if (updates.preserve_secondary_workspaces || retain_initial_rejection)
             && let Some(environments) = &updates.environments
         {
             // Recheck under the settings lock so a stale request cannot restore a removed binding.
@@ -248,10 +265,12 @@ impl Session {
     pub(super) async fn activate_turn_environments(
         &self,
         configuration: &SessionConfiguration,
+        allow_initial_default_recovery: bool,
     ) -> TurnEnvironmentSnapshot {
-        let snapshot = {
+        let (snapshot, admissions) = {
             let active = self.active_turn.lock().await;
             let state = self.state.lock().await;
+            let mut admissions = None;
             // Another task may have started while this one was preparing its settings.
             if active.as_ref().is_none_or(|turn| turn.task.is_none()) {
                 let mut environments = configuration.environments.clone();
@@ -265,16 +284,51 @@ impl Session {
                     }
                 }
                 // Apply the saved defaults even if this turn selects the same environments.
+                let active_defaults = configuration.inferred_environment_config();
+                let saved = &state.session_configuration;
+                let eligible_initial_recovery = allow_initial_default_recovery
+                    && saved.inferred_environment_config() == active_defaults;
                 self.services
                     .turn_environments
-                    .set_active_thread_defaults(configuration.inferred_environment_config());
+                    .set_active_thread_defaults(active_defaults);
                 self.services
                     .turn_environments
                     .activate_selections(&environments);
+                let defaults = configuration.default_secondary_environments.iter().filter(|default| {
+                    match default {
+                        DefaultSecondaryEnvironment::Ready(_) => true,
+                        DefaultSecondaryEnvironment::InitiallyUnavailable(original) => {
+                            eligible_initial_recovery
+                                && saved.default_secondary_environments.iter().any(|current| {
+                                    matches!(current, DefaultSecondaryEnvironment::InitiallyUnavailable(current)
+                                        if Arc::ptr_eq(original, current))
+                                })
+                        }
+                    }
+                }).cloned().collect::<Vec<_>>();
+                admissions = self
+                    .services
+                    .turn_environments
+                    .begin_default_secondary_admissions(&environments, &defaults);
             }
-            self.services.turn_environments.snapshot()
+            (self.services.turn_environments.snapshot_now(), admissions)
         };
-        snapshot.await
+        if let Some(admissions) = admissions {
+            self.mark_mcp_runtime_dirty();
+            let config = self.build_effective_session_config(configuration);
+            let snapshot = self
+                .services
+                .turn_environments
+                .verify_default_secondaries(&config, admissions, snapshot)
+                .await;
+            self.mark_mcp_runtime_dirty();
+            snapshot
+        } else {
+            self.services
+                .turn_environments
+                .resolve_snapshot(snapshot)
+                .await
+        }
     }
 
     /// Applies an explicit workspace tool transition to the running task, unlike ordinary
@@ -493,12 +547,31 @@ impl Session {
             }
         }
 
+        state.session_configuration.environments = future;
+        let previous_defaults = state
+            .session_configuration
+            .default_secondary_environments
+            .clone();
+        // An accepted owner decision revokes recovery even when it updated only the active row.
+        state
+            .session_configuration
+            .default_secondary_environments
+            .retain(|default| {
+                !matches!(default, DefaultSecondaryEnvironment::InitiallyUnavailable(original)
+                if original.rejection.has_same_workspace(selection))
+            });
+        state
+            .session_configuration
+            .retain_default_secondary_environments();
+        SessionConfiguration::revoke_removed_initial_recoveries(
+            &previous_defaults,
+            &state.session_configuration.default_secondary_environments,
+        );
         if update_future {
             self.services
                 .turn_environments
-                .update_configured_selections(&future);
+                .update_configured_selections(&state.session_configuration.environments);
         }
-        state.session_configuration.environments = future;
         if update_current {
             // Invalidate MCP before installed configuration can wake a waiting turn.
             self.mark_mcp_runtime_dirty();

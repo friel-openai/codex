@@ -1,3 +1,4 @@
+use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::turn_context::TurnEnvironment;
@@ -13,6 +14,7 @@ use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use serde::Deserialize;
@@ -47,19 +49,39 @@ pub(crate) fn terminal_session_for_input(
             &invocation.step_context.environments,
             /*environment_id*/ None,
         )?;
-        invocation
+        let terminal = invocation
             .session
             .services
             .unified_exec_manager
             .resolve_terminal(args.session_id)
             .await
-            .map(ToolEnvironments::Terminal)
             .map_err(|err| {
                 FunctionCallError::RespondToModel(format!(
                     "{} failed: {err}",
                     invocation.tool_name.name
                 ))
+            })?;
+        // A saved terminal may outlive a selection, but cannot override this turn's quarantine.
+        if invocation
+            .step_context
+            .environments
+            .environments
+            .iter()
+            .any(|environment| {
+                matches!(
+                    environment,
+                    TurnEnvironmentState::Failed { selection, .. }
+                        if selection.environment_id == terminal.environment_id
+                            && selection.config == EnvironmentConfigState::StartupUnavailable
+                )
             })
+        {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "The terminal's environment `{}` is unavailable for this turn.",
+                terminal.environment_id
+            )));
+        }
+        Ok(ToolEnvironments::Terminal(terminal))
     })
 }
 

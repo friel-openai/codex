@@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
             }
         }
 
-        let implicit_environment_selection = environment_requests.is_none();
-        let environment_requests = environment_requests.unwrap_or_else(|| {
-            listener_task_context
-                .thread_manager
-                .default_environment_requests(&config.cwd, &config.workspace_roots)
-        });
         let dynamic_tools = dynamic_tools.unwrap_or_default();
         if !dynamic_tools.is_empty() {
             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
@@ -1941,7 +1935,10 @@ impl ThreadRequestProcessor {
         }
         let mut start_options = StartThreadOptions::new(config);
         start_options.thread_extension_init = thread_extension_init;
-        start_options.bound_startup_environment_discovery(implicit_environment_selection);
+        start_options.bound_startup_environment_discovery(
+            &listener_task_context.thread_manager,
+            environment_requests,
+        );
         let reserved_thread_id = if start_options.config.ephemeral {
             None
         } else {
@@ -1982,7 +1979,6 @@ impl ThreadRequestProcessor {
                 dynamic_tools,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
-                environments: Some(environment_requests),
                 client_mcp_extensions,
                 ..start_options
             })
@@ -6081,6 +6077,9 @@ impl ThreadRequestProcessor {
                 override_local_cwd,
                 override_local_roots,
                 optional_environment_ids,
+                matches!(target, ThreadResumeTarget::Client(_))
+                    && params.history.is_none()
+                    && params.path.is_none(),
             )
             .map_err(|err| invalid_request(err.to_string()))?;
         start_options.initial_history = thread_history;

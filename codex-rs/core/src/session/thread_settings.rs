@@ -146,6 +146,9 @@ pub(super) fn prepare_update(
         preserve_secondary_workspaces: environment_requests
             .as_ref()
             .is_some_and(|requests| requests.preserve_secondary_workspaces),
+        retain_default_secondaries: environment_requests
+            .as_ref()
+            .is_some_and(|requests| requests.retain_default_secondaries),
         environments: environment_requests.map(|requests| requests.select(roots)),
         runtime_workspace_roots,
         profile_workspace_roots,

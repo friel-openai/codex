@@ -11,6 +11,7 @@ use crate::agent::api::AgentControl;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConstraintError;
+use crate::environment_selection::DefaultSecondaryEnvironment;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
@@ -24,6 +25,7 @@ use crate::state::ActiveTurn;
 use crate::turn_metadata::ExecutionMetadata;
 use codex_analytics::ThreadProductUpdate;
 use codex_attachment_store::AttachmentStore;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
@@ -143,6 +145,9 @@ pub(crate) struct SessionConfiguration {
     pub(super) implicit_environment_selection: bool,
     /// Saved registry executors allowed to remain unavailable for this loaded session only.
     pub(super) resume_optional_environment_ids: Arc<std::collections::HashSet<String>>,
+    /// Exact remote bindings admitted from omitted app-server startup environments.
+    /// Settings updates and cold resume cannot add entries.
+    pub(super) default_secondary_environments: Vec<DefaultSecondaryEnvironment>,
     /// Explicit startup overrides used when resolving effective model metadata.
     pub(super) model_info_overrides: ModelInfoOverrides,
 
@@ -449,6 +454,40 @@ impl SessionConfiguration {
         }
     }
 
+    pub(super) fn retain_default_secondary_environments(&mut self) {
+        let Some((primary, secondaries)) = self.environments.split_first() else {
+            self.default_secondary_environments.clear();
+            return;
+        };
+        if primary.environment_id != LOCAL_ENVIRONMENT_ID
+            || primary.config != EnvironmentConfigState::FromThread
+        {
+            self.default_secondary_environments.clear();
+            return;
+        }
+        self.default_secondary_environments.retain(|original| {
+            secondaries
+                .iter()
+                .any(|current| original.matches_saved_selection(current))
+        });
+    }
+
+    pub(super) fn revoke_removed_initial_recoveries(
+        previous: &[DefaultSecondaryEnvironment],
+        current: &[DefaultSecondaryEnvironment],
+    ) {
+        for previous in previous {
+            if let DefaultSecondaryEnvironment::InitiallyUnavailable(previous) = previous
+                && !current.iter().any(|current| {
+                    matches!(current, DefaultSecondaryEnvironment::InitiallyUnavailable(current)
+                        if Arc::ptr_eq(previous, current))
+                })
+            {
+                previous.revoked.cancel();
+            }
+        }
+    }
+
     pub(super) fn validate(
         &self,
         environments: &[TurnEnvironmentSelection],
@@ -518,6 +557,11 @@ impl SessionConfiguration {
             next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
             next_configuration.environments = environments.environments.clone();
             next_configuration.implicit_environment_selection = environments.implicit_selection;
+            if updates.preserve_secondary_workspaces || updates.retain_default_secondaries {
+                next_configuration.retain_default_secondary_environments();
+            } else {
+                next_configuration.default_secondary_environments.clear();
+            }
         }
         let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
         if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
@@ -697,6 +741,8 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) environments: Option<TurnEnvironmentSelections>,
     /// Recheck the secondary workspaces at commit and retain their actual bindings.
     pub(crate) preserve_secondary_workspaces: bool,
+    /// Retain only previously admitted bindings that the generated defaults did not change.
+    pub(crate) retain_default_secondaries: bool,
     pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,

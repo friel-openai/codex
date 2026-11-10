@@ -2424,6 +2424,45 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn refresh_hooks_does_not_wait_for_previous_remote_selection() -> anyhow::Result<()> {
+    let session = make_session_with_config(|_| {}).await?;
+    // Keep the listener open without completing the executor handshake.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let environments = &session.services.turn_environments;
+    environments.environment_manager().upsert_environment(
+        "stalled".to_string(),
+        format!("ws://{}", listener.local_addr()?),
+        Some(std::time::Duration::from_secs(30)),
+    )?;
+    let config = session.get_config().await;
+    let local_selection = local(config.cwd.clone());
+    let remote_selection = TurnEnvironmentSelection {
+        environment_id: "stalled".to_string(),
+        ..local_selection.clone()
+    };
+    environments.update_selections(&[local_selection, remote_selection]);
+    assert!(
+        environments
+            .snapshot_now()
+            .starting()
+            .any(|environment| environment.selection.environment_id == "stalled")
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        session.refresh_hooks(config),
+    )
+    .await?;
+    assert!(
+        environments
+            .snapshot_now()
+            .starting()
+            .any(|environment| environment.selection.environment_id == "stalled")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
     let (session, _turn_context) = make_session_and_context().await;
     {
@@ -6572,6 +6611,7 @@ async fn set_rate_limits_retains_previous_credits() {
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -6697,6 +6737,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -8063,6 +8104,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -9714,6 +9756,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -10043,6 +10086,7 @@ async fn make_session_with_config_and_rx(
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -10184,6 +10228,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -12240,6 +12285,7 @@ where
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),

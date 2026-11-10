@@ -186,7 +186,7 @@ impl RemoteFileSystem {
         options: GetMetadataOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<FileMetadata> {
-        if sandbox.is_some() || !options.follow_symlinks {
+        if self.client.is_attachment_bound() || sandbox.is_some() || !options.follow_symlinks {
             return self.get_metadata_uncached(path, options, sandbox).await;
         }
 
