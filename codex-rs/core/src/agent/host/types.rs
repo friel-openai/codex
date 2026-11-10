@@ -3,6 +3,7 @@
 use crate::agent::api::AgentControl;
 use crate::agents_md_manager::SessionInstructions;
 use crate::exec_policy::ExecPolicyManager;
+use crate::inherited_thread_state::InheritedThreadState;
 use codex_execpolicy::Policy;
 use codex_execpolicy::RequirementsExecPolicy;
 use codex_protocol::ThreadId;
@@ -49,6 +50,7 @@ pub struct PreparedChildContext {
 pub(crate) struct PreparedChildInheritance {
     pub(crate) instructions: SessionInstructions,
     pub(crate) exec_policy: Option<Arc<ExecPolicyManager>>,
+    pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) originator: String,
     pub(crate) attachment_source: Option<ThreadId>,
 }
