@@ -346,14 +346,44 @@ index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d199
              plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
              model_reasoning_summary: cfg.model_reasoning_summary,
 diff --git a/codex-rs/core/src/config/runtime_refresh.rs b/codex-rs/core/src/config/runtime_refresh.rs
-index b2bf4243dde72e15d82204ae9ef835a2850d939c..e87732516725b9e7858ddd017383650aedd8666d 100644
+index b2bf4243dde72e15d82204ae9ef835a2850d939c..1fa3206ad32a3f6eaa92f4c7b5ed7b77449aa5a9 100644
 --- a/codex-rs/core/src/config/runtime_refresh.rs
 +++ b/codex-rs/core/src/config/runtime_refresh.rs
-@@ -196,6 +196,7 @@ impl Config {
+@@ -8,6 +8,7 @@ use crate::config::constrain_mcp_servers;
+ use crate::config::resolve_tool_suggest_config_from_layer_stack;
+ use codex_config::McpServerAuth;
+ use codex_config::McpServerConfig;
++use codex_config::config_toml::AutoReviewToml;
+ use codex_features::Feature;
+ use codex_features::FeatureConfigSource;
+ use codex_features::FeatureOverrides;
+@@ -69,8 +70,19 @@ impl Config {
+         }
+         // User refreshes retain the session's managed configuration.
+         layers.ensure_config_server_applied()?;
+-        let cfg: McpRefreshToml = layers
+-            .effective_config()
++        let effective_config = layers.effective_config();
++        let auto_review_use_ultrafast = if matches!(scope, RuntimeConfigRefresh::UserFiles) {
++            let auto_review: Option<AutoReviewToml> = effective_config
++                .get("auto_review")
++                .cloned()
++                .map(toml::Value::try_into)
++                .transpose()
++                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
++            auto_review.is_some_and(|auto_review| auto_review.use_ultrafast)
++        } else {
++            incoming.auto_review_use_ultrafast
++        };
++        let cfg: McpRefreshToml = effective_config
+             .try_into()
+             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+         let mut configured_features = Features::from_sources(
+@@ -196,6 +208,7 @@ impl Config {
          if !matches!(scope, RuntimeConfigRefresh::Mcp) {
              config.tool_suggest = resolve_tool_suggest_config_from_layer_stack(&layers);
              config.custom_models = incoming.custom_models.clone();
-+            config.auto_review_use_ultrafast = incoming.auto_review_use_ultrafast;
++            config.auto_review_use_ultrafast = auto_review_use_ultrafast;
          }
          config.config_layer_stack = layers
              .with_mcp_ema_cancellation(self.config_layer_stack.mcp_ema_cancellation().clone());
@@ -1127,6 +1157,100 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
                  ResolvedModelMessages::bundled()
                      .auto_review()
                      .policy_template,
+diff --git a/codex-rs/core/src/session/config_refresh_tests.rs b/codex-rs/core/src/session/config_refresh_tests.rs
+index b584558364563bdfdbd56f682e3ba9c7c1df5879..ea4b9a890505bbda7edd97aad414446f292a4285 100644
+--- a/codex-rs/core/src/session/config_refresh_tests.rs
++++ b/codex-rs/core/src/session/config_refresh_tests.rs
+@@ -12,6 +12,89 @@ async fn runtime_servers(session: &Session) -> HashMap<String, McpServerConfig>
+     )
+ }
+
++#[tokio::test]
++async fn file_reload_updates_auto_review_ultrafast_for_new_turns() {
++    let (session, _) = make_session_and_context().await;
++    let home = session.codex_home().await;
++    let file = home.join(CONFIG_TOML_FILE);
++    std::fs::create_dir_all(&home).unwrap();
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
++    session.reload_user_config_layer().await;
++    let before = session.new_default_turn().await;
++    assert!(!before.config.auto_review_use_ultrafast);
++
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = true\n").unwrap();
++    session.reload_user_config_layer().await;
++    let enabled = session.new_default_turn().await;
++    assert!(enabled.config.auto_review_use_ultrafast);
++    assert!(!before.config.auto_review_use_ultrafast);
++
++    let last_valid = session.get_config().await;
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = 'invalid'\n").unwrap();
++    session.reload_user_config_layer().await;
++    assert!(Arc::ptr_eq(&last_valid, &session.get_config().await));
++
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
++    session.reload_user_config_layer().await;
++    assert!(
++        !session
++            .new_default_turn()
++            .await
++            .config
++            .auto_review_use_ultrafast
++    );
++    assert!(enabled.config.auto_review_use_ultrafast);
++}
++
++#[tokio::test]
++async fn file_reload_uses_effective_auto_review_ultrafast_from_selected_profile() {
++    let (session, _) = make_session_and_context().await;
++    let home = session.codex_home().await;
++    let file = home.join(CONFIG_TOML_FILE);
++    let profile = home.join("work.config.toml");
++    std::fs::create_dir_all(&home).unwrap();
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = true\n").unwrap();
++    std::fs::write(&profile, "[auto_review]\nuse_ultrafast = false\n").unwrap();
++    let initial = ConfigBuilder::without_managed_config_for_tests()
++        .codex_home(home.to_path_buf())
++        .loader_overrides(LoaderOverrides {
++            user_config_path: Some(profile.clone()),
++            user_config_profile: Some("work".parse().unwrap()),
++            ..LoaderOverrides::without_managed_config_for_tests()
++        })
++        .build()
++        .await
++        .unwrap();
++    assert!(!initial.auto_review_use_ultrafast);
++    session
++        .state
++        .lock()
++        .await
++        .session_configuration
++        .original_config_do_not_use = Arc::new(initial);
++
++    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
++    std::fs::write(&profile, "[auto_review]\nuse_ultrafast = true\n").unwrap();
++    session.reload_user_config_layer().await;
++    assert!(
++        session
++            .new_default_turn()
++            .await
++            .config
++            .auto_review_use_ultrafast
++    );
++
++    std::fs::write(&profile, "").unwrap();
++    session.reload_user_config_layer().await;
++    assert!(
++        !session
++            .new_default_turn()
++            .await
++            .config
++            .auto_review_use_ultrafast
++    );
++}
++
+ #[test_case::test_case(true; "host enabled")]
+ #[test_case::test_case(false; "host disabled")]
+ #[tokio::test]
 diff --git a/codex-rs/core/src/session/model_alias_refresh_tests.rs b/codex-rs/core/src/session/model_alias_refresh_tests.rs
 index 685fbe962079e72337a520f5035c18e6d70874a1..9880fc5dc5db275c03a214344e1cc3dc1b2e3702 100644
 --- a/codex-rs/core/src/session/model_alias_refresh_tests.rs
