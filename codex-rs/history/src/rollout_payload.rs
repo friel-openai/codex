@@ -19,6 +19,7 @@ use crate::RetainedUserMessage;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::protocol::RolloutReferenceItem;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -36,6 +37,10 @@ pub(super) enum RolloutItemWire<'a> {
     },
     DynamicToolsUpdated {
         payload: DynamicToolsUpdatedPayload<'a>,
+    },
+    #[serde(alias = "fork_reference")]
+    RolloutReference {
+        payload: Cow<'a, RolloutReferenceItem>,
     },
     ResponseItem {
         payload: Cow<'a, ResponseItem>,
@@ -91,6 +96,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                     thread_id: *thread_id,
                     tools: Cow::Borrowed(tools),
                 },
+            },
+            RolloutItem::RolloutReference(payload) => Self::RolloutReference {
+                payload: Cow::Borrowed(payload),
             },
             RolloutItem::ResponseItem(envelope) => Self::ResponseItem {
                 payload: Cow::Borrowed(&envelope.item),
@@ -188,6 +196,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                 thread_id: payload.thread_id,
                 tools: payload.tools.into_owned(),
             },
+            RolloutItemWire::RolloutReference { payload } => {
+                Self::RolloutReference(payload.into_owned())
+            }
             RolloutItemWire::ResponseItem { payload, metadata } => {
                 if let (
                     ResponseItem::Message {
