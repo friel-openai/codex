@@ -199,17 +199,31 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
 #[tokio::test]
 async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls()
 -> Result<()> {
+    use codex_app_server_protocol::ThreadReadParams;
+    use codex_app_server_protocol::ThreadReadResponse;
+    use codex_app_server_protocol::TurnStatus;
+
     const THREAD_START_TIMEOUT: Duration = Duration::from_secs(20);
     const LOCAL_INSTRUCTIONS: &str = "local workspace instructions";
+    const PROJECTLESS_INSTRUCTIONS: &str = "projectless workspace instructions";
 
     let server = responses::start_mock_server().await;
-    let response_mock = responses::mount_sse_once(
+    let response_mock = responses::mount_sse_sequence(
         &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_assistant_message("msg-1", "done"),
-            responses::ev_completed("resp-1"),
-        ]),
+        [
+            "explicit-environment-echo",
+            "implicit-environments",
+            "projectless-composer",
+        ]
+        .into_iter()
+        .map(|id| {
+            responses::sse(vec![
+                responses::ev_response_created(id),
+                responses::ev_assistant_message(id, "done"),
+                responses::ev_completed(id),
+            ])
+        })
+        .collect(),
     )
     .await;
     let codex_home = TempDir::new()?;
@@ -269,42 +283,147 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
         ephemeral: Some(true),
         ..Default::default()
     };
+    let denied = TurnEnvironmentParams {
+        environment_id: "stalled".to_string(),
+        cwd: LegacyAppPathString::from_path(workspace.as_path()),
+        runtime_workspace_roots: None,
+    };
+    let other_workspace_dir = TempDir::new()?;
+    let other_workspace = other_workspace_dir.path().canonicalize()?;
+    let projectless_cwd = other_workspace.join("project");
+    std::fs::create_dir(&projectless_cwd)?;
+    std::fs::write(projectless_cwd.join("AGENTS.md"), PROJECTLESS_INSTRUCTIONS)?;
 
-    let request_id = app_server
-        .send_raw_request(
-            "thread/start",
-            Some(json!({"cwd": workspace, "ephemeral": true})),
-        )
-        .await?;
-    let response: ThreadStartResponse =
-        timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
-    assert_eq!(
-        response.instruction_sources,
-        vec![local_source.into(), healthy_source.into()],
-    );
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        app_server.start_turn_and_wait_for_completion(TurnStartParams {
-            cwd: Some(workspace.to_path_buf()),
-            ..text_turn_params(response.thread.id, "inspect workspace instructions")
-        }),
-    )
-    .await??;
-    let input = response_mock.single_request().message_input_texts("user");
-    for expected in [LOCAL_INSTRUCTIONS, AGENTS_INSTRUCTIONS] {
-        assert!(
-            input.iter().any(|text| text.contains(expected)),
-            "{input:?}"
+    for (index, label) in ["Desktop echo", "cwd only", "projectless composer"]
+        .into_iter()
+        .enumerate()
+    {
+        let request_id = app_server.send_thread_start_request(start.clone()).await?;
+        let response: ThreadStartResponse =
+            timeout(THREAD_START_TIMEOUT, app_server.read_response(request_id)).await??;
+        assert_eq!(
+            response.instruction_sources,
+            vec![local_source.clone().into(), healthy_source.clone().into()],
         );
+        let thread_id = response.thread.id;
+        let mut reported = response
+            .thread
+            .environments
+            .context("thread/start should report its selected environments")?;
+        assert_eq!(reported[0].environment_id, "local");
+        let projectless = index == 2;
+        let local_cwd = if projectless {
+            // The projectless composer changes only the primary local entry.
+            reported[0].cwd = LegacyAppPathString::from_path(&projectless_cwd);
+            reported[0].runtime_workspace_roots =
+                vec![LegacyAppPathString::from_path(&other_workspace)];
+            projectless_cwd.clone()
+        } else {
+            workspace.to_path_buf()
+        };
+        let echoed: Vec<_> = reported
+            .iter()
+            .cloned()
+            .map(|environment| TurnEnvironmentParams {
+                environment_id: environment.environment_id,
+                cwd: environment.cwd,
+                runtime_workspace_roots: Some(environment.runtime_workspace_roots),
+            })
+            .collect();
+        let stalled_index = echoed
+            .iter()
+            .position(|environment| environment.environment_id == "stalled")
+            .context("thread/start should report its unavailable secondary")?;
+        let completed = timeout(
+            DEFAULT_READ_TIMEOUT,
+            app_server.start_turn_and_wait_for_completion(TurnStartParams {
+                cwd: Some(local_cwd.clone()),
+                environments: (index != 1).then(|| echoed.clone()),
+                ..text_turn_params(thread_id.clone(), label)
+            }),
+        )
+        .await??;
+        assert_eq!(completed.turn.status, TurnStatus::Completed);
+        let requests = response_mock.requests();
+        assert_eq!(requests.len(), index + 1);
+        let input = requests[index].message_input_texts("user");
+        let local_instructions = if projectless {
+            PROJECTLESS_INSTRUCTIONS
+        } else {
+            LOCAL_INSTRUCTIONS
+        };
+        for expected in [local_instructions, AGENTS_INSTRUCTIONS] {
+            assert!(
+                input.iter().any(|text| text.contains(expected)),
+                "{input:?}"
+            );
+        }
+
+        if projectless {
+            assert!(!input.iter().any(|text| text.contains(LOCAL_INSTRUCTIONS)));
+            let request_id = app_server
+                .send_thread_read_request(ThreadReadParams {
+                    thread_id: thread_id.clone(),
+                    include_turns: false,
+                })
+                .await?;
+            let updated: ThreadReadResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+            assert_eq!(updated.thread.environments, Some(reported));
+
+            let mut promoted = echoed.clone();
+            promoted.swap(0, stalled_index);
+            let mut moved = echoed.clone();
+            moved[0].cwd = LegacyAppPathString::from_path(workspace.as_path());
+            moved[stalled_index].cwd = LegacyAppPathString::from_path(&other_workspace);
+            let mut rerooted = echoed.clone();
+            rerooted[stalled_index].runtime_workspace_roots =
+                Some(vec![LegacyAppPathString::from_path(&other_workspace)]);
+            for (label, cwd, environments) in [
+                (
+                    "request only the stalled executor",
+                    local_cwd.clone(),
+                    vec![echoed[stalled_index].clone()],
+                ),
+                ("promote the stalled executor", local_cwd.clone(), promoted),
+                (
+                    "move the stalled executor cwd",
+                    workspace.to_path_buf(),
+                    moved,
+                ),
+                (
+                    "change the stalled executor roots",
+                    local_cwd.clone(),
+                    rerooted,
+                ),
+                ("change the fallback cwd", other_workspace.clone(), echoed),
+            ] {
+                let request_id = app_server
+                    .send_turn_start_request(TurnStartParams {
+                        cwd: Some(cwd),
+                        environments: Some(environments),
+                        ..text_turn_params(thread_id.clone(), label)
+                    })
+                    .await?;
+                let error = timeout(
+                    DEFAULT_READ_TIMEOUT,
+                    app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+                )
+                .await??;
+                assert_eq!(error.error.code, -32600, "{label}");
+                assert_eq!(
+                    error.error.message,
+                    "invalid thread settings override: invalid value for `environments`: `stalled` is not in the allowed set owner-provided environment configuration (set by <unspecified>)",
+                    "{label}"
+                );
+            }
+            assert_eq!(response_mock.requests().len(), index + 1);
+        }
     }
 
     let request_id = app_server
         .send_thread_start_request(ThreadStartParams {
-            environments: Some(vec![TurnEnvironmentParams {
-                environment_id: "stalled".to_string(),
-                cwd: LegacyAppPathString::from_path(workspace.as_path()),
-                runtime_workspace_roots: None,
-            }]),
+            environments: Some(vec![denied]),
             ..start
         })
         .await?;

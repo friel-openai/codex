@@ -695,6 +695,8 @@ pub(crate) struct SessionSettingsUpdate {
     /// Omission preserves the current data; an empty initializer clears it.
     pub(crate) turn_extension_init: Option<ExtensionDataInit>,
     pub(crate) environments: Option<TurnEnvironmentSelections>,
+    /// Recheck the secondary workspaces at commit and retain their actual bindings.
+    pub(crate) preserve_secondary_workspaces: bool,
     pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
