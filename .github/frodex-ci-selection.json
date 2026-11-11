@@ -193,7 +193,10 @@
         "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_configured_subagent_developer_instructions",
         "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_an_implicitly_selected_configured_default_role",
         "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::inherits_parent_developer_instructions_without_an_override",
-        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_updated_configured_role_settings_and_restores_paginated_usage"
+        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_updated_configured_role_settings_and_restores_paginated_usage",
+        "suite::v2::thread_list::thread_search_returns_content_matches",
+        "suite::v2::thread_list::thread_search_matches_json_escaped_content",
+        "suite::v2::thread_list::thread_search_filters_by_source_kind"
       ]
     },
     {
@@ -1156,7 +1159,16 @@
         "local::rollout_migration::archive_gate::tests::cancelled_archive_retains_gate_and_writer_until_sqlite_commit",
         "local::rollout_migration::archive_gate::tests::cancelled_journal_publication_retains_gate_through_physical_sync",
         "local::rollout_migration::archive_gate::tests::ordinary_marker_first_protects_a_damaged_sqlite_alias",
-        "local::rollout_migration::archive_gate::tests::ordinary_move_first_and_rejected_publications_leave_history_and_journals_unchanged"
+        "local::rollout_migration::archive_gate::tests::ordinary_move_first_and_rejected_publications_leave_history_and_journals_unchanged",
+        "local::search_threads::tests::recency_cursor_includes_thread_id_tie_breaker",
+        "local::search_threads::tests::search_requires_classifiable_user_metadata",
+        "local::search_threads::tests::search_requires_a_working_state_database",
+        "local::search_threads::tests::search_does_not_open_unselected_or_internal_rollouts",
+        "local::search_threads::tests::search_rechecks_selected_metadata_after_lifecycle_reservation",
+        "local::search_threads::tests::search_prefers_the_selected_existing_representation",
+        "local::search_threads::tests::search_reads_only_top_level_user_rollouts",
+        "local::search_threads::tests::search_matches_selected_rollout_across_path_spellings_and_compression",
+        "local::search_threads::tests::search_paginates_equal_timestamps_in_active_and_archived_rollouts"
       ]
     },
     {
