@@ -610,6 +610,7 @@ impl Session {
         let options = NewTurnContextOptions {
             final_output_json_schema: start_options.final_output_json_schema,
             cyber_access_program: start_options.cyber_access_program,
+            allow_initial_default_recovery: false,
         };
         let turn_context = match session_configuration {
             Some(configuration) => {
@@ -1020,6 +1021,7 @@ impl Session {
         };
         let saved_guardian_completion =
             matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
+        self.revoke_turn_initial_recovery(turn_context.as_ref());
         if !saved_guardian_completion {
             self.send_event(turn_context.as_ref(), event.clone()).await;
         }
@@ -1098,6 +1100,7 @@ impl Session {
         error: Option<ErrorEvent>,
     ) {
         let sub_id = task.turn_context.sub_id.clone();
+        self.revoke_turn_initial_recovery(task.turn_context.as_ref());
         if task.cancellation_token.is_cancelled() {
             self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                 .await;
