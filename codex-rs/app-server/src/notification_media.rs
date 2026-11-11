@@ -199,6 +199,8 @@ fn without_thread_item_media(mut item: ThreadItemPayload) -> ThreadItemPayload {
         }
         ThreadItemPayload::HookPrompt { .. }
         | ThreadItemPayload::AgentMessage { .. }
+        | ThreadItemPayload::InterAgentCommunication { .. }
+        | ThreadItemPayload::RawResponseItem { .. }
         | ThreadItemPayload::Plan { .. }
         | ThreadItemPayload::Reasoning { .. }
         | ThreadItemPayload::FunctionCallOutput {
