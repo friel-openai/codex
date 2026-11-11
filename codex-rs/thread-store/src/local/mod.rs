@@ -1262,6 +1262,16 @@ impl LocalThreadStore {
         .await
     }
 
+    /// Both resume anchors refer to one validated rollout lineage. The page readers
+    /// still enforce segment boundaries, item visibility and cursor encoding.
+    pub async fn resume_backwards_cursors(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<(Option<String>, Option<String>)> {
+        self.await_automatic_rollout_migration(thread_id).await?;
+        thread_history::resume_backwards_cursors(self, thread_id).await
+    }
+
     /// Lists projection-backed turns without enabling app-server routing yet.
     pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
         self.await_automatic_rollout_migration(params.thread_id)
