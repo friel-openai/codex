@@ -1,0 +1,917 @@
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index 5b980a815f0df1a92605ab0905808fee14d94628..d942bbb4590a5fc40f4e95210d2a42c5a455ebfc 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -103,7 +103,7 @@ use codex_state::log_db::LogDbLayer;
+ use codex_thread_store::LocalQueueStore;
+ use codex_thread_store::QueueStore;
+ use tokio::sync::Mutex;
+-use tokio::sync::Semaphore;
++use tokio::sync::RwLock;
+ use tokio::sync::broadcast;
+ use tokio::sync::mpsc;
+ use tokio::sync::watch;
+@@ -457,7 +457,7 @@ impl MessageProcessor {
+         let pending_thread_unloads = Arc::new(Mutex::new(HashMap::new()));
+         let thread_watch_manager =
+             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
+-        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
++        let thread_list_state_permit = Arc::new(RwLock::new(()));
+         let app_list_shutdown_token = CancellationToken::new();
+         let request_serialization_queues = RequestSerializationQueues::default();
+         let config_processor = ConfigRequestProcessor::new(
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index dcde7ce943155f15b8a3a85b31b03dde77559ee6..e31342545d977ab2a30fb2cd7416bb8f57805ec6 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -518,8 +518,10 @@ use std::sync::Arc;
+ use std::time::Duration;
+ use std::time::Instant;
+ use tokio::sync::Mutex;
++use tokio::sync::RwLock;
++use tokio::sync::RwLockReadGuard;
++use tokio::sync::RwLockWriteGuard;
+ use tokio::sync::Semaphore;
+-use tokio::sync::SemaphorePermit;
+ use tokio::sync::broadcast;
+ use tokio::sync::oneshot;
+ use tokio::sync::watch;
+diff --git a/codex-rs/app-server/src/request_processors/projects.rs b/codex-rs/app-server/src/request_processors/projects.rs
+index 4a04d6cac4f93219e52456a92c458cd382b0824f..bdb437bb0818890332fbefa155975d6bd8552edf 100644
+--- a/codex-rs/app-server/src/request_processors/projects.rs
++++ b/codex-rs/app-server/src/request_processors/projects.rs
+@@ -36,8 +36,8 @@ use codex_thread_store::StoredProjectRoot;
+ use codex_thread_store::ThreadStore;
+ use codex_thread_store::ThreadStoreError;
+ use codex_thread_store::UpdateProjectParams as StoreUpdateProjectParams;
+-use tokio::sync::Semaphore;
+-use tokio::sync::SemaphorePermit;
++use tokio::sync::RwLock;
++use tokio::sync::RwLockWriteGuard;
+
+ use super::thread_processor::THREAD_LIST_DEFAULT_LIMIT;
+ use super::thread_processor::THREAD_LIST_MAX_LIMIT;
+@@ -50,14 +50,14 @@ use crate::outgoing_message::OutgoingMessageSender;
+ pub(crate) struct ProjectRequestProcessor {
+     thread_store: Arc<dyn ThreadStore>,
+     outgoing: Arc<OutgoingMessageSender>,
+-    thread_list_state_permit: Arc<Semaphore>,
++    thread_list_state_permit: Arc<RwLock<()>>,
+ }
+
+ impl ProjectRequestProcessor {
+     pub(crate) fn new(
+         thread_store: Arc<dyn ThreadStore>,
+         outgoing: Arc<OutgoingMessageSender>,
+-        thread_list_state_permit: Arc<Semaphore>,
++        thread_list_state_permit: Arc<RwLock<()>>,
+     ) -> Self {
+         Self {
+             thread_store,
+@@ -290,13 +290,8 @@ impl ProjectRequestProcessor {
+
+     async fn acquire_thread_list_state_permit(
+         &self,
+-    ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
+-        self.thread_list_state_permit
+-            .acquire()
+-            .await
+-            .map_err(|err| {
+-                internal_error(format!("failed to acquire thread list state permit: {err}"))
+-            })
++    ) -> Result<RwLockWriteGuard<'_, ()>, JSONRPCErrorError> {
++        Ok(self.thread_list_state_permit.write().await)
+     }
+ }
+
+diff --git a/codex-rs/app-server/src/request_processors/thread_listener_shutdown_tests.rs b/codex-rs/app-server/src/request_processors/thread_listener_shutdown_tests.rs
+index bbb872b35d3a24582ce1f12ab0c7322f014b4ade..36d272fa8048e71b88939f3123351f4fb2f04874 100644
+--- a/codex-rs/app-server/src/request_processors/thread_listener_shutdown_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_listener_shutdown_tests.rs
+@@ -18,6 +18,7 @@ use anyhow::Result;
+ use codex_analytics::AnalyticsEventsClient;
+ use codex_app_server_protocol::ClientResponsePayload;
+ use codex_app_server_protocol::RequestId;
++use codex_app_server_protocol::ThreadReadParams;
+ use codex_app_server_protocol::ThreadResumeParams;
+ use codex_app_server_protocol::ThreadUnsubscribeParams;
+ use codex_app_server_protocol::ThreadUnsubscribeResponse;
+@@ -30,9 +31,114 @@ use core_test_support::test_codex::test_codex;
+ use pretty_assertions::assert_eq;
+ use std::collections::HashSet;
+ use test_case::test_case;
+-use tokio::sync::Semaphore;
++use tokio::sync::RwLock;
+ use tokio::sync::mpsc;
+
++#[tokio::test]
++async fn loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state() -> Result<()>
++{
++    let server = wiremock::MockServer::start().await;
++    let test = test_codex().build_with_auto_env(&server).await?;
++    let thread_id = test.session_configured.thread_id;
++    test.thread_store
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await?;
++    let config = Arc::new(test.config.clone());
++    let auth =
++        AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false)
++            .await?;
++    let config_manager =
++        ConfigManager::without_managed_config_for_tests(config.codex_home.to_path_buf());
++    let (outgoing_tx, _outgoing_rx) = mpsc::channel(/*buffer*/ 64);
++    let outgoing = Arc::new(OutgoingMessageSender::new(
++        outgoing_tx,
++        AnalyticsEventsClient::disabled(),
++    ));
++    let thread_state_manager = ThreadStateManager::new();
++    let thread_watch_manager = ThreadWatchManager::new_with_outgoing(outgoing.clone());
++    let skills_watcher = SkillsWatcher::new(
++        test.thread_manager.skills_service(),
++        &config.codex_home,
++        outgoing.clone(),
++    );
++    let thread_goal_processor = ThreadGoalRequestProcessor::new(
++        test.thread_manager.clone(),
++        outgoing.clone(),
++        config.clone(),
++        thread_state_manager.clone(),
++        /*state_db*/ None,
++        Arc::new(GoalService::new()),
++        config_manager.clone(),
++    );
++    let processor = ThreadRequestProcessor::new(
++        auth,
++        test.thread_manager.clone(),
++        outgoing,
++        Arg0DispatchPaths::default(),
++        config,
++        config_manager,
++        test.thread_store.clone(),
++        Default::default(),
++        thread_state_manager,
++        thread_watch_manager,
++        Arc::new(RwLock::new(())),
++        thread_goal_processor,
++        /*state_db*/ None,
++        /*log_db*/ None,
++        skills_watcher,
++        /*turn_cost_worker*/ None,
++        Vec::new(),
++        Arc::new(SampleResponseRegistry::default()),
++    );
++    let connection_id = ConnectionId(1);
++    processor
++        .connection_initialized(connection_id, ConnectionCapabilities::default())
++        .await;
++    let held = processor.thread_list_state_permit.read().await;
++    let resume_id = ConnectionRequestId {
++        connection_id,
++        request_id: RequestId::Integer(1),
++    };
++    let resume = tokio::time::timeout(
++        Duration::from_secs(10),
++        processor.thread_resume(
++            ThreadResumeTarget::Client(resume_id),
++            ThreadResumeParams {
++                thread_id: thread_id.to_string(),
++                exclude_turns: true,
++                ..Default::default()
++            },
++            /*app_server_client_name*/ None,
++            /*app_server_client_version*/ None,
++            /*client_mcp_extensions*/ Default::default(),
++        ),
++    )
++    .await
++    .context("loaded resume blocked by an unrelated held list-state permit")?
++    .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
++    assert!(resume.is_none());
++    let read_id = ConnectionRequestId {
++        connection_id,
++        request_id: RequestId::Integer(2),
++    };
++    let read = tokio::time::timeout(
++        Duration::from_secs(10),
++        processor.thread_read(
++            &read_id,
++            ThreadReadParams {
++                thread_id: thread_id.to_string(),
++                include_turns: false,
++            },
++        ),
++    )
++    .await
++    .context("thread read blocked by an unrelated held list-state permit")?
++    .map_err(|error| anyhow::anyhow!("read failed: {}", error.message))?;
++    assert!(read.is_some());
++    drop(held);
++    Ok(())
++}
++
+ #[test_case(true; "listener attached before shutdown")]
+ #[test_case(false; "listener attached after shutdown")]
+ #[tokio::test]
+@@ -85,7 +191,7 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
+         Default::default(),
+         thread_state_manager.clone(),
+         thread_watch_manager.clone(),
+-        Arc::new(Semaphore::new(/*permits*/ 1)),
++        Arc::new(RwLock::new(())),
+         thread_goal_processor,
+         /*state_db*/ None,
+         /*log_db*/ None,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index bf0259941de2ac70cf598cdfc7f347250394a31d..31d2cb60a28610876738c4b875d1e0b8b3484e63 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -772,7 +772,8 @@ pub(crate) struct ThreadRequestProcessor {
+     legacy_displayed_turn_items: Arc<Mutex<LegacyDisplayedTurnItems>>,
+     pub(super) thread_state_manager: ThreadStateManager,
+     pub(super) thread_watch_manager: ThreadWatchManager,
+-    pub(super) thread_list_state_permit: Arc<Semaphore>,
++    /// Resumes share this lock; archive, delete, and list mutations take it exclusively.
++    pub(super) thread_list_state_permit: Arc<RwLock<()>>,
+     pub(super) fork_handoff_slots: Arc<Semaphore>,
+     pub(super) thread_goal_processor: ThreadGoalRequestProcessor,
+     pub(super) state_db: Option<StateDbHandle>,
+@@ -800,6 +801,8 @@ enum RunningThreadResumeResult {
+     /// The optional stored thread contains the history-bearing probe that cold
+     /// resume can reuse instead of reading the rollout again.
+     NotRunning(Option<Box<StoredThread>>),
++    /// The loaded source now requires the original exclusive list ordering.
++    NeedsExclusive,
+ }
+
+ impl ThreadRequestProcessor {
+@@ -815,7 +818,7 @@ impl ThreadRequestProcessor {
+         pending_thread_unloads: PendingThreadUnloads,
+         thread_state_manager: ThreadStateManager,
+         thread_watch_manager: ThreadWatchManager,
+-        thread_list_state_permit: Arc<Semaphore>,
++        thread_list_state_permit: Arc<RwLock<()>>,
+         thread_goal_processor: ThreadGoalRequestProcessor,
+         state_db: Option<StateDbHandle>,
+         log_db: Option<LogDbLayer>,
+@@ -893,6 +896,7 @@ impl ThreadRequestProcessor {
+         client_mcp_extensions: ClientMcpExtensions,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+         let mut prepared_config = None;
++        let mut force_exclusive = false;
+         let mut timings = crate::thread_state::ThreadResumeTimings::new(
+             !params.exclude_turns,
+             params.initial_turns_page.is_some(),
+@@ -906,6 +910,7 @@ impl ThreadRequestProcessor {
+                 app_server_client_version.clone(),
+                 client_mcp_extensions.clone(),
+                 &mut prepared_config,
++                &mut force_exclusive,
+                 &mut timings,
+             ))
+             .await?
+@@ -1456,13 +1461,8 @@ impl ThreadRequestProcessor {
+
+     pub(super) async fn acquire_thread_list_state_permit(
+         &self,
+-    ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
+-        self.thread_list_state_permit
+-            .acquire()
+-            .await
+-            .map_err(|err| {
+-                internal_error(format!("failed to acquire thread list state permit: {err}"))
+-            })
++    ) -> Result<RwLockWriteGuard<'_, ()>, JSONRPCErrorError> {
++        Ok(self.thread_list_state_permit.write().await)
+     }
+
+     async fn set_app_server_client_info(
+@@ -5575,6 +5575,7 @@ impl ThreadRequestProcessor {
+         app_server_client_version: Option<String>,
+         client_mcp_extensions: ClientMcpExtensions,
+         prepared_config: &mut Option<PreparedResumeConfig>,
++        force_exclusive: &mut bool,
+         timings: &mut crate::thread_state::ThreadResumeTimings,
+     ) -> Result<ControlFlow<()>, JSONRPCErrorError> {
+         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
+@@ -5604,10 +5605,14 @@ impl ThreadRequestProcessor {
+
+         let permit_started = Instant::now();
+         let permit = self
+-            .acquire_thread_resume_permit(params, Some(&mut timings.permit))
++            .acquire_thread_resume_permit(params, *force_exclusive, Some(&mut timings.permit))
+             .await;
+         timings.permit_preparation += permit_started.elapsed();
+-        let _thread_list_state_permit = permit?;
++        let permit = permit?;
++        let reserved_thread_id = permit.thread_id;
++        let resume_shared = permit.list.is_shared();
++        let _thread_list_state_permit = permit.list;
++        let _resume_guard = permit.resume;
+         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
+             && self
+                 .pending_thread_unloads
+@@ -5624,6 +5629,8 @@ impl ThreadRequestProcessor {
+                 .resume_running_thread(
+                     request_id,
+                     params,
++                    reserved_thread_id,
++                    resume_shared,
+                     app_server_client_name.clone(),
+                     app_server_client_version.clone(),
+                     /*cold_resume_history*/ None,
+@@ -5634,6 +5641,7 @@ impl ThreadRequestProcessor {
+                 RunningThreadResumeResult::Handled(completion) => {
+                     // The listener may need this permit to finish the response.
+                     drop(_thread_list_state_permit);
++                    drop(_resume_guard);
+                     // A stopped listener can discard an accepted command before responding.
+                     if completion.await.is_err() {
+                         timings.delegated = false;
+@@ -5642,6 +5650,10 @@ impl ThreadRequestProcessor {
+                     return Ok(ControlFlow::Break(()));
+                 }
+                 RunningThreadResumeResult::NotRunning(stored_thread) => stored_thread,
++                RunningThreadResumeResult::NeedsExclusive => {
++                    *force_exclusive = true;
++                    return Ok(ControlFlow::Continue(()));
++                }
+             },
+             ThreadResumeTarget::DaemonRecovery(saved) => {
+                 let thread_id = ThreadId::from_string(&params.thread_id)
+@@ -5716,6 +5728,7 @@ impl ThreadRequestProcessor {
+                     }
+                 };
+                 let source_id = stored_thread.thread_id;
++                Self::check_resume_reservation(reserved_thread_id, source_id)?;
+                 let resolved_path = path
+                     .as_ref()
+                     .and(stored_thread.rollout_path.as_ref())
+@@ -5730,6 +5743,7 @@ impl ThreadRequestProcessor {
+                     ),
+                 )
+                 .await?;
++                Self::check_resume_reservation(reserved_thread_id, stored_thread.thread_id)?;
+                 // The loader checks the selected rollout for in-home paths. A full Legacy
+                 // reread must retain that ID and path to use the same deferral as an ID resume.
+                 let selected_home_rollout = resolved_path.is_some_and(|resolved_path| {
+@@ -5738,6 +5752,17 @@ impl ThreadRequestProcessor {
+                 });
+                 (history, Some(stored_thread), selected_home_rollout)
+             };
++        if let InitialHistory::Resumed(resumed) = &thread_history {
++            Self::check_resume_reservation(reserved_thread_id, resumed.conversation_id)?;
++        }
++        if resume_shared
++            && let Some((source, _)) = thread_history.get_resumed_session_sources()
++            && !Self::resume_source_kind_can_share(&source, /*parent_thread_id*/ None)
++        {
++            // History can carry agent ownership that was absent from indexed metadata.
++            *force_exclusive = true;
++            return Ok(ControlFlow::Continue(()));
++        }
+         // Path-based resume can use an empty request thread ID. Coordinate once its real
+         // identity is known; unrelated loaded threads never wait for this cold startup.
+         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
+@@ -5923,6 +5948,8 @@ impl ThreadRequestProcessor {
+                 .resume_running_thread(
+                     request_id,
+                     &attach_params,
++                    reserved_thread_id,
++                    resume_shared,
+                     app_server_client_name,
+                     app_server_client_version,
+                     cold_resume_history,
+@@ -5932,6 +5959,7 @@ impl ThreadRequestProcessor {
+             {
+                 RunningThreadResumeResult::Handled(completion) => {
+                     drop(_thread_list_state_permit);
++                    drop(_resume_guard);
+                     if completion.await.is_err() {
+                         timings.delegated = false;
+                         return Err(thread_closing_for_resume(child_thread_id));
+@@ -5941,6 +5969,10 @@ impl ThreadRequestProcessor {
+                 RunningThreadResumeResult::NotRunning(_) => Err(invalid_request(
+                     "cannot resume an unloaded multi-agent v2 sub-agent through its parent; resume the parent first, or use thread/read to inspect it",
+                 )),
++                RunningThreadResumeResult::NeedsExclusive => {
++                    *force_exclusive = true;
++                    Ok(ControlFlow::Continue(()))
++                }
+             };
+         }
+
+@@ -6072,6 +6104,7 @@ impl ThreadRequestProcessor {
+                 // Config loading can call back into Desktop; release both locks during host work.
+                 drop(_goal_resume_guard);
+                 drop(_thread_list_state_permit);
++                drop(_resume_guard);
+                 let config_started = Instant::now();
+                 let config = self
+                     .config_manager
+@@ -6505,11 +6538,17 @@ impl ThreadRequestProcessor {
+         clippy::await_holding_invalid_type,
+         reason = "listener state creation must be serialized against terminal listener cleanup"
+     )]
++    #[expect(
++        clippy::too_many_arguments,
++        reason = "the reserved source identity must be checked before attaching a listener"
++    )]
+     #[tracing::instrument(level = "trace", skip_all)]
+     async fn resume_running_thread(
+         &self,
+         request_id: &ConnectionRequestId,
+         params: &ThreadResumeParams,
++        reserved_thread_id: Option<ThreadId>,
++        resume_shared: bool,
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
+         cold_resume_history: Option<&[RolloutItem]>,
+@@ -6536,6 +6575,7 @@ impl ThreadRequestProcessor {
+             )
+             .await?
+         {
++            Self::check_resume_reservation(reserved_thread_id, existing_thread_id)?;
+             let source_thread = crate::thread_state::ThreadResumeTimings::measure(
+                 &mut timings.lookup,
+                 self.read_stored_thread_for_resume(
+@@ -6557,6 +6597,7 @@ impl ThreadRequestProcessor {
+             )
+             .await?;
+             let existing_thread_id = source_thread.thread_id;
++            Self::check_resume_reservation(reserved_thread_id, existing_thread_id)?;
+             match crate::thread_state::ThreadResumeTimings::measure(
+                 &mut timings.lookup,
+                 get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id),
+@@ -6609,6 +6650,15 @@ impl ThreadRequestProcessor {
+                     existing_thread.resume_config_snapshot(),
+                 )
+                 .await;
++            if resume_shared
++                && (!Self::resume_source_can_share(&source_thread)
++                    || !Self::resume_source_kind_can_share(
++                        &config_snapshot.session_source,
++                        /*parent_thread_id*/ None,
++                    ))
++            {
++                return Ok(RunningThreadResumeResult::NeedsExclusive);
++            }
+             let mismatch_details = collect_resume_override_mismatches(
+                 params,
+                 &config_snapshot,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+index 32f3e13e67eb44e0b7e2201348ea230c24e1c4b9..f2e4de0fc76ae79add133ebfd5b5a67cfc1d2db2 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+@@ -24,6 +24,7 @@ impl ThreadRequestProcessor {
+                     thread_id: thread_id.to_string(),
+                     ..Default::default()
+                 },
++                /*force_exclusive*/ false,
+                 /*permit_duration*/ None,
+             )
+             .await?;
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+index e7a9caf1a77f4c78f0c29371c96f1d9eb0ad8aaa..c3b4212293817591d3b69fbca19e693728f881c5 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+@@ -3,7 +3,90 @@
+ use super::*;
+ use codex_thread_store::ReadThreadsParams;
+
++/// Keeps list mutations excluded while one selected thread is resumed.
++pub(super) struct ThreadResumePermit<'a> {
++    pub(super) list: ThreadListResumePermit<'a>,
++    pub(super) resume: Option<tokio::sync::OwnedMutexGuard<()>>,
++    pub(super) thread_id: Option<ThreadId>,
++}
++
++/// Root resumes may overlap, but agent-owned or uncertain sources retain exclusive ordering.
++pub(super) enum ThreadListResumePermit<'a> {
++    Shared(RwLockReadGuard<'a, ()>),
++    Exclusive(RwLockWriteGuard<'a, ()>),
++}
++
++impl ThreadListResumePermit<'_> {
++    pub(super) fn is_shared(&self) -> bool {
++        match self {
++            Self::Shared(guard) => {
++                let _ = &**guard;
++                true
++            }
++            Self::Exclusive(guard) => {
++                let _ = &**guard;
++                false
++            }
++        }
++    }
++}
++
++impl<'a> ThreadResumePermit<'a> {
++    async fn acquire(
++        state: &ThreadStateManager,
++        list: &'a RwLock<()>,
++        thread_id: Option<ThreadId>,
++        shared: bool,
++        permit_duration: Option<&mut Duration>,
++    ) -> Self {
++        let started = Instant::now();
++        let list = if shared {
++            ThreadListResumePermit::Shared(list.read().await)
++        } else {
++            ThreadListResumePermit::Exclusive(list.write().await)
++        };
++        if let Some(duration) = permit_duration {
++            *duration = duration.saturating_add(started.elapsed());
++        }
++        // Keep the list lock before the per-thread reservation, as mutations do.
++        let resume = match thread_id {
++            Some(thread_id) => Some(state.lock_resume(thread_id).await),
++            None => None,
++        };
++        Self {
++            list,
++            resume,
++            thread_id,
++        }
++    }
++}
++
+ impl ThreadRequestProcessor {
++    pub(super) fn resume_source_can_share(source: &StoredThread) -> bool {
++        Self::resume_source_kind_can_share(&source.source, source.parent_thread_id)
++    }
++
++    pub(super) fn resume_source_kind_can_share(
++        source: &codex_protocol::protocol::SessionSource,
++        parent_thread_id: Option<ThreadId>,
++    ) -> bool {
++        parent_thread_id.is_none()
++            && !source.is_non_root_agent()
++            && !matches!(source, codex_protocol::protocol::SessionSource::Unknown)
++    }
++
++    pub(super) fn check_resume_reservation(
++        reserved: Option<ThreadId>,
++        actual: ThreadId,
++    ) -> Result<(), JSONRPCErrorError> {
++        if reserved != Some(actual) {
++            return Err(invalid_request(
++                "thread source changed during resume; retry with the current thread ID or path",
++            ));
++        }
++        Ok(())
++    }
++
+     pub(super) async fn wait_for_resume_shutdown_drain(
+         thread_id: ThreadId,
+         mut drain: watch::Receiver<bool>,
+@@ -21,10 +104,13 @@ impl ThreadRequestProcessor {
+     pub(super) async fn acquire_thread_resume_permit(
+         &self,
+         params: &ThreadResumeParams,
++        mut force_exclusive: bool,
+         mut permit_duration: Option<&mut Duration>,
+-    ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
++    ) -> Result<ThreadResumePermit<'_>, JSONRPCErrorError> {
+         let mut prepared = params.history.is_some();
+         let requested_id = ThreadId::from_string(&params.thread_id).ok();
++        let mut prepared_id = prepared.then_some(requested_id).flatten();
++        let mut prepared_can_share = false;
+         loop {
+             let running = if let Some(thread_id) = requested_id {
+                 get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+@@ -41,6 +127,8 @@ impl ThreadRequestProcessor {
+                         /*include_history*/ false,
+                     )
+                     .await?;
++                prepared_id = Some(source.thread_id);
++                prepared_can_share = Self::resume_source_can_share(&source);
+                 if params.path.is_some() {
+                     // Explicit paths can identify external or stale rollouts. Only migrate the
+                     // selected source; the protected resume still validates the requested path.
+@@ -82,12 +170,28 @@ impl ThreadRequestProcessor {
+                 }
+                 prepared = true;
+             }
+-            let started = Instant::now();
+-            let permit = self.acquire_thread_list_state_permit().await;
+-            if let Some(duration) = permit_duration.as_deref_mut() {
+-                *duration = duration.saturating_add(started.elapsed());
+-            }
+-            let permit = permit?;
++            let thread_id = if running { requested_id } else { prepared_id };
++            let can_share = if running && params.history.is_none() {
++                let source = self
++                    .read_stored_thread_for_resume(
++                        &params.thread_id,
++                        /*path*/ None,
++                        /*include_history*/ false,
++                    )
++                    .await?;
++                Self::check_resume_reservation(thread_id, source.thread_id)?;
++                Self::resume_source_can_share(&source)
++            } else {
++                prepared_can_share
++            };
++            let permit = ThreadResumePermit::acquire(
++                &self.thread_state_manager,
++                &self.thread_list_state_permit,
++                thread_id,
++                can_share && !force_exclusive,
++                permit_duration.as_deref_mut(),
++            )
++            .await;
+             if !prepared
+                 && let Some(thread_id) = requested_id
+                 && get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
+@@ -98,6 +202,38 @@ impl ThreadRequestProcessor {
+                 drop(permit);
+                 continue;
+             }
++            if permit.list.is_shared() {
++                let running = if let Some(thread_id) = requested_id {
++                    get_loaded_thread_for_persistence(&self.thread_manager, thread_id).await?
++                } else {
++                    None
++                };
++                let current = self
++                    .read_stored_thread_for_resume(
++                        &params.thread_id,
++                        if running.is_some() {
++                            None
++                        } else {
++                            params.path.as_ref()
++                        },
++                        /*include_history*/ false,
++                    )
++                    .await?;
++                Self::check_resume_reservation(thread_id, current.thread_id)?;
++                let running_can_share = match running {
++                    Some(thread) => Self::resume_source_kind_can_share(
++                        &thread.config_snapshot().await.session_source,
++                        /*parent_thread_id*/ None,
++                    ),
++                    None => true,
++                };
++                if !Self::resume_source_can_share(&current) || !running_can_share {
++                    // Ownership changed while waiting. Retry without overlapping other resumes.
++                    drop(permit);
++                    force_exclusive = true;
++                    continue;
++                }
++            }
+             // Do not reuse preflight metadata: archive, deletion and source selection may have
+             // changed while migration ran. Existing resume checks run again under this permit.
+             return Ok(permit);
+@@ -114,6 +250,203 @@ mod tests {
+     use crate::request_serialization::RequestSerializationQueueKey;
+     use crate::request_serialization::RequestSerializationQueues;
+
++    #[tokio::test]
++    async fn exclusive_list_permit_blocks_an_unrelated_resume() {
++        let old_list_permit = Semaphore::new(1);
++        let _first = old_list_permit.acquire().await.unwrap();
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), old_list_permit.acquire())
++                .await
++                .is_err()
++        );
++    }
++
++    #[tokio::test]
++    async fn unrelated_resume_and_queued_read_complete_while_another_resume_is_held() {
++        let first_id = ThreadId::new();
++        let other_id = ThreadId::new();
++        let state = Arc::new(ThreadStateManager::new());
++        let list = Arc::new(RwLock::new(()));
++        let queues = RequestSerializationQueues::default();
++        let gate = Arc::new(ConnectionRpcGate::new());
++        let (first_started_tx, first_started_rx) = oneshot::channel();
++        let (release_first_tx, release_first_rx) = oneshot::channel();
++        let (read_tx, read_rx) = oneshot::channel();
++        let key = |thread_id: ThreadId| RequestSerializationQueueKey::Thread {
++            thread_id: thread_id.to_string(),
++        };
++
++        queues
++            .enqueue(
++                key(first_id),
++                RequestSerializationAccess::Exclusive,
++                QueuedInitializedRequest::new(Arc::clone(&gate), {
++                    let state = Arc::clone(&state);
++                    let list = Arc::clone(&list);
++                    async move {
++                        let _permit =
++                            ThreadResumePermit::acquire(&state, &list, Some(first_id), true, None)
++                                .await;
++                        first_started_tx.send(()).unwrap();
++                        release_first_rx.await.unwrap();
++                    }
++                }),
++            )
++            .await;
++        first_started_rx.await.unwrap();
++        queues
++            .enqueue(
++                key(other_id),
++                RequestSerializationAccess::Exclusive,
++                QueuedInitializedRequest::new(Arc::clone(&gate), {
++                    let state = Arc::clone(&state);
++                    let list = Arc::clone(&list);
++                    async move {
++                        let _permit =
++                            ThreadResumePermit::acquire(&state, &list, Some(other_id), true, None)
++                                .await;
++                    }
++                }),
++            )
++            .await;
++        queues
++            .enqueue(
++                key(other_id),
++                RequestSerializationAccess::Exclusive,
++                // thread/read uses the same per-thread queue as thread/resume.
++                QueuedInitializedRequest::new(gate, async move {
++                    read_tx.send(()).unwrap();
++                }),
++            )
++            .await;
++        let read_completed = tokio::time::timeout(Duration::from_secs(1), read_rx).await;
++        release_first_tx.send(()).unwrap();
++        assert!(
++            read_completed.is_ok_and(|result| result.is_ok()),
++            "unrelated queued read was blocked by the held resume"
++        );
++    }
++
++    #[tokio::test]
++    async fn unrelated_resume_does_not_wait_for_a_thread_resume_reservation() {
++        let first_id = ThreadId::new();
++        let other_id = ThreadId::new();
++        let state = Arc::new(ThreadStateManager::new());
++        let list = Arc::new(RwLock::new(()));
++        let first = ThreadResumePermit::acquire(&state, &list, Some(first_id), true, None).await;
++
++        // Replacing listener state must not replace a still-held resume reservation.
++        state.thread_state(first_id).await;
++        state.remove_thread_state(first_id).await;
++        let (same_tx, mut same_rx) = oneshot::channel();
++        let same = tokio::spawn({
++            let state = Arc::clone(&state);
++            let list = Arc::clone(&list);
++            async move {
++                let _permit =
++                    ThreadResumePermit::acquire(&state, &list, Some(first_id), true, None).await;
++                same_tx.send(()).unwrap();
++            }
++        });
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut same_rx)
++                .await
++                .is_err()
++        );
++
++        let other = tokio::time::timeout(Duration::from_secs(1), async {
++            let _permit =
++                ThreadResumePermit::acquire(&state, &list, Some(other_id), true, None).await;
++        })
++        .await;
++        assert!(other.is_ok());
++
++        // Archive/delete/project mutations must still wait for all resumes.
++        let writer = list.write();
++        tokio::pin!(writer);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut writer)
++                .await
++                .is_err()
++        );
++        // Tokio gives a queued mutation priority over later unrelated resumes.
++        let late = ThreadResumePermit::acquire(&state, &list, Some(other_id), true, None);
++        tokio::pin!(late);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut late)
++                .await
++                .is_err()
++        );
++        drop(first);
++        tokio::time::timeout(Duration::from_secs(1), &mut same_rx)
++            .await
++            .expect("same-thread resume should acquire after release")
++            .unwrap();
++        same.await.unwrap();
++        let writer = tokio::time::timeout(Duration::from_secs(1), &mut writer)
++            .await
++            .expect("mutation should acquire after the resume releases");
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut late)
++                .await
++                .is_err()
++        );
++        drop(writer);
++        tokio::time::timeout(Duration::from_secs(1), &mut late)
++            .await
++            .expect("later resume should acquire after the mutation");
++    }
++
++    #[test]
++    fn changed_resume_source_does_not_use_another_threads_reservation() {
++        let selected = ThreadId::new();
++        assert!(ThreadRequestProcessor::check_resume_reservation(Some(selected), selected).is_ok());
++        assert!(ThreadRequestProcessor::check_resume_reservation(None, selected).is_err());
++        assert!(
++            ThreadRequestProcessor::check_resume_reservation(Some(selected), ThreadId::new())
++                .is_err()
++        );
++    }
++
++    #[tokio::test]
++    async fn unknown_or_agent_resume_keeps_exclusive_list_ordering() {
++        use codex_protocol::protocol::InternalSessionSource;
++        use codex_protocol::protocol::SessionSource;
++
++        assert!(ThreadRequestProcessor::resume_source_kind_can_share(
++            &SessionSource::Cli,
++            None
++        ));
++        assert!(!ThreadRequestProcessor::resume_source_kind_can_share(
++            &SessionSource::Unknown,
++            None
++        ));
++        assert!(!ThreadRequestProcessor::resume_source_kind_can_share(
++            &SessionSource::Internal(InternalSessionSource::Guardian),
++            None,
++        ));
++        assert!(!ThreadRequestProcessor::resume_source_kind_can_share(
++            &SessionSource::Cli,
++            Some(ThreadId::new()),
++        ));
++
++        let state = ThreadStateManager::new();
++        let list = RwLock::new(());
++        // An explicit-history request without an ID must retain the old exclusion.
++        let first = ThreadResumePermit::acquire(&state, &list, None, false, None).await;
++        let next = ThreadResumePermit::acquire(&state, &list, Some(ThreadId::new()), true, None);
++        tokio::pin!(next);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut next)
++                .await
++                .is_err()
++        );
++        drop(first);
++        tokio::time::timeout(Duration::from_secs(1), &mut next)
++            .await
++            .expect("root resume should proceed after the exclusive resume");
++    }
++
+     #[tokio::test(start_paused = true)]
+     async fn cold_resume_with_pending_shutdown_drain_releases_thread_queue() {
+         let thread_id = ThreadId::new();
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index 165529c42351906886e3a98f10dd3bf8021b253b..d07c097cb94e897c0b1170d17d544e50655f75c7 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -675,6 +675,8 @@ struct ThreadStateManagerInner {
+     live_connections: HashMap<ConnectionId, ConnectionCapabilities>,
+     threads: HashMap<ThreadId, ThreadEntry>,
+     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
++    // Resume reservations must survive removal and replacement of a thread's listener state.
++    resume_locks: HashMap<ThreadId, Weak<Mutex<()>>>,
+ }
+
+ #[derive(Clone, Copy, Default)]
+@@ -706,6 +708,26 @@ impl ListenerStateCandidate {
+ }
+
+ impl ThreadStateManager {
++    /// Serializes resumes of one thread even when listener state is replaced during shutdown.
++    pub(crate) async fn lock_resume(
++        &self,
++        thread_id: ThreadId,
++    ) -> tokio::sync::OwnedMutexGuard<()> {
++        let lock = {
++            let mut state = self.state.lock().await;
++            state.resume_locks.retain(|_, lock| lock.strong_count() > 0);
++            match state.resume_locks.get(&thread_id).and_then(Weak::upgrade) {
++                Some(lock) => lock,
++                None => {
++                    let lock = Arc::new(Mutex::new(()));
++                    state.resume_locks.insert(thread_id, Arc::downgrade(&lock));
++                    lock
++                }
++            }
++        };
++        lock.lock_owned().await
++    }
++
+     /// Coordinates goal edits with cold/path-based resume for just this thread.
+     pub(crate) async fn lock_goal_resume(
+         &self,
+@@ -967,6 +989,7 @@ impl ThreadStateManager {
+             live_connections,
+             threads,
+             thread_ids_by_connection,
++            ..
+         } = &mut *state;
+         let slot = threads.entry(thread_id);
+         match (&slot, candidate) {
