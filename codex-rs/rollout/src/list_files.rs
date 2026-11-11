@@ -15,13 +15,18 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::MAX_SCAN_FILES;
-use super::ThreadCandidate;
 use super::parse_timestamp_uuid_from_filename;
 use super::truncate_to_millis;
 use crate::compression;
 use crate::rollout_file_name::RolloutFileName;
 
 const MAX_SIBLING_ROLLOUT_IDS: usize = 64;
+
+pub(super) struct ThreadCandidate {
+    path: PathBuf,
+    id: Uuid,
+    updated_at: Option<OffsetDateTime>,
+}
 
 /// Runs a scan whose worker observes cancellation when its async waiter is dropped.
 async fn run_scan<T, F>(read: F) -> io::Result<T>
