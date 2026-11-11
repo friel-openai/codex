@@ -32,10 +32,12 @@ use codex_extension_api::Instructions;
 use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 use toml::Value as TomlValue;
@@ -56,12 +58,27 @@ const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 pub(crate) const REMOTE_AGENTS_MD_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 
+/// Instruction reads that authorized the exact remote selections at startup.
+#[derive(Default)]
+pub(crate) struct StartupProjectInstructions {
+    pub(crate) by_environment: HashMap<String, (TurnEnvironmentSelection, Option<LoadedAgentsMd>)>,
+}
+
 /// Loads project AGENTS.md content and combines it with host-provided user
 /// instructions.
 pub(crate) async fn load_project_instructions(
     config: &Config,
     user_instructions: Option<Instructions>,
     environments: &TurnEnvironmentSnapshot,
+) -> io::Result<Option<LoadedAgentsMd>> {
+    load_project_instructions_with_startup(config, user_instructions, environments, None).await
+}
+
+pub(crate) async fn load_project_instructions_with_startup(
+    config: &Config,
+    user_instructions: Option<Instructions>,
+    environments: &TurnEnvironmentSnapshot,
+    startup: Option<&StartupProjectInstructions>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
     if config.active_project.is_untrusted() {
@@ -72,6 +89,38 @@ pub(crate) async fn load_project_instructions(
     for turn_environment in environments.turn_environments() {
         if remaining == 0 {
             break;
+        }
+
+        if let Some(startup) = startup
+            && turn_environment.environment.is_remote()
+        {
+            let selection = turn_environment.selection();
+            let Some((_, docs)) = startup
+                .by_environment
+                .get(&selection.environment_id)
+                .filter(|(admitted, _)| admitted == &selection)
+            else {
+                return Err(io::Error::other(format!(
+                    "AGENTS.md startup instructions do not match environment `{}`",
+                    selection.environment_id,
+                )));
+            };
+            if let Some(docs) = docs {
+                for entry in &docs.entries {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let mut entry = entry.clone();
+                    entry
+                        .contents
+                        .truncate(entry.contents.floor_char_boundary(remaining));
+                    if !entry.contents.trim().is_empty() {
+                        remaining -= entry.contents.len();
+                        loaded.entries.push(entry);
+                    }
+                }
+            }
+            continue;
         }
 
         let sandbox = instruction_discovery_sandbox(turn_environment);
@@ -134,13 +183,13 @@ fn instruction_discovery_sandbox(
     .then(|| environment.sandbox_context(/*additional_permissions*/ None))
 }
 
-/// Checks that a remote workspace can supply project instructions before startup admits it.
-pub(crate) async fn check_startup_project_instructions(
+/// Reads a remote workspace's instructions before startup admits it.
+pub(crate) async fn read_startup_project_instructions(
     config: &Config,
     environment: &TurnEnvironment,
-) -> io::Result<()> {
+) -> io::Result<Option<LoadedAgentsMd>> {
     if config.active_project.is_untrusted() {
-        return Ok(());
+        return Ok(None);
     }
     let sandbox = instruction_discovery_sandbox(environment);
     read_environment_agents_md(
@@ -149,8 +198,7 @@ pub(crate) async fn check_startup_project_instructions(
         config.project_doc_max_bytes,
         sandbox.as_ref(),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn read_environment_agents_md(
