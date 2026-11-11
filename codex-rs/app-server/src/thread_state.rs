@@ -675,6 +675,8 @@ struct ThreadStateManagerInner {
     live_connections: HashMap<ConnectionId, ConnectionCapabilities>,
     threads: HashMap<ThreadId, ThreadEntry>,
     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
+    // Resume reservations must survive removal and replacement of a thread's listener state.
+    resume_locks: HashMap<ThreadId, Weak<Mutex<()>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -706,6 +708,26 @@ impl ListenerStateCandidate {
 }
 
 impl ThreadStateManager {
+    /// Serializes resumes of one thread even when listener state is replaced during shutdown.
+    pub(crate) async fn lock_resume(
+        &self,
+        thread_id: ThreadId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut state = self.state.lock().await;
+            state.resume_locks.retain(|_, lock| lock.strong_count() > 0);
+            match state.resume_locks.get(&thread_id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    state.resume_locks.insert(thread_id, Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
     /// Coordinates goal edits with cold/path-based resume for just this thread.
     pub(crate) async fn lock_goal_resume(
         &self,
@@ -967,6 +989,7 @@ impl ThreadStateManager {
             live_connections,
             threads,
             thread_ids_by_connection,
+            ..
         } = &mut *state;
         let slot = threads.entry(thread_id);
         match (&slot, candidate) {
