@@ -4,6 +4,7 @@ use super::*;
 use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use anyhow::Result;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol_test_support::ContentItemTestExt;
@@ -216,6 +217,101 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
     );
 
     Ok(())
+}
+
+#[test]
+fn subagent_diffs_add_change_remove_and_escape_xml() {
+    let empty = EnvironmentsState::default();
+    let first = EnvironmentsState::default()
+        .with_subagents("- /root/worker: <ready> & waiting".to_string());
+    let second = EnvironmentsState::default()
+        .with_subagents("- /root/worker: </subagents>\n- /root/reviewer".to_string());
+    let empty_snapshot = empty
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+    let first_snapshot = first
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+    let second_snapshot = second
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+
+    assert_eq!(
+        first
+            .render_fragment_diff(PreviousSectionState::Known(&empty_snapshot))
+            .1
+            .expect("adding subagents should update the model")
+            .render(),
+        ContentItem::InputText {
+            text: "<environment_context>\n  <subagents>\n    - /root/worker: &lt;ready&gt; &amp; waiting\n  </subagents>\n</environment_context>".to_string(),
+        }
+    );
+    assert_eq!(
+        second
+            .render_fragment_diff(PreviousSectionState::Known(&first_snapshot))
+            .1
+            .expect("changing subagents should update the model")
+            .render(),
+        ContentItem::InputText {
+            text: "<environment_context>\n  <subagents>\n    - /root/worker: &lt;/subagents&gt;\n    - /root/reviewer\n  </subagents>\n</environment_context>".to_string(),
+        }
+    );
+    assert_eq!(
+        empty
+            .render_fragment_diff(PreviousSectionState::Known(&second_snapshot))
+            .1
+            .expect("removing subagents should update the model")
+            .render(),
+        ContentItem::InputText {
+            text: "<environment_context>\n  <subagents />\n</environment_context>".to_string(),
+        }
+    );
+    assert!(
+        empty
+            .render_fragment_diff(PreviousSectionState::Known(&empty_snapshot))
+            .1
+            .is_none(),
+        "an initial absent subagent value should remain omitted"
+    );
+}
+
+#[test]
+fn escaped_subagent_payload_remains_byte_bounded() {
+    let state = EnvironmentsState::default().with_subagents(format!(
+        "- /root/legacy: {}",
+        "<&".repeat(MAX_RENDERED_SUBAGENTS_BYTES)
+    ));
+    let ContentItem::InputText { text: rendered } = state.body() else {
+        panic!("subagent environment context should be input text");
+    };
+    let start = rendered.find("  <subagents>").expect("subagents start");
+    let end = rendered
+        .find("  </subagents>")
+        .map(|end| end + "  </subagents>\n".len())
+        .expect("subagents end");
+    assert!(end - start <= MAX_RENDERED_SUBAGENTS_BYTES);
+    assert!(end - start < 1_000);
+    assert!(rendered.contains("additional current subagents omitted"));
+}
+
+#[test]
+fn v2_subagent_xml_remains_nested_and_unescaped() {
+    let state = EnvironmentsState::default().with_versioned_subagents(
+        "<agent name=\"/root/worker\" />".to_string(),
+        MultiAgentVersion::V2,
+    );
+
+    let ContentItem::InputText { text: rendered } = state.body() else {
+        panic!("subagent environment context should be input text");
+    };
+    assert_eq!(
+        rendered,
+        "\n  <subagents>\n    <agent name=\"/root/worker\" />\n  </subagents>\n"
+    );
+    assert!(!rendered.contains("&lt;agent"));
 }
 
 #[test]
