@@ -62,7 +62,13 @@
         "request_serialization::tests::same_key_requests_run_fifo",
         "request_serialization::tests::panicking_thread_request_does_not_strand_queue",
         "thread_state::tests::explicit_settings_confirmation_preserves_dedup_and_cleans_up",
-        "thread_state::tests::slow_resume_timing_is_thresholded_and_reported_once"
+        "thread_state::tests::slow_resume_timing_is_thresholded_and_reported_once",
+        "request_processors::thread_processor::resume_preparation::tests::changed_resume_source_does_not_use_another_threads_reservation",
+        "request_processors::thread_processor::resume_preparation::tests::exclusive_list_permit_blocks_an_unrelated_resume",
+        "request_processors::thread_processor::resume_preparation::tests::unknown_or_agent_resume_keeps_exclusive_list_ordering",
+        "request_processors::thread_processor::resume_preparation::tests::unrelated_resume_and_queued_read_complete_while_another_resume_is_held",
+        "request_processors::thread_processor::resume_preparation::tests::unrelated_resume_does_not_wait_for_a_thread_resume_reservation",
+        "request_processors::thread_lifecycle::listener_shutdown_tests::loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state"
       ]
     },
     {
@@ -179,7 +185,15 @@
         "suite::v2::thread_read::paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume",
         "suite::v2::thread_read::thread_read_loaded_thread_returns_precomputed_path_before_materialization",
         "suite::v2::thread_read::thread_turns_list_reuses_legacy_reference_depths_without_changing_history",
-        "suite::v2::thread_resume::thread_resume_rejoins_running_paginated_thread_with_initial_page"
+        "suite::v2::thread_resume::thread_resume_rejoins_running_paginated_thread_with_initial_page",
+        "suite::v2::thread_resume::thread_resume_uses_path_over_non_running_thread_id",
+        "suite::v2::thread_resume::thread_resume_rejects_mismatched_path_for_running_thread_id",
+        "suite::v2::thread_resume::thread_resume_rejects_history_when_thread_is_running",
+        "suite::v2::thread_resume::thread_resume_keeps_tool_paused_goal_paused",
+        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_configured_subagent_developer_instructions",
+        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_an_implicitly_selected_configured_default_role",
+        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::inherits_parent_developer_instructions_without_an_override",
+        "suite::v2::multi_agent_v2_developer_instructions::cold_resume_preserves_effective_developer_instructions_for_worker::reapplies_updated_configured_role_settings_and_restores_paginated_usage"
       ]
     },
     {
