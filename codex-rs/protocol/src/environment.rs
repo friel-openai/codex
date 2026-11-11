@@ -197,6 +197,7 @@ impl TurnEnvironmentSelections {
     /// Requests these environments again, leaving root choices to the receiving thread.
     pub fn into_requests(self) -> TurnEnvironmentRequests {
         TurnEnvironmentRequests {
+            preserve_secondary_workspaces: false,
             legacy_fallback_cwd: self.legacy_fallback_cwd,
             environment_requests: self
                 .environments
@@ -212,6 +213,9 @@ impl TurnEnvironmentSelections {
 /// The receiving thread attaches roots in `select` before capturing these environments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEnvironmentRequests {
+    /// Updates the local primary workspace; the remaining entries identify bindings to retain,
+    /// not new selections. This is set by the app-server, not by the wire request.
+    pub preserve_secondary_workspaces: bool,
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environment_requests: Vec<TurnEnvironmentRequest>,
     /// Whether the environment list came from registry defaults.
@@ -224,6 +228,7 @@ impl TurnEnvironmentRequests {
         environment_requests: Vec<TurnEnvironmentRequest>,
     ) -> Self {
         Self {
+            preserve_secondary_workspaces: false,
             legacy_fallback_cwd,
             environment_requests,
             implicit_selection: false,
