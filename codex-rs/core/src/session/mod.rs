@@ -331,7 +331,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
     include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
 const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
-const GOAL_SUPERVISOR_ROLE_NAME: &str = "goal_supervisor";
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -401,7 +400,7 @@ pub(crate) async fn load_agent_role_prompt(
 
     let role_prompt = match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
-            if agent_role.as_deref() == Some(GOAL_SUPERVISOR_ROLE_NAME) =>
+            if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
         {
             load_supervisor_agent_prompt(&config.codex_home).await
         }
@@ -709,6 +708,11 @@ impl ForkStartupItems {
         self
     }
 
+    pub(crate) fn with_tail_items(mut self, tail: Vec<ResponseItem>) -> Self {
+        self.tail = tail;
+        self
+    }
+
     pub(crate) fn with_forked_from_ordinal_exclusive(mut self, cutoff: Option<u64>) -> Self {
         self.forked_from_ordinal_exclusive = cutoff;
         self
@@ -789,6 +793,19 @@ pub(crate) fn resolve_multi_agent_version(
             // Threads created before runtime metadata existed keep the legacy V1 tool surface.
             InitialHistory::Resumed(_) | InitialHistory::Forked(_) => Some(MultiAgentVersion::V1),
         })
+}
+
+pub(crate) fn configured_or_persisted_multi_agent_version(
+    conversation_history: &InitialHistory,
+    configured_multi_agent_version: Option<MultiAgentVersion>,
+) -> Option<MultiAgentVersion> {
+    if configured_multi_agent_version == Some(MultiAgentVersion::Disabled) {
+        return configured_multi_agent_version;
+    }
+
+    conversation_history
+        .get_multi_agent_version()
+        .or(configured_multi_agent_version)
 }
 
 async fn initial_rollout_ordinal(
@@ -922,13 +939,13 @@ impl Session {
             mcp_manager,
             code_mode_session_provider,
             extensions,
-            conversation_history,
+            mut conversation_history,
             resume_preparation,
             history_initialization,
             disabled_plugin_ids,
             requested_history_mode,
             fork_persistence,
-            fork_startup_items,
+            mut fork_startup_items,
             session_source,
             forked_from_thread_id,
             parent_thread_id,
@@ -1143,9 +1160,30 @@ impl Session {
             token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         }
         let configured_config = Arc::clone(&config);
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
+        let configured_multi_agent_version = config.multi_agent_version_override();
+        let multi_agent_version = configured_or_persisted_multi_agent_version(
+            &conversation_history,
+            configured_multi_agent_version,
+        )
+        .or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
+        if crate::goal_supervisor::is_goal_supervisor_helper_source(&session_source)
+            && let InitialHistory::Forked(items) = &mut conversation_history
+        {
+            // Copied prefixes may be persisted by Session::new before initial-history replay.
+            items.retain_mut(|item| {
+                codex_history::retain_inherited_supervisor_rollout_item(item, multi_agent_version)
+            });
+            if let Some(items) = &mut fork_startup_items.model_history_override {
+                items.retain_mut(|item| {
+                    codex_history::retain_inherited_supervisor_rollout_item(
+                        item,
+                        multi_agent_version,
+                    )
+                });
+            }
+        }
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -2013,7 +2051,7 @@ impl Session {
         conversation_history: InitialHistory,
         mut fork_startup_items: ForkStartupItems,
     ) -> CodexResult<()> {
-        let (is_subagent, is_paginated_subagent) = {
+        let (is_subagent, is_paginated_subagent, is_goal_supervisor_helper) = {
             let state = self.state.lock().await;
             let session_configuration = &state.session_configuration;
             (
@@ -2024,6 +2062,9 @@ impl Session {
                 ) && matches!(
                     session_configuration.thread_source.as_ref(),
                     Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
+                ),
+                crate::goal_supervisor::is_goal_supervisor_helper_source(
+                    &session_configuration.session_source,
                 ),
             )
         };
@@ -2142,11 +2183,6 @@ impl Session {
                     .iter()
                     .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
-                let mut persisted_rollout_items = rollout_items
-                    .iter()
-                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
                         Some(model_history) => model_history,
@@ -2158,10 +2194,9 @@ impl Session {
                             .await?
                         }
                     };
-                let shared_model_response_items =
+                let mut shared_model_response_items =
                     fork_startup_items.shared_model_response_items.take();
-                let shared_model_state = fork_startup_items.shared_model_state.take();
-                let has_authoritative_model_state = shared_model_state.is_some();
+                let mut shared_model_state = fork_startup_items.shared_model_state.take();
                 // Optimized forks carry sparse rollout metadata alongside complete shared
                 // responses. The loaded parent's recorder is authoritative when available.
                 match (&shared_model_state, &shared_model_response_items) {
@@ -2178,6 +2213,18 @@ impl Session {
                         .executed_tool_calls
                         .restore_mcp_attribution_from_rollout_items(&logical_rollout_items),
                 }
+                if is_goal_supervisor_helper {
+                    // A new fork can still carry parent SessionMeta, so use destination policy.
+                    logical_rollout_items.retain_mut(|item| {
+                        codex_history::retain_inherited_supervisor_rollout_item(
+                            item,
+                            self.multi_agent_version(),
+                        )
+                    });
+                    shared_model_response_items = None;
+                    shared_model_state = None;
+                }
+                let has_authoritative_model_state = shared_model_state.is_some();
                 if let Some(items) = &shared_model_response_items
                     && !logical_rollout_items.iter().any(|item| {
                         matches!(
@@ -2236,7 +2283,7 @@ impl Session {
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
-                let _startup_rollout_items = startup_response_items
+                let mut startup_rollout_items = startup_response_items
                     .into_iter()
                     .map(ResponseItemEnvelope::new)
                     .map(RolloutItem::ResponseItem)
@@ -2257,6 +2304,11 @@ impl Session {
 
                 let thread_settings_applied =
                     RolloutItem::EventMsg(thread_settings::applied_event(self).await);
+                let mut persisted_rollout_items = rollout_items
+                    .iter()
+                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 match &self.fork_persistence {
                     ForkPersistence::Referenced {
                         inherited_item_count,
@@ -2286,7 +2338,9 @@ impl Session {
                         persisted_rollout_items.push(thread_settings_applied);
                     }
                 }
-                self.persist_rollout_items(&persisted_rollout_items).await;
+                persisted_rollout_items.append(&mut startup_rollout_items);
+                self.persist_initial_rollout_items(&persisted_rollout_items)
+                    .await?;
                 if self.preserve_parent_tool_declarations() {
                     let notice = DeveloperInstructions::new(
                         "<mcp_tools>\nMCP tools are unavailable for this request.\n</mcp_tools>",
@@ -2923,6 +2977,11 @@ impl Session {
             })
             .await;
         }
+    }
+
+    pub(crate) async fn effective_session_config(&self) -> Config {
+        let state = self.state.lock().await;
+        self.build_effective_session_config(&state.session_configuration)
     }
 
     pub(crate) async fn session_source(&self) -> SessionSource {
@@ -5735,6 +5794,30 @@ impl Session {
             return false;
         }
         true
+    }
+
+    async fn persist_initial_rollout_items(&self, items: &[RolloutItem]) -> CodexResult<()> {
+        let Some(live_thread) = self.live_thread() else {
+            if self
+                .state
+                .lock()
+                .await
+                .session_configuration
+                .is_system_ephemeral()
+            {
+                return Ok(());
+            }
+            return Err(CodexErr::Fatal(format!(
+                "thread {} does not have a live rollout writer during startup",
+                self.thread_id()
+            )));
+        };
+        live_thread.append_items(items).await.map_err(|err| {
+            CodexErr::Fatal(format!(
+                "failed to persist initial history for thread {}: {err}",
+                self.thread_id()
+            ))
+        })
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {

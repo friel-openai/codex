@@ -1,5 +1,7 @@
 //! Extension crate for the `/goal` feature.
 
+#![recursion_limit = "256"]
+
 mod accounting;
 mod analytics;
 mod api;
@@ -7,6 +9,7 @@ mod events;
 mod extension;
 mod metrics;
 mod runtime;
+mod scheduler;
 mod spec;
 mod steering;
 mod tool;
@@ -22,6 +25,10 @@ pub use extension::GoalExtensionConfig;
 pub use extension::install_with_backend;
 pub use runtime::GoalRuntimeHandle;
 pub use runtime::PreviousGoalSnapshot;
+pub use scheduler::GoalActivationFuture;
+pub use scheduler::GoalActivator;
+pub use scheduler::GoalSchedulerHandle;
+pub use scheduler::GoalSchedulerOptions;
 pub use spec::CREATE_GOAL_TOOL_NAME;
 pub use spec::GET_GOAL_TOOL_NAME;
 pub use spec::UPDATE_GOAL_TOOL_NAME;
