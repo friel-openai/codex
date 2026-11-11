@@ -51,6 +51,14 @@ struct GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.inner.custom_models_snapshot()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.inner.replace_custom_models(custom_models);
+    }
+
     fn model_catalog_with_origins(
         &self,
         strategy: RefreshStrategy,
@@ -69,10 +77,6 @@ impl ModelsManager for GatedModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.inner.auth_manager()
-    }
-
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        self.inner.custom_models()
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
