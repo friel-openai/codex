@@ -1211,7 +1211,7 @@ impl Session {
                 .iter()
                 .find(|environment| {
                     environment.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
-                        && !matches!(environment.config, EnvironmentConfigState::Failed(_))
+                        && environment.config.failure_reason().is_none()
                 }),
         );
         config.model = Some(
