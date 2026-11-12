@@ -308,7 +308,7 @@ impl LegacyRolloutCanonicalizer {
                 if let Some(hook) = hook {
                     self.ensure_turn(writer, &timestamp, source_index).await?;
                     self.reasoning = None;
-                    self.write_completed_item(writer, &timestamp, TurnItem::HookPrompt(hook))
+                    self.write_completed_item(writer, &timestamp, TurnItem::HookPrompt(hook), 0)
                         .await?;
                 }
             }
@@ -382,7 +382,8 @@ impl LegacyRolloutCanonicalizer {
                     turn.saw_user = true;
                 }
                 self.reasoning = None;
-                self.write_completed_item(writer, &timestamp, item).await?;
+                self.write_completed_item(writer, &timestamp, item, 0)
+                    .await?;
             }
             RolloutItem::EventMsg(EventMsg::AgentReasoning(event)) => {
                 self.write_reasoning(
@@ -418,6 +419,12 @@ impl LegacyRolloutCanonicalizer {
                 if let Some((item, turn_id)) =
                     legacy_event::completed_item(&event, &mut || self.next_item_id())?
                 {
+                    // Legacy Desktop uses the activity's occurrence time, not the rollout
+                    // envelope timestamp. Zero remains the protocol's unknown-time sentinel.
+                    let completed_at_ms = match &event {
+                        EventMsg::SubAgentActivity(activity) => activity.occurred_at_ms,
+                        _ => 0,
+                    };
                     match turn_id {
                         Some(turn_id)
                             if self
@@ -425,8 +432,14 @@ impl LegacyRolloutCanonicalizer {
                                 .as_ref()
                                 .is_some_and(|turn| turn.id.as_str() != turn_id.as_str()) =>
                         {
-                            self.write_completed_item_to_turn(writer, &timestamp, turn_id, item)
-                                .await?;
+                            self.write_completed_item_to_turn(
+                                writer,
+                                &timestamp,
+                                turn_id,
+                                item,
+                                completed_at_ms,
+                            )
+                            .await?;
                         }
                         Some(turn_id) => {
                             if self.active_turn.is_none()
@@ -434,23 +447,40 @@ impl LegacyRolloutCanonicalizer {
                             {
                                 self.reasoning = None;
                                 self.write_completed_item_to_turn(
-                                    writer, &timestamp, turn_id, item,
+                                    writer,
+                                    &timestamp,
+                                    turn_id,
+                                    item,
+                                    completed_at_ms,
                                 )
                                 .await?;
                             } else if self.active_turn.is_none() {
                                 self.start_implicit_turn(writer, &timestamp, turn_id)
                                     .await?;
                                 self.reasoning = None;
-                                self.write_completed_item(writer, &timestamp, item).await?;
+                                self.write_completed_item(
+                                    writer,
+                                    &timestamp,
+                                    item,
+                                    completed_at_ms,
+                                )
+                                .await?;
                             } else {
                                 self.reasoning = None;
-                                self.write_completed_item(writer, &timestamp, item).await?;
+                                self.write_completed_item(
+                                    writer,
+                                    &timestamp,
+                                    item,
+                                    completed_at_ms,
+                                )
+                                .await?;
                             }
                         }
                         None => {
                             self.ensure_turn(writer, &timestamp, source_index).await?;
                             self.reasoning = None;
-                            self.write_completed_item(writer, &timestamp, item).await?;
+                            self.write_completed_item(writer, &timestamp, item, completed_at_ms)
+                                .await?;
                         }
                     }
                 } else {
@@ -605,6 +635,7 @@ impl LegacyRolloutCanonicalizer {
         writer: &mut W,
         timestamp: &str,
         item: TurnItem,
+        completed_at_ms: i64,
     ) -> ThreadStoreResult<()>
     where
         W: AsyncWrite + Unpin,
@@ -614,7 +645,7 @@ impl LegacyRolloutCanonicalizer {
             .as_ref()
             .map(|turn| turn.id.clone())
             .ok_or_else(|| migration_error("completed rollout item has no active turn"))?;
-        self.write_completed_item_to_turn(writer, timestamp, turn_id, item)
+        self.write_completed_item_to_turn(writer, timestamp, turn_id, item, completed_at_ms)
             .await
     }
 
@@ -624,6 +655,7 @@ impl LegacyRolloutCanonicalizer {
         timestamp: &str,
         turn_id: String,
         item: TurnItem,
+        completed_at_ms: i64,
     ) -> ThreadStoreResult<()>
     where
         W: AsyncWrite + Unpin,
@@ -636,8 +668,7 @@ impl LegacyRolloutCanonicalizer {
                 turn_id,
                 item,
                 started_at_ms: None,
-                // The legacy rollout timestamp is not an observed item completion time.
-                completed_at_ms: 0,
+                completed_at_ms,
             })),
         )
         .await
@@ -674,7 +705,7 @@ impl LegacyRolloutCanonicalizer {
         if self.record_generated_items {
             self.pending_generated_item_id = Some(item.id.clone());
         }
-        self.write_completed_item(writer, timestamp, TurnItem::Reasoning(item))
+        self.write_completed_item(writer, timestamp, TurnItem::Reasoning(item), 0)
             .await
     }
 
