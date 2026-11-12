@@ -920,6 +920,9 @@ impl CodexThread {
             preserve_secondary_workspaces: environment_requests
                 .as_ref()
                 .is_some_and(|requests| requests.preserve_secondary_workspaces),
+            retain_default_secondaries: environment_requests
+                .as_ref()
+                .is_some_and(|requests| requests.retain_default_secondaries),
             environments: environment_requests
                 .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
             runtime_workspace_roots,
@@ -1217,6 +1220,11 @@ impl CodexThread {
     /// Captures thread-owned settings and environment selections for runtime restoration.
     pub async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
         self.session.restorable_thread_settings().await
+    }
+
+    /// Returns the current bindings when an app client may be echoing coordinator defaults.
+    pub async fn restatable_environment_settings(&self) -> Option<TurnEnvironmentRequests> {
+        self.session.restatable_environment_settings().await
     }
 
     /// Returns the MCP extensions declared by the client that created this runtime.

@@ -2424,6 +2424,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn refresh_hooks_does_not_wait_for_previous_remote_selection() -> anyhow::Result<()> {
+    let session = make_session_with_config(|_| {}).await?;
+    // Keep the listener open without completing the executor handshake.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let environments = &session.services.turn_environments;
+    environments.environment_manager().upsert_environment(
+        "stalled".to_string(),
+        format!("ws://{}", listener.local_addr()?),
+        Some(std::time::Duration::from_secs(30)),
+    )?;
+    let config = session.get_config().await;
+    let local_selection = local(config.cwd.clone());
+    let remote_selection = TurnEnvironmentSelection {
+        environment_id: "stalled".to_string(),
+        ..local_selection.clone()
+    };
+    environments.update_selections(&[local_selection, remote_selection]);
+    assert!(
+        environments
+            .snapshot_now()
+            .starting()
+            .any(|environment| environment.selection.environment_id == "stalled")
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        session.refresh_hooks(config),
+    )
+    .await?;
+    assert!(
+        environments
+            .snapshot_now()
+            .starting()
+            .any(|environment| environment.selection.environment_id == "stalled")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_end_runs_local_hook_while_secondary_is_still_starting() -> anyhow::Result<()> {
+    let session = make_session_with_config(|config| {
+        assert!(config.features.disable(Feature::DeferredExecutor).is_ok());
+    })
+    .await?;
+    let home = tempfile::tempdir()?;
+    let marker = home.path().join("session-end");
+    let config = session.get_config().await;
+    let config_path = AbsolutePathBuf::try_from(home.path().join(CONFIG_TOML_FILE))?;
+    let mut user_config: codex_config::TomlValue = serde_json::from_value(serde_json::json!({
+        "hooks": {
+            "SessionEnd": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("printf 'closed' > '{}'", marker.display()),
+                }],
+            }],
+        },
+    }))?;
+    let hooks_config = |user_config| -> anyhow::Result<HooksConfig> {
+        Ok(HooksConfig {
+            feature_enabled: true,
+            config_layer_stack: Some(
+                config
+                    .config_layer_stack
+                    .with_user_config(&config_path, user_config)?,
+            ),
+            ..HooksConfig::default()
+        })
+    };
+    let listed = codex_hooks::list_hooks(hooks_config(user_config.clone())?);
+    let [hook] = listed.hooks.as_slice() else {
+        anyhow::bail!("expected exactly one SessionEnd hook");
+    };
+    user_config
+        .get_mut("hooks")
+        .and_then(codex_config::TomlValue::as_table_mut)
+        .expect("SessionEnd fixture has a hooks table")
+        .insert(
+            "state".to_string(),
+            serde_json::from_value(serde_json::json!({
+                hook.key.clone(): {"trusted_hash": hook.current_hash.clone()},
+            }))?,
+        );
+    let hooks = session.hooks().reconfigured(hooks_config(user_config)?);
+    assert_eq!(hooks.preview_session_end().len(), 1);
+    session.services.hooks.store(Arc::new(hooks));
+
+    // Hold the handshake longer than the shutdown budget.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let environments = &session.services.turn_environments;
+    environments.environment_manager().upsert_environment(
+        "stalled".to_string(),
+        format!("ws://{}", listener.local_addr()?),
+        Some(std::time::Duration::from_secs(30)),
+    )?;
+    let local_selection = local(config.cwd.clone());
+    let remote_selection = TurnEnvironmentSelection {
+        environment_id: "stalled".to_string(),
+        ..local_selection.clone()
+    };
+    environments.update_selections(&[local_selection, remote_selection]);
+    let secondary_is_starting = || {
+        environments
+            .snapshot_now()
+            .starting()
+            .any(|environment| environment.selection.environment_id == "stalled")
+    };
+    assert!(secondary_is_starting());
+
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        super::handlers::shutdown(&session, "shutdown".to_string()),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("idle session shutdown waited for the starting secondary"))?;
+    assert!(closed);
+    assert_eq!(std::fs::read_to_string(marker)?, "closed");
+    assert!(secondary_is_starting());
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
     let (session, _turn_context) = make_session_and_context().await;
     {
@@ -6572,6 +6695,7 @@ async fn set_rate_limits_retains_previous_credits() {
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -6697,6 +6821,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -8063,6 +8188,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         environments: Vec::new(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -9714,6 +9840,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -10043,6 +10170,7 @@ async fn make_session_with_config_and_rx(
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -10184,6 +10312,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -12240,6 +12369,7 @@ where
         environments: default_environments.clone(),
         implicit_environment_selection: false,
         resume_optional_environment_ids: Default::default(),
+        default_secondary_environments: Vec::new(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -16036,6 +16166,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
         .await;
 
     assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn shutdown_preserves_queued_trigger_without_starting_a_turn() -> anyhow::Result<()> {
+    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
+    let interrupted_turn_id = turn_context.sub_id.clone();
+    session
+        .start_task(
+            turn_context,
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    session
+        .input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            )
+            .into(),
+            Default::default(),
+        )
+        .await;
+    assert!(session.has_pending_turn_start_work().await);
+
+    let closed = tokio::time::timeout(
+        StdDuration::from_secs(3),
+        handlers::shutdown(&session, "shutdown".to_string()),
+    )
+    .await?;
+    assert!(closed);
+    assert!(session.active_turn.lock().await.is_none());
+    assert!(session.has_pending_turn_start_work().await);
+    assert_eq!(
+        session.state.lock().await.last_started_turn_id.as_deref(),
+        Some(interrupted_turn_id.as_str())
+    );
+    Ok(())
 }
 
 #[tokio::test]
