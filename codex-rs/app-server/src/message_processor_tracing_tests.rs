@@ -288,6 +288,24 @@ async fn build_test_processor_with_state_db(
     Arc<MessageProcessor>,
     mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
 ) {
+    build_test_processor_with_loader(
+        config,
+        auth_manager,
+        state_db,
+        CloudConfigBundleLoader::default(),
+    )
+    .await
+}
+
+async fn build_test_processor_with_loader(
+    config: Arc<Config>,
+    auth_manager: Arc<AuthManager>,
+    state_db: Option<crate::rollout_state_db::StateDbHandle>,
+    cloud_config_loader: CloudConfigBundleLoader,
+) -> (
+    Arc<MessageProcessor>,
+    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+) {
     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
     let config_manager = ConfigManager::new(
         config.codex_home.to_path_buf(),
@@ -296,7 +314,7 @@ async fn build_test_processor_with_state_db(
             config.codex_home.join("managed_config.toml").to_path_buf(),
         ),
         /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
+        cloud_config_loader,
         Arg0DispatchPaths::default(),
         Arc::new(codex_config::NoopThreadConfigLoader),
     );
@@ -484,6 +502,711 @@ fn assert_has_internal_descendant_at_min_depth(
         ancestor.name,
         format_spans(spans)
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn stalled_auth_config_delays_auth_status_but_not_initialize() -> Result<()> {
+    use codex_app_server_protocol::GetAuthStatusParams;
+    use codex_app_server_protocol::GetAuthStatusResponse;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Semaphore;
+
+    let block_next = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let loader = CloudConfigBundleLoader::from_getter({
+        let (block_next, entered, release) = (block_next.clone(), entered.clone(), release.clone());
+        move || {
+            let (block_next, entered, release) =
+                (block_next.clone(), entered.clone(), release.clone());
+            async move {
+                if block_next.swap(false, Ordering::SeqCst) {
+                    entered.add_permits(1);
+                    release
+                        .acquire()
+                        .await
+                        .expect("release config load")
+                        .forget();
+                }
+                Ok(None)
+            }
+        }
+    });
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let home = TempDir::new()?;
+    let config = Arc::new(build_test_config(home.path(), &server.uri()).await?);
+    let auth = AuthManager::shared_from_config(config.as_ref(), false).await?;
+    let (processor, outgoing_rx) =
+        build_test_processor_with_loader(config, auth, None, loader).await;
+    let mut harness = TracingHarness::from_processor(server, home, processor, outgoing_rx).await?;
+
+    block_next.store(true, Ordering::SeqCst);
+    let auth_status = |id| ClientRequest::GetAuthStatus {
+        request_id: RequestId::Integer(id),
+        params: GetAuthStatusParams {
+            include_token: Some(false),
+            refresh_token: Some(false),
+            allow_retryable_error: false,
+        },
+    };
+    harness
+        .processor
+        .process_request(
+            TEST_CONNECTION_ID,
+            request_from_client_request(auth_status(2)),
+            &AppServerTransport::Stdio,
+            Arc::clone(&harness.session),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await??
+        .forget();
+
+    let connection = ConnectionId(8);
+    let session = Arc::new(ConnectionSessionState::new(
+        crate::transport::ConnectionOrigin::Stdio,
+    ));
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(ClientRequest::Initialize {
+                request_id: RequestId::Integer(3),
+                params: InitializeParams {
+                    client_info: ClientInfo {
+                        name: "second-client".to_string(),
+                        title: None,
+                        version: "0.1.0".to_string(),
+                    },
+                    capabilities: Some(InitializeCapabilities {
+                        experimental_api: true,
+                        ..Default::default()
+                    }),
+                },
+            }),
+            &AppServerTransport::Stdio,
+            Arc::clone(&session),
+        )
+        .await;
+    let _: InitializeResponse = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_response_from(&mut harness.outgoing_rx, connection, 3),
+    )
+    .await?;
+    assert!(session.initialized());
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(auth_status(4)),
+            &AppServerTransport::Stdio,
+            Arc::clone(&session),
+        )
+        .await;
+    let opted_in = ClientRequest::GetAuthStatus {
+        request_id: RequestId::Integer(5),
+        params: GetAuthStatusParams {
+            include_token: Some(false),
+            refresh_token: Some(false),
+            allow_retryable_error: true,
+        },
+    };
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(opted_in),
+            &AppServerTransport::Stdio,
+            session,
+        )
+        .await;
+    loop {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), harness.outgoing_rx.recv())
+            .await?
+            .expect("outgoing channel");
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+            && connection_id == connection
+        {
+            match message {
+                crate::outgoing_message::OutgoingMessage::Error(error) => {
+                    assert_eq!(error.id, RequestId::Integer(5));
+                    assert_eq!(error.error.code, crate::error_code::OVERLOADED_ERROR_CODE);
+                    assert_eq!(
+                        error.error.data,
+                        Some(serde_json::json!({"reason": "authStatusTemporarilyUnavailable"}))
+                    );
+                    break;
+                }
+                crate::outgoing_message::OutgoingMessage::Response(response) => {
+                    assert_ne!(response.id, RequestId::Integer(4));
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_response_from::<GetAuthStatusResponse>(&mut harness.outgoing_rx, connection, 4)
+        )
+        .await
+        .is_err()
+    );
+
+    release.add_permits(1);
+    let _: GetAuthStatusResponse = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_response_from(&mut harness.outgoing_rx, TEST_CONNECTION_ID, 2),
+    )
+    .await?;
+    let _: GetAuthStatusResponse = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_response_from(&mut harness.outgoing_rx, connection, 4),
+    )
+    .await?;
+    harness.shutdown().await;
+    Ok(())
+}
+
+async fn retryable_auth_test_harness() -> Result<(
+    TracingHarness,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<tokio::sync::Semaphore>,
+    Arc<tokio::sync::Semaphore>,
+    ConnectionId,
+    Arc<ConnectionSessionState>,
+)> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Semaphore;
+
+    let block_next = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let loader = CloudConfigBundleLoader::from_getter({
+        let (block_next, entered, release) = (block_next.clone(), entered.clone(), release.clone());
+        move || {
+            let (block_next, entered, release) =
+                (block_next.clone(), entered.clone(), release.clone());
+            async move {
+                if block_next.swap(false, Ordering::SeqCst) {
+                    entered.add_permits(1);
+                    release
+                        .acquire()
+                        .await
+                        .expect("release config load")
+                        .forget();
+                }
+                Ok(None)
+            }
+        }
+    });
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let home = TempDir::new()?;
+    let config = Arc::new(build_test_config(home.path(), &server.uri()).await?);
+    let auth = AuthManager::shared_from_config(config.as_ref(), false).await?;
+    let (processor, outgoing_rx) =
+        build_test_processor_with_loader(config, auth, None, loader).await;
+    let mut harness = TracingHarness::from_processor(server, home, processor, outgoing_rx).await?;
+    let connection = ConnectionId(8);
+    let session = Arc::new(ConnectionSessionState::new(
+        crate::transport::ConnectionOrigin::Stdio,
+    ));
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(ClientRequest::Initialize {
+                request_id: RequestId::Integer(3),
+                params: InitializeParams {
+                    client_info: ClientInfo {
+                        name: "retrying-client".to_string(),
+                        title: None,
+                        version: "0.1.0".to_string(),
+                    },
+                    capabilities: Some(InitializeCapabilities {
+                        experimental_api: true,
+                        ..Default::default()
+                    }),
+                },
+            }),
+            &AppServerTransport::Stdio,
+            Arc::clone(&session),
+        )
+        .await;
+    let _: InitializeResponse = read_response_from(&mut harness.outgoing_rx, connection, 3).await;
+    Ok((harness, block_next, entered, release, connection, session))
+}
+
+fn read_only_auth_status(id: i64) -> ClientRequest {
+    ClientRequest::GetAuthStatus {
+        request_id: RequestId::Integer(id),
+        params: codex_app_server_protocol::GetAuthStatusParams {
+            include_token: Some(false),
+            refresh_token: Some(false),
+            allow_retryable_error: true,
+        },
+    }
+}
+
+async fn read_auth_status_error(
+    outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+    connection: ConnectionId,
+    request_id: i64,
+) {
+    loop {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), outgoing_rx.recv())
+            .await
+            .expect("auth status deadline")
+            .expect("outgoing channel");
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message: crate::outgoing_message::OutgoingMessage::Error(error),
+            ..
+        } = envelope
+            && connection_id == connection
+            && error.id == RequestId::Integer(request_id)
+        {
+            assert_eq!(error.error.code, crate::error_code::OVERLOADED_ERROR_CODE);
+            assert_eq!(
+                error.error.data,
+                Some(serde_json::json!({"reason": "authStatusTemporarilyUnavailable"}))
+            );
+            return;
+        }
+    }
+}
+
+async fn read_response_without_expired_auth<T: serde::de::DeserializeOwned>(
+    outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+    connection: ConnectionId,
+    expected_id: i64,
+) -> T {
+    loop {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), outgoing_rx.recv())
+            .await
+            .expect("response deadline")
+            .expect("outgoing channel");
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+            && connection_id == connection
+        {
+            match message {
+                crate::outgoing_message::OutgoingMessage::Response(response) => {
+                    assert_ne!(
+                        response.id,
+                        RequestId::Integer(4),
+                        "late response to expired status"
+                    );
+                    assert_ne!(
+                        response.id,
+                        RequestId::Integer(5),
+                        "late response to expired status"
+                    );
+                    if response.id == RequestId::Integer(expected_id) {
+                        return serde_json::from_value(
+                            serde_json::to_value(response.result).expect("serialize response"),
+                        )
+                        .expect("deserialize response");
+                    }
+                }
+                crate::outgoing_message::OutgoingMessage::Error(error) => {
+                    assert_ne!(
+                        error.id,
+                        RequestId::Integer(4),
+                        "late error to expired status"
+                    );
+                    assert_ne!(
+                        error.id,
+                        RequestId::Integer(5),
+                        "late error to expired status"
+                    );
+                    assert_ne!(
+                        error.id,
+                        RequestId::Integer(expected_id),
+                        "unexpected error: {error:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn retryable_auth_status_preserves_auth_order_and_current_provider() -> Result<()> {
+    use codex_app_server_protocol::GetAuthStatusResponse;
+    use codex_app_server_protocol::LoginAccountParams;
+    use codex_app_server_protocol::LoginAccountResponse;
+    use codex_app_server_protocol::LogoutAccountResponse;
+    use std::sync::atomic::Ordering;
+
+    let (mut harness, block_next, entered, release, connection, session) =
+        retryable_auth_test_harness().await?;
+    block_next.store(true, Ordering::SeqCst);
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(4)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await??
+        .forget();
+    read_auth_status_error(&mut harness.outgoing_rx, connection, 4).await;
+
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(5)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    read_auth_status_error(&mut harness.outgoing_rx, connection, 5).await;
+    assert_eq!(
+        harness
+            .processor
+            .request_serialization_queues
+            .queued_count(
+                &crate::request_serialization::RequestSerializationQueueKey::Global("account-auth")
+            )
+            .await,
+        0
+    );
+
+    write_mock_responses_config_toml(
+        harness._codex_home.path(),
+        &harness._server.uri(),
+        &BTreeMap::new(),
+        8192,
+        Some(true),
+        "mock_provider",
+        "compact",
+    )?;
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(ClientRequest::LoginAccount {
+                request_id: RequestId::Integer(6),
+                params: LoginAccountParams::ApiKey {
+                    api_key: "synthetic-test-key".to_string(),
+                },
+            }),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(7)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(ClientRequest::LogoutAccount {
+                request_id: RequestId::Integer(8),
+                params: None,
+            }),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(9)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    release.add_permits(1);
+    let _: LoginAccountResponse =
+        read_response_without_expired_auth(&mut harness.outgoing_rx, connection, 6).await;
+
+    let logged_in: GetAuthStatusResponse =
+        read_response_without_expired_auth(&mut harness.outgoing_rx, connection, 7).await;
+    assert_eq!(logged_in.requires_openai_auth, Some(true));
+    assert!(logged_in.auth_method.is_some());
+    assert_eq!(logged_in.auth_token, None);
+    let _: LogoutAccountResponse =
+        read_response_without_expired_auth(&mut harness.outgoing_rx, connection, 8).await;
+    let logged_out: GetAuthStatusResponse =
+        read_response_without_expired_auth(&mut harness.outgoing_rx, connection, 9).await;
+    assert_eq!(logged_out.requires_openai_auth, Some(true));
+    assert_eq!(logged_out.auth_method, None);
+
+    write_mock_responses_config_toml(
+        harness._codex_home.path(),
+        &harness._server.uri(),
+        &BTreeMap::new(),
+        8192,
+        Some(false),
+        "mock_provider",
+        "compact",
+    )?;
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(10)),
+            &AppServerTransport::Stdio,
+            session,
+        )
+        .await;
+    let custom_provider: GetAuthStatusResponse =
+        read_response_without_expired_auth(&mut harness.outgoing_rx, connection, 10).await;
+    assert_eq!(custom_provider.requires_openai_auth, Some(false));
+    assert_eq!(custom_provider.auth_method, None);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    while let Ok(Some(envelope)) =
+        tokio::time::timeout_at(deadline, harness.outgoing_rx.recv()).await
+    {
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+            && connection_id == connection
+        {
+            match message {
+                crate::outgoing_message::OutgoingMessage::Response(response) => {
+                    assert!(!matches!(response.id, RequestId::Integer(4 | 5)))
+                }
+                crate::outgoing_message::OutgoingMessage::Error(error) => {
+                    assert!(!matches!(error.id, RequestId::Integer(4 | 5)))
+                }
+                _ => {}
+            }
+        }
+    }
+    harness.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn retryable_auth_status_disconnect_discards_waiting_request() -> Result<()> {
+    use codex_app_server_protocol::GetAuthStatusResponse;
+    use std::sync::atomic::Ordering;
+
+    let (mut harness, block_next, entered, release, connection, session) =
+        retryable_auth_test_harness().await?;
+    block_next.store(true, Ordering::SeqCst);
+    harness
+        .processor
+        .process_request(
+            TEST_CONNECTION_ID,
+            request_from_client_request(read_only_auth_status(11)),
+            &AppServerTransport::Stdio,
+            harness.session.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await??
+        .forget();
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(12)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    let key = crate::request_serialization::RequestSerializationQueueKey::Global("account-auth");
+    assert_eq!(
+        harness
+            .processor
+            .request_serialization_queues
+            .queued_count(&key)
+            .await,
+        1
+    );
+    harness
+        .processor
+        .connection_closed(connection, &session)
+        .await;
+    assert_eq!(
+        harness
+            .processor
+            .request_serialization_queues
+            .queued_count(&key)
+            .await,
+        0
+    );
+    release.add_permits(1);
+    let _: GetAuthStatusResponse =
+        read_response_from(&mut harness.outgoing_rx, TEST_CONNECTION_ID, 11).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(3200);
+    while let Ok(Some(envelope)) =
+        tokio::time::timeout_at(deadline, harness.outgoing_rx.recv()).await
+    {
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+            && connection_id == connection
+        {
+            match message {
+                crate::outgoing_message::OutgoingMessage::Response(response) => {
+                    assert_ne!(response.id, RequestId::Integer(12))
+                }
+                crate::outgoing_message::OutgoingMessage::Error(error) => {
+                    assert_ne!(error.id, RequestId::Integer(12))
+                }
+                _ => {}
+            }
+        }
+    }
+    harness.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn retryable_auth_status_disconnect_drains_started_request() -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    let (mut harness, block_next, entered, release, connection, session) =
+        retryable_auth_test_harness().await?;
+    block_next.store(true, Ordering::SeqCst);
+    harness
+        .processor
+        .process_request(
+            connection,
+            request_from_client_request(read_only_auth_status(14)),
+            &AppServerTransport::Stdio,
+            session.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await??
+        .forget();
+    let processor = Arc::clone(&harness.processor);
+    let mut close = tokio::spawn(async move {
+        processor.connection_closed(connection, &session).await;
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut close)
+            .await
+            .is_err()
+    );
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), close).await??;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    while let Ok(Some(envelope)) =
+        tokio::time::timeout_at(deadline, harness.outgoing_rx.recv()).await
+    {
+        if let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+            && connection_id == connection
+        {
+            match message {
+                crate::outgoing_message::OutgoingMessage::Response(response) => {
+                    assert_ne!(response.id, RequestId::Integer(14))
+                }
+                crate::outgoing_message::OutgoingMessage::Error(error) => {
+                    assert_ne!(error.id, RequestId::Integer(14))
+                }
+                _ => {}
+            }
+        }
+    }
+    harness.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn retryable_auth_status_does_not_time_out_token_or_refresh_requests() -> Result<()> {
+    use codex_app_server_protocol::GetAuthStatusParams;
+    use codex_app_server_protocol::GetAuthStatusResponse;
+    use std::sync::atomic::Ordering;
+
+    let (mut harness, block_next, entered, release, connection, session) =
+        retryable_auth_test_harness().await?;
+    block_next.store(true, Ordering::SeqCst);
+    harness
+        .processor
+        .process_request(
+            TEST_CONNECTION_ID,
+            request_from_client_request(ClientRequest::GetAuthStatus {
+                request_id: RequestId::Integer(11),
+                params: GetAuthStatusParams {
+                    include_token: Some(false),
+                    refresh_token: Some(false),
+                    allow_retryable_error: false,
+                },
+            }),
+            &AppServerTransport::Stdio,
+            harness.session.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await??
+        .forget();
+    for (id, include_token, refresh_token) in [(12, true, false), (13, false, true)] {
+        harness
+            .processor
+            .process_request(
+                connection,
+                request_from_client_request(ClientRequest::GetAuthStatus {
+                    request_id: RequestId::Integer(id),
+                    params: GetAuthStatusParams {
+                        include_token: Some(include_token),
+                        refresh_token: Some(refresh_token),
+                        allow_retryable_error: true,
+                    },
+                }),
+                &AppServerTransport::Stdio,
+                session.clone(),
+            )
+            .await;
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(3200),
+            read_response_from::<GetAuthStatusResponse>(&mut harness.outgoing_rx, connection, 12)
+        )
+        .await
+        .is_err()
+    );
+    release.add_permits(1);
+    let _: GetAuthStatusResponse =
+        read_response_from(&mut harness.outgoing_rx, TEST_CONNECTION_ID, 11).await;
+    let _: GetAuthStatusResponse =
+        read_response_from(&mut harness.outgoing_rx, connection, 12).await;
+    let _: GetAuthStatusResponse =
+        read_response_from(&mut harness.outgoing_rx, connection, 13).await;
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

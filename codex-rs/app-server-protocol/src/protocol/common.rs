@@ -2994,6 +2994,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_status_retryable_error_is_request_scoped() -> Result<()> {
+        let old: v1::GetAuthStatusParams = serde_json::from_value(json!({
+            "includeToken": false,
+            "refreshToken": false
+        }))?;
+        assert!(!old.allow_retryable_error);
+        assert_eq!(
+            serde_json::to_value(&old)?,
+            json!({
+                "includeToken": false,
+                "refreshToken": false
+            })
+        );
+        let opted_in: v1::GetAuthStatusParams = serde_json::from_value(json!({
+            "includeToken": false,
+            "refreshToken": false,
+            "allowRetryableError": true
+        }))?;
+        assert!(opted_in.allow_retryable_error);
+        assert_eq!(
+            serde_json::to_value(&opted_in)?["allowRetryableError"],
+            true
+        );
+        Ok(())
+    }
+
+    #[test]
     fn conversation_id_serializes_as_plain_string() -> Result<()> {
         let id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
 

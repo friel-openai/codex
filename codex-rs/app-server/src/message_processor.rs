@@ -10,6 +10,7 @@ use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
 use crate::current_time::app_server_time_provider;
+use crate::error_code::auth_status_unavailable;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -54,6 +55,7 @@ use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_processors::account_processor::handle_gcp_setup;
 use crate::request_processors::read_server_diagnostics;
 use crate::request_serialization::QueuedInitializedRequest;
+use crate::request_serialization::RequestSerializationAccess;
 use crate::request_serialization::RequestSerializationQueueKey;
 use crate::request_serialization::RequestSerializationQueues;
 use crate::skills_watcher::SkillsWatcher;
@@ -70,6 +72,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::ExperimentalApi;
+use codex_app_server_protocol::GetAuthStatusParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
@@ -106,6 +109,7 @@ use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::timeout;
@@ -116,6 +120,7 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
 use crate::turn_admission::TurnAdmission;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+const AUTH_STATUS_RETRYABLE_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 3);
 
 /// Erases a selected handler's future so the dispatcher does not retain every request variant.
 type InitializedRequestFuture = Pin<
@@ -1081,6 +1086,21 @@ impl MessageProcessor {
             &codex_request,
         );
 
+        if let ClientRequest::GetAuthStatus { params, .. } = &codex_request
+            && params.allow_retryable_error
+            && !params.refresh_token.unwrap_or(false)
+            && !params.include_token.unwrap_or(false)
+        {
+            self.dispatch_retryable_auth_status(
+                connection_request_id,
+                params.clone(),
+                session,
+                request_context,
+            )
+            .await;
+            return Ok(());
+        }
+
         let (turn_admission, recheck_turn_admission) = match &codex_request {
             ClientRequest::ThreadStart { .. }
             | ClientRequest::ThreadFork { .. }
@@ -1166,6 +1186,82 @@ impl MessageProcessor {
             });
         }
         Ok(())
+    }
+
+    async fn dispatch_retryable_auth_status(
+        self: &Arc<Self>,
+        request_id: ConnectionRequestId,
+        params: GetAuthStatusParams,
+        session: Arc<ConnectionSessionState>,
+        request_context: RequestContext,
+    ) {
+        let deadline = tokio::time::Instant::now() + AUTH_STATUS_RETRYABLE_TIMEOUT;
+        let key = RequestSerializationQueueKey::Global("account-auth");
+        let abandoned = CancellationToken::new();
+        let (result_tx, result_rx) = oneshot::channel();
+        let processor = Arc::clone(self);
+        let work_abandoned = abandoned.clone();
+        let originator = AuthStorageOriginator::from_client_name(
+            session.app_server_client_name().unwrap_or("none"),
+        );
+        let work = async move {
+            if work_abandoned.is_cancelled() || result_tx.is_closed() {
+                return;
+            }
+            let result = originator
+                .scope(Box::pin(
+                    processor.account_processor.get_auth_status(params),
+                ))
+                .await;
+            let _ = result_tx.send(result);
+        }
+        .instrument(request_context.span());
+        self.request_serialization_queues
+            .enqueue(
+                key.clone(),
+                RequestSerializationAccess::Exclusive,
+                QueuedInitializedRequest::new(Arc::clone(&session.rpc_gate), work)
+                    .with_method("getAuthStatus")
+                    .with_abandonment(abandoned.clone()),
+            )
+            .await;
+
+        let queues = self.request_serialization_queues.clone();
+        let outgoing = Arc::clone(&self.outgoing);
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = session.disconnect.cancelled() => None,
+                result = tokio::time::timeout_at(deadline, result_rx) => Some(result),
+            };
+            if !matches!(&result, Some(Ok(Ok(_)))) {
+                abandoned.cancel();
+                queues.discard_abandoned(&key).await;
+            }
+            if session.disconnect.is_cancelled() || session.rpc_gate.is_closed() {
+                return;
+            }
+            match result {
+                None => {}
+                Some(Err(_)) => {
+                    outgoing
+                        .send_error(request_id, auth_status_unavailable())
+                        .await
+                }
+                Some(Ok(Err(_))) => {
+                    outgoing
+                        .send_error(
+                            request_id,
+                            internal_error("Auth status request was interrupted"),
+                        )
+                        .await
+                }
+                Some(Ok(Ok(Ok(Some(response))))) => {
+                    outgoing.send_response_as(request_id, response).await;
+                }
+                Some(Ok(Ok(Ok(None)))) => {}
+                Some(Ok(Ok(Err(error)))) => outgoing.send_error(request_id, error).await,
+            }
+        });
     }
 
     #[deny(clippy::large_stack_frames)]

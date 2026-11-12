@@ -114,6 +114,7 @@ impl RequestSerializationQueueKey {
 pub(crate) struct QueuedInitializedRequest {
     method: &'static str,
     gate: Option<Arc<ConnectionRpcGate>>,
+    abandoned: Option<tokio_util::sync::CancellationToken>,
     future: BoxFutureUnit,
 }
 
@@ -125,6 +126,7 @@ impl QueuedInitializedRequest {
         Self {
             method: "internal",
             gate: Some(gate),
+            abandoned: None,
             future: Box::pin(future),
         }
     }
@@ -133,12 +135,21 @@ impl QueuedInitializedRequest {
         Self {
             method: "internal",
             gate: None,
+            abandoned: None,
             future: Box::pin(future),
         }
     }
 
     pub(crate) fn with_method(mut self, method: &'static str) -> Self {
         self.method = method;
+        self
+    }
+
+    pub(crate) fn with_abandonment(
+        mut self,
+        abandoned: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.abandoned = Some(abandoned);
         self
     }
 
@@ -202,6 +213,33 @@ pub(crate) struct RequestSerializationQueues {
 }
 
 impl RequestSerializationQueues {
+    #[cfg(test)]
+    pub(crate) async fn queued_count(&self, key: &RequestSerializationQueueKey) -> usize {
+        self.inner
+            .lock()
+            .await
+            .get(key)
+            .map_or(0, |queue| queue.requests.len())
+    }
+
+    /// Drop abandoned requests that have not started; running requests retain their queue ownership.
+    pub(crate) async fn discard_abandoned(&self, key: &RequestSerializationQueueKey) {
+        let mut queues = self.inner.lock().await;
+        if let Some(queue) = queues.get_mut(key) {
+            let previous_len = queue.requests.len();
+            queue.requests.retain(|request| {
+                !request
+                    .request
+                    .abandoned
+                    .as_ref()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            });
+            if queue.requests.len() != previous_len {
+                queue.changed.notify_one();
+            }
+        }
+    }
+
     /// Release requests whose connection closed while they waited in a queue.
     pub(crate) async fn discard_closed(&self) {
         let mut queues = self.inner.lock().await;
@@ -457,6 +495,61 @@ mod tests {
         blocked_tx
             .send(())
             .expect("blocked request should be waiting");
+    }
+
+    #[tokio::test]
+    async fn stalled_account_auth_blocks_other_connections_but_not_other_work() {
+        let queues = RequestSerializationQueues::default();
+        let (account_key, account_access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(1),
+            ClientRequestSerializationScope::Global("account-auth"),
+        );
+        let (status_key, status_access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(2),
+            ClientRequestSerializationScope::Global("account-auth"),
+        );
+        assert_eq!(account_key, status_key);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (status_tx, mut status_rx) = oneshot::channel();
+        queues
+            .enqueue(
+                account_key,
+                account_access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                }),
+            )
+            .await;
+        timeout(queue_drain_timeout(), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        queues
+            .enqueue(
+                status_key,
+                status_access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    status_tx.send(()).unwrap();
+                }),
+            )
+            .await;
+        let (other_tx, other_rx) = oneshot::channel();
+        tokio::spawn(async move { other_tx.send(()).unwrap() });
+        timeout(queue_drain_timeout(), other_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        release_tx.send(()).unwrap();
+        timeout(queue_drain_timeout(), status_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
