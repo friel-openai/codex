@@ -4,6 +4,7 @@ use anyhow::Context;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex_exec::test_codex_exec;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::string::ToString;
 use uuid::Uuid;
@@ -89,12 +90,12 @@ fn exec_sse_response(index: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Result<()> {
+async fn exec_fork_by_id_creates_new_session_with_frozen_history_base() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
     let server = MockServer::start().await;
-    let _response_mock =
+    let response_mock =
         responses::mount_sse_sequence(&server, (0..2).map(exec_sse_response).collect()).await;
 
     let marker = format!("fork-base-{}", Uuid::new_v4());
@@ -135,11 +136,29 @@ async fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Re
         extract_forked_from_id(&forked_path).as_deref(),
         Some(session_id.as_str())
     );
-    assert!(
-        forked_content.contains(&marker),
-        "forked session should copy ancestor rollout history"
+    assert!(!rollout_response_items_contain_marker(
+        &forked_path,
+        &marker
+    )?);
+    let fork_meta: Value =
+        serde_json::from_str(forked_content.lines().next().context("fork metadata")?)?;
+    let history_base = &fork_meta["payload"]["history_base"];
+    let snapshot_id = history_base["thread_id"].as_str().context("snapshot id")?;
+    Uuid::parse_str(snapshot_id)?;
+    assert_ne!(snapshot_id, session_id);
+    let end_ordinal = history_base["end_ordinal_exclusive"]
+        .as_u64()
+        .context("frozen ordinal")?;
+    assert!(end_ordinal > 0);
+    assert_eq!(
+        fork_meta["payload"]["forked_from_ordinal_exclusive"],
+        end_ordinal
     );
     assert!(forked_content.contains(&marker2));
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body_json().to_string().contains(&marker));
 
     let original_content = std::fs::read_to_string(&original_path)?;
     assert!(original_content.contains(&marker));

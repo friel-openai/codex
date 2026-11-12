@@ -4,6 +4,8 @@ use crate::agent::api::AgentControl;
 use crate::agents_md_manager::SessionInstructions;
 use crate::exec_policy::ExecPolicyManager;
 use crate::inherited_thread_state::InheritedThreadState;
+use crate::session::ForkStartupItems;
+use crate::thread_manager::SharedFullHistorySourceReservation;
 use codex_execpolicy::Policy;
 use codex_execpolicy::RequirementsExecPolicy;
 use codex_protocol::ThreadId;
@@ -53,4 +55,6 @@ pub(crate) struct PreparedChildInheritance {
     pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) originator: String,
     pub(crate) attachment_source: Option<ThreadId>,
+    pub(crate) fork_startup_items: ForkStartupItems,
+    pub(crate) fork_source_reservation: Option<SharedFullHistorySourceReservation>,
 }
