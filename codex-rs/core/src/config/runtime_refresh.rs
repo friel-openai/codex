@@ -8,6 +8,7 @@ use crate::config::constrain_mcp_servers;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use codex_config::McpServerAuth;
 use codex_config::McpServerConfig;
+use codex_config::config_toml::AutoReviewToml;
 use codex_features::Feature;
 use codex_features::FeatureConfigSource;
 use codex_features::FeatureOverrides;
@@ -69,8 +70,19 @@ impl Config {
         }
         // User refreshes retain the session's managed configuration.
         layers.ensure_config_server_applied()?;
-        let cfg: McpRefreshToml = layers
-            .effective_config()
+        let effective_config = layers.effective_config();
+        let auto_review_use_ultrafast = if matches!(scope, RuntimeConfigRefresh::UserFiles) {
+            let auto_review: Option<AutoReviewToml> = effective_config
+                .get("auto_review")
+                .cloned()
+                .map(toml::Value::try_into)
+                .transpose()
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            auto_review.is_some_and(|auto_review| auto_review.use_ultrafast)
+        } else {
+            incoming.auto_review_use_ultrafast
+        };
+        let cfg: McpRefreshToml = effective_config
             .try_into()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         let mut configured_features = Features::from_sources(
@@ -196,6 +208,7 @@ impl Config {
         if !matches!(scope, RuntimeConfigRefresh::Mcp) {
             config.tool_suggest = resolve_tool_suggest_config_from_layer_stack(&layers);
             config.custom_models = incoming.custom_models.clone();
+            config.auto_review_use_ultrafast = auto_review_use_ultrafast;
         }
         config.config_layer_stack = layers
             .with_mcp_ema_cancellation(self.config_layer_stack.mcp_ema_cancellation().clone());
