@@ -1,5 +1,6 @@
 //! Host-installed tools for independent root threads, outside agent-tree ownership.
 
+mod fork;
 mod message;
 pub(crate) mod retention;
 
@@ -46,6 +47,7 @@ impl ThreadLifecycleContributor<Config> for Host {
 }
 
 pub(crate) fn register(session: &Session, turn: &TurnContext, registry: &mut ToolRegistry) {
+    fork::register(session, turn, registry);
     message::register(session, turn, registry);
 }
 
