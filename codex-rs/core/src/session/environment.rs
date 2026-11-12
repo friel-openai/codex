@@ -14,6 +14,7 @@ use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::sandbox::SandboxType;
 
 use crate::config::ConstraintError;
@@ -96,6 +97,43 @@ pub(super) fn ensure_configs_stay_owner_provided(
         });
     }
     Ok(())
+}
+
+fn update_local_workspace(
+    current: &SessionConfiguration,
+    requested: &TurnEnvironmentSelections,
+) -> ConstraintResult<TurnEnvironmentSelections> {
+    let is_local_primary = |environment: &TurnEnvironmentSelection| {
+        environment.environment_id == LOCAL_ENVIRONMENT_ID
+            && environment.config == EnvironmentConfigState::FromThread
+    };
+    if let Some((local, secondaries)) = current.environments.split_first()
+        && let Some((requested_local, requested_secondaries)) = requested.environments.split_first()
+        && is_local_primary(local)
+        && is_local_primary(requested_local)
+        && (current.cwd() == &requested.legacy_fallback_cwd
+            || requested_local.cwd.to_abs_path().ok().as_ref()
+                == Some(&requested.legacy_fallback_cwd))
+        && secondaries.len() == requested_secondaries.len()
+        && secondaries
+            .iter()
+            .zip(requested_secondaries)
+            .all(|(selected, requested)| selected.has_same_workspace(requested))
+    {
+        let mut environments = current.environments.clone();
+        environments[0].cwd = requested_local.cwd.clone();
+        environments[0].workspace_roots = requested_local.workspace_roots.clone();
+        return Ok(TurnEnvironmentSelections::new(
+            requested.legacy_fallback_cwd.clone(),
+            environments,
+        ));
+    }
+    Err(ConstraintError::InvalidValue {
+        field_name: "environments",
+        candidate: "local workspace update".to_string(),
+        allowed: "current local primary and unchanged secondary workspaces".to_string(),
+        requirement_source: codex_config::RequirementSource::Unknown,
+    })
 }
 
 fn validate_environment_config(
@@ -181,6 +219,19 @@ impl Session {
         updates: &SessionSettingsUpdate,
     ) -> ConstraintResult<SessionConfiguration> {
         let current_environments = &current.environments;
+        let adjusted;
+        let updates = if updates.preserve_secondary_workspaces
+            && let Some(environments) = &updates.environments
+        {
+            // Recheck under the settings lock so a stale request cannot restore a removed binding.
+            adjusted = SessionSettingsUpdate {
+                environments: Some(update_local_workspace(current, environments)?),
+                ..updates.clone()
+            };
+            &adjusted
+        } else {
+            updates
+        };
         if let Some(environments) = &updates.environments {
             ensure_configs_stay_owner_provided(current_environments, &environments.environments)?;
         }

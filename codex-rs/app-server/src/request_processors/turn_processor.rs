@@ -124,6 +124,42 @@ struct ThreadEnvironmentOverride {
     runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
 }
 
+fn restates_unavailable_startup_secondaries(
+    current: &TurnEnvironmentRequests,
+    requested: &TurnEnvironmentRequests,
+) -> bool {
+    let Some((primary, secondaries)) = current.environment_requests.split_first() else {
+        return false;
+    };
+    let Some((requested_primary, requested_secondaries)) =
+        requested.environment_requests.split_first()
+    else {
+        return false;
+    };
+    primary.environment_id == LOCAL_ENVIRONMENT_ID
+        && primary.config == EnvironmentConfigState::FromThread
+        && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
+        && requested_primary.config == EnvironmentConfigState::FromThread
+        && secondaries
+            .iter()
+            .any(|environment| environment.config == EnvironmentConfigState::StartupUnavailable)
+        && secondaries.len() == requested_secondaries.len()
+        && secondaries
+            .iter()
+            .zip(requested_secondaries)
+            .all(|(current, requested)| {
+                current.environment_id == requested.environment_id
+                    && current.cwd == requested.cwd
+                    && current.workspace_roots == requested.workspace_roots
+                    && matches!(
+                        current.config,
+                        EnvironmentConfigState::FromThread
+                            | EnvironmentConfigState::StartupUnavailable
+                    )
+                    && requested.config == EnvironmentConfigState::FromThread
+            })
+}
+
 struct ThreadSettingsBuildParams {
     method: &'static str,
     disabled_plugin_ids: Option<Vec<String>>,
@@ -782,7 +818,7 @@ impl TurnRequestProcessor {
             return ThreadEnvironmentOverride::default();
         }
 
-        // Explicit environment requests own their workspace roots and pass through unchanged. Top-level
+        // Explicit environment requests own their workspace roots. Top-level
         // `runtimeWorkspaceRoots` is only a compatibility input for default environments.
         if let Some(environment_requests) = environment_requests {
             let legacy_fallback_cwd = match cwd {
@@ -796,11 +832,31 @@ impl TurnRequestProcessor {
                     None => thread.config_snapshot().await.cwd().clone(),
                 },
             };
+            let mut requested =
+                TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
+            // Thread.environments cannot represent StartupUnavailable. A restated secondary
+            // is not a new selection when the client is only setting the local workspace.
+            if requested.environment_requests.len() > 1
+                && requested.environment_requests[0].environment_id == LOCAL_ENVIRONMENT_ID
+                && let Some(current) = thread.restorable_thread_settings().await.environments
+                && restates_unavailable_startup_secondaries(&current, &requested)
+            {
+                let local = &requested.environment_requests[0];
+                let local_changed = *local != current.environment_requests[0];
+                let same_fallback = requested.legacy_fallback_cwd == current.legacy_fallback_cwd;
+                if !local_changed && same_fallback {
+                    return ThreadEnvironmentOverride::default();
+                }
+                if local_changed
+                    && (same_fallback
+                        || local.cwd.to_abs_path().ok().as_ref()
+                            == Some(&requested.legacy_fallback_cwd))
+                {
+                    requested.preserve_secondary_workspaces = true;
+                }
+            }
             return ThreadEnvironmentOverride {
-                environment_requests: Some(TurnEnvironmentRequests::new(
-                    legacy_fallback_cwd,
-                    environment_requests,
-                )),
+                environment_requests: Some(requested),
                 ..Default::default()
             };
         }
