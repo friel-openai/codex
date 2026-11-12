@@ -85,10 +85,10 @@ index db8512954efd73dffae5766a601d35f479c53e18..2ab63f653bad42be4deb9fed5bc84c4e
  }
 
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 6fa8bb090aecd2f42ae67877abce8cd7b6f2c88f..8a3829f30f049e3a9456f67eef0e38e0bf0a3610 100644
+index 5fd56b06e3b15765acf7409c39d552410122ce03..718792a7822e7db973b7516c09eeca59e3bd68bf 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -3313,7 +3313,7 @@
+@@ -3319,7 +3319,7 @@
            "type": "boolean"
          },
          "enable_thread_adoption": {
@@ -380,6 +380,21 @@ index 823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac..b1f143393ee930d00abb845b7687af87
      };
      let properties = adopt_agent
          .parameters
+diff --git a/codex-rs/core/tests/suite/compact_remote_trimming.rs b/codex-rs/core/tests/suite/compact_remote_trimming.rs
+index 9921a132dc7963eb54831c472edacbf3f343ab0c..cc3924a48ee07ffcaf7b8054fcb54ecaaf9dffcf 100644
+--- a/codex-rs/core/tests/suite/compact_remote_trimming.rs
++++ b/codex-rs/core/tests/suite/compact_remote_trimming.rs
+@@ -169,7 +169,9 @@ async fn remote_compact_v2_trim_estimate_uses_session_base_instructions(
+                 .with_config({
+                     let instructions = instructions.to_string();
+                     move |config| {
+-                        config.model_context_window = Some(12_000);
++                        // Incremental requests include Frodex's larger tool catalog in history.
++                        config.model_context_window =
++                            Some(if incremental_tools { 17_000 } else { 12_000 });
+                         config.base_instructions = Some(instructions);
+                         if incremental_tools {
+                             config
 diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
 index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d477ea4ea 100644
 --- a/codex-rs/core/tests/suite/multi_agent_mode.rs
@@ -591,10 +606,10 @@ index 527c5ad1ff72db2636af2346ff25bf101f09cdb1..4cea2da0bf76b5f5c9165e3323277309
      pub enable_thread_adoption: Option<bool>,
      #[serde(skip_serializing_if = "Option::is_none")]
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 08f1fc20245729c39d03bb88d94a39613f9677fb..447dae0a0a3109ceb3d809f902c00b0d8407fd35 100644
+index 5efedf1b3d92057ac30c1f09499e1980c486169f..c9b884e5fd6a597c92e5ff41bc6c24ac49b56127 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -1605,7 +1605,7 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1609,7 +1609,7 @@ pub const FEATURES: &[FeatureSpec] = &[
          id: Feature::MultiAgentV2,
          key: "multi_agent_v2",
          stage: Stage::Stable,
@@ -603,7 +618,7 @@ index 08f1fc20245729c39d03bb88d94a39613f9677fb..447dae0a0a3109ceb3d809f902c00b0d
      },
      FeatureSpec {
          id: Feature::ModelCatalogInContext,
-@@ -1658,8 +1658,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1662,8 +1662,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::AgentPromptInjection,
          key: "agent_prompt_injection",
@@ -614,7 +629,7 @@ index 08f1fc20245729c39d03bb88d94a39613f9677fb..447dae0a0a3109ceb3d809f902c00b0d
      },
      FeatureSpec {
          id: Feature::SpawnCsv,
-@@ -2132,12 +2132,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -2148,12 +2148,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::GoalSupervisor,
          key: "goal_supervisor",
