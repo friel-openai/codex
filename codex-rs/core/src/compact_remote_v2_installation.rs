@@ -225,8 +225,13 @@ async fn build_and_install_compaction(
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
     let installing_prefix = prefix.is_some();
     let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
+        let prepared_window_advance = sess.prepare_auto_compact_window_advance().await;
         let (initial_context, world_state_baseline) = sess
-            .build_initial_context_with_world_state(replacement_step_context, &cutoff_world_state)
+            .build_initial_context_with_world_state_for_auto_compact_window(
+                replacement_step_context,
+                &cutoff_world_state,
+                &prepared_window_advance,
+            )
             .await;
         let (prefix_context, initial_context) = split_prefix_updates(initial_context);
         let initial_context = merge_world_state_updates(initial_context)
@@ -234,6 +239,7 @@ async fn build_and_install_compaction(
             .map(ResponseItemEnvelope::new)
             .collect();
         sess.replace_compacted_history(
+            &replacement_step_context.turn,
             compacted_history,
             replacement_step_context.to_turn_context_item(),
             world_state_baseline,
@@ -244,30 +250,31 @@ async fn build_and_install_compaction(
                 model_info: &model_info,
                 compaction_response_id,
                 reviewer_compaction_hash,
+                prepared_window_advance,
                 turn_context,
                 started_item: needs_start.then_some(&compaction_item),
             },
         )
         .await?
     } else {
-        let (new_history, world_state_baseline) = build_compaction_replacement_history(
-            sess,
-            replacement_step_context,
-            world_state,
-            compacted_history,
-        )
-        .await;
-        let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+        let (new_history, world_state_baseline, prepared_window_advance) =
+            build_compaction_replacement_history(
+                sess,
+                replacement_step_context,
+                world_state,
+                compacted_history,
+            )
+            .await;
         let installation = CompactedHistoryMetadata {
             input_goal_ids,
             message: String::new(),
-            window_number,
-            window_ids,
+            prepared_window_advance,
             compaction_response_id: Some(compaction_response_id),
             compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash,
         };
         sess.replace_compacted_history(
+            &replacement_step_context.turn,
             new_history,
             replacement_step_context.to_turn_context_item(),
             world_state_baseline,
@@ -297,8 +304,6 @@ async fn build_and_install_compaction(
             replacement_history: &replacement_history,
         });
     }
-    sess.recompute_token_usage(&replacement_step_context.turn)
-        .await;
     // Prefix installation emits its start only after validation. A routing
     // evaluation must likewise stay invisible until foreground installation succeeds.
     if !installing_prefix && needs_start && reporting.defers_lifecycle() {
