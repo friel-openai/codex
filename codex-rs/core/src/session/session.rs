@@ -39,6 +39,7 @@ use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::EnvironmentConfig;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -138,6 +139,10 @@ pub(crate) struct SessionConfiguration {
     pub(super) turn_extension_init: ExtensionDataInit,
     /// Ordered environments inherited by future turns.
     pub(super) environments: Vec<TurnEnvironmentSelection>,
+    /// The ordered selection came from registry defaults, not an explicit override.
+    pub(super) implicit_environment_selection: bool,
+    /// Saved registry executors allowed to remain unavailable for this loaded session only.
+    pub(super) resume_optional_environment_ids: Arc<std::collections::HashSet<String>>,
     /// Explicit startup overrides used when resolving effective model metadata.
     pub(super) model_info_overrides: ModelInfoOverrides,
 
@@ -358,6 +363,25 @@ impl SessionConfiguration {
         &self,
         environment_selections: &[TurnEnvironmentSelection],
     ) -> ThreadSettingsSnapshot {
+        let environments = environment_selections
+            .iter()
+            .cloned()
+            .map(|mut environment| {
+                // Do not persist a temporary refusal as a new saved executor policy.
+                if environment.config == EnvironmentConfigState::StartupUnavailable
+                    && self
+                        .resume_optional_environment_ids
+                        .contains(&environment.environment_id)
+                {
+                    environment.config = EnvironmentConfigState::FromThread;
+                }
+                environment
+            })
+            .collect();
+        let mut environments = codex_protocol::protocol::PersistedEnvironmentSelections::from(
+            TurnEnvironmentSelections::new(self.legacy_fallback_cwd.clone(), environments),
+        );
+        environments.implicit_selection = self.implicit_environment_selection;
         ThreadSettingsSnapshot {
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
@@ -373,13 +397,7 @@ impl SessionConfiguration {
             personality: self.step_settings.personality,
             collaboration_mode: self.step_settings.collaboration_mode.clone(),
             disabled_plugin_ids: self.disabled_plugin_ids.clone(),
-            environments: Some(
-                TurnEnvironmentSelections::new(
-                    self.legacy_fallback_cwd.clone(),
-                    environment_selections.to_vec(),
-                )
-                .into(),
-            ),
+            environments: Some(environments),
             workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(
                 environment_selections,
             )),
@@ -400,13 +418,16 @@ impl SessionConfiguration {
         environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CodexThreadSettingsOverrides {
         CodexThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentRequests::new(
-                self.legacy_fallback_cwd.clone(),
-                environment_selections
-                    .into_iter()
-                    .map(TurnEnvironmentSelection::into_request)
-                    .collect(),
-            )),
+            environments: Some(
+                TurnEnvironmentRequests::new(
+                    self.legacy_fallback_cwd.clone(),
+                    environment_selections
+                        .into_iter()
+                        .map(TurnEnvironmentSelection::into_request)
+                        .collect(),
+                )
+                .with_implicit_selection(self.implicit_environment_selection),
+            ),
             runtime_workspace_roots: Some(self.runtime_workspace_roots.clone()),
             profile_workspace_roots: Some(
                 self.permission_profile_state
@@ -496,6 +517,7 @@ impl SessionConfiguration {
         if let Some(environments) = &updates.environments {
             next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
             next_configuration.environments = environments.environments.clone();
+            next_configuration.implicit_environment_selection = environments.implicit_selection;
         }
         let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
         if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
@@ -914,6 +936,8 @@ impl Session {
         git_enrichment_policy: GitEnrichmentPolicy,
         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
     ) -> anyhow::Result<Arc<Self>> {
+        let startup_project_instructions =
+            thread_extension_init.remove::<crate::agents_md::StartupProjectInstructions>();
         debug!(
             "Configuring session: model={}; provider={:?}",
             session_configuration
@@ -1694,7 +1718,11 @@ impl Session {
                 otel.name = "session_init.thread_name_lookup",
             ));
             let (instruction_refresh, plugin_skill_errors, thread_name) = tokio::join!(
-                agents_md_manager.refresh(config.as_ref(), &resolved_environments),
+                agents_md_manager.refresh_with_startup(
+                    config.as_ref(),
+                    &resolved_environments,
+                    startup_project_instructions.as_deref(),
+                ),
                 plugin_skill_warmup,
                 thread_name_lookup,
             );
