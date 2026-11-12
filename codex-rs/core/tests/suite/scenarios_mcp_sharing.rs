@@ -1,4 +1,4 @@
-//! Shared MCP transports preserve each chat's model-visible tools and input responses.
+//! Root-isolated MCP transports preserve each chat's model-visible tools and input responses.
 
 use super::*;
 use codex_protocol::approvals::ElicitationAction;
@@ -20,6 +20,14 @@ async fn shared_mcp_keeps_tools_and_model_requested_input_per_chat() -> Result<(
     let second_server = start_mock_server().await;
     let command = stdio_server_bin()?;
     let test = test_codex()
+        .with_pre_build_hook(|home| {
+            // First-turn refresh reloads operational MCP features from their config layers.
+            std::fs::write(
+                home.join("config.toml"),
+                "[features]\nmcp_connection_sharing = true\n",
+            )
+            .expect("persist sharing across first-turn config refresh");
+        })
         .with_config(move |config| {
             super::configure_scenario_catalog(config);
             config.approvals_reviewer = ApprovalsReviewer::User;
@@ -136,9 +144,9 @@ async fn shared_mcp_keeps_tools_and_model_requested_input_per_chat() -> Result<(
         inputs.push(input);
     }
     assert!(processes[0].is_u64());
-    assert_eq!(
+    assert_ne!(
         processes[0], processes[1],
-        "the chats must share one process"
+        "unrelated roots must own separate processes"
     );
 
     // Both calls use the same server input key; resolve the joiner's input first.
@@ -169,7 +177,7 @@ async fn shared_mcp_keeps_tools_and_model_requested_input_per_chat() -> Result<(
         })
         .collect::<Vec<_>>();
     insta::assert_snapshot!(context_snapshot::format_context_snapshot(
-        "Two chats share one MCP process, expose different tools, and answer simultaneous model-requested questions in reverse order.",
+        "Two unrelated roots isolate MCP processes, expose different tools, and answer simultaneous model-requested questions in reverse order.",
         &entries,
         &ContextSnapshotOptions::default()
             .rewrite_known_segments()
