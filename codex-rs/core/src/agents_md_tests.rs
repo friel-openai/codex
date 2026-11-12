@@ -1,4 +1,6 @@
 use super::*;
+use crate::agents_md_manager::AgentsMdManager;
+use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConfigBuilder;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
@@ -6,6 +8,8 @@ use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::session::turn_context::TurnEnvironment;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
@@ -38,7 +42,10 @@ use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::TempDirExt;
 use core_test_support::create_directory_symlink;
+use futures::SinkExt;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
+use serde_json::json;
 use std::fs;
 use std::io;
 use std::ops::Deref;
@@ -46,9 +53,16 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone, Copy)]
 enum InjectedFailure {
@@ -1129,6 +1143,134 @@ async fn merges_existing_instructions_with_agents_md() {
     let expected = format!("{INSTRUCTIONS}{AGENTS_MD_SEPARATOR}{}", "proj doc");
 
     assert_eq!(res, expected);
+}
+
+#[tokio::test]
+async fn stalled_remote_project_instructions_fail_closed_and_can_be_retried() {
+    let root = tempfile::tempdir().expect("project root");
+    fs::write(root.path().join("AGENTS.md"), "local instructions").unwrap();
+    let config = make_config(&root, /*limit*/ 4096, /*instructions*/ None).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (stalled, metadata_requested) = oneshot::channel();
+    let ready = Arc::new(AtomicBool::new(false));
+    let _worker = AbortOnDropHandle::new(tokio::spawn({
+        let ready = Arc::clone(&ready);
+        async move {
+            let mut stalled = Some(stalled);
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            while let Some(Ok(frame)) = socket.next().await {
+                let Message::Text(text) = frame else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({"result": {"sessionId": "test-session"}}),
+                    "initialized" => continue,
+                    "fs/getMetadata" if !ready.load(Ordering::Acquire) => {
+                        if let Some(stalled) = stalled.take() {
+                            let _ = stalled.send(());
+                        }
+                        continue;
+                    }
+                    "fs/getMetadata"
+                        if request["params"]["path"]
+                            .as_str()
+                            .is_some_and(|path| path.ends_with("/AGENTS.md")) =>
+                    {
+                        json!({"result": {
+                            "isDirectory": false,
+                            "isFile": true,
+                            "isSymlink": false,
+                            "size": "remote instructions".len(),
+                            "createdAtMs": 0,
+                            "modifiedAtMs": 0,
+                        }})
+                    }
+                    "fs/getMetadata" => json!({"error": {"code": -32004, "message": "not found"}}),
+                    "fs/readFile" => {
+                        assert!(
+                            request["params"]["path"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with("/AGENTS.md")
+                        );
+                        json!({"result": {"dataBase64": BASE64_STANDARD.encode("remote instructions")}})
+                    }
+                    method => panic!("unexpected exec-server method: {method}"),
+                };
+                let mut response = result;
+                response["id"] = request["id"].clone();
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+    }));
+    let mut environments =
+        resolved_local_environments([("local", root.abs()), ("remote", root.abs())]);
+    let TurnEnvironmentState::Ready(remote) = &mut environments.environments[1] else {
+        panic!("expected a ready remote environment");
+    };
+    remote.environment = Arc::new(Environment::create_for_tests(Some(url)).unwrap());
+    let manager = AgentsMdManager::new(SessionInstructions::default());
+
+    let refresh = tokio::time::timeout(
+        REMOTE_AGENTS_MD_DISCOVERY_BUDGET + Duration::from_secs(5),
+        manager.refresh(&config, &environments),
+    );
+    let expire = async {
+        tokio::time::timeout(Duration::from_secs(5), metadata_requested)
+            .await
+            .expect("connected worker should receive metadata requests")
+            .expect("worker should stay connected");
+        tokio::time::pause();
+        tokio::time::advance(REMOTE_AGENTS_MD_DISCOVERY_BUDGET).await;
+    };
+    let (result, ()) = tokio::join!(refresh, expire);
+    tokio::time::resume();
+    let (result, _) = result.expect("a stalled worker must not block discovery indefinitely");
+    let error = result.expect_err("selected remote instructions are required");
+    assert!(matches!(
+        error.details(),
+        codex_protocol::error::CodexErrorDetails::Io(error)
+            if error.kind() == io::ErrorKind::TimedOut
+                && error.to_string().contains("AGENTS.md discovery timed out for environment `remote`")
+    ));
+    assert!(manager.get_loaded().await.is_none());
+    assert!(
+        manager
+            .project_snapshot(&config, &environments)
+            .await
+            .is_none()
+    );
+
+    let local_only = resolved_local_environments([("local", root.abs())]);
+    let (result, warnings) = manager.refresh(&config, &local_only).await;
+    assert!(warnings.is_empty());
+    assert_eq!(result.unwrap().unwrap().text(), "local instructions");
+
+    ready.store(true, Ordering::Release);
+    let (result, warnings) = manager.refresh(&config, &environments).await;
+    assert!(warnings.is_empty());
+    let complete = result.unwrap().expect("both instructions available");
+    assert_eq!(
+        complete.text(),
+        format!(
+            "for `local` with root {}\n\nlocal instructions\n\nfor `remote` with root {}\n\nremote instructions",
+            root.path().display(),
+            root.path().display()
+        )
+    );
+    assert!(
+        manager
+            .project_snapshot(&config, &environments)
+            .await
+            .is_some()
+    );
 }
 
 #[tokio::test]
