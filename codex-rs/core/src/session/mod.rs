@@ -1318,6 +1318,8 @@ impl Session {
             &model_info,
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
+        let startup_environment_discovery =
+            thread_extension_init.remove::<crate::thread_manager::StartupEnvironmentDiscovery>();
         let mut session_configuration = SessionConfiguration {
             turn_extension_init,
             provider: create_model_provider(
@@ -1333,6 +1335,13 @@ impl Session {
                 approvals_reviewer: config.approvals_reviewer,
             }),
             environments: environment_selections.clone(),
+            implicit_environment_selection: startup_environment_discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.implicit_selection),
+            resume_optional_environment_ids: startup_environment_discovery
+                .as_ref()
+                .map(|discovery| Arc::clone(&discovery.optional_on_resume))
+                .unwrap_or_default(),
             model_info_overrides: config.to_models_manager_config().into(),
             developer_instructions: config.developer_instructions.clone(),
             base_instructions,
@@ -1365,12 +1374,13 @@ impl Session {
             .validate(&environment_selections)
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
         // DeferredExecutor lets an explicit attachment connect after thread/start.
-        let inherited_environments = if let Some(discovery) =
-            thread_extension_init.remove::<crate::thread_manager::StartupEnvironmentDiscovery>()
-            && (discovery.implicit_selection || !config.features.enabled(Feature::DeferredExecutor))
+        let inherited_environments = if let Some(discovery) = startup_environment_discovery
+            && (discovery.implicit_selection
+                || discovery.cold_resume
+                || !config.features.enabled(Feature::DeferredExecutor))
         {
             debug_assert!(inherited_environments.is_none());
-            ThreadEnvironments::admit_startup_remotes(
+            if let Some((environments, instructions)) = ThreadEnvironments::admit_startup_remotes(
                 Arc::clone(&environment_manager),
                 session_configuration
                     .user_shell_override
@@ -1383,9 +1393,15 @@ impl Session {
                 config.as_ref(),
                 &mut environment_selections,
                 discovery.implicit_selection,
+                &discovery.optional_on_resume,
             )
             .await?
-            .or(inherited_environments)
+            {
+                thread_extension_init.insert(instructions);
+                Some(environments)
+            } else {
+                inherited_environments
+            }
         } else {
             inherited_environments
         };
