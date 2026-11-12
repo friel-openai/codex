@@ -401,20 +401,9 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         drop(cache);
-        let origin = if config_model_catalog.is_some() {
-            codex_models_manager::ModelOrigin::ExplicitConfig
-        } else {
-            codex_models_manager::ModelOrigin::Bundled
-        };
-        let model_catalog = config_model_catalog
-            .or_else(|| codex_models_manager::bundled_models_response().ok())
-            .unwrap_or_default();
-        Arc::new(StaticModelsManager::new_with_custom_models(
-            self.auth_manager(),
-            model_catalog,
-            origin,
-            custom_models,
-        ))
+        let manager = self.models_manager_without_cache(config_model_catalog);
+        manager.replace_custom_models(custom_models);
+        manager
     }
 }
 
@@ -1662,6 +1651,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             CustomModelConfig {
                 model: "gpt-5.5".to_string(),
                 model_context_window: None,
+                routing_profile: None,
                 model_auto_compact_token_limit: None,
             },
         )]);
@@ -1720,7 +1710,9 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                     codex_models_manager::ModelOrigin::ExplicitConfig
                 );
                 assert_eq!(
-                    manager.custom_models().contains_key("local-reviewer"),
+                    manager
+                        .custom_models_snapshot()
+                        .contains_key("local-reviewer"),
                     has_aliases
                 );
                 if has_aliases {
@@ -1760,6 +1752,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             CustomModelConfig {
                 model: "gpt-5.5".to_string(),
                 model_context_window: Some(64_000),
+                routing_profile: None,
                 model_auto_compact_token_limit: Some(48_000),
             },
         )]);
@@ -1769,7 +1762,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             provider.models_manager(home.path().into(), Some(catalog.clone()), aliases.clone()),
             provider.models_manager_with_cache(Some(catalog.clone()), cache, aliases.clone()),
         ] {
-            assert_eq!(manager.custom_models(), &aliases);
+            assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
             let sourced_catalog = manager
                 .model_catalog_with_origins(
                     RefreshStrategy::InMemory,

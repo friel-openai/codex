@@ -156,11 +156,13 @@ impl SamplingExecution {
                 | ApiError::ResponseIncomplete(_)
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
+                | ApiError::UsageLimitReached(_)
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
                 | ApiError::InvalidAudioInput { .. }
                 | ApiError::ModelNotFound { .. }
                 | ApiError::InvalidPrompt { .. }
+                | ApiError::ModelUnavailable { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
                 | ApiError::BioPolicy { .. },
