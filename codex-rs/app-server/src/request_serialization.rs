@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::sync::Arc;
 use codex_app_server_protocol::ClientRequestSerializationScope;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use futures::FutureExt;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use tokio::sync::Mutex;
@@ -139,6 +141,18 @@ impl QueuedInitializedRequest {
             None => future.await,
         }
     }
+
+    async fn run_serialized(self, key: &RequestSerializationQueueKey) {
+        // The drain owns the map entry. A handler that unwinds must not take
+        // the drain with it or later requests will enqueue without a worker.
+        if AssertUnwindSafe(self.run()).catch_unwind().await.is_err() {
+            let thread_id = match key {
+                RequestSerializationQueueKey::Thread { thread_id } => Some(thread_id.as_str()),
+                _ => None,
+            };
+            tracing::error!(?thread_id, "serialized app-server request panicked");
+        }
+    }
 }
 
 struct QueuedSerializedRequest {
@@ -262,14 +276,14 @@ impl RequestSerializationQueues {
 
             if requests[0].access == RequestSerializationAccess::Exclusive {
                 for request in requests {
-                    request.request.run().await;
+                    request.request.run_serialized(&key).await;
                 }
                 continue;
             }
 
             let mut running_reads = requests
                 .into_iter()
-                .map(|request| request.request.run())
+                .map(|request| request.request.run_serialized(&key))
                 .collect::<FuturesUnordered<_>>();
 
             loop {
@@ -298,7 +312,7 @@ impl RequestSerializationQueues {
                         };
 
                         for request in requests {
-                            running_reads.push(request.request.run());
+                            running_reads.push(request.request.run_serialized(&key));
                         }
                     }
                 }
@@ -413,6 +427,82 @@ mod tests {
         blocked_tx
             .send(())
             .expect("blocked request should be waiting");
+    }
+
+    #[tokio::test]
+    async fn panicking_thread_request_does_not_strand_queue() {
+        let queues = RequestSerializationQueues::default();
+        let (key, access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(1),
+            ClientRequestSerializationScope::Thread {
+                thread_id: "thread-a".to_string(),
+            },
+        );
+        let (follower_key, follower_access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(2),
+            ClientRequestSerializationScope::Thread {
+                thread_id: "thread-a".to_string(),
+            },
+        );
+        assert_eq!(key, follower_key);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (follower_tx, mut follower_rx) = oneshot::channel();
+        let (other_tx, other_rx) = oneshot::channel();
+        let handler_guard = Arc::new(Mutex::new(()));
+        let first_guard = Arc::clone(&handler_guard);
+
+        queues
+            .enqueue(
+                key,
+                access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    let _guard = first_guard.lock().await;
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    panic!("test serialized handler panic");
+                }),
+            )
+            .await;
+        timeout(queue_drain_timeout(), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        queues
+            .enqueue(
+                follower_key,
+                follower_access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    let _guard = handler_guard.try_lock().unwrap();
+                    follower_tx.send(()).unwrap();
+                }),
+            )
+            .await;
+        queues
+            .enqueue(
+                RequestSerializationQueueKey::Thread {
+                    thread_id: "thread-b".to_string(),
+                },
+                RequestSerializationAccess::Exclusive,
+                QueuedInitializedRequest::new(gate(), async move {
+                    other_tx.send(()).unwrap();
+                }),
+            )
+            .await;
+        timeout(queue_drain_timeout(), other_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            follower_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+
+        release_tx.send(()).unwrap();
+        timeout(queue_drain_timeout(), follower_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
