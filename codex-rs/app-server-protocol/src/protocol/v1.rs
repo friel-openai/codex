@@ -194,6 +194,10 @@ pub struct GitDiffToRemoteParams {
 pub struct GetAuthStatusParams {
     pub include_token: Option<bool>,
     pub refresh_token: Option<bool>,
+    /// Permit a temporary error if this request cannot complete promptly.
+    /// The caller must retry without treating that error as a login failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_retryable_error: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

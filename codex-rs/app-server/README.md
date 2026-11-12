@@ -612,6 +612,16 @@ API-key and explicitly external-auth providers bypass discovery. Custom ChatGPT-
 require discovery before being treated as independent. Changing a workspace-bound thread's
 bootstrap origin requires a new thread.
 
+## Retryable auth status
+
+Clients that can retry auth readiness without treating it as a login failure may set
+`allowRetryableError` to `true` on that `getAuthStatus` request. When both
+`refreshToken` and `includeToken` are false, the server may return error code
+`-32001` with `data.reason` set to `authStatusTemporarilyUnavailable`. The client
+should retry on the same connection and must not treat this error as a successful
+auth result. The server does not return cached identity when current inputs cannot
+be read. Requests without `allowRetryableError` retain their existing behavior.
+
 ## Windows sandbox implementation selection
 
 `windowsSandbox/setupStart` applies only to the legacy `elevated` and

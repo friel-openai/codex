@@ -88,6 +88,7 @@ pub(crate) fn prefetch(
                     params: GetAuthStatusParams {
                         include_token: Some(true),
                         refresh_token: Some(false),
+                        allow_retryable_error: false,
                     },
                 })
                 .await

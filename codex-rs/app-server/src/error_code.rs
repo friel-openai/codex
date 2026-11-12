@@ -13,6 +13,15 @@ pub(crate) fn server_draining_error() -> JSONRPCErrorError {
     error
 }
 
+pub(crate) fn auth_status_unavailable() -> JSONRPCErrorError {
+    let mut error = error(
+        OVERLOADED_ERROR_CODE,
+        "Auth status temporarily unavailable; retry",
+    );
+    error.data = Some(serde_json::json!({ "reason": "authStatusTemporarilyUnavailable" }));
+    error
+}
+
 pub(crate) fn invalid_request(message: impl Into<String>) -> JSONRPCErrorError {
     error(INVALID_REQUEST_ERROR_CODE, message)
 }

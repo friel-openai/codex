@@ -104,6 +104,7 @@ async fn get_auth_status_no_auth() -> Result<()> {
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -131,6 +132,7 @@ async fn get_auth_status_with_api_key() -> Result<()> {
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -178,6 +180,7 @@ async fn personal_access_token_without_email_supports_auth_status_and_account_re
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -256,6 +259,7 @@ async fn get_auth_status_with_api_key_when_auth_not_required() -> Result<()> {
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -288,6 +292,7 @@ async fn get_auth_status_with_api_key_no_include_token() -> Result<()> {
     let params = GetAuthStatusParams {
         include_token: None,
         refresh_token: Some(false),
+        allow_retryable_error: false,
     };
     let request_id = mcp.send_get_auth_status_request(params).await?;
 
@@ -315,6 +320,7 @@ async fn get_auth_status_with_api_key_refresh_requested() -> Result<()> {
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(true),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -375,6 +381,7 @@ async fn get_auth_status_omits_token_after_permanent_refresh_failure() -> Result
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(true),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -393,6 +400,7 @@ async fn get_auth_status_omits_token_after_permanent_refresh_failure() -> Result
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(true),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -449,6 +457,7 @@ async fn get_auth_status_omits_token_after_proactive_refresh_failure() -> Result
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -512,6 +521,7 @@ async fn get_auth_status_returns_token_after_proactive_refresh_recovery() -> Res
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(true),
+            allow_retryable_error: false,
         })
         .await?;
 
@@ -541,6 +551,7 @@ async fn get_auth_status_returns_token_after_proactive_refresh_recovery() -> Res
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
 
