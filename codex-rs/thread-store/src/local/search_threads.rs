@@ -1,21 +1,22 @@
 use std::collections::HashMap;
-use std::path::Path;
-use std::path::PathBuf;
+use std::io;
 
-use codex_install_context::InstallContext;
-use codex_rollout::RolloutConfig;
-use codex_rollout::first_rollout_content_match_snippet;
+use chrono::DateTime;
+use chrono::Utc;
+use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSource;
+use codex_rollout::first_rollout_content_match_snippet_exact;
 use codex_rollout::parse_cursor;
-use codex_rollout::search_rollout_matches;
-use codex_utils_absolute_path::normalize_windows_device_path;
+use codex_state::ThreadFilterOptions;
 
 use super::LocalThreadStore;
 use super::helpers::resolve_thread_names;
 use super::helpers::resolve_thread_section_metadata;
 use super::helpers::set_thread_name;
-use super::helpers::stored_thread_from_rollout_item;
-use super::list_threads::list_rollout_threads;
-use crate::ListThreadsParams;
+use super::read_thread::parse_session_source;
+use super::read_thread::stored_thread_from_state_metadata;
 use crate::SearchThreadsParams;
 use crate::SortDirection;
 use crate::StoredThreadSearchResult;
@@ -29,7 +30,7 @@ use crate::ThreadStoreResult;
 mod tests;
 
 struct ThreadSearchItem {
-    item: codex_rollout::ThreadItem,
+    item: codex_state::ThreadMetadata,
     snippet: String,
 }
 
@@ -46,16 +47,12 @@ pub(super) async fn search_threads(
     let cursor = params
         .cursor
         .as_deref()
-        .map(|cursor| {
-            parse_cursor(cursor).ok_or_else(|| ThreadStoreError::InvalidRequest {
-                message: format!("invalid cursor: {cursor}"),
-            })
-        })
+        .map(parse_search_cursor)
         .transpose()?;
     let sort_key = match params.sort_key {
-        ThreadSortKey::CreatedAt => codex_rollout::ThreadSortKey::CreatedAt,
-        ThreadSortKey::UpdatedAt => codex_rollout::ThreadSortKey::UpdatedAt,
-        ThreadSortKey::RecencyAt => codex_rollout::ThreadSortKey::RecencyAt,
+        ThreadSortKey::CreatedAt => codex_state::SortKey::CreatedAt,
+        ThreadSortKey::UpdatedAt => codex_state::SortKey::UpdatedAt,
+        ThreadSortKey::RecencyAt => codex_state::SortKey::RecencyAt,
         ThreadSortKey::SectionPosition => {
             return Err(ThreadStoreError::InvalidRequest {
                 message: "section-position sorting requires a section filter".to_owned(),
@@ -63,91 +60,82 @@ pub(super) async fn search_threads(
         }
     };
     let sort_direction = match params.sort_direction {
-        SortDirection::Asc => codex_rollout::SortDirection::Asc,
-        SortDirection::Desc => codex_rollout::SortDirection::Desc,
+        SortDirection::Asc => codex_state::SortDirection::Asc,
+        SortDirection::Desc => codex_state::SortDirection::Desc,
     };
-    let state_db = store.state_db().await;
-    let rollout_config = RolloutConfig {
-        codex_home: store.config.codex_home.clone(),
-        sqlite: store.config.sqlite.clone(),
-        cwd: store.config.codex_home.clone(),
-        model_provider_id: store.config.default_model_provider_id.clone(),
-        generate_memories: false,
-    };
-    let rg_command = InstallContext::current().rg_command();
-    let matching_rollouts = search_rollout_matches(
-        rg_command.as_path(),
-        store.config.codex_home.as_path(),
-        params.archived,
-        search_term,
-    )
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to search rollout contents: {err}"),
-    })?;
-    if matching_rollouts.is_empty() {
-        return Ok(ThreadSearchPage {
-            items: Vec::new(),
-            next_cursor: None,
+    // A filesystem listing reads rollout contents before identifying the selected rollout.
+    let state_db = store
+        .state_db()
+        .await
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: "thread/search requires the state database to select eligible rollouts"
+                .to_string(),
+        })?;
+    if state_db.sqlite() != &store.config.sqlite {
+        return Err(ThreadStoreError::Internal {
+            message: "thread/search state database does not match its configured SQLite home"
+                .to_string(),
         });
     }
+    let backfill =
+        state_db
+            .get_backfill_state()
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to query thread/search metadata backfill state: {err}"),
+            })?;
+    if backfill.status != codex_state::BackfillStatus::Complete {
+        return Err(ThreadStoreError::Internal {
+            message: "thread/search state database metadata backfill is incomplete".to_string(),
+        });
+    }
+    let allowed_sources = params
+        .allowed_sources
+        .iter()
+        .map(|source| match serde_json::to_value(source) {
+            Ok(serde_json::Value::String(source)) => source,
+            Ok(source) => source.to_string(),
+            Err(_) => String::new(),
+        })
+        .collect::<Vec<_>>();
     let mut matching_items = Vec::new();
     let mut page_cursor = cursor;
     let scan_page_size = params.page_size.saturating_mul(8).clamp(256, 2048);
-    let scan_params = ListThreadsParams {
-        page_size: scan_page_size,
-        cursor: None,
-        sort_key: params.sort_key,
-        sort_direction: params.sort_direction,
-        allowed_sources: params.allowed_sources.clone(),
-        model_providers: None,
-        cwd_filters: None,
-        section: None,
-        project_id: None,
-        archived: params.archived,
-        search_term: None,
-        relation_filter: None,
-        use_state_db_only: state_db.is_some(),
-    };
-    let mut remaining_rollouts = matching_rollouts
-        .into_iter()
-        .map(|(path, snippet)| (rollout_search_path(&path), snippet))
-        .collect::<HashMap<_, _>>();
-
     loop {
-        let page = list_rollout_threads(
-            state_db.clone(),
-            &rollout_config,
-            store.config.default_model_provider_id.as_str(),
-            &scan_params,
-            page_cursor.as_ref(),
-            sort_key,
-            sort_direction,
-        )
-        .await?;
+        let page = state_db
+            .list_threads_for_content_search(
+                scan_page_size,
+                ThreadFilterOptions {
+                    archived_only: params.archived,
+                    allowed_sources: &allowed_sources,
+                    model_providers: None,
+                    cwd_filters: None,
+                    section: None,
+                    project_id: None,
+                    anchor: page_cursor.as_ref(),
+                    sort_key,
+                    sort_direction,
+                    search_term: None,
+                },
+            )
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to query the state database for thread/search: {err}"),
+            })?;
         for item in page.items {
-            let logical_path = rollout_search_path(item.path.as_path());
-            let Some(snippet) = (match remaining_rollouts.remove(logical_path.as_path()) {
-                Some(Some(snippet)) => Some(snippet),
-                Some(None) => first_rollout_content_match_snippet(item.path.as_path(), search_term)
-                    .await
-                    .map_err(|err| ThreadStoreError::Internal {
-                        message: format!("failed to read rollout search match: {err}"),
-                    })?,
-                None => None,
-            }) else {
+            let Some(item) =
+                search_candidate(store, state_db.as_ref(), item, params.archived, search_term)
+                    .await?
+            else {
                 continue;
             };
-            matching_items.push(ThreadSearchItem { item, snippet });
+            matching_items.push(item);
             if matching_items.len() > params.page_size {
                 break;
             }
         }
-        page_cursor = page.next_cursor;
-        if matching_items.len() > params.page_size
-            || remaining_rollouts.is_empty()
-            || page_cursor.is_none()
-        {
+        page_cursor = page.next_anchor;
+        if matching_items.len() > params.page_size || page_cursor.is_none() {
             break;
         }
     }
@@ -167,19 +155,12 @@ pub(super) async fn search_threads(
 
     let mut items = matching_items
         .into_iter()
-        .filter_map(|item| {
-            stored_thread_from_rollout_item(
-                item.item,
-                params.archived,
-                store.config.default_model_provider_id.as_str(),
-            )
-            .map(|thread| StoredThreadSearchResult {
-                thread,
-                snippet: item.snippet,
-            })
+        .map(|item| StoredThreadSearchResult {
+            thread: stored_thread_from_state_metadata(store, item.item, None),
+            snippet: item.snippet,
         })
         .collect::<Vec<_>>();
-    if let Some(state_db) = state_db {
+    {
         let sectioned_thread_ids = items
             .iter()
             .filter(|item| item.thread.section.is_some())
@@ -201,17 +182,116 @@ pub(super) async fn search_threads(
     Ok(ThreadSearchPage { items, next_cursor })
 }
 
-fn rollout_search_path(path: &Path) -> PathBuf {
-    let path = codex_rollout::plain_rollout_path(path);
-    // Resume can persist a Windows namespace prefix while filesystem search returns the
-    // ordinary spelling. Normalize both join keys without requiring the uncompressed file
-    // to exist, and retain the filename identifying the selected rollout after a revert.
-    if cfg!(windows)
-        && let Some(normalized) = path.to_str().and_then(normalize_windows_device_path)
-    {
-        return PathBuf::from(normalized);
+async fn search_candidate(
+    store: &LocalThreadStore,
+    state_db: &codex_state::StateRuntime,
+    item: codex_state::ThreadMetadata,
+    archived: bool,
+    search_term: &str,
+) -> ThreadStoreResult<Option<ThreadSearchItem>> {
+    if !is_user_chat(&item) {
+        return Ok(None);
     }
-    path
+    // Revert and archive use the matching exclusive lifecycle reservation in this store.
+    let _lifecycle = store.reserve_thread_lifecycle(item.id).await;
+    let Some(current) =
+        state_db
+            .get_thread(item.id)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to recheck thread/search metadata: {err}"),
+            })?
+    else {
+        return Ok(None);
+    };
+    if current.rollout_path != item.rollout_path
+        || current.archived_at.is_some() != archived
+        || !is_user_chat(&current)
+    {
+        return Ok(None);
+    }
+    let edges = state_db
+        .list_thread_spawn_edges_by_child_ids(&[item.id])
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to query thread/search parent relationships: {err}"),
+        })?;
+    // Promotion closes the old edge when the child becomes an independent root.
+    if edges
+        .iter()
+        .any(|edge| edge.status == codex_state::DirectionalThreadSpawnEdgeStatus::Open)
+    {
+        return Ok(None);
+    }
+    let snippet = match search_selected_rollout(item.rollout_path.as_path(), search_term).await {
+        Ok(Some(snippet)) => snippet,
+        Ok(None) => return Ok(None),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(ThreadStoreError::Internal {
+                message: format!("failed to read rollout search match: {err}"),
+            });
+        }
+    };
+    Ok(Some(ThreadSearchItem { item, snippet }))
+}
+
+async fn search_selected_rollout(
+    path: &std::path::Path,
+    search_term: &str,
+) -> io::Result<Option<String>> {
+    match first_rollout_content_match_snippet_exact(path, search_term).await {
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            match codex_rollout::existing_rollout_path(path).await {
+                Some(existing_path) if existing_path != path => {
+                    first_rollout_content_match_snippet_exact(&existing_path, search_term).await
+                }
+                _ => Err(err),
+            }
+        }
+        result => result,
+    }
+}
+
+fn is_user_chat(item: &codex_state::ThreadMetadata) -> bool {
+    let user_thread_source = match &item.thread_source {
+        None | Some(ThreadSource::User) => true,
+        Some(ThreadSource::Feature(feature)) => {
+            matches!(
+                feature.as_str(),
+                "automation" | "voice_chat" | "realtime_voice"
+            )
+        }
+        _ => false,
+    };
+    item.attached_thread_parent_id.is_none()
+        && item.agent_nickname.is_none()
+        && item.agent_role.is_none()
+        && item
+            .agent_path
+            .as_deref()
+            .is_none_or(|path| path == AgentPath::ROOT)
+        && user_thread_source
+        && matches!(
+            parse_session_source(&item.source),
+            SessionSource::Cli
+                | SessionSource::VSCode
+                | SessionSource::Exec
+                | SessionSource::Mcp
+                | SessionSource::Custom(_)
+        )
 }
 
 fn cursor_from_thread_search_item(
@@ -219,25 +299,35 @@ fn cursor_from_thread_search_item(
     sort_key: ThreadSortKey,
 ) -> Option<codex_rollout::Cursor> {
     let timestamp = match sort_key {
-        ThreadSortKey::CreatedAt => item.item.created_at.as_deref()?,
-        ThreadSortKey::UpdatedAt => item
-            .item
-            .updated_at
-            .as_deref()
-            .or(item.item.created_at.as_deref())?,
-        ThreadSortKey::RecencyAt => item
-            .item
-            .recency_at
-            .as_deref()
-            .or(item.item.updated_at.as_deref())
-            .or(item.item.created_at.as_deref())?,
+        ThreadSortKey::CreatedAt => item.item.created_at,
+        ThreadSortKey::UpdatedAt => item.item.updated_at,
+        ThreadSortKey::RecencyAt => item.item.recency_at,
         ThreadSortKey::SectionPosition => return None,
     };
     match sort_key {
-        ThreadSortKey::RecencyAt => parse_cursor(&format!("{timestamp}|{}", item.item.thread_id?)),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => parse_cursor(timestamp),
+        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
+            parse_cursor(&format!("{}|{}", timestamp.to_rfc3339(), item.item.id))
+        }
         ThreadSortKey::SectionPosition => None,
     }
+}
+
+fn parse_search_cursor(cursor: &str) -> ThreadStoreResult<codex_state::Anchor> {
+    let invalid = || ThreadStoreError::InvalidRequest {
+        message: format!("invalid cursor: {cursor}"),
+    };
+    parse_cursor(cursor).ok_or_else(invalid)?;
+    let (timestamp, thread_id) = match cursor.split_once('|') {
+        Some((timestamp, thread_id)) => (
+            timestamp,
+            Some(ThreadId::from_string(thread_id).map_err(|_| invalid())?),
+        ),
+        None => (cursor, None),
+    };
+    let ts = DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    Ok(codex_state::Anchor { ts, id: thread_id })
 }
 
 async fn set_thread_search_result_names(
