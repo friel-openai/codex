@@ -28,7 +28,10 @@
         "tests::export::tests::generate_json_filters_experimental_fields_and_methods",
         "protocol::thread_history_projection::tests::ignores_legacy_abort_without_turn_id_and_context_only_records",
         "protocol::thread_history_projection::tests::projects_completed_canonical_turn_items",
-        "protocol::thread_history_projection::tests::projects_optional_completed_item_lifecycle_timestamps"
+        "protocol::thread_history_projection::tests::projects_optional_completed_item_lifecycle_timestamps",
+        "protocol::common::tests::deserialize_initialize_capabilities",
+        "protocol::common::tests::serialize_initialize_capabilities",
+        "protocol::common::tests::auth_status_retryable_error_is_request_scoped"
       ]
     },
     {
@@ -68,7 +71,13 @@
         "request_processors::thread_processor::resume_preparation::tests::unknown_or_agent_resume_keeps_exclusive_list_ordering",
         "request_processors::thread_processor::resume_preparation::tests::unrelated_resume_and_queued_read_complete_while_another_resume_is_held",
         "request_processors::thread_processor::resume_preparation::tests::unrelated_resume_does_not_wait_for_a_thread_resume_reservation",
-        "request_processors::thread_lifecycle::listener_shutdown_tests::loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state"
+        "request_processors::thread_lifecycle::listener_shutdown_tests::loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state",
+        "message_processor::message_processor_tracing_tests::stalled_auth_config_delays_auth_status_but_not_initialize",
+        "message_processor::message_processor_tracing_tests::retryable_auth_status_preserves_auth_order_and_current_provider",
+        "message_processor::message_processor_tracing_tests::retryable_auth_status_disconnect_discards_waiting_request",
+        "message_processor::message_processor_tracing_tests::retryable_auth_status_disconnect_drains_started_request",
+        "message_processor::message_processor_tracing_tests::retryable_auth_status_does_not_time_out_token_or_refresh_requests",
+        "request_serialization::tests::stalled_account_auth_blocks_other_connections_but_not_other_work"
       ]
     },
     {
