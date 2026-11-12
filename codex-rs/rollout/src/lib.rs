@@ -233,6 +233,7 @@ pub use review_input::resolve_review_input;
 pub use review_input::review_input_segment_path;
 pub use rollout_reference_index::RolloutReferenceIndex;
 pub use search::first_rollout_content_match_snippet;
+pub use search::first_rollout_content_match_snippet_exact;
 pub use search::search_rollout_matches;
 pub use search::search_rollout_paths;
 pub use segment_checkpoint::CertifiedSegmentStateCheckpoint;
