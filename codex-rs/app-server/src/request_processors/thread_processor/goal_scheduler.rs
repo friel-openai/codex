@@ -24,6 +24,7 @@ impl ThreadRequestProcessor {
                     thread_id: thread_id.to_string(),
                     ..Default::default()
                 },
+                /*force_exclusive*/ false,
                 /*permit_duration*/ None,
             )
             .await?;
