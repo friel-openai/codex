@@ -31,6 +31,8 @@ use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use std::sync::Arc;
 
@@ -201,6 +203,14 @@ pub(super) async fn create_spawn(
     }
     let config = effective_spawn_config(&child.thread).await?;
     let status = child.thread.io.agent_status.borrow().clone();
+    let (parent_thread_id, depth) = match &child.thread.session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth,
+            ..
+        }) => (Some(*parent_thread_id), Some(*depth)),
+        _ => (None, None),
+    };
     let _active = invocation.lock_active()?;
     let _membership = pending.disarm();
     state.notify_thread_created(child.thread_id);
@@ -209,9 +219,12 @@ pub(super) async fn create_spawn(
             thread_id: child.thread_id,
             metadata: AgentMetadata {
                 agent_id: Some(child.thread_id),
+                parent_thread_id,
+                depth,
                 agent_path: Some(task_name.clone()),
                 agent_nickname: child.thread.session_source.get_nickname(),
                 agent_role: child.thread.session_source.get_agent_role(),
+                last_task_message: None,
             },
             status,
         },
