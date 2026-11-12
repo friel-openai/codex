@@ -21,6 +21,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_otel::SessionTelemetry;
 use codex_plugin::ExecutorPluginHookSource;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::protocol::TurnContextItem;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +56,8 @@ pub(crate) struct StepContext {
     /// A model reroute preserves these names when it rebuilds the step so steering input does not
     /// lose a server that was not required by the original turn input.
     pub(crate) required_mcp_servers: Vec<String>,
+    /// The dynamic catalog captured when this sampling request's tools were prepared.
+    pub(crate) dynamic_tools: Arc<[DynamicToolSpec]>,
     /// The finalized tool plan advertised and executed for this exact sampling request.
     pub(crate) tool_router: Arc<ToolRouter>,
     /// The canonical AGENTS.md value observed with this environment snapshot.
