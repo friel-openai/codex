@@ -143,6 +143,9 @@ pub(super) fn prepare_update(
             approval_policy,
             approvals_reviewer,
         },
+        preserve_secondary_workspaces: environment_requests
+            .as_ref()
+            .is_some_and(|requests| requests.preserve_secondary_workspaces),
         environments: environment_requests.map(|requests| requests.select(roots)),
         runtime_workspace_roots,
         profile_workspace_roots,
