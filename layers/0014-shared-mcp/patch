@@ -17093,7 +17093,7 @@ index 7c3d830dc22fd71eb8e33fc0ba270b61fedb7f25..e902eb986960e6fb18214dc0af460fef
                  self.client
                      .read_resource_with_elicitation(params, timeout, Arc::clone(send_elicitation))
 diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
-index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575df0ebdf4c 100644
+index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..ed2638e81547ecbd3cb71c8578a2fcd53cfd1944 100644
 --- a/codex-rs/codex-mcp/src/runtime.rs
 +++ b/codex-rs/codex-mcp/src/runtime.rs
 @@ -59,15 +59,17 @@ use crate::McpConfig;
@@ -17146,13 +17146,22 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
  /// Owns all mutable MCP state for one Codex thread.
  ///
  /// Publication replaces the latest state atomically. Existing bindings retain
-@@ -136,7 +148,49 @@ pub struct McpRuntime {
+@@ -136,7 +148,58 @@ pub struct McpRuntime {
      resource_cache_generation: AtomicU64,
      elicitation_router: ElicitationRequestRouter,
      resource_origins: Mutex<ResourceOrigins>,
 -    ema_auth: OnceLock<crate::ema_auth::EmaAuthContext>,
 +    ema_auth: Arc<OnceLock<crate::ema_auth::EmaAuthContext>>,
 +    session_routes: Mutex<McpRuntimeRouteRegistry>,
++    #[cfg(test)]
++    publication_pauses: Mutex<HashMap<String, Arc<RuntimePublicationPause>>>,
++}
++
++/// Holds a test publication after candidate construction and before its atomic commit.
++#[cfg(test)]
++struct RuntimePublicationPause {
++    arrived: tokio::sync::Notify,
++    release: tokio::sync::Notify,
 +}
 +
 +/// Tracks every immutable session route published by one thread runtime.
@@ -17197,7 +17206,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
  }
 
  struct EventStreamCancellation {
-@@ -157,6 +211,8 @@ struct PublishedMcpRuntime {
+@@ -157,6 +220,8 @@ struct PublishedMcpRuntime {
      ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
      environment_selections: Arc<[TurnEnvironmentSelection]>,
      ready_environments: HashMap<String, Arc<Environment>>,
@@ -17206,7 +17215,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
      cached_binding: Mutex<Option<CachedMcpBinding>>,
  }
 
-@@ -214,7 +270,7 @@ impl PublishedMcpRuntime {
+@@ -214,7 +279,7 @@ impl PublishedMcpRuntime {
  }
 
  struct CachedMcpBinding {
@@ -17215,7 +17224,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
      // Reuse a frozen binding while a model step or caller still needs it.
      binding: Weak<McpBinding>,
  }
-@@ -282,9 +338,11 @@ impl McpRuntime {
+@@ -282,9 +347,11 @@ impl McpRuntime {
      /// This is useful while constructing a thread that must publish a stable
      /// runtime handle before its full MCP inputs are available.
      pub fn empty(prefix_mcp_tool_names: bool) -> Self {
@@ -17228,7 +17237,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                  config: None,
                  auth: None,
                  auth_token: None,
-@@ -295,6 +353,7 @@ impl McpRuntime {
+@@ -295,6 +362,7 @@ impl McpRuntime {
                  ready_selected_capability_roots: Vec::new(),
                  environment_selections: Arc::default(),
                  ready_environments: HashMap::new(),
@@ -17236,17 +17245,19 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                  cached_binding: Mutex::new(None),
              }),
              catalog_publication: Mutex::new(0),
-@@ -308,7 +367,8 @@ impl McpRuntime {
+@@ -308,7 +376,10 @@ impl McpRuntime {
              resource_cache_generation: AtomicU64::new(0),
              elicitation_router: ElicitationRequestRouter::default(),
              resource_origins: Mutex::default(),
 -            ema_auth: OnceLock::new(),
 +            ema_auth: Arc::new(OnceLock::new()),
++            #[cfg(test)]
++            publication_pauses: Mutex::default(),
 +            session_routes: Mutex::new(McpRuntimeRouteRegistry::new(&session_route)),
          }
      }
 
-@@ -372,19 +432,29 @@ impl McpRuntime {
+@@ -372,19 +443,29 @@ impl McpRuntime {
      }
 
      /// Reconciles configured servers and publishes their immutable runtime snapshot.
@@ -17282,7 +17293,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
          self.latest_hard_refresh_codex_apps_tools_cache().await
      }
 
-@@ -403,36 +473,79 @@ impl McpRuntime {
+@@ -403,36 +484,81 @@ impl McpRuntime {
          }
      }
 
@@ -17372,6 +17383,8 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
 +        }
          let (publish, publication_gate) = McpPublicationGate::pending();
 +        let startup_cancellation_token = input.startup_cancellation_token.clone();
++        #[cfg(test)]
++        let test_submit_id = input.submit_id.clone();
          let config = Arc::clone(&input.config);
          let auth = input.auth.clone();
          let auth_manager = input.auth_manager.clone();
@@ -17382,7 +17395,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
          let auth_matches = current.auth_matches(auth.as_ref());
          let auth_owner = AuthOwner::capture(auth.as_ref(), auth_manager.as_deref());
          let same_owner = match (current.auth_owner, auth_owner) {
-@@ -459,7 +572,7 @@ impl McpRuntime {
+@@ -459,7 +585,7 @@ impl McpRuntime {
          // Keep MCP startup state out of the caller's nested session-initialization future.
          let connections = Arc::new(
              Box::pin(McpConnectionSet::new(
@@ -17391,7 +17404,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                  retain_ema.then_some(current.connections.as_ref()),
                  reuse_previous.then_some(PreviousMcpConnections {
                      connections: &current.connections,
-@@ -480,23 +593,7 @@ impl McpRuntime {
+@@ -480,23 +606,7 @@ impl McpRuntime {
                          .source()
                          .is_host_owned_apps(CODEX_APPS_MCP_SERVER_NAME, registration.config())
                  });
@@ -17416,7 +17429,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
              connections,
              config: Some(config),
              auth,
-@@ -508,19 +605,73 @@ impl McpRuntime {
+@@ -508,19 +618,85 @@ impl McpRuntime {
              ready_selected_capability_roots,
              environment_selections,
              ready_environments,
@@ -17433,6 +17446,18 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
 -            if let Some(retained) = &cancellation.retained_subscription_cancellation {
 -                retained.send_replace(());
 +        });
++        #[cfg(test)]
++        {
++            let pause = self
++                .publication_pauses
++                .lock()
++                .unwrap()
++                .remove(&test_submit_id);
++            if let Some(pause) = pause {
++                pause.arrived.notify_one();
++                pause.release.notified().await;
++            }
++        }
 +        let outcome = {
 +            let mut cancellation = self
 +                .event_stream_cancellation
@@ -17453,7 +17478,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
 +                if routes_registered {
 +                    routes_registered = session_routes.register(&route);
 +                }
-+            }
+             }
 +            let commit = if routes_registered {
 +                published.connections.commit_provisional_connections(
 +                    (!reuse_previous).then_some(current.connections.as_ref()),
@@ -17489,7 +17514,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
 +                PublicationOutcome::Retry
 +            } else {
 +                PublicationOutcome::Invalid
-             }
++            }
 +        };
 +        drop(publish);
 +        if !matches!(outcome, PublicationOutcome::Published) {
@@ -17500,7 +17525,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
      }
 
      /// Ensures the next refresh creates fresh connections for every configured server.
-@@ -567,21 +718,38 @@ impl McpRuntime {
+@@ -567,21 +743,38 @@ impl McpRuntime {
          required_servers: &[String],
          required_plugins: &HashSet<String>,
      ) -> Option<Arc<McpBinding>> {
@@ -17550,7 +17575,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
              }
          }
 
-@@ -596,26 +764,28 @@ impl McpRuntime {
+@@ -596,26 +789,28 @@ impl McpRuntime {
                  )
                  .await,
          );
@@ -17585,7 +17610,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                  binding: Arc::downgrade(&binding),
              });
          }
-@@ -866,7 +1036,7 @@ impl McpRuntime {
+@@ -866,7 +1061,7 @@ impl McpRuntime {
              && current.connections.wait_for_server_startup(server).await
              && let Some(revisions) = current
                  .connections
@@ -17594,7 +17619,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                      /*required_servers*/ &[],
                      /*required_plugins*/ &HashSet::new(),
                  )
-@@ -885,9 +1055,7 @@ impl McpRuntime {
+@@ -885,9 +1080,7 @@ impl McpRuntime {
                  .lock()
                  .unwrap_or_else(std::sync::PoisonError::into_inner)
                  .as_ref()
@@ -17605,7 +17630,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
          };
          let result = current
              .connections
-@@ -908,7 +1076,7 @@ impl McpRuntime {
+@@ -908,7 +1101,7 @@ impl McpRuntime {
          let namespace = if let Some((revisions, binding)) = attribution
              && current
                  .connections
@@ -17614,7 +17639,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
                      /*required_servers*/ &[],
                      /*required_plugins*/ &HashSet::new(),
                  )
-@@ -1030,23 +1198,42 @@ impl McpRuntime {
+@@ -1030,23 +1223,42 @@ impl McpRuntime {
      }
 
      pub async fn shutdown(&self) {
@@ -17669,7 +17694,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
          });
          if let Err(error) = shutdown.await {
              warn!("MCP runtime shutdown task failed: {error}");
-@@ -1276,6 +1463,61 @@ mod tests {
+@@ -1276,6 +1488,61 @@ mod tests {
          assert!(!gate.wait().await);
      }
 
@@ -17731,7 +17756,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
      #[tokio::test]
      async fn cached_bindings_follow_the_clients_catalog_revision() -> anyhow::Result<()> {
          let codex_home = tempfile::tempdir()?;
-@@ -1312,6 +1554,7 @@ mod tests {
+@@ -1312,6 +1579,7 @@ mod tests {
              ready_selected_capability_roots: Vec::new(),
              environment_selections: Arc::default(),
              ready_environments: HashMap::new(),
@@ -17739,7 +17764,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
              cached_binding: Mutex::new(None),
          });
          let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ true);
-@@ -1399,6 +1642,7 @@ mod tests {
+@@ -1399,6 +1667,7 @@ mod tests {
              ready_selected_capability_roots: Vec::new(),
              environment_selections: Arc::default(),
              ready_environments: HashMap::new(),
@@ -17747,7 +17772,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
              cached_binding: Mutex::new(None),
          });
          let first = McpRuntime::binding_from_published_runtime(
-@@ -1419,6 +1663,7 @@ mod tests {
+@@ -1419,6 +1688,7 @@ mod tests {
 
          let previous = Arc::into_inner(published).expect("published runtime has no other owners");
          let republished = Arc::new(PublishedMcpRuntime {
@@ -17755,7 +17780,7 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
              cached_binding: Mutex::new(None),
              ..previous
          });
-@@ -1432,6 +1677,110 @@ mod tests {
+@@ -1432,6 +1702,110 @@ mod tests {
          assert!(!Arc::ptr_eq(&first, &refreshed));
      }
 
@@ -17867,10 +17892,10 @@ index 35ac0f980cc2679d18d8aa499ddee2cab76127cc..d76c6796025bc79816b5a8591787575d
          McpServerConfig {
              auth: Default::default(),
 diff --git a/codex-rs/codex-mcp/src/runtime_shared_connection_tests.rs b/codex-rs/codex-mcp/src/runtime_shared_connection_tests.rs
-index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aab9fbee5e 100644
+index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..43cb4d32491de6e21ba23737a182cc7313ea614a 100644
 --- a/codex-rs/codex-mcp/src/runtime_shared_connection_tests.rs
 +++ b/codex-rs/codex-mcp/src/runtime_shared_connection_tests.rs
-@@ -4,6 +4,7 @@ use crate::connection_pool::ConnectionSharing;
+@@ -4,15 +4,325 @@ use crate::connection_pool::ConnectionSharing;
  use crate::connection_pool::ConnectionSlot;
  use crate::connection_pool::McpConnectionPool;
  use crate::connection_pool::tests as fixture;
@@ -17878,7 +17903,317 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
  use futures::FutureExt;
  use pretty_assertions::assert_eq;
  use std::sync::atomic::AtomicUsize;
-@@ -13,6 +14,7 @@ use tokio::sync::Notify;
+ use tokio::sync::Notify;
+
++fn publication_pause(runtime: &McpRuntime, submit_id: &str) -> Arc<RuntimePublicationPause> {
++    let pause = Arc::new(RuntimePublicationPause {
++        arrived: Notify::new(),
++        release: Notify::new(),
++    });
++    runtime
++        .publication_pauses
++        .lock()
++        .unwrap()
++        .insert(submit_id.to_owned(), Arc::clone(&pause));
++    pause
++}
++
++fn runtime_input(
++    home: &std::path::Path,
++    pool: McpConnectionPool,
++    submit_id: &str,
++    context: &McpRuntimeContext,
++) -> McpRuntimeInput {
++    let executable = std::env::var("CARGO_BIN_EXE_test_stdio_server")
++        .expect("the test_stdio_server binary must be built and bound by the test runner");
++    let server_config: codex_config::McpServerConfig = serde_json::from_value(serde_json::json!({
++        "command": executable,
++        "env": {
++            "MCP_TEST_INITIALIZE_BARRIER_FILE": home.join("allow-initialize"),
++            "MCP_TEST_DYNAMIC_SERVER_METADATA": "1"
++        },
++        "startup_timeout_sec": 30,
++    }))
++    .unwrap();
++    let mut catalog = crate::ResolvedMcpCatalog::builder();
++    catalog.register(crate::McpServerRegistration::from_config(
++        "test_server".to_owned(),
++        server_config.clone(),
++    ));
++    let mut config = crate::mcp::tests::test_mcp_config(home.to_path_buf());
++    config.mcp_server_catalog = catalog.build();
++    McpRuntimeInput {
++        network_policy_metadata: None,
++        runtime_auth: None,
++        startup_policy: McpStartupPolicy::Eager,
++        config: Arc::new(config),
++        plugins_available: false,
++        ready_selected_capability_roots: Vec::new(),
++        mcp_servers: HashMap::from([(
++            "test_server".to_owned(),
++            crate::server::EffectiveMcpServer::from_host_config(server_config),
++        )]),
++        submit_id: submit_id.to_owned(),
++        tx_event: None,
++        startup_cancellation_token: CancellationToken::new(),
++        connection_pool: pool.clone(),
++        connection_pool_mode: McpConnectionPoolMode::Reuse,
++        runtime_context: context.clone().with_connection_pool(pool),
++        codex_apps_tools_cache: ConnectorRuntimeManager::default(),
++        tool_catalog_cache: McpToolCatalogCache::default(),
++        codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
++        client_mcp_extensions: ClientMcpExtensions::default(),
++        auth: None,
++        auth_manager: None,
++        elicitation_reviewer: None,
++        elicitation_lifecycle: None,
++    }
++}
++
++async fn wait_arrived(pause: &RuntimePublicationPause) {
++    tokio::time::timeout(Duration::from_secs(10), pause.arrived.notified())
++        .await
++        .expect("candidate reached publication");
++}
++
++async fn publish_bounded(runtime: &McpRuntime, input: McpRuntimeInput, reuse: bool) -> bool {
++    tokio::time::timeout(Duration::from_secs(20), runtime.publish(input, reuse))
++        .await
++        .expect("runtime publication timed out")
++}
++
++async fn shutdown_bounded(runtime: &McpRuntime) {
++    tokio::time::timeout(Duration::from_secs(20), runtime.shutdown())
++        .await
++        .expect("runtime shutdown timed out");
++}
++
++fn process_id(binding: &crate::McpBinding) -> u32 {
++    let echo = binding
++        .tools()
++        .iter()
++        .find(|tool| tool.server_name == "test_server" && tool.tool.name == "echo")
++        .expect("echo tool from the test server");
++    echo.tool
++        .description
++        .as_deref()
++        .expect("test process description")
++        .strip_prefix("Echo from rmcp-test-process-")
++        .and_then(|value| value.strip_suffix('.'))
++        .expect("exact test process description")
++        .parse()
++        .expect("numeric test process ID")
++}
++
++#[tokio::test]
++async fn concurrent_first_publications_converge_within_root_and_isolate_other_roots() {
++    let home = tempfile::tempdir().unwrap();
++    let pool = McpConnectionPool::default();
++    let context = fixture::context();
++    let first = Arc::new(McpRuntime::empty(true));
++    let second = Arc::new(McpRuntime::empty(true));
++    let first_pause = publication_pause(&first, "first");
++    let second_pause = publication_pause(&second, "second");
++    let first_task = {
++        let runtime = Arc::clone(&first);
++        let input = runtime_input(home.path(), pool.clone(), "first", &context);
++        tokio::spawn(async move { runtime.publish(input, true).await })
++    };
++    let second_task = {
++        let runtime = Arc::clone(&second);
++        let input = runtime_input(home.path(), pool.clone(), "second", &context);
++        tokio::spawn(async move { runtime.publish(input, true).await })
++    };
++    wait_arrived(&first_pause).await;
++    wait_arrived(&second_pause).await;
++    first_pause.release.notify_one();
++    assert!(
++        tokio::time::timeout(Duration::from_secs(10), first_task)
++            .await
++            .unwrap()
++            .unwrap()
++    );
++    second_pause.release.notify_one();
++    assert!(
++        tokio::time::timeout(Duration::from_secs(10), second_task)
++            .await
++            .unwrap()
++            .unwrap()
++    );
++    let first_set = Arc::clone(&first.current.load_full().connections);
++    let second_set = Arc::clone(&second.current.load_full().connections);
++    assert!(first_set.shares_server_connection(&second_set, "test_server"));
++
++    let other = McpRuntime::empty(true);
++    assert!(
++        publish_bounded(
++            &other,
++            runtime_input(home.path(), McpConnectionPool::default(), "other", &context),
++            true
++        )
++        .await
++    );
++    let other_set = Arc::clone(&other.current.load_full().connections);
++    assert!(!first_set.shares_server_connection(&other_set, "test_server"));
++    std::fs::write(home.path().join("allow-initialize"), b"ready").unwrap();
++    let first_binding = tokio::time::timeout(
++        Duration::from_secs(20),
++        first.current_binding_for_call("test_server"),
++    )
++    .await
++    .unwrap()
++    .expect("first binding");
++    let second_binding = tokio::time::timeout(
++        Duration::from_secs(20),
++        second.current_binding_for_call("test_server"),
++    )
++    .await
++    .unwrap()
++    .expect("second binding");
++    let other_binding = tokio::time::timeout(
++        Duration::from_secs(20),
++        other.current_binding_for_call("test_server"),
++    )
++    .await
++    .unwrap()
++    .expect("other-root binding");
++    assert_eq!(process_id(&first_binding), process_id(&second_binding));
++    assert_ne!(process_id(&first_binding), process_id(&other_binding));
++    drop((first_binding, second_binding, other_binding));
++    shutdown_bounded(&first).await;
++    shutdown_bounded(&second).await;
++    shutdown_bounded(&other).await;
++}
++
++#[tokio::test]
++async fn superseded_and_cancelled_publications_never_replace_the_current_runtime() {
++    let home = tempfile::tempdir().unwrap();
++    let runtime = Arc::new(McpRuntime::empty(true));
++    let pool = McpConnectionPool::default();
++    let context = fixture::context();
++    let pause = publication_pause(&runtime, "superseded");
++    let task = {
++        let runtime = Arc::clone(&runtime);
++        let input = runtime_input(home.path(), pool.clone(), "superseded", &context);
++        tokio::spawn(async move { runtime.publish(input, true).await })
++    };
++    wait_arrived(&pause).await;
++    assert!(
++        publish_bounded(
++            &runtime,
++            runtime_input(home.path(), pool.clone(), "winner", &context),
++            true
++        )
++        .await
++    );
++    let winner = runtime.current.load_full();
++    pause.release.notify_one();
++    assert!(
++        !tokio::time::timeout(Duration::from_secs(10), task)
++            .await
++            .unwrap()
++            .unwrap()
++    );
++    assert!(Arc::ptr_eq(&winner, &runtime.current.load_full()));
++
++    let pause = publication_pause(&runtime, "cancelled");
++    let input = runtime_input(home.path(), pool, "cancelled", &context);
++    let cancellation = input.startup_cancellation_token.clone();
++    let task = {
++        let runtime = Arc::clone(&runtime);
++        tokio::spawn(async move { runtime.publish(input, true).await })
++    };
++    wait_arrived(&pause).await;
++    cancellation.cancel();
++    pause.release.notify_one();
++    assert!(
++        !tokio::time::timeout(Duration::from_secs(10), task)
++            .await
++            .unwrap()
++            .unwrap()
++    );
++    assert!(Arc::ptr_eq(&winner, &runtime.current.load_full()));
++    shutdown_bounded(&runtime).await;
++}
++
++#[tokio::test]
++async fn replacement_keeps_an_existing_binding_usable_until_its_call_finishes() {
++    let home = tempfile::tempdir().unwrap();
++    std::fs::write(home.path().join("allow-initialize"), b"ready").unwrap();
++    let pool = McpConnectionPool::default();
++    let context = fixture::context();
++    let runtime = McpRuntime::empty(true);
++    assert!(
++        publish_bounded(
++            &runtime,
++            runtime_input(home.path(), pool.clone(), "old", &context),
++            true
++        )
++        .await
++    );
++    let binding = tokio::time::timeout(
++        Duration::from_secs(20),
++        runtime.current_binding_for_call("test_server"),
++    )
++    .await
++    .unwrap()
++    .expect("old binding is ready");
++    let old_call = binding
++        .prepare_call("test_server", "echo")
++        .expect("old echo tool");
++    let old_pid = process_id(&binding);
++    let mut replacement = runtime_input(home.path(), pool, "new", &context);
++    replacement.connection_pool_mode = McpConnectionPoolMode::Replace;
++    assert!(publish_bounded(&runtime, replacement, false).await);
++    let old_result = old_call
++        .call(
++            Some(serde_json::json!({"message": "old generation"})),
++            None,
++            Some(Duration::from_secs(10)),
++        )
++        .await
++        .expect("captured old generation remains usable");
++    assert_ne!(old_result.is_error, Some(true));
++    assert_eq!(
++        old_result
++            .structured_content
++            .as_ref()
++            .and_then(|value| value["echo"].as_str()),
++        Some(format!("rmcp-test-process-{old_pid}").as_str())
++    );
++    let new_binding = tokio::time::timeout(
++        Duration::from_secs(20),
++        runtime.current_binding_for_call("test_server"),
++    )
++    .await
++    .unwrap()
++    .expect("new binding is ready");
++    assert_ne!(process_id(&binding), process_id(&new_binding));
++    let new_pid = process_id(&new_binding);
++    let new_result = new_binding
++        .prepare_call("test_server", "echo")
++        .unwrap()
++        .call(
++            Some(serde_json::json!({"message": "new generation"})),
++            None,
++            Some(Duration::from_secs(10)),
++        )
++        .await
++        .expect("new generation is usable");
++    assert_ne!(new_result.is_error, Some(true));
++    assert_eq!(
++        new_result
++            .structured_content
++            .as_ref()
++            .and_then(|value| value["echo"].as_str()),
++        Some(format!("rmcp-test-process-{new_pid}").as_str())
++    );
++    drop(old_call);
++    drop(binding);
++    shutdown_bounded(&runtime).await;
++}
++
+ #[tokio::test]
  async fn forced_refresh_replaces_pending_connection_without_interrupting_other_chats() {
      let pool = McpConnectionPool::default();
      let key = fixture::key(&fixture::context(), &fixture::config());
@@ -17886,7 +18221,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
      let starts = Arc::new(AtomicUsize::new(0));
      let started = Arc::new(Notify::new());
      let release = Arc::new(Notify::new());
-@@ -27,12 +29,14 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -27,12 +337,14 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
      let first = {
          let pool = pool.clone();
          let key = key.clone();
@@ -17901,7 +18236,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
                  Arc::default(),
                  /*tool_catalog_cache_context*/ None,
                  CancellationToken::new(),
-@@ -48,6 +52,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -48,6 +360,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
      let other = pool.connect(
          Arc::default(),
          key.clone(),
@@ -17909,7 +18244,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
          Arc::default(),
          /*tool_catalog_cache_context*/ None,
          CancellationToken::new(),
-@@ -76,12 +81,15 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -76,12 +389,15 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
          ready_selected_capability_roots: Vec::new(),
          environment_selections: Arc::default(),
          ready_environments: HashMap::new(),
@@ -17925,7 +18260,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
          config,
          plugins_available: false,
          ready_selected_capability_roots: Vec::new(),
-@@ -111,6 +119,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -111,6 +427,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
          pool.connect(
              Arc::default(),
              key.clone(),
@@ -17933,7 +18268,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
              Arc::default(),
              /*tool_catalog_cache_context*/ None,
              CancellationToken::new(),
-@@ -128,6 +137,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -128,6 +445,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
              /*arguments*/ None,
              |_| Ok(None),
              /*timeout*/ None,
@@ -17941,7 +18276,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
          )
          .await
          .unwrap();
-@@ -138,6 +148,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -138,6 +456,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
          .connect(
              Arc::default(),
              key,
@@ -17949,7 +18284,7 @@ index f3009e7d803ad7149bda21f4ffc4ab936d78eea3..4ead34c559974ad111664000aa3cb2aa
              Arc::default(),
              /*tool_catalog_cache_context*/ None,
              CancellationToken::new(),
-@@ -161,6 +172,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
+@@ -161,6 +480,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
              /*arguments*/ None,
              |_| Ok(None),
              /*timeout*/ None,
