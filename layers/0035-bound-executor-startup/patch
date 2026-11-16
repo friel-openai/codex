@@ -1,352 +1,8 @@
-diff --git a/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst b/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst
-index 4a72f15b82f50afa513a2f526677e8222ac951cc..57a953cd84c4a00e8868110f47f7cca4e06e9c69 100644
-GIT binary patch
-delta 8753
-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
-b$aE`M8N4dZ3BheGJsk_tDnI-mh#`7?90jaZ
-
-delta 8703
-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
-
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 9439e30a4ef64a8d890782360671773f621686dc..a1abf98bf28b68d55c3eca6abb8c35b3033d6dc2 100644
+index 407cfaa06462f4dea43c69bf27e61d99e69516a1..e85fe8f3ba7da487657a15ee3dcff95d8c7f22cf 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -1902,6 +1902,7 @@ impl ThreadRequestProcessor {
+@@ -1922,6 +1922,7 @@ impl ThreadRequestProcessor {
              }
          }
 
@@ -354,7 +10,7 @@ index 9439e30a4ef64a8d890782360671773f621686dc..a1abf98bf28b68d55c3eca6abb8c35b3
          let environment_requests = environment_requests.unwrap_or_else(|| {
              listener_task_context
                  .thread_manager
-@@ -1928,6 +1929,8 @@ impl ThreadRequestProcessor {
+@@ -1948,6 +1949,8 @@ impl ThreadRequestProcessor {
              thread_extension_init.insert(selected_capability_roots);
          }
          let mut start_options = StartThreadOptions::new(config);
@@ -363,7 +19,7 @@ index 9439e30a4ef64a8d890782360671773f621686dc..a1abf98bf28b68d55c3eca6abb8c35b3
          let reserved_thread_id = if start_options.config.ephemeral {
              None
          } else {
-@@ -1969,7 +1972,6 @@ impl ThreadRequestProcessor {
+@@ -1989,7 +1992,6 @@ impl ThreadRequestProcessor {
                  metrics_service_name: service_name,
                  parent_trace: request_trace,
                  environments: Some(environment_requests),
@@ -372,10 +28,10 @@ index 9439e30a4ef64a8d890782360671773f621686dc..a1abf98bf28b68d55c3eca6abb8c35b3
                  ..start_options
              })
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 3d32003b082e7f48869fe206153dca0b1a7e6b9a..12b94584384513b4e91f9ae4f0a0de0189b255d5 100644
+index 609f18f934f51529846337fa3ba4f6d8a63d42d5..9f047c5a013626e8c38890c89d845e36e9fe3a11 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -11,6 +11,7 @@ use codex_protocol::models::FunctionCallOutputBody;
+@@ -13,6 +13,7 @@ use codex_protocol::models::FunctionCallOutputBody;
  use codex_protocol::models::FunctionCallOutputContentItem;
  use codex_protocol::models::FunctionCallOutputPayload;
  use codex_protocol::models::ImageReference as CoreImageReference;
@@ -383,7 +39,7 @@ index 3d32003b082e7f48869fe206153dca0b1a7e6b9a..12b94584384513b4e91f9ae4f0a0de01
  use codex_protocol::protocol::TurnEnvironmentRequests;
  use codex_protocol::protocol::TurnSettingsUpdate;
  use codex_protocol::protocol::TurnSettingsUpdateOutcome;
-@@ -804,8 +805,11 @@ impl TurnRequestProcessor {
+@@ -907,8 +908,11 @@ impl TurnRequestProcessor {
          }
 
          // Default-environment updates retain the task's fallback roots, not its active roots.
@@ -397,7 +53,7 @@ index 3d32003b082e7f48869fe206153dca0b1a7e6b9a..12b94584384513b4e91f9ae4f0a0de01
          let legacy_fallback_cwd = cwd.unwrap_or_else(|| current_cwd.clone());
          let workspace_roots = match workspace_roots {
              Some(workspace_roots) => workspace_roots,
-@@ -815,9 +819,25 @@ impl TurnRequestProcessor {
+@@ -918,9 +922,25 @@ impl TurnRequestProcessor {
                  legacy_fallback_cwd.clone(),
              ),
          };
@@ -654,10 +310,10 @@ index d07ce4f04836de568673afb429f31dcf22cae364..6b3458397c35eae00fd8b76f6a411522
  async fn turn_model_context_uses_selected_environment() -> Result<()> {
      let server = responses::start_mock_server().await;
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 9dffb781a9bf0daf7cbef07f7766145ad8a705f6..2146d7825b92bb60851a42ef220726e80e85e903 100644
+index 482348a605e30e4b1a630a6be943e351990b5d84..4071572744044ed6fc9cd334409f1c1a8a5bd1f1 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -377,7 +377,9 @@ impl LocalAgentControl {
+@@ -390,7 +390,9 @@ impl LocalAgentControl {
                              continue;
                          }
                          EnvironmentConfigState::Ready(config) => config,
@@ -669,7 +325,7 @@ index 9dffb781a9bf0daf7cbef07f7766145ad8a705f6..2146d7825b92bb60851a42ef220726e8
                          }
                      };
 diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
-index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d07c35c33 100644
+index 08983d72ffd1e2a17fefd2740c68164c73f79486..c776dc15c06ce5e3eb3a37f5e0e77973af3f6c26 100644
 --- a/codex-rs/core/src/agents_md.rs
 +++ b/codex-rs/core/src/agents_md.rs
 @@ -20,6 +20,7 @@
@@ -688,39 +344,41 @@ index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d
  use toml::Value as TomlValue;
  use tracing::error;
 
-@@ -52,6 +54,7 @@ const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+@@ -54,6 +56,7 @@ const PROJECT_DOC_BUDGET_GUIDANCE: &str = "Trim your project instructions to fit
  // This covers typical project hierarchies in one remote round trip without monopolizing that
  // transport when independent startup discovery runs concurrently.
  const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 +pub(crate) const REMOTE_AGENTS_MD_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 
- /// Loads project AGENTS.md content and combines it with host-provided user
- /// instructions.
-@@ -71,22 +74,28 @@ pub(crate) async fn load_project_instructions(
+ /// Loads repository instructions across the selected environments.
+ pub(crate) async fn load_project_instructions(
+@@ -77,23 +80,33 @@ pub(crate) async fn load_project_instructions(
              break;
          }
 
--        let filesystem = turn_environment.environment.get_filesystem();
+-        let filesystem = turn_environment.environment().get_filesystem();
 -        let sandbox = (!turn_environment
 -            .permission_profile()
 -            .file_system_sandbox_policy()
 -            .has_full_disk_read_access())
 -        .then(|| turn_environment.sandbox_context(/*additional_permissions*/ None));
 -        match read_agents_md(
--            config,
++        let sandbox = instruction_discovery_sandbox(turn_environment);
++        let read = read_environment_agents_md(
+             config,
 -            filesystem.as_ref(),
 -            &turn_environment.selection.environment_id,
 -            turn_environment.cwd(),
--            remaining,
--            sandbox.as_ref(),
++            turn_environment,
+             remaining,
+             sandbox.as_ref(),
+             warnings,
 -        )
 -        .await
 -        {
-+        let sandbox = instruction_discovery_sandbox(turn_environment);
-+        let read =
-+            read_environment_agents_md(config, turn_environment, remaining, sandbox.as_ref());
++        );
 +        // An executor can finish its handshake and stop answering filesystem calls.
-+        let result = if turn_environment.environment.is_remote() {
++        let result = if turn_environment.environment().is_remote() {
 +            // A deadline is not a completed scan. Do not admit the workspace with
 +            // a partial set of instructions, even when it allows full disk reads.
 +            tokio::time::timeout(REMOTE_AGENTS_MD_DISCOVERY_BUDGET, read)
@@ -741,8 +399,8 @@ index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d
              Ok(Some(docs)) => {
                  for entry in docs.entries {
                      remaining = remaining.saturating_sub(entry.contents.len());
-@@ -115,6 +124,52 @@ pub(crate) async fn load_project_instructions(
-     Ok((!loaded.is_empty()).then_some(loaded))
+@@ -122,6 +135,56 @@ pub(crate) async fn load_project_instructions(
+     Ok(loaded)
  }
 
 +fn instruction_discovery_sandbox(
@@ -764,11 +422,13 @@ index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d
 +        return Ok(());
 +    }
 +    let sandbox = instruction_discovery_sandbox(environment);
++    let mut warnings = Vec::new();
 +    read_environment_agents_md(
 +        config,
 +        environment,
 +        config.project_doc_max_bytes,
 +        sandbox.as_ref(),
++        &mut warnings,
 +    )
 +    .await?;
 +    Ok(())
@@ -779,14 +439,16 @@ index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d
 +    environment: &TurnEnvironment,
 +    max_total: usize,
 +    sandbox: Option<&FileSystemSandboxContext>,
++    warnings: &mut Vec<String>,
 +) -> io::Result<Option<LoadedAgentsMd>> {
 +    read_agents_md(
 +        config,
-+        environment.environment.get_filesystem().as_ref(),
++        environment.environment().get_filesystem().as_ref(),
 +        &environment.selection.environment_id,
 +        environment.cwd(),
 +        max_total,
 +        sandbox,
++        warnings,
 +    )
 +    .await
 +}
@@ -795,7 +457,7 @@ index 1919d681f3febb57a33afe86527ad02b05baac69..bcd09c4bd644a78fe96c8fe69a79d04d
  ///
  /// On success returns `Ok(Some(loaded))` where `loaded` contains every
 diff --git a/codex-rs/core/src/agents_md_tests.rs b/codex-rs/core/src/agents_md_tests.rs
-index aad04d540c6444fed781fc149ecd9774633bae6b..8257d4da3d4df6cbe880340140567f71177165e0 100644
+index 354c5d21a580421202d0c1299fd160c2f5a8c988..1d4b9209f1f9dedebefc736193376c534d13b339 100644
 --- a/codex-rs/core/src/agents_md_tests.rs
 +++ b/codex-rs/core/src/agents_md_tests.rs
 @@ -1,4 +1,6 @@
@@ -842,7 +504,7 @@ index aad04d540c6444fed781fc149ecd9774633bae6b..8257d4da3d4df6cbe880340140567f71
 
  #[derive(Clone, Copy)]
  enum InjectedFailure {
-@@ -1131,6 +1145,134 @@ async fn merges_existing_instructions_with_agents_md() {
+@@ -1137,6 +1151,134 @@ async fn merges_existing_instructions_with_agents_md() {
      assert_eq!(res, expected);
  }
 
@@ -978,18 +640,16 @@ index aad04d540c6444fed781fc149ecd9774633bae6b..8257d4da3d4df6cbe880340140567f71
  async fn multiple_environment_docs_use_labeled_layout_and_preserve_source_order() {
      let primary = tempfile::tempdir().expect("primary tempdir");
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6d1df5a3e 100644
+index 65198ac497e8030a70f78dd7c55d7d8ad9166f4c..04e66a4747ae25ec5a78bcb79229806053e2dddd 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
-@@ -33,13 +33,18 @@ use codex_skills_extension::EnvironmentSkillRequirements;
- use codex_utils_absolute_path::AbsolutePathBuf;
- use codex_utils_path_uri::PathUri;
- use futures::FutureExt;
-+use futures::StreamExt;
- use futures::future::BoxFuture;
+@@ -35,12 +35,16 @@ use futures::future::BoxFuture;
  use futures::future::Shared;
+ use futures::stream::BoxStream;
  use tokio::sync::watch;
 +use tokio::time::Instant;
+ use tokio_util::sync::CancellationToken;
+ use tokio_util::sync::DropGuard;
  use tokio_util::task::AbortOnDropHandle;
  use tracing::Instrument;
  use tracing::instrument::WithSubscriber;
@@ -1000,7 +660,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
  use crate::session::ThreadEnvironmentDefaults;
  use crate::session::turn_context::ShellSnapshotCache;
  use crate::session::turn_context::ShellSnapshotTask;
-@@ -233,7 +238,8 @@ fn resolve_selection_config(
+@@ -236,7 +240,8 @@ fn resolve_selection_config(
          ),
          config @ (EnvironmentConfigState::Ready(_)
          | EnvironmentConfigState::Pending
@@ -1010,16 +670,15 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
      };
      selection.config = config;
      (selection, origin)
-@@ -307,6 +313,8 @@ pub(crate) struct ThreadEnvironments {
- struct ThreadEnvironmentsState {
+@@ -321,6 +326,7 @@ struct ThreadEnvironmentsState {
      thread_defaults: ThreadEnvironmentDefaults,
      environments: Vec<SelectedTurnEnvironment>,
-+    // Keep each rejection at its original position without binding an executor.
+     connection_events: Option<ConnectionEventStreams>,
 +    startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
  }
 
- #[derive(Clone, Copy)]
-@@ -317,10 +325,7 @@ enum StartupRetry<'a> {
+ /// Forwards the active attachments' streams to their thread's event channel.
+@@ -366,10 +372,7 @@ enum StartupRetry<'a> {
 
  impl StartupRetry<'_> {
      fn should_restart(self, environment: &SelectedTurnEnvironment) -> bool {
@@ -1031,7 +690,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
              return matches!(self, Self::AfterSelectionUpdate);
          }
          // Avoid cloning a resolved environment on every healthy turn.
-@@ -343,6 +348,101 @@ impl StartupRetry<'_> {
+@@ -392,6 +395,101 @@ impl StartupRetry<'_> {
  }
 
  impl ThreadEnvironments {
@@ -1133,32 +792,45 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
      pub(crate) fn new(
          environment_manager: Arc<EnvironmentManager>,
          local_shell: Shell,
-@@ -438,10 +538,12 @@ impl ThreadEnvironments {
-             state: Mutex::new(ThreadEnvironmentsState {
+@@ -492,11 +590,13 @@ impl ThreadEnvironments {
                  thread_defaults: thread_defaults.clone(),
-                 environments: active,
+                 environments: Vec::new(),
+                 connection_events: None,
 +                startup_rejections: Vec::new(),
              }),
              configured: Mutex::new(ThreadEnvironmentsState {
                  thread_defaults,
                  environments,
+                 connection_events: None,
 +                startup_rejections: Vec::new(),
              }),
-             connection_event_tx: OnceLock::new(),
          }
-@@ -550,9 +652,11 @@ impl ThreadEnvironments {
-         let ThreadEnvironmentsState {
+     }
+@@ -527,6 +627,9 @@ impl ThreadEnvironments {
+                 )
+             })
+             .collect();
++        state
++            .startup_rejections
++            .clone_from(&configured.startup_rejections);
+         state.connection_events = Some(connection_events);
+     }
+
+@@ -632,10 +735,12 @@ impl ThreadEnvironments {
              thread_defaults,
              environments: current,
+             connection_events,
+-        } = state;
 +            startup_rejections,
-         } = &mut *state;
++        } = &mut *state;
+         let connection_events = connection_events.as_ref();
          let mut seen_environment_ids = HashSet::with_capacity(environments.len());
          let mut next = Vec::with_capacity(environments.len());
 +        let mut rejections = Vec::new();
          let mut pending_completions = Vec::new();
-         // Connection state belongs to the environment instance, not its cwd or roots.
-         let connection_events_task = |environment_id: &str, environment: &Arc<Environment>| {
-@@ -575,6 +679,11 @@ impl ThreadEnvironments {
+         // Workspace and configuration changes preserve the attachment to the same executor.
+         let attachment_for =
+@@ -667,6 +772,11 @@ impl ThreadEnvironments {
              if !seen_environment_ids.insert(selected_environment.environment_id.as_str()) {
                  continue;
              }
@@ -1170,7 +842,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
              let current_environment = current.iter().find(|environment| {
                  environment
                      .selection
-@@ -601,8 +710,10 @@ impl ThreadEnvironments {
+@@ -710,8 +820,10 @@ impl ThreadEnvironments {
                          EnvironmentConfigState::Ready(config) => {
                              pending_completions.push((completion, Ok(config.clone())));
                          }
@@ -1183,15 +855,15 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
                          }
                          EnvironmentConfigState::FromThread | EnvironmentConfigState::Pending => {
                              environment.pending_completion = Some(completion);
-@@ -678,6 +789,7 @@ impl ThreadEnvironments {
-             })
-             .collect::<Vec<_>>();
-         let previous = std::mem::replace(current, next);
+@@ -764,6 +876,7 @@ impl ThreadEnvironments {
+         }
+         // Install the new selection before dropping the guards for removed attachments.
+         drop(std::mem::replace(current, next));
 +        *startup_rejections = rejections;
 
          // Publish after installing the new list, including pending bindings replaced by retries.
          for (completion, result) in pending_completions {
-@@ -740,9 +852,8 @@ impl ThreadEnvironments {
+@@ -822,9 +935,8 @@ impl ThreadEnvironments {
 
      /// Projects canonical selections back to caller input form without losing config ownership.
      pub(crate) fn selections(&self) -> Vec<TurnEnvironmentSelection> {
@@ -1203,7 +875,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
              .environments
              .iter()
              .map(|environment| {
-@@ -750,7 +861,11 @@ impl ThreadEnvironments {
+@@ -832,7 +944,11 @@ impl ThreadEnvironments {
                      .config_origin
                      .into_input_selection(environment.selection.clone())
              })
@@ -1216,7 +888,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
      }
 
      /// Returns installed owner configuration without treating pending attachments as ready.
-@@ -761,7 +876,8 @@ impl ThreadEnvironments {
+@@ -843,7 +959,8 @@ impl ThreadEnvironments {
              EnvironmentConfigState::Ready(config) => Some(config),
              EnvironmentConfigState::FromThread
              | EnvironmentConfigState::Pending
@@ -1226,15 +898,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
          }
      }
 
-@@ -799,6 +915,7 @@ impl ThreadEnvironments {
-         let ThreadEnvironmentsState {
-             thread_defaults,
-             environments,
-+            ..
-         } = &mut *state;
-         if thread_defaults.common == defaults {
-             return;
-@@ -899,12 +1016,16 @@ impl ThreadEnvironments {
+@@ -982,12 +1099,16 @@ impl ThreadEnvironments {
              .inspect_selected_capability_roots(&selected_capability_roots);
          status.ready_roots.retain(|root| {
              let CapabilityRootLocation::Environment { environment_id, .. } = &root.location;
@@ -1256,7 +920,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
          });
          status
      }
-@@ -985,8 +1106,8 @@ impl ThreadEnvironments {
+@@ -1009,8 +1130,8 @@ impl ThreadEnvironments {
          configuration_ready: Option<PendingConfiguration>,
      ) -> TurnEnvironmentResult {
          let environment_id = &selection.environment_id;
@@ -1267,7 +931,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
          }
 
          // Wait for the shared executor connection.
-@@ -1097,9 +1218,8 @@ impl ThreadEnvironments {
+@@ -1120,9 +1241,8 @@ impl ThreadEnvironments {
 
      fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
          // Keep the startup results, but not the senders that would keep removed Pending work alive.
@@ -1279,7 +943,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
              .environments
              .iter()
              .map(|environment| {
-@@ -1117,6 +1237,20 @@ impl ThreadEnvironments {
+@@ -1140,6 +1260,20 @@ impl ThreadEnvironments {
                  })
              })
              .collect();
@@ -1300,25 +964,25 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
          TurnEnvironmentSnapshot { environments }
      }
 
-@@ -1170,9 +1304,14 @@ impl TurnEnvironmentState {
+@@ -1193,9 +1327,14 @@ impl TurnEnvironmentState {
          starting: StartingTurnEnvironment,
          resolved: Option<TurnEnvironmentResult>,
      ) -> Self {
--        let required_skills = starting.environment.required_skills().to_vec();
+-        let required_skills = starting.attachment.environment.required_skills().to_vec();
 -        if let EnvironmentConfigState::Failed(error) = &starting.selection.config {
 -            let error = error.clone();
 +        let required_skills =
 +            if starting.selection.config == EnvironmentConfigState::StartupUnavailable {
 +                Vec::new()
 +            } else {
-+                starting.environment.required_skills().to_vec()
++                starting.attachment.environment.required_skills().to_vec()
 +            };
 +        if let Some(error) = starting.selection.config.failure_reason() {
 +            let error = error.to_owned();
              return Self::Failed {
                  required_skills,
                  selection: starting
-@@ -1444,6 +1583,11 @@ impl TurnEnvironmentSnapshot {
+@@ -1467,6 +1606,11 @@ impl TurnEnvironmentSnapshot {
                          .config_origin
                          .into_input_selection(environment.selection.clone()),
                  ),
@@ -1330,7 +994,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
                  TurnEnvironmentState::Failed { .. } => None,
              })
              .map(TurnEnvironmentSelection::into_request)
-@@ -1464,8 +1608,8 @@ impl TurnEnvironmentSnapshot {
+@@ -1487,8 +1631,8 @@ impl TurnEnvironmentSnapshot {
              .collect()
      }
 
@@ -1341,7 +1005,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
      pub(crate) fn to_spawn_selections(
          &self,
      ) -> codex_protocol::error::Result<Vec<TurnEnvironmentSelection>> {
-@@ -1478,6 +1622,11 @@ impl TurnEnvironmentSnapshot {
+@@ -1501,6 +1645,11 @@ impl TurnEnvironmentSnapshot {
                          .config_origin
                          .into_input_selection(environment.selection.clone()),
                  ),
@@ -1353,7 +1017,16 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
                  TurnEnvironmentState::Failed { .. } => Err(codex_protocol::error::CodexErr::Fatal(
                      "cannot inherit a failed environment when spawning an agent; reconnect the environment before retrying".to_string(),
                  )),
-@@ -1520,9 +1669,9 @@ mod connection_tests;
+@@ -1510,7 +1659,7 @@ impl TurnEnvironmentSnapshot {
+
+     pub(crate) fn primary_filesystem(&self) -> Option<Arc<dyn ExecutorFileSystem>> {
+         self.primary()
+-            .map(|environment| environment.environment.get_filesystem())
++            .map(|environment| environment.environment().get_filesystem())
+     }
+
+     pub(crate) fn single_local_environment(&self) -> Option<&TurnEnvironment> {
+@@ -1543,9 +1692,9 @@ mod connection_tests;
 
  #[cfg(test)]
  mod tests {
@@ -1366,7 +1039,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
              environments: vec![super::TurnEnvironmentState::Failed {
                  required_skills: Vec::new(),
                  selection: TurnEnvironmentSelection {
-@@ -1543,6 +1692,33 @@ mod tests {
+@@ -1566,6 +1715,33 @@ mod tests {
                  .to_string()
                  .contains("cannot inherit a failed environment")
          );
@@ -1401,7 +1074,7 @@ index 8a79af4a54711fa2136388cbbb2d0296ab96143c..b9ce23080da0727f527a5ac1c35953b6
 
      use std::time::Duration;
 diff --git a/codex-rs/core/src/mcp.rs b/codex-rs/core/src/mcp.rs
-index 3bfa3b412c423288553a10f097245e7311619280..ed7c44239042c1b6df193ad1475bdcfbe58264f4 100644
+index a6270a6ccf0f19071494a0581eeb2e35c965522a..c95e3484040fcedb37f113affcc1ee6f9561cc1a 100644
 --- a/codex-rs/core/src/mcp.rs
 +++ b/codex-rs/core/src/mcp.rs
 @@ -79,9 +79,9 @@ impl<'a> McpEnvironmentScope<'a> {
@@ -1418,10 +1091,10 @@ index 3bfa3b412c423288553a10f097245e7311619280..ed7c44239042c1b6df193ad1475bdcfb
                  .mcp_policy
                  .as_ref()
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index ba65f0546fec98ad7a75d7353f29d29426fe2a24..719e7cb083d93790eab8339e71511fb0b13bcedf 100644
+index e1d673c429dd6fb6aa80dbff8e78e329cb539f03..cd2ce8bed7b06f0232a11db703f81afbd13de08e 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -60,7 +60,8 @@ pub(super) fn validate_environment_configs(
+@@ -61,7 +61,8 @@ pub(super) fn validate_environment_configs(
          match &selection.config {
              EnvironmentConfigState::FromThread
              | EnvironmentConfigState::Pending
@@ -1432,10 +1105,10 @@ index ba65f0546fec98ad7a75d7353f29d29426fe2a24..719e7cb083d93790eab8339e71511fb0
                  validate_environment_config(selection, config, features).map_err(|error| {
                      ConstraintError::InvalidValue {
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 22a927a2421699030c32cb40b389a6bc54b0babb..daea84efe87f32f727d12217f94aa2f0e16eaadf 100644
+index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f67694be0 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -40,6 +40,7 @@ use crate::context::world_state::WorldStateUpdate;
+@@ -44,6 +44,7 @@ use crate::context::world_state::WorldStateUpdate;
  use crate::context::world_state::WorldStateUpdateContent;
  use crate::context::world_state::split_prefix_updates;
  use crate::current_time::TimeProvider;
@@ -1443,7 +1116,7 @@ index 22a927a2421699030c32cb40b389a6bc54b0babb..daea84efe87f32f727d12217f94aa2f0
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
  use crate::exec_policy::ExecPolicyManager;
-@@ -1037,7 +1038,7 @@ impl Session {
+@@ -1101,7 +1102,7 @@ impl Session {
                      roots
                  }
              };
@@ -1452,16 +1125,16 @@ index 22a927a2421699030c32cb40b389a6bc54b0babb..daea84efe87f32f727d12217f94aa2f0
              .into_iter()
              .map(|request| TurnEnvironmentSelection::new(request, &selected_capability_roots))
              .collect::<Vec<_>>();
-@@ -1317,7 +1318,7 @@ impl Session {
-             &model_info,
-         );
-         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
+@@ -1382,7 +1383,7 @@ impl Session {
+         };
+         // Replace any inherited context before startup hooks see this thread's effective auth.
+         thread_extension_init.insert(provider_auth.clone());
 -        let session_configuration = SessionConfiguration {
 +        let mut session_configuration = SessionConfiguration {
              turn_extension_init,
-             provider: create_model_provider(
-                 config.model_provider.clone(),
-@@ -1363,6 +1364,34 @@ impl Session {
+             provider: provider_auth.model_provider(config.model_provider.clone()),
+             step_settings: Arc::new(StepSettings {
+@@ -1426,6 +1427,34 @@ impl Session {
          session_configuration
              .validate(&environment_selections)
              .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -1512,10 +1185,10 @@ index 486aee03c7e1b41c49c6ff45dcd49c329b9847d9..fdb55014125e5b30252d8bce5b8d0fdc
          Some(
              profile
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 92d606b387679e97bc195d043e43aafca919f40d..e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183 100644
+index e856f578ed2682d6f213627139cd670f6b2e68bf..a0e271efc87d004b260008b1fee2b806ca21a57b 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -1211,7 +1211,7 @@ impl Session {
+@@ -1275,7 +1275,7 @@ impl Session {
                  .iter()
                  .find(|environment| {
                      environment.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
@@ -1525,10 +1198,10 @@ index 92d606b387679e97bc195d043e43aafca919f40d..e2e0f02d4bd9c417abc39ad6b4ca8af4
          );
          config.model = Some(
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index d9044baff99aff3d3897f01c7621570764ec9178..bbb4d1ebbd36e190f4684d4b6b9dcf4e1af020ae 100644
+index 3097e8787106d81c31da91f162273119a708ba13..93b3551d63d634bc8df403e18f212b6c7a0ec900 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -529,6 +529,11 @@ pub struct StartThreadOptions {
+@@ -586,6 +586,11 @@ pub struct StartThreadOptions {
      pub disabled_plugin_ids: Option<Vec<String>>,
  }
 
@@ -1540,10 +1213,10 @@ index d9044baff99aff3d3897f01c7621570764ec9178..bbb4d1ebbd36e190f4684d4b6b9dcf4e
  /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
  struct InheritedThreadInstructions(Instructions);
 
-@@ -544,6 +549,12 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
- }
+@@ -615,6 +620,12 @@ impl StartThreadOptions {
+         )
+     }
 
- impl StartThreadOptions {
 +    /// Bounds executor discovery for app-server thread/start before workspace startup work.
 +    pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
 +        self.thread_extension_init
@@ -1624,10 +1297,10 @@ index 4d04d7759fb3cb27cc7a4a746111e1c2efe723dd..28637eadc8c4d801a33895cc7965f710
          }
  }
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 79ab98f387de06ab07c3c161a04cbc14a085e019..e751adca0548787beace532ff2e1e60d284f093b 100644
+index 2d940368c93014c9197c4c4bc5a3686688417f75..bc8cd4a35b3f6f8b88cdb1476d8b09864d28581a 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -5158,6 +5158,11 @@ mod tests {
+@@ -5288,6 +5288,11 @@ mod tests {
                  "owner",
                  EnvironmentConfigState::Pending,
              ),
@@ -1639,7 +1312,7 @@ index 79ab98f387de06ab07c3c161a04cbc14a085e019..e751adca0548787beace532ff2e1e60d
          ] {
              let selection = TurnEnvironmentSelection {
                  environment_id: "selected-environment".to_string(),
-@@ -5170,18 +5175,19 @@ mod tests {
+@@ -5300,18 +5305,19 @@ mod tests {
              snapshot.environments =
                  Some(TurnEnvironmentSelections::new(cwd.clone(), vec![selection.clone()]).into());
              let encoded = serde_json::to_value(&snapshot)?;

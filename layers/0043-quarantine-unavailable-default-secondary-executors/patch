@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 0b9c494f6510505cac55fe4efe71223c3c72a1c6..9191b7f021358dd83dfd0973ea70a2fde6624c0c 100644
+index 0aed6bb710a8ced50ea146f076b2655ccc6c85a9..ce0fc539a2064c1c81d4f6670077b32d96602810 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
-@@ -502,28 +502,31 @@ thread or connecting to its executors. To page through the messages, use
+@@ -529,28 +529,31 @@ thread or connecting to its executors. To page through the messages, use
  `thread/turns/list` with `itemsView: "full"`. Reading the history does not make
  the thread available to `turn/start`.
 
@@ -51,10 +51,10 @@ index 0b9c494f6510505cac55fe4efe71223c3c72a1c6..9191b7f021358dd83dfd0973ea70a2fd
  To make the reviewed selection permanent, supply the retained executor IDs,
  working directories, and workspace roots in `turn/start.environments` on the
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index a23587d87dcde063e5f440e5360e8bde001f8f19..dcde7ce943155f15b8a3a85b31b03dde77559ee6 100644
+index 0ad83210142456ef49172438846d91b7980bdebf..61b681d8d6e8ab2ba1b91af29d9c78a7c22ee01e 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
-@@ -666,6 +666,22 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
+@@ -669,6 +669,22 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
  fn resolve_turn_environment_requests(
      thread_manager: &ThreadManager,
      environments: Option<Vec<TurnEnvironmentParams>>,
@@ -77,7 +77,7 @@ index a23587d87dcde063e5f440e5360e8bde001f8f19..dcde7ce943155f15b8a3a85b31b03dde
  ) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
      let Some(environments) = environments else {
          return Ok(None);
-@@ -707,13 +723,6 @@ fn resolve_turn_environment_requests(
+@@ -710,13 +726,6 @@ fn resolve_turn_environment_requests(
              config: EnvironmentConfigState::FromThread,
          });
      }
@@ -92,10 +92,10 @@ index a23587d87dcde063e5f440e5360e8bde001f8f19..dcde7ce943155f15b8a3a85b31b03dde
  }
 
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e71cf7b6c 100644
+index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a59195c75 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -1913,12 +1913,6 @@ impl ThreadRequestProcessor {
+@@ -1933,12 +1933,6 @@ impl ThreadRequestProcessor {
              }
          }
 
@@ -108,7 +108,7 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
          let dynamic_tools = dynamic_tools.unwrap_or_default();
          if !dynamic_tools.is_empty() {
              validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
-@@ -1941,7 +1935,10 @@ impl ThreadRequestProcessor {
+@@ -1961,7 +1955,10 @@ impl ThreadRequestProcessor {
          }
          let mut start_options = StartThreadOptions::new(config);
          start_options.thread_extension_init = thread_extension_init;
@@ -120,7 +120,7 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
          let reserved_thread_id = if start_options.config.ephemeral {
              None
          } else {
-@@ -1982,7 +1979,6 @@ impl ThreadRequestProcessor {
+@@ -2002,7 +1999,6 @@ impl ThreadRequestProcessor {
                  dynamic_tools,
                  metrics_service_name: service_name,
                  parent_trace: request_trace,
@@ -128,38 +128,30 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
                  client_mcp_extensions,
                  ..start_options
              })
-@@ -5644,39 +5640,46 @@ impl ThreadRequestProcessor {
+@@ -5686,38 +5682,52 @@ impl ThreadRequestProcessor {
          let prepared_model_context = prepared_config
              .as_mut()
              .and_then(|prepared| prepared.model_context.take());
--        let resume_result = if let Some(history) = history {
--            self.resume_thread_from_history(history.as_slice())
--                .await
--                .map(|thread_history| (thread_history, None))
--        } else if let Some(stored_thread) = stored_thread_from_running_probe {
--            self.load_resume_initial_history_from_stored_thread_with_options(
--                *stored_thread,
--                prepared_model_context,
--                include_turns,
+-        let (mut thread_history, resume_source_thread) = if let Some(history) = history {
+-            (
+-                self.resume_thread_from_history(history.as_slice()).await?,
+-                None,
 -            )
--            .await
--            .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread)))
 -        } else {
--            match self
--                .read_stored_thread_for_resume(
--                    &thread_id,
--                    path.as_ref(),
--                    /*include_history*/ false,
+-            let stored_thread = match stored_thread_from_running_probe {
+-                Some(stored_thread) => *stored_thread,
+-                None => {
+-                    self.read_stored_thread_for_resume(
+-                        &thread_id,
+-                        path.as_ref(),
+-                        /*include_history*/ false,
 +        let (mut thread_history, resume_source_thread, selected_home_rollout) =
 +            if let Some(history) = history {
 +                (
 +                    self.resume_thread_from_history(history.as_slice()).await?,
 +                    None,
 +                    false,
-                 )
--                .await
--            {
--                Ok(stored_thread) => self
++                )
 +            } else {
 +                let stored_thread = match stored_thread_from_running_probe {
 +                    Some(stored_thread) => *stored_thread,
@@ -172,6 +164,12 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
 +                        .await?
 +                    }
 +                };
++                thread_resume_account::check(
++                    &self.config.features,
++                    app_server_client_name.as_deref(),
++                    &self.auth_manager,
++                    &stored_thread,
++                )?;
 +                let source_id = stored_thread.thread_id;
 +                let resolved_path = path
 +                    .as_ref()
@@ -179,17 +177,13 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
 +                    .filter(|path| path.starts_with(self.config.codex_home.as_path()))
 +                    .cloned();
 +                let (history, stored_thread) = self
-                     .load_resume_initial_history_from_stored_thread_with_options(
-                         stored_thread,
-                         prepared_model_context,
-                         include_turns,
++                    .load_resume_initial_history_from_stored_thread_with_options(
++                        stored_thread,
++                        prepared_model_context,
++                        include_turns,
                      )
--                    .await
--                    .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread))),
--                Err(error) => Err(error),
--            }
--        };
--        let (mut thread_history, resume_source_thread) = resume_result?;
+-                    .await?
+-                }
 +                    .await?;
 +                // The loader checks the selected rollout for in-home paths. A full Legacy
 +                // reread must retain that ID and path to use the same deferral as an ID resume.
@@ -198,11 +192,26 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
 +                        && stored_thread.rollout_path.as_ref() == Some(&resolved_path)
 +                });
 +                (history, Some(stored_thread), selected_home_rollout)
-+            };
+             };
+-            thread_resume_account::check(
+-                &self.config.features,
+-                app_server_client_name.as_deref(),
+-                &self.auth_manager,
+-                &stored_thread,
+-            )?;
+-            let (thread_history, stored_thread) = self
+-                .load_resume_initial_history_from_stored_thread_with_options(
+-                    stored_thread,
+-                    prepared_model_context,
+-                    include_turns,
+-                )
+-                .await?;
+-            (thread_history, Some(stored_thread))
+-        };
          // Path-based resume can use an empty request thread ID. Coordinate once its real
          // identity is known; unrelated loaded threads never wait for this cold startup.
          let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
-@@ -6081,6 +6084,9 @@ impl ThreadRequestProcessor {
+@@ -6122,6 +6132,9 @@ impl ThreadRequestProcessor {
                  override_local_cwd,
                  override_local_roots,
                  optional_environment_ids,
@@ -213,18 +222,18 @@ index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..3f54a95b5c55cd589e3aa85a2a79b75e
              .map_err(|err| invalid_request(err.to_string()))?;
          start_options.initial_history = thread_history;
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06d07ac83a 100644
+index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f7405c62f9f 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -5,6 +5,7 @@ use codex_app_server_protocol::ThreadGuardianAssessment;
- use codex_app_server_protocol::ThreadGuardianReviewParams;
- use codex_app_server_protocol::ThreadGuardianReviewResponse;
+@@ -7,6 +7,7 @@ use codex_app_server_protocol::ThreadGuardianReviewResponse;
  use codex_app_server_protocol::ThreadItem;
+ use codex_app_server_protocol::ThreadPrepareApprovedPlanParams;
+ use codex_app_server_protocol::ThreadPrepareApprovedPlanResponse;
 +use codex_core::validate_environment_restatement_ids_and_cwds;
  use codex_protocol::error::CodexErrorDetails;
  use codex_protocol::models::ContentItem;
  use codex_protocol::models::FunctionCallOutputBody;
-@@ -124,7 +125,7 @@ struct ThreadEnvironmentOverride {
+@@ -194,7 +195,7 @@ struct ThreadEnvironmentOverride {
      runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
  }
 
@@ -233,7 +242,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
      current: &TurnEnvironmentRequests,
      requested: &TurnEnvironmentRequests,
  ) -> bool {
-@@ -140,9 +141,6 @@ fn restates_unavailable_startup_secondaries(
+@@ -210,9 +211,6 @@ fn restates_unavailable_startup_secondaries(
          && primary.config == EnvironmentConfigState::FromThread
          && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
          && requested_primary.config == EnvironmentConfigState::FromThread
@@ -243,7 +252,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
          && secondaries.len() == requested_secondaries.len()
          && secondaries
              .iter()
-@@ -662,8 +660,7 @@ impl TurnRequestProcessor {
+@@ -759,8 +757,7 @@ impl TurnRequestProcessor {
          let runtime_workspace_roots = params
              .runtime_workspace_roots
              .map(resolve_runtime_workspace_roots);
@@ -253,7 +262,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
 
          let turn_has_input = !params.input.is_empty();
          let input = if let Some(tool_output) = params.tool_output {
-@@ -705,7 +702,7 @@ impl TurnRequestProcessor {
+@@ -802,7 +799,7 @@ impl TurnRequestProcessor {
                  runtime_workspace_roots,
                  environment_requests,
              )
@@ -262,7 +271,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
          let thread_settings = self
              .build_thread_settings_overrides(
                  thread.as_ref(),
-@@ -813,9 +810,9 @@ impl TurnRequestProcessor {
+@@ -915,9 +912,9 @@ impl TurnRequestProcessor {
          cwd: Option<AbsolutePathBuf>,
          workspace_roots: Option<Vec<AbsolutePathBuf>>,
          environment_requests: Option<Vec<TurnEnvironmentRequest>>,
@@ -274,7 +283,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
          }
 
          // Explicit environment requests own their workspace roots. Top-level
-@@ -834,19 +831,18 @@ impl TurnRequestProcessor {
+@@ -936,19 +933,18 @@ impl TurnRequestProcessor {
              };
              let mut requested =
                  TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
@@ -300,7 +309,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
                  if local_changed
                      && (same_fallback
                          || local.cwd.to_abs_path().ok().as_ref()
-@@ -855,10 +851,24 @@ impl TurnRequestProcessor {
+@@ -957,10 +953,24 @@ impl TurnRequestProcessor {
                      requested.preserve_secondary_workspaces = true;
                  }
              }
@@ -327,7 +336,7 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
          }
 
          // Default-environment updates retain the task's fallback roots, not its active roots.
-@@ -888,13 +898,14 @@ impl TurnRequestProcessor {
+@@ -990,13 +1000,14 @@ impl TurnRequestProcessor {
              request.cwd = PathUri::from_abs_path(&legacy_fallback_cwd);
              request.workspace_roots = workspace_roots.iter().map(PathUri::from_abs_path).collect();
          }
@@ -348,9 +357,9 @@ index 70e95702fc1eca328fbcabd3b4752b6cfd648251..bf5f9b184afd4c807db9ccc1b5c17c06
      }
 
      async fn build_thread_settings_overrides(
-@@ -1058,7 +1069,7 @@ impl TurnRequestProcessor {
+@@ -1160,7 +1171,7 @@ impl TurnRequestProcessor {
                  /*workspace_roots*/ None,
-                 /*environment_requests*/ None,
+                 environments,
              )
 -            .await;
 +            .await?;
@@ -2653,10 +2662,10 @@ index c53c73bd8c7a04887018256d1e04dd6553b470ba..f770186f7a393843de1fc268c10894bb
 +    ))
 +}
 diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
-index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df884832adc 100644
+index a9e973df1f86c79c44ca956a928316ba8e33aee9..f319b2387d0d9a6ab1026d2020f3c26ecee92d0e 100644
 --- a/codex-rs/core/src/agents_md.rs
 +++ b/codex-rs/core/src/agents_md.rs
-@@ -123,6 +123,22 @@ pub(crate) async fn load_project_instructions_with_startup(
+@@ -129,6 +129,22 @@ pub(crate) async fn load_project_instructions_with_startup(
              continue;
          }
 
@@ -2677,19 +2686,19 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
 +        }
 +
          let sandbox = instruction_discovery_sandbox(turn_environment);
-         let read =
-             read_environment_agents_md(config, turn_environment, remaining, sandbox.as_ref());
-@@ -152,7 +168,8 @@ pub(crate) async fn load_project_instructions_with_startup(
+         let read = read_environment_agents_md(
+             config,
+@@ -163,7 +179,8 @@ pub(crate) async fn load_project_instructions_with_startup(
                  }
              }
              Ok(None) => {}
 -            Err(error) if sandbox.is_none() => {
 +            // Do not build a prompt when a required remote's instruction scan failed.
-+            Err(error) if sandbox.is_none() && !turn_environment.environment.is_remote() => {
++            Err(error) if sandbox.is_none() && !turn_environment.environment().is_remote() => {
                  error!(
                      environment_id = turn_environment.selection.environment_id,
                      "error trying to find AGENTS.md docs: {error:#}"
-@@ -201,19 +218,47 @@ pub(crate) async fn read_startup_project_instructions(
+@@ -214,6 +231,31 @@ pub(crate) async fn read_startup_project_instructions(
      .await
  }
 
@@ -2703,14 +2712,16 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
 +        return Ok(LoadedAgentsMd::default());
 +    }
 +    let sandbox = instruction_discovery_sandbox(environment);
++    let mut warnings = Vec::new();
 +    read_agents_md_with_policy(
 +        config,
-+        environment.environment.get_filesystem().as_ref(),
++        environment.environment().get_filesystem().as_ref(),
 +        &environment.selection.environment_id,
 +        environment.cwd(),
 +        config.project_doc_max_bytes,
 +        sandbox.as_ref(),
 +        FindUpErrorPolicy::Propagate,
++        &mut warnings,
 +    )
 +    .await
 +    .map(Option::unwrap_or_default)
@@ -2719,26 +2730,27 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
  async fn read_environment_agents_md(
      config: &Config,
      environment: &TurnEnvironment,
-     max_total: usize,
+@@ -221,13 +263,18 @@ async fn read_environment_agents_md(
      sandbox: Option<&FileSystemSandboxContext>,
+     warnings: &mut Vec<String>,
  ) -> io::Result<Option<LoadedAgentsMd>> {
 -    read_agents_md(
 +    read_agents_md_with_policy(
          config,
-         environment.environment.get_filesystem().as_ref(),
+         environment.environment().get_filesystem().as_ref(),
          &environment.selection.environment_id,
          environment.cwd(),
          max_total,
          sandbox,
-+        if environment.environment.is_remote() {
++        if environment.environment().is_remote() {
 +            FindUpErrorPolicy::Propagate
 +        } else {
 +            FindUpErrorPolicy::Ignore
 +        },
+         warnings,
      )
      .await
- }
-@@ -224,7 +269,7 @@ async fn read_environment_agents_md(
+@@ -239,7 +286,7 @@ async fn read_environment_agents_md(
  /// discovered doc. If no documentation file is found the function returns
  /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
  /// decide how to handle them.
@@ -2747,11 +2759,11 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
  async fn read_agents_md(
      config: &Config,
      fs: &dyn ExecutorFileSystem,
-@@ -232,12 +277,34 @@ async fn read_agents_md(
-     cwd: &PathUri,
-     max_total: usize,
+@@ -249,7 +296,39 @@ async fn read_agents_md(
      sandbox: Option<&FileSystemSandboxContext>,
-+) -> io::Result<Option<LoadedAgentsMd>> {
+     warnings: &mut Vec<String>,
+ ) -> io::Result<Option<LoadedAgentsMd>> {
+-    let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
 +    read_agents_md_with_policy(
 +        config,
 +        fs,
@@ -2760,6 +2772,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
 +        max_total,
 +        sandbox,
 +        FindUpErrorPolicy::Ignore,
++        warnings,
 +    )
 +    .await
 +}
@@ -2773,17 +2786,21 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
 +    max_total: usize,
 +    sandbox: Option<&FileSystemSandboxContext>,
 +    error_policy: FindUpErrorPolicy,
- ) -> io::Result<Option<LoadedAgentsMd>> {
-     if max_total == 0 {
-         return Ok(None);
-     }
-
--    let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
++    warnings: &mut Vec<String>,
++) -> io::Result<Option<LoadedAgentsMd>> {
++    if max_total == 0 {
++        return Ok(None);
++    }
++
 +    let paths = agents_md_paths_with_policy(config, cwd, fs, sandbox, error_policy).await?;
-     if paths.is_empty() {
-         return Ok(None);
-     }
-@@ -252,7 +319,12 @@ async fn read_agents_md(
++    if paths.is_empty() {
++        return Ok(None);
++    }
++
+     let mut remaining = max_total;
+     let mut loaded = LoadedAgentsMd::default();
+
+@@ -265,7 +344,12 @@ async fn read_agents_md(
 
          let mut data = match fs.read_file(&p, ReadFileOptions::default(), sandbox).await {
              Ok(data) => data,
@@ -2796,8 +2813,8 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
 +            }
              Err(err) => return Err(err),
          };
-         let size = data.len() as u64;
-@@ -289,14 +361,25 @@ async fn read_agents_md(
+         let size = data.len();
+@@ -304,14 +388,25 @@ async fn read_agents_md(
      }
  }
 
@@ -2824,7 +2841,7 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
  ) -> io::Result<Vec<PathUri>> {
      let dir = cwd.clone();
 
-@@ -315,14 +398,9 @@ async fn agents_md_paths(
+@@ -330,14 +425,9 @@ async fn agents_md_paths(
              default_project_root_markers()
          }
      };
@@ -2843,18 +2860,18 @@ index 8d3c4fdc5ac19feae304ff6632bc4017ef5ce71b..66b402539c99bc56da037ea1344c4df8
          let mut dirs = Vec::new();
          let mut cursor = dir.clone();
 diff --git a/codex-rs/core/src/agents_md_manager.rs b/codex-rs/core/src/agents_md_manager.rs
-index ae3bf92505f5efe12e3f8f8d1346e101e34e8f1a..190da09132fb609456d67c6f0ac490a8156ebf8a 100644
+index e7fb92c215a595f3d8da6427895c1b4c2e160958..d4a4e9c24ca5831b3a84f394a7cdd65f9f6a104d 100644
 --- a/codex-rs/core/src/agents_md_manager.rs
 +++ b/codex-rs/core/src/agents_md_manager.rs
-@@ -46,6 +46,7 @@ struct AgentsMdState {
- #[derive(Default)]
+@@ -47,6 +47,7 @@ struct AgentsMdState {
  struct AgentsMdCache {
      selections: Option<Vec<TurnEnvironmentSelection>>,
+     project_doc_max_bytes: usize,
 +    verified_project_instructions: Vec<Option<Arc<LoadedAgentsMd>>>,
      active_project_trust_level: Option<TrustLevel>,
      loaded: Option<Arc<LoadedAgentsMd>>,
  }
-@@ -94,10 +95,15 @@ impl AgentsMdManager {
+@@ -95,12 +96,17 @@ impl AgentsMdManager {
              .turn_environments()
              .map(|environment| environment.selection.clone())
              .collect::<Vec<_>>();
@@ -2866,37 +2883,44 @@ index ae3bf92505f5efe12e3f8f8d1346e101e34e8f1a..190da09132fb609456d67c6f0ac490a8
          let (mut instructions, cached, refresh_repository) = {
              let mut state = self.state.lock().await;
              let refresh_repository = state.cache.selections.as_ref() != Some(&selections)
-+                || state.cache.verified_project_instructions != verified_project_instructions
-                 || state.cache.active_project_trust_level != active_project_trust_level;
+                 || state.cache.active_project_trust_level != active_project_trust_level
+-                || state.cache.project_doc_max_bytes != config.project_doc_max_bytes;
++                || state.cache.project_doc_max_bytes != config.project_doc_max_bytes
++                || state.cache.verified_project_instructions != verified_project_instructions;
              if refresh_repository {
                  // Tightened read permissions must not leave inaccessible instructions visible,
-@@ -167,6 +173,7 @@ impl AgentsMdManager {
-             state.instructions = instructions;
+                 // even if discovery fails or the caller cancels the refresh.
+@@ -180,6 +186,7 @@ impl AgentsMdManager {
              state.cache = AgentsMdCache {
                  selections: Some(selections),
+                 project_doc_max_bytes: budget,
 +                verified_project_instructions,
                  active_project_trust_level,
                  loaded: loaded.clone(),
              };
-@@ -193,6 +200,13 @@ impl AgentsMdManager {
-             .collect::<Vec<_>>();
+@@ -207,8 +214,15 @@ impl AgentsMdManager {
          let state = self.state.lock().await;
          (state.cache.selections.as_ref() == Some(&selections)
+             && state.cache.active_project_trust_level == config.active_project.trust_level
+-            && state.cache.project_doc_max_bytes == config.project_doc_max_bytes)
+-            .then(|| state.cache.loaded.clone().unwrap_or_default())
++            && state.cache.project_doc_max_bytes == config.project_doc_max_bytes
 +            && state
 +                .cache
 +                .verified_project_instructions
 +                .iter()
 +                .eq(environments
 +                    .turn_environments()
-+                    .map(|environment| &environment.verified_project_instructions))
-             && state.cache.active_project_trust_level == config.active_project.trust_level)
-             .then(|| state.cache.loaded.clone().unwrap_or_default())
++                    .map(|environment| &environment.verified_project_instructions)))
++        .then(|| state.cache.loaded.clone().unwrap_or_default())
      }
+
+     pub(crate) async fn inherited_instructions(&self) -> SessionInstructions {
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8ceeb8fa6 100644
+index d23ff3fc5299f1ca7a19f33f3f8f98673aed800b..37960e5849379066ddb08ee2eeed99d9ea725f33 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -920,6 +920,9 @@ impl CodexThread {
+@@ -1001,6 +1001,9 @@ impl CodexThread {
              preserve_secondary_workspaces: environment_requests
                  .as_ref()
                  .is_some_and(|requests| requests.preserve_secondary_workspaces),
@@ -2906,7 +2930,7 @@ index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8
              environments: environment_requests
                  .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
              runtime_workspace_roots,
-@@ -1219,6 +1222,11 @@ impl CodexThread {
+@@ -1321,6 +1324,11 @@ impl CodexThread {
          self.session.restorable_thread_settings().await
      }
 
@@ -2919,30 +2943,27 @@ index 26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8..fb953d1be6f751d0aa84916b81c730a8
      pub fn client_mcp_extensions(&self) -> ClientMcpExtensions {
          self.session.services.client_mcp_extensions.clone()
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373cd5ac70ba 100644
+index bf1668d1f2d497970c4233b365293b02df0388b0..622e882f546ec1f0a016fffcc85247db3e883984 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
-@@ -6,6 +6,7 @@ use std::sync::Arc;
+@@ -5,6 +5,7 @@ use std::future::Future;
+ use std::sync::Arc;
  use std::sync::Mutex;
- use std::sync::OnceLock;
  use std::sync::PoisonError;
 +use std::sync::Weak;
 
+ use async_channel::Receiver;
  use async_channel::Sender;
- use codex_exec_server::Environment;
-@@ -36,8 +37,11 @@ use futures::FutureExt;
- use futures::StreamExt;
+@@ -34,6 +35,8 @@ use futures::StreamExt;
  use futures::future::BoxFuture;
  use futures::future::Shared;
+ use futures::stream::BoxStream;
 +use tokio::sync::Semaphore;
 +use tokio::sync::oneshot;
  use tokio::sync::watch;
  use tokio::time::Instant;
-+use tokio_util::sync::CancellationToken;
- use tokio_util::task::AbortOnDropHandle;
- use tracing::Instrument;
- use tracing::instrument::WithSubscriber;
-@@ -45,6 +49,7 @@ use tracing::instrument::WithSubscriber;
+ use tokio_util::sync::CancellationToken;
+@@ -45,6 +48,7 @@ use tracing::instrument::WithSubscriber;
  use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
  use crate::agents_md::StartupProjectInstructions;
  use crate::agents_md::read_startup_project_instructions;
@@ -2950,15 +2971,15 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
  use crate::config::Config;
  use crate::session::ThreadEnvironmentDefaults;
  use crate::session::turn_context::ShellSnapshotCache;
-@@ -53,6 +58,7 @@ use crate::session::turn_context::TurnEnvironment;
+@@ -53,6 +57,7 @@ use crate::session::turn_context::TurnEnvironment;
  use crate::shell::Shell;
  use crate::shell_snapshot::ShellSnapshot;
  use crate::shell_snapshot::SnapshotCredentialBrokerState;
 +use crate::thread_manager::StartupEnvironmentDiscovery;
 
- // Reject pathological selected cwd values at the environment-selection boundary.
- const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
-@@ -129,8 +135,19 @@ pub(crate) fn default_thread_environment_requests(
+ mod attachment;
+ pub(crate) use attachment::EnvironmentAttachment;
+@@ -132,8 +137,19 @@ pub(crate) fn default_thread_environment_requests(
      cwd: &AbsolutePathBuf,
      workspace_roots: &[AbsolutePathBuf],
  ) -> Vec<TurnEnvironmentRequest> {
@@ -2980,7 +3001,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          .into_iter()
          .map(|environment_id| TurnEnvironmentRequest {
              environment_id,
-@@ -145,9 +162,34 @@ pub(crate) fn default_thread_environment_requests(
+@@ -148,9 +164,34 @@ pub(crate) fn default_thread_environment_requests(
  pub fn validate_environment_ids_and_cwds<'a>(
      environment_manager: &EnvironmentManager,
      environments: impl IntoIterator<Item = (&'a str, &'a PathUri)>,
@@ -3016,7 +3037,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          if cwd.inferred_native_path_string().len() > MAX_TURN_ENVIRONMENT_CWD_BYTES {
              return Err(CodexErr::InvalidRequest(
                  "turn environment working directory exceeds the maximum size".to_string(),
-@@ -158,11 +200,15 @@ pub fn validate_environment_ids_and_cwds<'a>(
+@@ -161,11 +202,15 @@ pub fn validate_environment_ids_and_cwds<'a>(
                  "duplicate turn environment id `{environment_id}`"
              )));
          }
@@ -3037,9 +3058,9 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      }
      Ok(())
  }
-@@ -316,6 +362,251 @@ struct ThreadEnvironmentsState {
+@@ -328,6 +373,251 @@ struct ThreadEnvironmentsState {
      environments: Vec<SelectedTurnEnvironment>,
-     // Keep each rejection at its original position without binding an executor.
+     connection_events: Option<ConnectionEventStreams>,
      startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
 +    default_secondary_admissions: Option<DefaultSecondaryAdmissions>,
 +}
@@ -3118,7 +3139,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                match (&mut verification.result).now_or_never() {
 +                    Some(Ok(Some((environment, completed))))
 +                        if completed.elapsed() < REMOTE_AGENTS_MD_DISCOVERY_BUDGET
-+                            && environment.environment.check_connected_view().is_ok() =>
++                            && environment.environment().check_connected_view().is_ok() =>
 +                    {
 +                        return Some((environment, verification.revoked));
 +                    }
@@ -3189,7 +3210,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +    environment: &mut TurnEnvironment,
 +) -> Option<()> {
 +    // HOME, temporary directories, and shell must describe the checked attachment.
-+    let info = environment.environment.info().await.ok()?;
++    let info = environment.environment().info().await.ok()?;
 +    environment.user_home_dir = info.user_home_dir;
 +    environment.temporary_directories = info.temporary_directories;
 +    environment.executor_platform_os = info.platform_os;
@@ -3198,7 +3219,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +    let docs = verify_remote_project_instructions(config, environment)
 +        .await
 +        .ok()?;
-+    environment.environment.check_connected_view().ok()?;
++    environment.environment().check_connected_view().ok()?;
 +    environment.verified_project_instructions = Some(Arc::new(docs));
 +    Some(())
 +}
@@ -3268,7 +3289,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +        !attempt.revoked.is_cancelled()
 +            && state.environments.first().is_some_and(|primary| {
 +                primary.selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
-+                    && !primary.environment.is_remote()
++                    && !primary.environment().is_remote()
 +                    && primary.config_origin == EnvironmentConfigOrigin::Thread
 +            })
 +            && state
@@ -3288,8 +3309,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +    }
  }
 
- #[derive(Clone, Copy)]
-@@ -358,14 +649,62 @@ impl ThreadEnvironments {
+ /// Forwards the active attachments' streams to their thread's event channel.
+@@ -405,14 +695,62 @@ impl ThreadEnvironments {
          thread_defaults: ThreadEnvironmentDefaults,
          config: &Config,
          selections: &mut [TurnEnvironmentSelection],
@@ -3355,7 +3376,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          let remote_selections = selections
              .iter()
              .filter(|selection| selection.config != EnvironmentConfigState::StartupUnavailable)
-@@ -377,7 +716,16 @@ impl ThreadEnvironments {
+@@ -424,7 +762,16 @@ impl ThreadEnvironments {
              .cloned()
              .collect::<Vec<_>>();
          if remote_selections.is_empty() {
@@ -3373,7 +3394,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          }
          let discovery = Self::new(
              environment_manager,
-@@ -389,7 +737,25 @@ impl ThreadEnvironments {
+@@ -436,7 +783,25 @@ impl ThreadEnvironments {
          );
          discovery.update_selections(&remote_selections);
          let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
@@ -3391,7 +3412,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            .filter_map(|starting| {
 +                let id = &starting.selection.environment_id;
 +                let original = startup.default_registrations.get(id)?;
-+                (Arc::ptr_eq(original, &starting.environment)
++                (Arc::ptr_eq(original, &starting.attachment.environment)
 +                    && original.supports_initial_default_recovery())
 +                .then(|| (id.clone(), Arc::downgrade(original)))
 +            })
@@ -3400,7 +3421,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
              .map(|state| async move {
                  if Instant::now() >= deadline {
                      return None;
-@@ -436,15 +802,32 @@ impl ThreadEnvironments {
+@@ -483,15 +848,32 @@ impl ThreadEnvironments {
              let reason = format!(
                  "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive."
              );
@@ -3435,7 +3456,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          }
          let mut environments = Vec::with_capacity(ready.len());
          let mut instructions = StartupProjectInstructions::default();
-@@ -454,10 +837,12 @@ impl ThreadEnvironments {
+@@ -501,10 +883,12 @@ impl ThreadEnvironments {
                  .insert(id, (environment.selection(), docs));
              environments.push(TurnEnvironmentState::Ready(environment));
          }
@@ -3451,31 +3472,32 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      }
 
      pub(crate) fn new(
-@@ -556,11 +941,13 @@ impl ThreadEnvironments {
-                 thread_defaults: thread_defaults.clone(),
-                 environments: active,
+@@ -608,12 +992,14 @@ impl ThreadEnvironments {
+                 environments: Vec::new(),
+                 connection_events: None,
                  startup_rejections: Vec::new(),
 +                default_secondary_admissions: None,
              }),
              configured: Mutex::new(ThreadEnvironmentsState {
                  thread_defaults,
                  environments,
+                 connection_events: None,
                  startup_rejections: Vec::new(),
 +                default_secondary_admissions: None,
              }),
-             connection_event_tx: OnceLock::new(),
          }
-@@ -670,6 +1057,7 @@ impl ThreadEnvironments {
-             thread_defaults,
+     }
+@@ -753,6 +1139,7 @@ impl ThreadEnvironments {
              environments: current,
+             connection_events,
              startup_rejections,
 +            ..
          } = &mut *state;
+         let connection_events = connection_events.as_ref();
          let mut seen_environment_ids = HashSet::with_capacity(environments.len());
-         let mut next = Vec::with_capacity(environments.len());
-@@ -807,6 +1195,15 @@ impl ThreadEnvironments {
-             .collect::<Vec<_>>();
-         let previous = std::mem::replace(current, next);
+@@ -894,6 +1281,15 @@ impl ThreadEnvironments {
+         // Install the new selection before dropping the guards for removed attachments.
+         drop(std::mem::replace(current, next));
          *startup_rejections = rejections;
 +        if let Some(admissions) = &state.default_secondary_admissions {
 +            for admission in &admissions.secondaries {
@@ -3489,7 +3511,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 
          // Publish after installing the new list, including pending bindings replaced by retries.
          for (completion, result) in pending_completions {
-@@ -919,6 +1316,21 @@ impl ThreadEnvironments {
+@@ -1002,6 +1398,21 @@ impl ThreadEnvironments {
          self.set_thread_defaults(&self.state, defaults);
      }
 
@@ -3511,7 +3533,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      pub(crate) fn set_configured_thread_defaults(&self, defaults: EnvironmentConfig) {
          self.set_thread_defaults(&self.configured, defaults);
      }
-@@ -929,6 +1341,9 @@ impl ThreadEnvironments {
+@@ -1012,6 +1423,9 @@ impl ThreadEnvironments {
          defaults: EnvironmentConfig,
      ) {
          let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3521,7 +3543,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          let ThreadEnvironmentsState {
              thread_defaults,
              environments,
-@@ -1224,18 +1639,335 @@ impl ThreadEnvironments {
+@@ -1247,18 +1661,337 @@ impl ThreadEnvironments {
 
      /// Copies the current selection without waiting for any executor to connect.
      pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
@@ -3558,9 +3580,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            active.default_secondary_admissions.as_ref(),
 +            /*include_initial_recovery*/ false,
 +        )
-     }
-
--    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
++    }
++
 +    /// Keep default secondaries unavailable while their instructions are being checked.
 +    pub(crate) fn begin_default_secondary_admissions(
 +        &self,
@@ -3571,7 +3592,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +        Self::revoke_initial_attempts(state.default_secondary_admissions.as_ref());
 +        let local_primary = requested.first().is_some_and(|primary| {
 +            state.environments.first().is_some_and(|active| {
-+                !active.environment.is_remote() && active.selection.has_same_workspace(primary)
++                !active.attachment.environment.is_remote()
++                    && active.selection.has_same_workspace(primary)
 +            })
 +        });
 +        let mut secondaries = state
@@ -3580,7 +3602,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            .filter(|environment| {
 +                local_primary
 +                    && environment.config_origin == EnvironmentConfigOrigin::Thread
-+                    && environment.environment.is_remote()
++                    && environment.attachment.environment.is_remote()
 +                    && defaults.iter().any(|default| {
 +                        matches!(default, DefaultSecondaryEnvironment::Ready(default)
 +                            if default.has_same_workspace(&environment.selection))
@@ -3588,7 +3610,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            })
 +            .map(|environment| DefaultSecondaryAdmission {
 +                selection: environment.selection.clone(),
-+                registration: Arc::clone(&environment.environment),
++                registration: Arc::clone(&environment.attachment.environment),
 +                verified: None,
 +                initial_recovery: None,
 +            })
@@ -3714,17 +3736,18 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                                admission.matches(
 +                                    &environment.selection,
 +                                    environment.config_origin,
-+                                    &environment.environment,
++                                    environment.environment(),
 +                                )
 +                            })
 +                            .cloned()
 +                        else {
 +                            return;
 +                        };
-+                        let Ok(bound) = environment.environment.connected_view() else {
++                        let Ok(bound) = environment.environment().connected_view() else {
 +                            return;
 +                        };
-+                        environment.environment = Arc::new(bound);
++                        environment.attachment =
++                            environment.attachment.bind_environment(Arc::new(bound));
 +                        environment
 +                    };
 +                    let Ok(Some(())) = tokio::time::timeout_at(
@@ -3766,14 +3789,14 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                        admission.matches_initial_rejection(&state)
 +                            && self.is_current_registration(admission)
 +                            && admission.verified.as_ref().is_some_and(|environment| {
-+                                environment.environment.check_connected_view().is_ok()
++                                environment.environment().check_connected_view().is_ok()
 +                            })
 +                    } else {
 +                        state.environments.iter().any(|environment| {
 +                            admission.matches(
 +                                &environment.selection,
 +                                environment.config_origin,
-+                                &environment.environment,
++                                &environment.attachment.environment,
 +                            )
 +                        })
 +                    };
@@ -3787,7 +3810,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                        // A shell snapshot from an older connection does not belong to this view.
 +                        environment.shell_snapshot = Self::start_shell_snapshot_task(
 +                            self.shell_snapshot.clone(),
-+                            Arc::clone(&environment.environment),
++                            Arc::clone(environment.environment()),
 +                            environment.selection.cwd.clone(),
 +                            environment.shell.clone(),
 +                            &environment.selection.config,
@@ -3826,7 +3849,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                        if admission.initial_recovery.is_some() {
 +                            return include_initial_recovery
 +                                && admission.matches_initial_rejection(state)
-+                                && verified.environment.check_connected_view().is_ok();
++                                && verified.environment().check_connected_view().is_ok();
 +                        }
 +                        let TurnEnvironmentState::Starting(starting) = &*environment else {
 +                            return false;
@@ -3834,8 +3857,8 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                        admission.matches(
 +                            &starting.selection,
 +                            starting.config_origin,
-+                            &starting.environment,
-+                        ) && verified.environment.check_connected_view().is_ok()
++                            &starting.attachment.environment,
++                        ) && verified.environment().check_connected_view().is_ok()
 +                    });
 +                    // An initial recovery may only overlay its exact rejection. An owner
 +                    // decision in the raw snapshot supersedes the old attempt.
@@ -3853,24 +3876,16 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            }
 +        }
 +        snapshot
-+    }
-+
+     }
+
+-    fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
 +    fn snapshot_state(state: &ThreadEnvironmentsState) -> TurnEnvironmentSnapshot {
          // Keep the startup results, but not the senders that would keep removed Pending work alive.
 -        let state = state.lock().unwrap_or_else(PoisonError::into_inner);
          let mut environments: Vec<_> = state
              .environments
              .iter()
-@@ -1280,7 +2012,7 @@ impl ThreadEnvironments {
-             non_blocking = non_blocking_snapshots,
-         )
-     )]
--    fn resolve_snapshot(
-+    pub(crate) fn resolve_snapshot(
-         &self,
-         snapshot: TurnEnvironmentSnapshot,
-     ) -> impl Future<Output = TurnEnvironmentSnapshot> + Send + 'static {
-@@ -1317,6 +2049,39 @@ pub(crate) enum TurnEnvironmentState {
+@@ -1340,6 +2073,39 @@ pub(crate) enum TurnEnvironmentState {
  }
 
  impl TurnEnvironmentState {
@@ -3910,7 +3925,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      fn from_resolution(
          starting: StartingTurnEnvironment,
          resolved: Option<TurnEnvironmentResult>,
-@@ -1394,6 +2159,56 @@ pub struct TurnEnvironmentSnapshot {
+@@ -1417,6 +2183,56 @@ pub struct TurnEnvironmentSnapshot {
  }
 
  impl TurnEnvironmentSnapshot {
@@ -3967,7 +3982,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      /// Keeps the original root order for child threads and saved history.
      pub(crate) fn selected_capability_roots(&self) -> Vec<SelectedCapabilityRoot> {
          EnvironmentCapabilityRoots::collect(self.environments.iter().map(|environment| {
-@@ -1432,9 +2247,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1455,9 +2271,12 @@ impl TurnEnvironmentSnapshot {
              .environments
              .iter()
              .map(|environment| match environment {
@@ -3975,7 +3990,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 -                    TurnEnvironmentState::Ready(environment.clone())
 -                }
 +                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
-+                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
++                    Some(recovery) if environment.environment().check_connected_view().is_err() => {
 +                        TurnEnvironmentState::initial_recovery_denied(recovery.rejection.clone())
 +                    }
 +                    _ => TurnEnvironmentState::Ready(environment.clone()),
@@ -3983,18 +3998,18 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
                  TurnEnvironmentState::Starting(environment) => {
                      TurnEnvironmentState::from_resolution(
                          environment.clone(),
-@@ -1452,7 +2270,9 @@ impl TurnEnvironmentSnapshot {
+@@ -1475,7 +2294,9 @@ impl TurnEnvironmentSnapshot {
              let TurnEnvironmentState::Ready(environment) = environment else {
                  return None;
              };
 -            Some(environment)
 +            (environment.initial_recovery.is_none()
-+                || environment.environment.check_connected_view().is_ok())
++                || environment.environment().check_connected_view().is_ok())
 +            .then_some(environment)
          })
      }
 
-@@ -1466,12 +2286,18 @@ impl TurnEnvironmentSnapshot {
+@@ -1489,12 +2310,18 @@ impl TurnEnvironmentSnapshot {
      }
 
      pub(crate) fn ready_environment_handles(&self) -> HashMap<String, Arc<Environment>> {
@@ -4011,13 +4026,13 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +                };
 +                Some((
                      environment.selection.environment_id.clone(),
-                     Arc::clone(&environment.environment),
+                     Arc::clone(environment.environment()),
 -                )
 +                ))
              })
              .collect()
      }
-@@ -1493,7 +2319,35 @@ impl TurnEnvironmentSnapshot {
+@@ -1516,7 +2343,35 @@ impl TurnEnvironmentSnapshot {
      }
 
      pub(crate) fn primary(&self) -> Option<&TurnEnvironment> {
@@ -4026,7 +4041,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            return None;
 +        };
 +        (environment.initial_recovery.is_none()
-+            || environment.environment.check_connected_view().is_ok())
++            || environment.environment().check_connected_view().is_ok())
 +        .then_some(environment)
 +    }
 +
@@ -4054,7 +4069,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      }
 
      /// Returns the first selection's executor paths, even when setup is not ready yet.
-@@ -1594,7 +2448,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1617,7 +2472,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .filter_map(|environment| match environment {
@@ -4068,13 +4083,13 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
                  TurnEnvironmentState::Starting(environment) => Some(
                      environment
                          .config_origin
-@@ -1616,7 +2475,12 @@ impl TurnEnvironmentSnapshot {
+@@ -1639,7 +2499,12 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
 -                TurnEnvironmentState::Ready(environment) => environment.selection(),
 +                TurnEnvironmentState::Ready(environment) => match &environment.initial_recovery {
-+                    Some(recovery) if environment.environment.check_connected_view().is_err() => {
++                    Some(recovery) if environment.environment().check_connected_view().is_err() => {
 +                        recovery.rejection.clone()
 +                    }
 +                    _ => environment.selection(),
@@ -4082,7 +4097,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
                  TurnEnvironmentState::Starting(environment) => environment
                      .config_origin
                      .into_input_selection(environment.selection.clone()),
-@@ -1633,7 +2497,10 @@ impl TurnEnvironmentSnapshot {
+@@ -1656,7 +2521,10 @@ impl TurnEnvironmentSnapshot {
          self.environments
              .iter()
              .map(|environment| match environment {
@@ -4094,7 +4109,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
                  TurnEnvironmentState::Starting(environment) => Ok(
                      environment
                          .config_origin
-@@ -1740,6 +2607,7 @@ mod tests {
+@@ -1763,6 +2631,7 @@ mod tests {
 
      use std::time::Duration;
 
@@ -4102,7 +4117,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      use crate::config::PermissionProfileSnapshot;
      use codex_exec_server::Environment;
      use codex_exec_server::ExecServerRuntimeOptions;
-@@ -1749,6 +2617,7 @@ mod tests {
+@@ -1772,6 +2641,7 @@ mod tests {
      use codex_http_client::HttpClientFactory;
      use codex_http_client::OutboundProxyPolicy;
      use codex_protocol::config_types::WindowsSandboxLevel;
@@ -4110,7 +4125,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      use codex_protocol::models::ActivePermissionProfile;
      use codex_protocol::models::PermissionProfile;
      use codex_protocol::permissions::FileSystemSandboxPolicyContext;
-@@ -1835,7 +2704,7 @@ mod tests {
+@@ -1860,7 +2730,7 @@ mod tests {
          }
      }
 
@@ -4119,7 +4134,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
          let (stream, _) = listener.accept().await.expect("connection");
          let mut websocket = accept_async(stream).await.expect("websocket handshake");
 
-@@ -1874,6 +2743,185 @@ mod tests {
+@@ -1899,6 +2769,190 @@ mod tests {
              ))
              .await
              .expect("environment info response");
@@ -4165,11 +4180,13 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +        let _socket = server.await.expect("keep the verified transport connected");
 +        let mut verified = started
 +            .turn_environments()
-+            .find(|environment| environment.environment.is_remote())
++            .find(|environment| environment.environment().is_remote())
 +            .expect("ready remote")
 +            .clone();
-+        let registration = Arc::clone(&verified.environment);
-+        verified.environment = Arc::new(registration.connected_view().expect("bound transport"));
++        let registration = Arc::clone(verified.environment());
++        verified.attachment = verified.attachment.bind_environment(Arc::new(
++            registration.connected_view().expect("bound transport"),
++        ));
 +        verified.verified_project_instructions = Some(Arc::new(LoadedAgentsMd::default()));
 +        let owner_selection = verified.selection.clone();
 +        let mut admissions = environments
@@ -4189,7 +4206,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            environments
 +                .inherited_snapshot_now()
 +                .turn_environments()
-+                .any(|environment| environment.environment.is_remote())
++                .any(|environment| environment.environment().is_remote())
 +        );
 +
 +        // Keep the normalized Ready config and registration identical while changing its owner.
@@ -4201,7 +4218,10 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            let secondary = &state.environments[1];
 +            assert_eq!(secondary.selection, owner_selection);
 +            assert_eq!(secondary.config_origin, EnvironmentConfigOrigin::Owner);
-+            assert!(Arc::ptr_eq(&secondary.environment, &registration));
++            assert!(Arc::ptr_eq(
++                &secondary.attachment.environment,
++                &registration
++            ));
 +        }
 +        assert_eq!(
 +            environments.snapshot_now().to_selections(),
@@ -4305,7 +4325,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      }
 
      #[tokio::test]
-@@ -2089,6 +3137,66 @@ url = "ws://127.0.0.1:8765"
+@@ -2114,6 +3168,70 @@ url = "ws://127.0.0.1:8765"
          );
      }
 
@@ -4350,6 +4370,13 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +        ));
 +
 +        let (completion, _) = watch::channel(None);
++        let (attachment, _guard, _) = EnvironmentAttachment::new(
++            REMOTE_ENVIRONMENT_ID,
++            Arc::new(
++                Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string()))
++                    .expect("unattached test registration"),
++            ),
++        );
 +        snapshot.environments[0] = TurnEnvironmentState::Starting(StartingTurnEnvironment {
 +            selection: TurnEnvironmentSelection {
 +                config: EnvironmentConfigState::Pending,
@@ -4357,10 +4384,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 +            },
 +            config_origin: EnvironmentConfigOrigin::Owner,
 +            resolution: futures::future::pending().boxed().shared(),
-+            environment: Arc::new(
-+                Environment::create_for_tests(Some("ws://127.0.0.1:1".to_string()))
-+                    .expect("unattached test registration"),
-+            ),
++            attachment,
 +            owner_config_result: Some(pending_configuration(&completion)),
 +        });
 +        assert!(snapshot.primary().is_none());
@@ -4372,7 +4396,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
      #[tokio::test]
      async fn unresolved_environment_selections_are_skipped() {
          let cwd = AbsolutePathBuf::current_dir().expect("cwd");
-@@ -2286,8 +3394,16 @@ url = "ws://127.0.0.1:8765"
+@@ -2311,8 +3429,16 @@ url = "ws://127.0.0.1:8765"
          resolution.await.expect("local environment should resolve");
          turn_environments.update_selections(&[remote.clone(), local.clone()]);
          let initial = turn_environments.snapshot().await;
@@ -4390,7 +4414,7 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
              &EnvironmentConfig {
                  windows_sandbox_type: local_sandbox,
                  ..test_environment_config()
-@@ -2363,6 +3479,9 @@ url = "ws://127.0.0.1:8765"
+@@ -2388,6 +3514,9 @@ url = "ws://127.0.0.1:8765"
          assert!(next_starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
          assert!(!starting.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
          let attached = starting.refresh_readiness();
@@ -4400,8 +4424,42 @@ index 45bf7c4b6b564302d159915a0f1fa8c7297c4898..7e3479f181403fd959ad2451fb2a373c
 
          assert!(attached.starting().next().is_none());
          let child = ThreadEnvironments::new(
+diff --git a/codex-rs/core/src/environment_selection/attachment.rs b/codex-rs/core/src/environment_selection/attachment.rs
+index 062c6c786b359cf09e6244eca0547b8b99ff32ed..cfdf92fc30599b898b3b4399cea8bc8823408d17 100644
+--- a/codex-rs/core/src/environment_selection/attachment.rs
++++ b/codex-rs/core/src/environment_selection/attachment.rs
+@@ -23,6 +23,8 @@ pub(crate) struct EnvironmentAttachment {
+     pub(crate) environment: Arc<Environment>,
+     pub(crate) detached: CancellationToken,
+     _connection_events_task: Option<AbortOnDropHandle<()>>,
++    // A bound connection view retains the original attachment's event task and detach signal.
++    _source_attachment: Option<Arc<EnvironmentAttachment>>,
+ }
+
+ impl EnvironmentAttachment {
+@@ -52,10 +54,20 @@ impl EnvironmentAttachment {
+             environment,
+             detached,
+             _connection_events_task: connection_events_task,
++            _source_attachment: None,
+         });
+         let detach_on_drop = attachment.detached.clone().drop_guard();
+         (attachment, detach_on_drop, events)
+     }
++
++    pub(crate) fn bind_environment(self: &Arc<Self>, environment: Arc<Environment>) -> Arc<Self> {
++        Arc::new(Self {
++            environment,
++            detached: self.detached.clone(),
++            _connection_events_task: None,
++            _source_attachment: Some(Arc::clone(self)),
++        })
++    }
+ }
+
+ async fn forward_connection_events(
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index 57185f731832063c13701ddc5ba4c04d968f4ec9..33d9dfa0f09f1a213fd736d68c6d5bb5e063643d 100644
+index 3e6fd1861d6097796b5a3dcc30386f7901ad92d1..af32cc6f6937dfb91cf2d20516054c003b934060 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
 @@ -453,8 +453,7 @@ pub(crate) async fn run_turn_stop_hooks(
@@ -4424,19 +4482,20 @@ index 57185f731832063c13701ddc5ba4c04d968f4ec9..33d9dfa0f09f1a213fd736d68c6d5bb5
      let preview_runs = hooks.preview_session_end();
      if preview_runs.is_empty() {
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 52b5c380ca921aeacf63b023a3bf08647ce9b629..a7b2aa3673ec99e0c03728c79627fab5cce828e4 100644
+index 2f13035fe5d0f8cddf138b01665d2053ac19c9dc..f1f9ed2bdf26cdf367485721c763018c23eab457 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -283,3 +283,4 @@ pub mod otel_init;
- // Captured environment bindings can be passed back to ThreadManager by internal reviewers.
- pub use environment_selection::TurnEnvironmentSnapshot;
+@@ -307,4 +307,5 @@ pub use environment_selection::TurnEnvironmentSnapshot;
  pub use environment_selection::validate_environment_ids_and_cwds;
+
+ mod runtime_auth;
 +pub use environment_selection::validate_environment_restatement_ids_and_cwds;
+ pub use runtime_auth::build_runtime_auth_manager;
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835a3296829 100644
+index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a4417bdb2c57 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -21,6 +21,7 @@ use crate::config::ConstraintError;
+@@ -22,6 +22,7 @@ use crate::config::ConstraintError;
  use crate::config::ConstraintResult;
  use crate::config::ManagedFeatures;
  use crate::config::NetworkProxySpec;
@@ -4444,7 +4503,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::session::session::Session;
  use crate::session::session::SessionConfiguration;
-@@ -123,10 +124,11 @@ fn update_local_workspace(
+@@ -124,10 +125,11 @@ fn update_local_workspace(
          let mut environments = current.environments.clone();
          environments[0].cwd = requested_local.cwd.clone();
          environments[0].workspace_roots = requested_local.workspace_roots.clone();
@@ -4459,7 +4518,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
      }
      Err(ConstraintError::InvalidValue {
          field_name: "environments",
-@@ -213,6 +215,12 @@ enum ConfigUpdateSource {
+@@ -214,6 +216,12 @@ enum ConfigUpdateSource {
  }
 
  impl Session {
@@ -4472,7 +4531,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
      pub(super) fn apply_session_settings(
          &self,
          current: &SessionConfiguration,
-@@ -220,7 +228,16 @@ impl Session {
+@@ -221,7 +229,16 @@ impl Session {
      ) -> ConstraintResult<SessionConfiguration> {
          let current_environments = &current.environments;
          let adjusted;
@@ -4490,7 +4549,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
              && let Some(environments) = &updates.environments
          {
              // Recheck under the settings lock so a stale request cannot restore a removed binding.
-@@ -248,10 +265,12 @@ impl Session {
+@@ -249,10 +266,12 @@ impl Session {
      pub(super) async fn activate_turn_environments(
          &self,
          configuration: &SessionConfiguration,
@@ -4504,7 +4563,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
              // Another task may have started while this one was preparing its settings.
              if active.as_ref().is_none_or(|turn| turn.task.is_none()) {
                  let mut environments = configuration.environments.clone();
-@@ -265,16 +284,51 @@ impl Session {
+@@ -266,16 +285,51 @@ impl Session {
                      }
                  }
                  // Apply the saved defaults even if this turn selects the same environments.
@@ -4559,7 +4618,7 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
      }
 
      /// Applies an explicit workspace tool transition to the running task, unlike ordinary
-@@ -493,12 +547,31 @@ impl Session {
+@@ -494,12 +548,31 @@ impl Session {
              }
          }
 
@@ -4592,12 +4651,12 @@ index e9618b49a913b7ef0feedcd948d25873b51aa336..bb1e6b3b1ee921e27554b44d8ab01835
 -        state.session_configuration.environments = future;
          if update_current {
              // Invalidate MCP before installed configuration can wake a waiting turn.
-             self.mark_mcp_runtime_dirty();
+             self.mark_mcp_runtime_dirty(McpRefreshReason::CurrentEnvironmentsChanged);
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112d0b30bd0 100644
+index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265adc38d092c 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -40,6 +40,8 @@ use crate::context::world_state::WorldStateUpdate;
+@@ -44,6 +44,8 @@ use crate::context::world_state::WorldStateUpdate;
  use crate::context::world_state::WorldStateUpdateContent;
  use crate::context::world_state::split_prefix_updates;
  use crate::current_time::TimeProvider;
@@ -4606,7 +4665,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
  use crate::environment_selection::ThreadEnvironments;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
-@@ -149,6 +151,7 @@ use codex_protocol::openai_models::ModelPreset;
+@@ -155,6 +157,7 @@ use codex_protocol::openai_models::ModelPreset;
  use codex_protocol::permissions::FileSystemSandboxPolicy;
  use codex_protocol::permissions::FileSystemSandboxPolicyContext;
  use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -4614,7 +4673,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
  use codex_protocol::protocol::FileChange;
  use codex_protocol::protocol::HasLegacyEvent;
  use codex_protocol::protocol::HistoryPosition;
-@@ -169,6 +172,7 @@ use codex_protocol::protocol::ThreadSource;
+@@ -175,6 +178,7 @@ use codex_protocol::protocol::ThreadSource;
  use codex_protocol::protocol::TurnAbortReason;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentRequest;
@@ -4622,7 +4681,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
  use codex_protocol::protocol::TurnEnvironmentSelection;
  use codex_protocol::protocol::TurnStartedEvent;
  use codex_protocol::protocol::W3cTraceContext;
-@@ -992,11 +996,11 @@ impl Session {
+@@ -1056,11 +1060,11 @@ impl Session {
              metrics_service_name,
              user_shell_override,
              inherited_exec_policy,
@@ -4636,7 +4695,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
              mut thread_extension_init,
              turn_extension_init,
              client_mcp_extensions,
-@@ -1017,6 +1021,9 @@ impl Session {
+@@ -1081,6 +1085,9 @@ impl Session {
              .get::<codex_extension_api::SessionIsolation>()
              .map(|policy| *policy)
              .unwrap_or_default();
@@ -4646,7 +4705,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
          // Manager-owned threads and inline delegates bind roots at the same startup boundary.
          let selected_capability_roots =
              match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
-@@ -1342,6 +1349,7 @@ impl Session {
+@@ -1404,6 +1411,7 @@ impl Session {
                  .as_ref()
                  .map(|discovery| Arc::clone(&discovery.optional_on_resume))
                  .unwrap_or_default(),
@@ -4654,7 +4713,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
              model_info_overrides: config.to_models_manager_config().into(),
              developer_instructions: config.developer_instructions.clone(),
              base_instructions,
-@@ -1380,7 +1388,12 @@ impl Session {
+@@ -1443,7 +1451,12 @@ impl Session {
                  || !config.features.enabled(Feature::DeferredExecutor))
          {
              debug_assert!(inherited_environments.is_none());
@@ -4668,7 +4727,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
                  Arc::clone(&environment_manager),
                  session_configuration
                      .user_shell_override
-@@ -1392,11 +1405,36 @@ impl Session {
+@@ -1455,11 +1468,36 @@ impl Session {
                  ),
                  config.as_ref(),
                  &mut environment_selections,
@@ -4707,7 +4766,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
                  thread_extension_init.insert(instructions);
                  Some(environments)
              } else {
-@@ -3005,9 +3043,30 @@ impl Session {
+@@ -3125,9 +3163,30 @@ impl Session {
              // Save new environment defaults for future turns. The running turn keeps its own.
              windows_sandbox_changed =
                  state.session_configuration.windows_sandbox_level != updated.windows_sandbox_level;
@@ -4739,7 +4798,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
              if updated.environments != state.session_configuration.environments {
                  self.services
                      .turn_environments
-@@ -3101,11 +3160,11 @@ impl Session {
+@@ -3253,11 +3312,11 @@ impl Session {
          let snapshot = {
              let _state = self.state.lock().await;
              if self.features.enabled(Feature::SubagentThreadEnvironments) {
@@ -4753,7 +4812,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
      }
 
      pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
-@@ -3127,6 +3186,23 @@ impl Session {
+@@ -3298,6 +3357,23 @@ impl Session {
              .restorable_thread_settings(state.session_configuration.environments.clone())
      }
 
@@ -4777,7 +4836,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
      pub(crate) async fn set_app_server_client_info(
          &self,
          app_server_client_name: Option<String>,
-@@ -3259,7 +3335,8 @@ impl Session {
+@@ -3438,7 +3514,8 @@ impl Session {
      pub(crate) async fn refresh_hooks(&self, mut config: Arc<Config>) {
          loop {
              let disabled_plugin_ids = self.state.lock().await.active_disabled_plugin_ids.clone();
@@ -4787,7 +4846,7 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
              let hooks_config = build_hooks_config(
                  config.as_ref(),
                  self.services.plugins_manager.as_ref(),
-@@ -5064,7 +5141,7 @@ impl Session {
+@@ -5276,7 +5353,7 @@ impl Session {
                  self.services.turn_environments.snapshot(),
                  self.features
                      .enabled(Feature::SubagentThreadEnvironments)
@@ -4795,8 +4854,8 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
 +                    .then(|| self.services.turn_environments.inherited_snapshot_now()),
              )
          };
-         if matches!(
-@@ -5093,7 +5170,13 @@ impl Session {
+         if self.inherits_root_service_tier(&turn_context.session_source) {
+@@ -5306,7 +5383,13 @@ impl Session {
          );
          let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
          let environments = environments.or_cancel(cancellation_token).await?;
@@ -4812,10 +4871,10 @@ index 037fa6785264ac08128c7fd9639a3502a1050483..333c10ec620a84f466b7f4e0ab9b2112
          let load_agents_md = Box::pin(async {
              let (loaded_agents_md, warnings) = self
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea16fe610d 100644
+index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a3625147d1c5d09 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -11,6 +11,7 @@ use crate::agent::api::AgentControl;
+@@ -14,6 +14,7 @@ use crate::agent::host::InheritedSessionId;
  use crate::agents_md_manager::AgentsMdManager;
  use crate::agents_md_manager::SessionInstructions;
  use crate::config::ConstraintError;
@@ -4823,7 +4882,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
  use crate::environment_selection::ThreadEnvironments;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::hook_mcp_executor::CoreHookMcpExecutor;
-@@ -24,6 +25,7 @@ use crate::state::ActiveTurn;
+@@ -28,6 +29,7 @@ use crate::state::ActiveTurn;
  use crate::turn_metadata::ExecutionMetadata;
  use codex_analytics::ThreadProductUpdate;
  use codex_attachment_store::AttachmentStore;
@@ -4831,7 +4890,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
  use codex_extension_api::ExtensionDataInit;
  use codex_http_client::ClientRouteClass;
  use codex_http_client::RouteAwareClientPool;
-@@ -143,6 +145,9 @@ pub(crate) struct SessionConfiguration {
+@@ -159,6 +161,9 @@ pub(crate) struct SessionConfiguration {
      pub(super) implicit_environment_selection: bool,
      /// Saved registry executors allowed to remain unavailable for this loaded session only.
      pub(super) resume_optional_environment_ids: Arc<std::collections::HashSet<String>>,
@@ -4841,7 +4900,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
      /// Explicit startup overrides used when resolving effective model metadata.
      pub(super) model_info_overrides: ModelInfoOverrides,
 
-@@ -449,6 +454,40 @@ impl SessionConfiguration {
+@@ -473,6 +478,40 @@ impl SessionConfiguration {
          }
      }
 
@@ -4882,7 +4941,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
      pub(super) fn validate(
          &self,
          environments: &[TurnEnvironmentSelection],
-@@ -518,6 +557,11 @@ impl SessionConfiguration {
+@@ -542,6 +581,11 @@ impl SessionConfiguration {
              next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
              next_configuration.environments = environments.environments.clone();
              next_configuration.implicit_environment_selection = environments.implicit_selection;
@@ -4894,7 +4953,7 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
          }
          let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
          if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
-@@ -697,6 +741,8 @@ pub(crate) struct SessionSettingsUpdate {
+@@ -753,6 +797,8 @@ pub(crate) struct SessionSettingsUpdate {
      pub(crate) environments: Option<TurnEnvironmentSelections>,
      /// Recheck the secondary workspaces at commit and retain their actual bindings.
      pub(crate) preserve_secondary_workspaces: bool,
@@ -4904,10 +4963,10 @@ index ba9bab3f94efd5b005f784c818e68beb766ac5e8..d8cd58c10f70e2186dd157d8f1b47bea
      pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
      pub(crate) sandbox_policy: Option<SandboxPolicy>,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c6c4e46ce 100644
+index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263ee5e12b7c 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -2423,6 +2423,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
+@@ -2339,6 +2339,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
      Ok(())
  }
 
@@ -5037,7 +5096,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
  #[tokio::test]
  async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -6572,6 +6695,7 @@ async fn set_rate_limits_retains_previous_credits() {
+@@ -6482,6 +6605,7 @@ async fn set_rate_limits_retains_previous_credits() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5045,7 +5104,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -6697,6 +6821,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+@@ -6608,6 +6732,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5053,7 +5112,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -8063,6 +8188,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+@@ -7975,6 +8100,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5061,7 +5120,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          step_settings: Arc::new(StepSettings {
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
-@@ -9714,6 +9840,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -9632,6 +9758,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5069,7 +5128,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10043,6 +10170,7 @@ async fn make_session_with_config_and_rx(
+@@ -9977,6 +10104,7 @@ async fn make_session_with_config_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5077,7 +5136,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10184,6 +10312,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -10120,6 +10248,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5085,7 +5144,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -12240,6 +12369,7 @@ where
+@@ -12179,6 +12308,7 @@ where
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5093,7 +5152,7 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -16038,6 +16168,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
+@@ -15973,6 +16103,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
      assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
  }
 
@@ -5146,10 +5205,10 @@ index 8e3b4a9129f986cf30864e12f846adcf48c23046..2597cb962d84eb6f814e8a6e213a835c
  async fn abort_empty_active_turn_preserves_pending_input() {
      let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
 diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
-index 1a000b9cb5fa5b584ac859f36e588c635776b49e..79a14d049e45bfa8972e9afd33cf33db0a023f2b 100644
+index a790900084127950e2c5d04f84357c5ff924195d..1350e81a97710ca0da4651dbe29de304e19c3c56 100644
 --- a/codex-rs/core/src/session/thread_settings.rs
 +++ b/codex-rs/core/src/session/thread_settings.rs
-@@ -146,6 +146,9 @@ pub(super) fn prepare_update(
+@@ -149,6 +149,9 @@ pub(super) fn prepare_update(
          preserve_secondary_workspaces: environment_requests
              .as_ref()
              .is_some_and(|requests| requests.preserve_secondary_workspaces),
@@ -5160,25 +5219,26 @@ index 1a000b9cb5fa5b584ac859f36e588c635776b49e..79a14d049e45bfa8972e9afd33cf33db
          runtime_workspace_roots,
          profile_workspace_roots,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba14828f1b844 100644
+index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a978d453e9 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -2,9 +2,11 @@ use super::step_settings::ResolvedStepSettings;
+@@ -2,10 +2,12 @@ use super::step_settings::ResolvedStepSettings;
  use super::token_budget::has_explicit_settings;
  use super::token_budget::resolve_token_budget;
  use super::*;
 +use crate::agents_md::LoadedAgentsMd;
  use crate::config::TokenBudgetConfig;
  use crate::cyber_access_program;
+ use crate::environment_selection::EnvironmentAttachment;
  use crate::environment_selection::EnvironmentConfigOrigin;
 +use crate::environment_selection::InitialTurnEnvironmentRecovery;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::exec_policy::AllowPrefixRules;
  use crate::shell_snapshot::ShellSnapshot;
-@@ -81,6 +83,10 @@ pub(crate) struct TurnEnvironment {
+@@ -83,6 +85,10 @@ pub(crate) struct TurnEnvironment {
      pub(crate) selection: TurnEnvironmentSelection,
      pub(crate) config_origin: EnvironmentConfigOrigin,
-     pub(crate) environment: Arc<Environment>,
+     pub(crate) attachment: Arc<EnvironmentAttachment>,
 +    /// Empty is a verified absence of project instructions on the bound connection.
 +    pub(crate) verified_project_instructions: Option<Arc<LoadedAgentsMd>>,
 +    /// A verified initial recovery is active-turn only; child snapshots retain this rejection.
@@ -5186,25 +5246,42 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
      /// Cached from the selected executor; `None` means it did not report one.
      pub(crate) user_home_dir: Option<PathUri>,
      /// Cached from the selected executor; `None` means it did not report them.
-@@ -106,6 +112,8 @@ impl TurnEnvironment {
+@@ -97,7 +103,6 @@ pub(crate) struct TurnEnvironment {
+ }
+
+ impl TurnEnvironment {
+-    #[cfg(test)]
+     pub(crate) fn new(
+         selection: TurnEnvironmentSelection,
+         config_origin: EnvironmentConfigOrigin,
+@@ -106,7 +111,7 @@ impl TurnEnvironment {
+     ) -> Self {
+         let (attachment, guard, _) =
+             EnvironmentAttachment::new(&selection.environment_id, environment);
+-        // Standalone test snapshots have no thread selection to signal detach.
++        // Standalone snapshots have no thread selection to signal detach.
+         guard.disarm();
+         Self::from_attachment(selection, config_origin, attachment, shell)
+     }
+@@ -122,6 +127,8 @@ impl TurnEnvironment {
              selection,
              config_origin,
-             environment,
+             attachment,
 +            verified_project_instructions: None,
 +            initial_recovery: None,
              user_home_dir: None,
              temporary_directories: None,
              shell,
-@@ -328,6 +336,8 @@ impl std::fmt::Debug for TurnEnvironment {
- pub(crate) struct NewTurnContextOptions {
-     pub(crate) final_output_json_schema: Option<Value>,
+@@ -351,6 +358,8 @@ pub(crate) struct NewTurnContextOptions {
+     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
      pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+     pub(crate) helper_admission: Option<crate::agent::helper_daybreak::turn::HelperTurnAdmission>,
 +    /// Automatic, context-only, and recovery tasks cannot activate a new startup recovery.
 +    pub(crate) allow_initial_default_recovery: bool,
  }
 
  /// The context needed for a single turn of the thread.
-@@ -419,6 +429,9 @@ enum TurnContextBuildMode {
+@@ -446,6 +455,9 @@ enum TurnContextBuildMode {
      /// Captures recording settings without updating shared model/multi-agent metadata
      /// or discovering skills. Must not initialize context or capture an execution step.
      InjectItems,
@@ -5214,9 +5291,9 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
  }
 
  impl TurnContext {
-@@ -1417,7 +1430,9 @@ impl Session {
-                 )
-                 .await;
+@@ -1491,7 +1503,9 @@ impl Session {
+         if let Some(service_tier) = service_tier_for_turn {
+             Arc::make_mut(&mut configuration.step_settings).service_tier = Some(service_tier);
          }
 -        let turn_environments = self.activate_turn_environments(&configuration).await;
 +        let turn_environments = self
@@ -5225,7 +5302,7 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
          let turn_context = self
              .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
              .await;
-@@ -1500,12 +1515,12 @@ impl Session {
+@@ -1585,12 +1599,12 @@ impl Session {
                      .insert_arc(Arc::clone(&model_info.model));
                  self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
              }
@@ -5244,17 +5321,17 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
          };
          let plugins_input = per_turn_config.plugins_config_input();
          let plugin_outcome = self
-@@ -1518,12 +1533,15 @@ impl Session {
+@@ -1603,12 +1617,15 @@ impl Session {
              &plugin_outcome,
              per_turn_config.codex_home.as_path(),
          );
--        let skills_snapshot = if matches!(build_mode, TurnContextBuildMode::InjectItems)
+-        let skill_discovery = if matches!(build_mode, TurnContextBuildMode::InjectItems)
 -            || crate::guardian::is_basic_session_source(&session_configuration.session_source)
 -            || (per_turn_config
 -                .features
 -                .enabled(Feature::SkipHostSkillDiscovery)
 -                && !self.services.extensions.requires_host_skill_discovery())
-+        let skills_snapshot = if matches!(
++        let skill_discovery = if matches!(
 +            build_mode,
 +            TurnContextBuildMode::InjectItems | TurnContextBuildMode::SessionEnd
 +        ) || crate::guardian::is_basic_session_source(
@@ -5265,8 +5342,8 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
 +            && !self.services.extensions.requires_host_skill_discovery())
          {
              // Executor and orchestrator catalogs are supplied independently of host skills.
-             HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
-@@ -1694,6 +1712,24 @@ impl Session {
+             None
+@@ -1818,6 +1835,24 @@ impl Session {
              .await
      }
 
@@ -5291,7 +5368,7 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
      async fn new_default_turn_for(&self, build_mode: TurnContextBuildMode) -> Arc<TurnContext> {
          let session_configuration = self.default_turn_configuration().await;
          let turn_environments = self.services.turn_environments.snapshot().await;
-@@ -1728,7 +1764,10 @@ impl Session {
+@@ -1852,7 +1887,10 @@ impl Session {
          options: NewTurnContextOptions,
      ) -> Arc<TurnContext> {
          let turn_environments = self
@@ -5303,27 +5380,29 @@ index e2e0f02d4bd9c417abc39ad6b4ca8af49d3cc183..5ce3b99fc7315734497418a27f5ba148
              .await;
          self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
              .await
-@@ -1758,6 +1797,7 @@ impl Session {
+@@ -1882,7 +1920,9 @@ impl Session {
                  environments,
                  NewTurnContextOptions {
                      final_output_json_schema: current.final_output_json_schema.clone(),
 +                    allow_initial_default_recovery: false,
                      cyber_access_program: current.cyber_access_program,
++                    ..Default::default()
                  },
                  TurnContextBuildMode::StartupPrewarm,
+                 self.git_enrichment_policy,
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index 92963e6db51d4e985833530dbdeac4b2c250a73b..94089ff03bd14a0ba39f5389b8e4f8bd57d661e8 100644
+index c8c51ab01f64567a7bb4e21210424d39e85504a4..f0ea331a5523a0807322694a33ed0b7ab6dd741c 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
-@@ -166,6 +166,7 @@ impl PreparedTurnInputSettings {
-         let options = NewTurnContextOptions {
-             final_output_json_schema,
+@@ -182,6 +182,7 @@ impl PreparedTurnInputSettings {
+             prompt_cache_ttl,
              cyber_access_program,
+             helper_admission,
 +            allow_initial_default_recovery: matches!(kind, TurnStartKind::User),
          };
          let turn_context = match kind {
              TurnStartKind::User | TurnStartKind::Recovery => Some(
-@@ -746,13 +747,17 @@ impl Session {
+@@ -839,13 +840,17 @@ impl Session {
          {
              return None;
          }
@@ -5345,30 +5424,77 @@ index 92963e6db51d4e985833530dbdeac4b2c250a73b..94089ff03bd14a0ba39f5389b8e4f8bd
                  .as_ref()
                  .map(codex_history::TurnAttribution::start_options)
 diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
-index 324099bd9ecde3d6b8fe9d0aee6591edb78751b6..09b54c3216ee1807c66b8ab1305543387d47b382 100644
+index 2a49328c9b37c3b71b83b58235def9881b29a40c..1bded72568125ce4c549afcdd613fd586644997b 100644
 --- a/codex-rs/core/src/session/turn_suspension.rs
 +++ b/codex-rs/core/src/session/turn_suspension.rs
-@@ -54,6 +54,7 @@ pub(super) async fn suspend_turn_and_shutdown(
-         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
-     })?;
+@@ -56,6 +56,7 @@ pub(super) async fn suspend_turn_and_shutdown(
      let turn_id = task.turn_context.sub_id.clone();
+     // A suspended task emits no terminal outcome.
+     drop(task.outcome_handoff);
 +    session.revoke_turn_initial_recovery(task.turn_context.as_ref());
      // Normal shutdown records a terminal turn event, preventing another worker from
      // recovering this turn under its original ID. Cancel the task without that event.
      task.cancellation_token.cancel();
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index e4bd2e88c4257fa22266596dce6f551a6804e46b..20f7b4bfa176ceded5825befbd754a3e2f857483 100644
+index f69d5f6384327629d0d40cdb9afb299b20608288..4a305a948dbe5fb8729eeed2a26539879e6589ad 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
-@@ -610,6 +610,7 @@ impl Session {
-         let options = NewTurnContextOptions {
-             final_output_json_schema: start_options.final_output_json_schema,
+@@ -655,6 +655,7 @@ impl Session {
+             prompt_cache_ttl: start_options.prompt_cache_ttl,
              cyber_access_program: start_options.cyber_access_program,
+             helper_admission: triggered.then_some(helper_admission).flatten(),
 +            allow_initial_default_recovery: false,
          };
          let turn_context = match session_configuration {
              Some(configuration) => {
-@@ -1020,6 +1021,7 @@ impl Session {
+@@ -812,21 +813,28 @@ impl Session {
+                 (None, None, Some(err))
+             }
+         };
+-        let can_continue =
+-            successful && turn_context.terminal_error.lock().await.is_none();
++        let can_continue = successful && turn_context.terminal_error.lock().await.is_none();
+         let finishing = CancellationToken::new();
+         let finish_recording = finishing.clone().drop_guard();
+         let (turn_state, unadmitted_task, mut pending_input, outcome_handoff) = {
+             let mut active = self.active_turn.lock().await;
+-            let Some(active_turn) = active.as_mut() else { return TaskFinishAction::Finish; };
+-            let Some(task) = active_turn.task.as_ref() else { return TaskFinishAction::Finish; };
+-            if task.turn_context.sub_id != turn_context.sub_id { return TaskFinishAction::Finish; }
+-            if can_continue && !task.cancellation_token.is_cancelled()
++            let Some(active_turn) = active.as_mut() else {
++                return TaskFinishAction::Finish;
++            };
++            let Some(task) = active_turn.task.as_ref() else {
++                return TaskFinishAction::Finish;
++            };
++            if task.turn_context.sub_id != turn_context.sub_id {
++                return TaskFinishAction::Finish;
++            }
++            if can_continue
++                && !task.cancellation_token.is_cancelled()
+                 && (regular_output.is_some() || task.task.supports_pending_input_continuation())
+             {
+                 let state = active_turn.turn_state.lock().await;
+                 if state.accepts_mailbox_delivery_for_current_turn()
+-                    && (!state.pending_input.is_empty() || self.input_queue.has_pending_mailbox_items().await)
++                    && (!state.pending_input.is_empty()
++                        || self.input_queue.has_pending_mailbox_items().await)
+                 {
+                     return TaskFinishAction::Continue(
+                         Arc::clone(&task.turn_context),
+@@ -834,7 +842,9 @@ impl Session {
+                     );
+                 }
+             }
+-            let Some(task) = active_turn.task.take() else { return TaskFinishAction::Finish; };
++            let Some(task) = active_turn.task.take() else {
++                return TaskFinishAction::Finish;
++            };
+             task.handle.detach();
+             active_turn.finishing = Some(finishing);
+             (
+@@ -1060,6 +1070,7 @@ impl Session {
          };
          let saved_guardian_completion =
              matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
@@ -5376,7 +5502,7 @@ index e4bd2e88c4257fa22266596dce6f551a6804e46b..20f7b4bfa176ceded5825befbd754a3e
          if !saved_guardian_completion {
              self.send_event(turn_context.as_ref(), event.clone()).await;
          }
-@@ -1098,6 +1100,7 @@ impl Session {
+@@ -1139,6 +1150,7 @@ impl Session {
          error: Option<ErrorEvent>,
      ) {
          let sub_id = task.turn_context.sub_id.clone();
@@ -5385,10 +5511,10 @@ index e4bd2e88c4257fa22266596dce6f551a6804e46b..20f7b4bfa176ceded5825befbd754a3e
              self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                  .await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d2572f72d 100644
+index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf1075415e2eb 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -24,6 +24,7 @@ use crate::config::ThreadStoreConfig;
+@@ -25,6 +25,7 @@ use crate::config::Config;
  use crate::current_time::TimeProvider;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::environment_selection::default_thread_environment_requests;
@@ -5404,7 +5530,7 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d
  use codex_exec_server::EnvironmentManager;
  use codex_exec_server::LOCAL_ENVIRONMENT_ID;
  use codex_execpolicy::Policy;
-@@ -535,8 +537,12 @@ pub struct StartThreadOptions {
+@@ -592,8 +594,12 @@ pub struct StartThreadOptions {
  pub(crate) struct StartupEnvironmentDiscovery {
      pub(crate) implicit_selection: bool,
      pub(crate) cold_resume: bool,
@@ -5417,9 +5543,9 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d
  }
 
  /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
-@@ -555,23 +561,54 @@ impl ThreadInstructionsProvider for InheritedThreadInstructions {
+@@ -626,23 +632,54 @@ impl StartThreadOptions {
+     }
 
- impl StartThreadOptions {
      /// Bounds executor discovery for app-server thread/start before workspace startup work.
 -    pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
 +    pub fn bound_startup_environment_discovery(
@@ -5475,7 +5601,7 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d
      ) -> CodexResult<()> {
          let selection = saved.and_then(|settings| settings.environments.as_ref());
          let implicit_selection = selection.is_none_or(|saved| saved.implicit_selection);
-@@ -631,6 +668,8 @@ impl StartThreadOptions {
+@@ -702,6 +739,8 @@ impl StartThreadOptions {
                      .collect(),
              );
          }
@@ -5484,7 +5610,7 @@ index 9fd4f865b144bf1f8989372ee9e5308ef2a8756a..bd59843339908e38c128078c5d90430d
          let mut optional_on_resume = HashSet::new();
          if let Some(ids) = optional_environment_ids
              && !ids.is_empty()
-@@ -665,7 +704,9 @@ impl StartThreadOptions {
+@@ -736,7 +775,9 @@ impl StartThreadOptions {
              .insert(StartupEnvironmentDiscovery {
                  implicit_selection,
                  cold_resume: true,
@@ -6759,10 +6885,10 @@ index 61f12219fe01189ff4f1bd1a55411aa3a76fa47b..c44d1d0e33e3690015173c95fb66bf29
              .await?
              .replace_accepted_websocket(websocket)
 diff --git a/codex-rs/exec-server/src/client_recovery.rs b/codex-rs/exec-server/src/client_recovery.rs
-index 7c6fdc86d450f5c9d7a586f27ae816373aeaee6c..6f7a8031cbfed4499cebb306c2a472ed495c868c 100644
+index 78c945aec96f169d9fb7331497a24e3e212fe95e..3f0eaa12d1a362d289e47cfbf70f987abb03c2f8 100644
 --- a/codex-rs/exec-server/src/client_recovery.rs
 +++ b/codex-rs/exec-server/src/client_recovery.rs
-@@ -509,6 +509,7 @@ impl Inner {
+@@ -560,6 +560,7 @@ impl Inner {
          let client = ExecServerClient {
              inner: Arc::clone(self),
              recovery_policy: RecoveryPolicy::Wait,
@@ -6797,7 +6923,7 @@ index 43cae9282040133e650a7cf20eef8dc72fab5876..274e898015f0e0b0f8f0d59dffa989d4
                          self.environment_connection_state_tx.clone(),
                      );
 diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
-index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..b3eb8387413efbd5b32ea69d576db7e7283f403f 100644
+index a5adfb7728da98b026edd1a7bb9f2fa3916c20f0..a99e7a3956bda3d5d16b7bc28a905106118da2a9 100644
 --- a/codex-rs/exec-server/src/environment.rs
 +++ b/codex-rs/exec-server/src/environment.rs
 @@ -17,6 +17,7 @@ use codex_http_client::OutboundProxyPolicy;
@@ -6848,7 +6974,7 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..b3eb8387413efbd5b32ea69d576db7e7
      }
 
      /// Returns the local environment instance when one is configured.
-@@ -580,7 +591,11 @@ impl EnvironmentManager {
+@@ -590,7 +601,11 @@ impl EnvironmentManager {
                  .environments
                  .write()
                  .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6861,7 +6987,7 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..b3eb8387413efbd5b32ea69d576db7e7
          };
          drop(replaced);
          environment.start_connecting();
-@@ -1126,6 +1141,9 @@ impl Environment {
+@@ -1136,6 +1151,9 @@ impl Environment {
          let Some(client) = &environment.remote_client else {
              return;
          };
@@ -6871,7 +6997,7 @@ index a7f1c2895356d30b0b920b17767d8037d0a9c0ac..b3eb8387413efbd5b32ea69d576db7e7
          let mut startup_task = environment
              .startup_task
              .lock()
-@@ -1197,6 +1215,77 @@ impl Environment {
+@@ -1207,6 +1225,77 @@ impl Environment {
          Arc::clone(&self.filesystem)
      }
 
@@ -6981,7 +7107,7 @@ index 06762ed9b483c32c667ca7887eb92876a2b77b0b..638b791fbf8c0fcecd72cb5e8fa804a4
          }
 
 diff --git a/codex-rs/exec-server/src/rpc.rs b/codex-rs/exec-server/src/rpc.rs
-index e60530fd55d0bcbbdbfea6225be7de2175efe62d..029d5857b1176bd2823cac6e1b3adf544b951052 100644
+index a207b72bff01a5f80de34f8d19a53d55ee23d7f5..269232cdc29bf50e8b4e93724b1056e8f92efed0 100644
 --- a/codex-rs/exec-server/src/rpc.rs
 +++ b/codex-rs/exec-server/src/rpc.rs
 @@ -61,6 +61,14 @@ pub(crate) enum RpcCallError {
@@ -7034,25 +7160,32 @@ index e60530fd55d0bcbbdbfea6225be7de2175efe62d..029d5857b1176bd2823cac6e1b3adf54
          Ok(response.watching.then_some(rx))
      }
 
-@@ -641,7 +650,8 @@ impl RpcClient {
+@@ -640,7 +649,7 @@ impl RpcClient {
      {
          record_client_request(self.metrics.as_ref(), method);
          let _call_slot = self.acquire_regular_call_slot()?;
--        self.call_inner(method, params, RpcCallTimeout::None).await
-+        self.call_inner(method, params, RpcCallTimeout::None, None)
-+            .await
-     }
-
-     pub(crate) async fn call_with_timeout<P, T>(
-@@ -656,10 +666,38 @@ impl RpcClient {
-     {
-         record_client_request(self.metrics.as_ref(), method);
-         let _call_slot = self.acquire_regular_call_slot()?;
--        self.call_inner(method, params, RpcCallTimeout::After(call_timeout))
-+        self.call_inner(method, params, RpcCallTimeout::After(call_timeout), None)
+-        self.call_inner(method, params, RpcCallTimeout::None, trace_fallback)
++        self.call_inner(method, params, RpcCallTimeout::None, trace_fallback, None)
              .await
      }
 
+@@ -664,6 +673,7 @@ impl RpcClient {
+             params,
+             RpcCallTimeout::None,
+             /*trace_fallback*/ None,
++            /*dispatch_guard*/ None,
+         )
+         .await
+     }
+@@ -685,6 +695,36 @@ impl RpcClient {
+             params,
+             RpcCallTimeout::After(call_timeout),
+             /*trace_fallback*/ None,
++            /*dispatch_guard*/ None,
++        )
++        .await
++    }
++
 +    #[tracing::instrument(
 +        name = "codex.exec_server.request",
 +        level = "info",
@@ -7076,52 +7209,39 @@ index e60530fd55d0bcbbdbfea6225be7de2175efe62d..029d5857b1176bd2823cac6e1b3adf54
 +            method,
 +            params,
 +            call_timeout.map_or(RpcCallTimeout::None, RpcCallTimeout::After),
++            /*trace_fallback*/ None,
 +            Some(dispatch_guard),
-+        )
-+        .await
-+    }
-+
-     #[tracing::instrument(
-         name = "codex.exec_server.request",
-         level = "info",
-@@ -690,7 +728,8 @@ impl RpcClient {
-                 }
-             },
-         };
--        self.call_inner(method, params, RpcCallTimeout::None).await
-+        self.call_inner(method, params, RpcCallTimeout::None, None)
-+            .await
+         )
+         .await
      }
-
-     async fn call_inner<P, T>(
-@@ -698,6 +737,7 @@ impl RpcClient {
-         method: &str,
+@@ -724,6 +764,7 @@ impl RpcClient {
+             params,
+             RpcCallTimeout::None,
+             /*trace_fallback*/ None,
++            /*dispatch_guard*/ None,
+         )
+         .await
+     }
+@@ -734,6 +775,7 @@ impl RpcClient {
          params: &P,
          call_timeout: RpcCallTimeout,
+         trace_fallback: Option<W3cTraceContext>,
 +        dispatch_guard: Option<RpcDispatchGuard<'_>>,
      ) -> Result<T, RpcCallError>
      where
          P: Serialize,
-@@ -725,7 +765,14 @@ impl RpcClient {
-         };
-         let params = serde_json::to_value(params).map_err(RpcCallError::Json)?;
-         let response = self
--            .send_request_and_wait(method, request_id, params, response_rx, call_timeout)
-+            .send_request_and_wait(
-+                method,
-+                request_id,
-+                params,
-+                response_rx,
-+                call_timeout,
+@@ -768,6 +810,7 @@ impl RpcClient {
+                 response_rx,
+                 call_timeout,
+                 trace_fallback,
 +                dispatch_guard,
-+            )
+             )
              .await?;
          serde_json::from_value(response).map_err(RpcCallError::Json)
-     }
-@@ -740,19 +787,31 @@ impl RpcClient {
-         params: Value,
+@@ -784,19 +827,31 @@ impl RpcClient {
          response_rx: oneshot::Receiver<RpcCompletion>,
          call_timeout: RpcCallTimeout,
+         trace_fallback: Option<W3cTraceContext>,
 +        dispatch_guard: Option<RpcDispatchGuard<'_>>,
      ) -> Result<Value, RpcCallError> {
          let enqueue_started = Instant::now();
@@ -7131,16 +7251,16 @@ index e60530fd55d0bcbbdbfea6225be7de2175efe62d..029d5857b1176bd2823cac6e1b3adf54
 -                id: request_id.clone(),
 -                method: method.to_string(),
 -                params: Some(params),
--                trace: codex_otel::current_span_w3c_trace_context(),
+-                trace: codex_otel::current_span_w3c_trace_context().or(trace_fallback),
 -            }))
 -            .await
 -            .is_err()
 -        {
 +        let request = JSONRPCMessage::Request(JSONRPCRequest {
-+            id: request_id,
++            id: request_id.clone(),
 +            method: method.to_string(),
 +            params: Some(params),
-+            trace: codex_otel::current_span_w3c_trace_context(),
++            trace: codex_otel::current_span_w3c_trace_context().or(trace_fallback),
 +        });
 +        if let Some(guard) = dispatch_guard {
 +            let permit = tokio::select! {

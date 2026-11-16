@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 7e9668997c263c64fecc786a5bf612e18825fde2..a347f73ea7b856cfd2ffb794e44512269b929142 100644
+index ce0a44904a2aaf4b8ee430356243025998b29db8..7d665c5bf6c34750f99d9a19c2aaed6cb23787f7 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-@@ -2612,6 +2612,70 @@
+@@ -2701,6 +2701,70 @@
        ],
        "type": "object"
      },
@@ -73,7 +73,7 @@ index 7e9668997c263c64fecc786a5bf612e18825fde2..a347f73ea7b856cfd2ffb794e4451226
      "ItemCompletedNotification": {
        "properties": {
          "completedAtMs": {
-@@ -4814,6 +4878,30 @@
+@@ -4924,6 +4988,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -105,10 +105,10 @@ index 7e9668997c263c64fecc786a5bf612e18825fde2..a347f73ea7b856cfd2ffb794e4451226
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index e3555dce4ad974151c9e06fa002a117a9aa7775a..823c3b2eb3e7de8b94f1db78fc42300d6a04a27f 100644
+index 87ccde1954c188b326a0c7a4bf6d7c085580e00f..0f20ca43550f3bfe4a081ed9cd9ea8d384148285 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-@@ -14243,6 +14243,58 @@
+@@ -14636,6 +14636,58 @@
          ],
          "type": "object"
        },
@@ -167,7 +167,7 @@ index e3555dce4ad974151c9e06fa002a117a9aa7775a..823c3b2eb3e7de8b94f1db78fc42300d
        "InternalChatMessageMetadataPassthrough": {
          "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
          "properties": {
-@@ -22972,6 +23024,30 @@
+@@ -23743,6 +23795,30 @@
              "title": "FunctionCallOutputThreadItem",
              "type": "object"
            },
@@ -199,10 +199,10 @@ index e3555dce4ad974151c9e06fa002a117a9aa7775a..823c3b2eb3e7de8b94f1db78fc42300d
              "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
              "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index a7913ae385596afa8677afb81a1a4ffefd345246..796dcd76eb5b99f1405a2bd3468cea8cc80c851c 100644
+index 006cdf8d2c66fa31197ee31f80ee3b61e1b30cb5..6cabf3fe05abb1311fdce1ceddcf2a36c90a023c 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-@@ -10204,6 +10204,58 @@
+@@ -10597,6 +10597,58 @@
        ],
        "type": "object"
      },
@@ -261,355 +261,7 @@ index a7913ae385596afa8677afb81a1a4ffefd345246..796dcd76eb5b99f1405a2bd3468cea8c
      "InternalChatMessageMetadataPassthrough": {
        "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
        "properties": {
-@@ -20675,6 +20727,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
-index 5ae0952e10dfc6aad5d082af865f348f2306efde..572a6a093dab5a3bc071166e01cef6d91676a8ff 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/ItemCompletedNotification.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -524,6 +527,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -960,6 +1027,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
-index 4912fc5844b442d1f7ad312c80826a32d7477419..e6c619dabfb38c90d372da4ca0cec1dd7c8b0126 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/ItemStartedNotification.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -524,6 +527,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -960,6 +1027,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
-index 23b9b7dd0a5e9536425857adf7886cef5e11c6b3..1e973f2cb30d2c9b1896bf4d8e62a4c1fd199f4a 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/ReviewStartResponse.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -674,6 +677,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -1165,6 +1232,30 @@
+@@ -21446,6 +21498,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -641,10 +293,10 @@ index 23b9b7dd0a5e9536425857adf7886cef5e11c6b3..1e973f2cb30d2c9b1896bf4d8e62a4c1
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
-index 5b99cbebfb3b9fde4fb066288710e962c16d70f9..a7fe3ad571476f826aeb2ed441a0644a609523d7 100644
+index c96eb3e8aa471218090f3496a8f5bb1076e353e9..edc3dccd7b841ee21788b4dab0d3a8a530ed8e1a 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadForkResponse.json
-@@ -778,6 +778,70 @@
+@@ -860,6 +860,70 @@
        ],
        "type": "object"
      },
@@ -715,7 +367,7 @@ index 5b99cbebfb3b9fde4fb066288710e962c16d70f9..a7fe3ad571476f826aeb2ed441a0644a
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1779,6 +1843,30 @@
+@@ -1872,6 +1936,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -746,148 +398,11 @@ index 5b99cbebfb3b9fde4fb066288710e962c16d70f9..a7fe3ad571476f826aeb2ed441a0644a
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
-index 49c50b019a3c142ca22e42037004380468458241..a23850e3699f93a257390d816e1d24f9a1046b86 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadItemsListResponse.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -524,6 +527,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -960,6 +1027,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-@@ -1349,6 +1440,20 @@
-               ],
-               "description": "Reasoning effort requested for the spawned agent, when applicable."
-             },
-+            "receiverAgentNickname": {
-+              "description": "Nickname for the single receiver agent when the source event reports one.",
-+              "type": [
-+                "string",
-+                "null"
-+              ]
-+            },
-+            "receiverAgentRole": {
-+              "description": "Role for the single receiver agent when the source event reports one.",
-+              "type": [
-+                "string",
-+                "null"
-+              ]
-+            },
-             "receiverThreadIds": {
-               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
-               "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
-index b4c9ed8e2769c7320f5571953ab70502b275a3ab..0221d7bc3ff64c608719bd390a93f07111413712 100644
+index f08fc8f56ccd14f756adbea1e7b2f0cae13cb60a..126e0cbc1ce54f7e0f51568440dbdd86415d388f 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadListResponse.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -958,7 +473,7 @@ index b4c9ed8e2769c7320f5571953ab70502b275a3ab..0221d7bc3ff64c608719bd390a93f071
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1570,6 +1634,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -990,10 +505,10 @@ index b4c9ed8e2769c7320f5571953ab70502b275a3ab..0221d7bc3ff64c608719bd390a93f071
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
-index 726195ea4f2ec5c96ab0a42ab6f8f44fb0c083fa..9b2fcdec36829e86b76394ed65975fd77be0e954 100644
+index aeede34b0a4116acf7dac9b11e72e7a87ee40026..28fc9a797ccc0159546bbcca7345b2e55f2a6886 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -1064,7 +579,7 @@ index 726195ea4f2ec5c96ab0a42ab6f8f44fb0c083fa..9b2fcdec36829e86b76394ed65975fd7
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1570,6 +1634,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1096,10 +611,10 @@ index 726195ea4f2ec5c96ab0a42ab6f8f44fb0c083fa..9b2fcdec36829e86b76394ed65975fd7
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
-index e2470b601fadd4afba3d74132f3a40005035b3c4..f5d8bb90d7dc81031ba821826555a8a31236f4ae 100644
+index de0f4993c4e08fff2ed3b846aa9ea7ec7c3c6d94..db0f46e28b4e3877fa7e2cbc3ca9a1ed4a3b8a75 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadReadResponse.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -1170,7 +685,7 @@ index e2470b601fadd4afba3d74132f3a40005035b3c4..f5d8bb90d7dc81031ba821826555a8a3
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1570,6 +1634,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1202,10 +717,10 @@ index e2470b601fadd4afba3d74132f3a40005035b3c4..f5d8bb90d7dc81031ba821826555a8a3
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
-index 7dca6f3375ae434995b279f8195b1dab6eee1f93..7a45cd3e2f0ba74a9055f3348ebfb4b8c8c1cb83 100644
+index 17fddd94a98972867337a67268bbe6dcfe302f3d..19aa2b24abe499b7484185be98acc76c005cd6de 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeResponse.json
-@@ -794,6 +794,70 @@
+@@ -876,6 +876,70 @@
        ],
        "type": "object"
      },
@@ -1276,7 +791,7 @@ index 7dca6f3375ae434995b279f8195b1dab6eee1f93..7a45cd3e2f0ba74a9055f3348ebfb4b8
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1831,6 +1895,30 @@
+@@ -1924,6 +1988,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1308,10 +823,10 @@ index 7dca6f3375ae434995b279f8195b1dab6eee1f93..7a45cd3e2f0ba74a9055f3348ebfb4b8
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
-index 62ac26699a91f2ae0dfd86655568a38e1af931bd..462795d2f5ba594c58554e75d212ebf29ebed710 100644
+index b39cff7aac7ff5e6bdad052dabf4c51eda291fc8..995573148f82f3f8dd83f4c4588bd485ee04e447 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadRevertResponse.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -1382,7 +897,7 @@ index 62ac26699a91f2ae0dfd86655568a38e1af931bd..462795d2f5ba594c58554e75d212ebf2
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1237,7 +1301,7 @@
+@@ -1319,7 +1383,7 @@
            ]
          },
          "parentThreadId": {
@@ -1391,7 +906,7 @@ index 62ac26699a91f2ae0dfd86655568a38e1af931bd..462795d2f5ba594c58554e75d212ebf2
            "type": [
              "string",
              "null"
-@@ -1570,6 +1634,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1422,7 +937,7 @@ index 62ac26699a91f2ae0dfd86655568a38e1af931bd..462795d2f5ba594c58554e75d212ebf2
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-@@ -1959,6 +2047,20 @@
+@@ -2052,6 +2140,20 @@
                ],
                "description": "Reasoning effort requested for the spawned agent, when applicable."
              },
@@ -1444,10 +959,10 @@ index 62ac26699a91f2ae0dfd86655568a38e1af931bd..462795d2f5ba594c58554e75d212ebf2
                "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
                "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
-index 644d26a076946691b4114390c84713acdfa22075..b9991b1add0e9232b42c6b8e89804e72678ba9f1 100644
+index 0bdc82a6303571b32f3de59cc740c534d06077ca..20f5570f247117e0479353f0456e8b7c31a9ead2 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartResponse.json
-@@ -778,6 +778,70 @@
+@@ -860,6 +860,70 @@
        ],
        "type": "object"
      },
@@ -1518,7 +1033,7 @@ index 644d26a076946691b4114390c84713acdfa22075..b9991b1add0e9232b42c6b8e89804e72
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1779,6 +1843,30 @@
+@@ -1872,6 +1936,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1550,10 +1065,10 @@ index 644d26a076946691b4114390c84713acdfa22075..b9991b1add0e9232b42c6b8e89804e72
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
-index 615f99e085d203d5219a68356801212678bd4e88..4530141c056b89e654bd6c0e7ccd2ff2fc2ff201 100644
+index 80a2a3e1c4eee60a5e8f6e9b8df4544b3c154025..e734f378ae7ec4dbda4a91cc383287b6813632b3 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartedNotification.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -1624,7 +1139,7 @@ index 615f99e085d203d5219a68356801212678bd4e88..4530141c056b89e654bd6c0e7ccd2ff2
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1570,6 +1634,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -1655,148 +1170,11 @@ index 615f99e085d203d5219a68356801212678bd4e88..4530141c056b89e654bd6c0e7ccd2ff2
          {
            "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
            "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
-index 08380030010431edae5793a190c61b856a0d0560..58f7094b278a05d52da7acece8ea13d2ef42c888 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadTurnsListResponse.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -674,6 +677,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -1165,6 +1232,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-@@ -1554,6 +1645,20 @@
-               ],
-               "description": "Reasoning effort requested for the spawned agent, when applicable."
-             },
-+            "receiverAgentNickname": {
-+              "description": "Nickname for the single receiver agent when the source event reports one.",
-+              "type": [
-+                "string",
-+                "null"
-+              ]
-+            },
-+            "receiverAgentRole": {
-+              "description": "Role for the single receiver agent when the source event reports one.",
-+              "type": [
-+                "string",
-+                "null"
-+              ]
-+            },
-             "receiverThreadIds": {
-               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
-               "items": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
-index 6eb959e21b42f5fecf0c105d2c07ffdb8edabcf9..bb4a80bf322aeb85db956dd2054b803ac5cd29c3 100644
+index 654005fc5c1da0ac8a013f79efbc5b003fbadc84..382a0b6d166ecc4e32f4ef0c90e4e4e5128c5308 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
-@@ -700,6 +700,70 @@
+@@ -782,6 +782,70 @@
        ],
        "type": "object"
      },
@@ -1867,355 +1245,7 @@ index 6eb959e21b42f5fecf0c105d2c07ffdb8edabcf9..bb4a80bf322aeb85db956dd2054b803a
      "LegacyAppPathString": {
        "type": "string"
      },
-@@ -1570,6 +1634,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
-index 36462a6c30b665b707b8af6afc6938f196fd8e3f..9c4e7431fe56d792974a1f0188340cb9dad1e339 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/TurnCompletedNotification.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -674,6 +677,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -1165,6 +1232,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
-index 91a6187a82c2489717f390ad71959646bf9fa2bd..c5fa7f74a995bf2ea150e0bdb4f816f94ac11bba 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/TurnStartResponse.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -674,6 +677,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -1165,6 +1232,30 @@
-           "title": "FunctionCallOutputThreadItem",
-           "type": "object"
-         },
-+        {
-+          "properties": {
-+            "communication": {
-+              "$ref": "#/definitions/InterAgentCommunication"
-+            },
-+            "id": {
-+              "type": "string"
-+            },
-+            "type": {
-+              "enum": [
-+                "interAgentCommunication"
-+              ],
-+              "title": "InterAgentCommunicationThreadItemType",
-+              "type": "string"
-+            }
-+          },
-+          "required": [
-+            "communication",
-+            "id",
-+            "type"
-+          ],
-+          "title": "InterAgentCommunicationThreadItem",
-+          "type": "object"
-+        },
-         {
-           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-           "properties": {
-diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
-index 2ca7b0e163090464abc2e4f2e9e29f894433dad1..3a2e9e4115dbebe03b5fbf117c957f77bd8996b3 100644
---- a/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
-+++ b/codex-rs/app-server-protocol/schema/json/v2/TurnStartedNotification.json
-@@ -11,6 +11,9 @@
-       ],
-       "type": "string"
-     },
-+    "AgentPath": {
-+      "type": "string"
-+    },
-     "AsyncUserInputQuestion": {
-       "additionalProperties": false,
-       "properties": {
-@@ -674,6 +677,70 @@
-       ],
-       "type": "object"
-     },
-+    "InterAgentCommunication": {
-+      "properties": {
-+        "author": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "content": {
-+          "type": "string"
-+        },
-+        "encrypted_content": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        },
-+        "internal_chat_message_metadata_passthrough": {
-+          "anyOf": [
-+            {
-+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
-+            },
-+            {
-+              "type": "null"
-+            }
-+          ]
-+        },
-+        "other_recipients": {
-+          "default": [],
-+          "items": {
-+            "$ref": "#/definitions/AgentPath"
-+          },
-+          "type": "array"
-+        },
-+        "recipient": {
-+          "$ref": "#/definitions/AgentPath"
-+        },
-+        "trigger_turn": {
-+          "type": "boolean"
-+        }
-+      },
-+      "required": [
-+        "author",
-+        "content",
-+        "recipient",
-+        "trigger_turn"
-+      ],
-+      "type": "object"
-+    },
-+    "InternalChatMessageMetadataPassthrough": {
-+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
-+      "properties": {
-+        "turn_id": {
-+          "type": [
-+            "string",
-+            "null"
-+          ]
-+        }
-+      },
-+      "type": "object"
-+    },
-     "LegacyAppPathString": {
-       "type": "string"
-     },
-@@ -1165,6 +1232,30 @@
+@@ -1663,6 +1727,30 @@
            "title": "FunctionCallOutputThreadItem",
            "type": "object"
          },
@@ -2261,7 +1291,7 @@ index 0000000000000000000000000000000000000000..3bf6715594f43217e826f5b8091e1adb
 +
 +export type InterAgentCommunication = { id?: ResponseItemId, author: AgentPath, recipient: AgentPath, other_recipients: Array<AgentPath>, content: string, encrypted_content?: string, internal_chat_message_metadata_passthrough?: InternalChatMessageMetadataPassthrough, trigger_turn: boolean, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/index.ts b/codex-rs/app-server-protocol/schema/typescript/index.ts
-index 3135f430e9c08aeb265034da85e1913bb81b282d..74c4409093ca93451f7244fae424fd5aea2ba69f 100644
+index 8eb856fa10a4738904865e4e690615d66b4b5a7a..e1ddb15ae770cb64c1802ebc885d4b2224876b3b 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/index.ts
 @@ -45,6 +45,7 @@ export type { InitializeCapabilities } from "./InitializeCapabilities";
@@ -2272,32 +1302,11 @@ index 3135f430e9c08aeb265034da85e1913bb81b282d..74c4409093ca93451f7244fae424fd5a
  export type { InternalChatMessageMetadataPassthrough } from "./InternalChatMessageMetadataPassthrough";
  export type { InternalSessionSource } from "./InternalSessionSource";
  export type { LegacyAppPathString } from "./LegacyAppPathString";
-diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
-index d47677b90ea15aba83e50bb68c9681bcd641697c..5ad7964f01069c72c7aed83c504dd73a6e0f3535 100644
---- a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
-+++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
-@@ -3,6 +3,7 @@
- // This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
- import type { FunctionCallOutputBody } from "../FunctionCallOutputBody";
- import type { ImageGenerationItem } from "../ImageGenerationItem";
-+import type { InterAgentCommunication } from "../InterAgentCommunication";
- import type { LegacyAppPathString } from "../LegacyAppPathString";
- import type { MessagePhase } from "../MessagePhase";
- import type { ReasoningEffort } from "../ReasoningEffort";
-@@ -42,7 +43,7 @@ startedAtMs?: number | null,
- /**
-  * Unix timestamp in milliseconds when the item completed, if recorded.
-  */
--completedAtMs?: number | null, } & ({ "type": "userMessage", id: string, clientId: string | null, content: Array<UserInput>, } | { "type": "hookPrompt", id: string, fragments: Array<HookPromptFragment>, } | { "type": "agentMessage", id: string, text: string, phase: MessagePhase | null, memoryCitation: MemoryCitation | null, delivery: AgentMessageDelivery | null, questions: Array<AsyncUserInputQuestion> | null, } | { "type": "functionCallOutput", id: string, name: string, namespace: string | null, output: FunctionCallOutputBody, } | { "type": "plan", id: string, text: string, } | { "type": "reasoning", id: string, summary: Array<string>, content: Array<string>, } | { "type": "commandExecution", id: string,
-+completedAtMs?: number | null, } & ({ "type": "userMessage", id: string, clientId: string | null, content: Array<UserInput>, } | { "type": "hookPrompt", id: string, fragments: Array<HookPromptFragment>, } | { "type": "agentMessage", id: string, text: string, phase: MessagePhase | null, memoryCitation: MemoryCitation | null, delivery: AgentMessageDelivery | null, questions: Array<AsyncUserInputQuestion> | null, } | { "type": "functionCallOutput", id: string, name: string, namespace: string | null, output: FunctionCallOutputBody, } | { "type": "interAgentCommunication", id: string, communication: InterAgentCommunication, } | { "type": "plan", id: string, text: string, } | { "type": "reasoning", id: string, summary: Array<string>, content: Array<string>, } | { "type": "commandExecution", id: string,
- /**
-  * Trusted first-party plugin id when this command resolves to one plugin script.
-  */
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index 5572e25e49b7ab883643c183a3b5e5cdd79d4725..26db869412a4cedf4a7f5854c721d48b5144db25 100644
+index b6e54f49ab4295817edb67c5a6e03419ec48823b..d8b5b3efc140eec1d83b59080e820896b5b060b7 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
-@@ -1231,14 +1231,15 @@ pub(crate) async fn apply_bespoke_event_handling(
+@@ -1232,14 +1232,15 @@ pub(crate) async fn apply_bespoke_event_handling(
          EventMsg::RawResponseItem(mut raw_response_item_event) => {
              // Keep warehouse metadata out of app-server notifications.
              raw_response_item_event.item.clear_executed_tool_calls();
@@ -2318,7 +1327,7 @@ index 5572e25e49b7ab883643c183a3b5e5cdd79d4725..26db869412a4cedf4a7f5854c721d48b
          }
          EventMsg::RawResponseCompleted(raw_response_completed_event) => {
              let notification = RawResponseCompletedNotification {
-@@ -1562,31 +1563,27 @@ async fn complete_command_execution_item(
+@@ -1563,31 +1564,27 @@ async fn complete_command_execution_item(
          .await;
  }
 
@@ -2363,7 +1372,7 @@ index 5572e25e49b7ab883643c183a3b5e5cdd79d4725..26db869412a4cedf4a7f5854c721d48b
  }
 
  pub(crate) fn is_inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> bool {
-@@ -4102,14 +4099,12 @@ mod tests {
+@@ -4136,14 +4133,12 @@ mod tests {
          );
          let item = communication.to_model_input_item();
 
@@ -2384,7 +1393,7 @@ index 5572e25e49b7ab883643c183a3b5e5cdd79d4725..26db869412a4cedf4a7f5854c721d48b
 
          let msg = recv_broadcast_notification(&mut rx).await?;
          match msg {
-@@ -4169,14 +4164,12 @@ mod tests {
+@@ -4203,14 +4198,12 @@ mod tests {
          );
          let item = communication.to_model_input_item();
 
@@ -2406,10 +1415,10 @@ index 5572e25e49b7ab883643c183a3b5e5cdd79d4725..26db869412a4cedf4a7f5854c721d48b
          let msg = recv_broadcast_notification(&mut rx).await?;
          match msg {
 diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
-index c8f49f5ee5bb9204d7db602b21207f4e36a1728d..e8a6b530cc4178b99c83fafc9727c53d23e02afb 100644
+index 56034e5d313a07f8c663bcd121cfe64cdbcf435f..7d42da070e043f85ca68e2083c2ffbd1aa69f79c 100644
 --- a/codex-rs/app-server/tests/common/test_app_server.rs
 +++ b/codex-rs/app-server/tests/common/test_app_server.rs
-@@ -2013,43 +2013,39 @@ impl TestAppServerBuilder {
+@@ -2021,43 +2021,39 @@ impl TestAppServerBuilder {
                  )
              }
          };
@@ -2486,12 +1495,12 @@ index c8f49f5ee5bb9204d7db602b21207f4e36a1728d..e8a6b530cc4178b99c83fafc9727c53d
              TestAppServerEnvironment::Auto => {
                  let environments_toml = codex_home.join("environments.toml");
 diff --git a/codex-rs/core/BUILD.bazel b/codex-rs/core/BUILD.bazel
-index 58554b97fec42cf01e1653c9a5f320daa211f179..706882b73a7b83cf744c5cab63676a5508179619 100644
+index 2922c507111e3ebab360effba54867913ad0efa5..1b4155b5c908cc01aebfc8300b3a838f212b96ad 100644
 --- a/codex-rs/core/BUILD.bazel
 +++ b/codex-rs/core/BUILD.bazel
-@@ -35,7 +35,11 @@ codex_rust_crate(
-     },
+@@ -38,7 +38,11 @@ codex_rust_crate(
      test_data_extra = [
+         "//codex-rs/message-board-mcp:package-files",
          "config.schema.json",
 -    ] + glob(["src/**/snapshots/**"]) + [
 +    ] + glob([
@@ -2503,7 +1512,7 @@ index 58554b97fec42cf01e1653c9a5f320daa211f179..706882b73a7b83cf744c5cab63676a55
      test_shard_counts = {
          "core-all-test": 16,
 diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
-index 2b03bee4102a20be6b2d82c1cab6117a853b8682..bb8e030c4a024b171dc0d76c5d8eff21067759cf 100644
+index 3ebae259a03bce7d551f533fe8217175b6d539c4..6854db003bdc69ec61a127bf8bd5bcf82c48b8b0 100644
 --- a/codex-rs/core/src/agent/api.rs
 +++ b/codex-rs/core/src/agent/api.rs
 @@ -5,9 +5,7 @@
@@ -2652,10 +1661,10 @@ index af3e0fcfdc5370d62b19caf577067aacef1ed427..ff51d90a2189dd2bb600cb750cc2f289
 -    assert!(paginate_live_agents(vec![agent], None, None).is_err());
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index d297a642faa9deee5fe1e7087fccc5e821d088a0..2ed9c2336696369efbd0eb7e564fc962d5a42a77 100644
+index 7523a5c4ec39eff0da85e1d9a60e285c48898851..1a2b27e5030bd6ebf8c46b191d30679e0e90efd0 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -126,10 +126,10 @@ pub struct ListedAgent {
+@@ -125,10 +125,10 @@ pub struct ListedAgent {
 
  /// Byte-bounded page shared by agent listing tools and supervisor startup context.
  #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2670,7 +1679,7 @@ index d297a642faa9deee5fe1e7087fccc5e821d088a0..2ed9c2336696369efbd0eb7e564fc962
  }
 
  /// Result of a supervisor request to compact its authenticated direct parent.
-@@ -703,6 +703,83 @@ impl LocalAgentControl {
+@@ -697,6 +697,83 @@ impl LocalAgentControl {
          Ok(agents)
      }
 
@@ -2823,10 +1832,10 @@ index f78a3f7f20d2d023b0f5bf1fc07423cf8cb73db3..49f628217db6626e5e73e241abf82d0e
                  (receiver, submission_id)
              }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 717b1949bd84b5b30d4fa149c325d5121eb241cf..6dc3865b265a71e17670d75aa251de4c969091b6 100644
+index 9678967406fa77d3f0224feaa524bd7bd4cb171d..99d65edb549d564cdc6c97a9d5115d39cfad5f14 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1484,15 +1484,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
+@@ -1485,15 +1485,31 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
              .collect::<Vec<_>>(),
          vec![root_thread_id],
      );
@@ -2876,10 +1885,10 @@ index 7664cf302fbc586697738863718ff428ecc7debf..a28e534251bf0f921dec7fc2dedfe2d8
 
      fn role(&self) -> &'static str {
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 10b3ef7cb1d62ae8e045be742d92880bd7f3442e..2622adb3a1c37eb0855207aad136aced6036fc11 100644
+index f3c2c0a30f08274a1b283a5c8d3f0517bffae831..36d8a597e6c1bd70a4c6a9f3abc0b01dbe48449c 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -74,7 +74,6 @@ pub use agent::api::DeliveryReceipt;
+@@ -77,7 +77,6 @@ pub use agent::api::DeliveryReceipt;
  pub use agent::api::SendRequest;
  pub use agent::api::SpawnRequest;
  pub use agent::control::ListedAgent;
@@ -2889,7 +1898,7 @@ index 10b3ef7cb1d62ae8e045be742d92880bd7f3442e..2622adb3a1c37eb0855207aad136aced
  pub use agent::types::AgentMetadata;
 diff --git a/codex-rs/core/src/session/late_steer_tests.rs b/codex-rs/core/src/session/late_steer_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..197fbda21ef26490646e261b271ac5840de5709a
+index 0000000000000000000000000000000000000000..4f92f91d26222e500c2f20a8d79d75ce4fb4d000
 --- /dev/null
 +++ b/codex-rs/core/src/session/late_steer_tests.rs
 @@ -0,0 +1,285 @@
@@ -2965,7 +1974,7 @@ index 0000000000000000000000000000000000000000..197fbda21ef26490646e261b271ac584
 +        }
 +        self.continuation_started.notify_one();
 +        self.finish_continuation.notified().await;
-+        Ok(Some("continued".to_string()))
++        Ok(None)
 +    }
 +}
 +
@@ -3179,10 +2188,10 @@ index 0000000000000000000000000000000000000000..197fbda21ef26490646e261b271ac584
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 671a49ac7138f2828de91a2f3f79605cbc01639e..670ca3918d49fa90d680bc8fd172b95ca33e5e62 100644
+index aad2f8dfdbb1913ba7caf4397274b544a53b99c2..8caff90bfe7cbadf7575e1e0c4d233b6ca9b9eb3 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1162,13 +1162,20 @@ impl Session {
+@@ -1214,13 +1214,20 @@ impl Session {
          }
          let configured_config = Arc::clone(&config);
          let configured_multi_agent_version = config.multi_agent_version_override();
@@ -3236,10 +2245,10 @@ index f73f895efd88925e4d9f43be9402bd60346e7f73..fec0f6f0f4c3a6a7feab602cc2b65581
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index c2c22f9b94f33256d5ce0b0cc725bad2fba67c0f..b2fe6b56ae968ecebad98f491f1ae90af3a2ce98 100644
+index 292aa1e44e49943bfe792ab9dc3f07adb9bdde04..76254892499e5fbf4066f53ef64c4ac0d7190a5f 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -14157,6 +14157,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
+@@ -14009,6 +14009,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
      assert!(rx.try_recv().is_err());
  }
 
@@ -3249,7 +2258,7 @@ index c2c22f9b94f33256d5ce0b0cc725bad2fba67c0f..b2fe6b56ae968ecebad98f491f1ae90a
  async fn submit_steer_only(
      sess: &Arc<Session>,
      input: Vec<UserInput>,
-@@ -14810,9 +14813,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -14664,9 +14667,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
      );
  }
 
@@ -3270,7 +2279,7 @@ index c2c22f9b94f33256d5ce0b0cc725bad2fba67c0f..b2fe6b56ae968ecebad98f491f1ae90a
      let input = vec![TurnInput::UserInput {
          metadata: Default::default(),
          content: vec![UserInput::Text {
-@@ -14874,14 +14886,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
+@@ -14728,14 +14740,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
              let ResponseItem::Message { role, content, .. } = item else {
                  return false;
              };
@@ -3288,18 +2297,18 @@ index c2c22f9b94f33256d5ce0b0cc725bad2fba67c0f..b2fe6b56ae968ecebad98f491f1ae90a
          }),
          "expected a model-visible turn aborted marker in history after interrupt"
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 402fb39ea7556026516dc21590f0a31ffff3d4f7..3a3a778f6be69aa824ffb54cccae6d22ad4c8500 100644
+index 7fa30c1a38593e08c9467e21c379158926d03b5d..4b2d8a792b76396b8d3a40097254e1a2a2bf69cc 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -388,6 +388,7 @@ pub struct TurnContext {
+@@ -414,6 +414,7 @@ pub struct TurnContext {
      // TODO(anp): Reconcile this parallel turn snapshot with TurnEnvironment::sandbox_context
      // so owner-provided environment settings govern the remaining sandbox decisions.
      pub(crate) windows_sandbox_level: WindowsSandboxLevel,
 +    /// Remote model presets rendered in upstream-owned tool contracts.
      pub(crate) available_models: Vec<ModelPreset>,
      pub(crate) final_output_json_schema: Option<Value>,
-     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
-@@ -837,7 +838,7 @@ impl TurnContext {
+     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
+@@ -894,7 +895,7 @@ impl TurnContext {
          };
          config.model_reasoning_effort = reasoning_effort.clone();
 
@@ -3308,7 +2317,7 @@ index 402fb39ea7556026516dc21590f0a31ffff3d4f7..3a3a778f6be69aa824ffb54cccae6d22
              .list_models(
                  RefreshStrategy::OnlineIfUncached,
                  config.http_client_factory(),
-@@ -857,6 +858,9 @@ impl TurnContext {
+@@ -914,6 +915,9 @@ impl TurnContext {
          ));
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
@@ -3318,7 +2327,7 @@ index 402fb39ea7556026516dc21590f0a31ffff3d4f7..3a3a778f6be69aa824ffb54cccae6d22
 
          Self {
              sub_id: self.sub_id.clone(),
-@@ -1231,7 +1235,9 @@ impl Session {
+@@ -1295,7 +1299,9 @@ impl Session {
          let model_info = &step_settings.model_info;
          let session_telemetry_for_context = step_settings.telemetry(session_telemetry);
          let session_source = session_configuration.session_source.clone();
@@ -3330,24 +2339,24 @@ index 402fb39ea7556026516dc21590f0a31ffff3d4f7..3a3a778f6be69aa824ffb54cccae6d22
          let mut per_turn_config = per_turn_config;
          let configured_token_budget = per_turn_config.token_budget.clone();
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 3c16fdcd4d2bff729d9eade748b311d14c0b9737..e4bd2e88c4257fa22266596dce6f551a6804e46b 100644
+index 9cf3c667e2de246fb6e819635aa7d6a519e3b6f5..f69d5f6384327629d0d40cdb9afb299b20608288 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
-@@ -75,6 +75,13 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
+@@ -81,6 +81,13 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
 
- pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
+ pub(crate) type SessionTaskResult = CodexResult<Option<regular::RegularTaskOutput>>;
 
 +/// Result of atomically closing a task to steering or retaining it for accepted input.
 +pub(crate) enum TaskFinishAction {
 +    Finish,
 +    /// Settings and workspace replacements belong to the retained task, not its initial context.
-+    Continue(Arc<TurnContext>),
++    Continue(Arc<TurnContext>, Option<McpStartupRequirements>),
 +}
 +
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum InterruptedTurnHistoryMarker {
      Disabled,
-@@ -204,6 +211,24 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
+@@ -210,6 +217,24 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
          cancellation_token: CancellationToken,
      ) -> impl std::future::Future<Output = SessionTaskResult> + Send;
 
@@ -3372,7 +2381,7 @@ index 3c16fdcd4d2bff729d9eade748b311d14c0b9737..e4bd2e88c4257fa22266596dce6f551a
      /// Gives the task a chance to perform cleanup after an abort.
      ///
      /// The default implementation is a no-op; override this if additional
-@@ -234,6 +259,15 @@ pub(crate) trait AnySessionTask: Send + Sync + 'static {
+@@ -240,6 +265,15 @@ pub(crate) trait AnySessionTask: Send + Sync + 'static {
      ) -> BoxFuture<'static, SessionTaskResult>;
 
      fn abort<'a>(&'a self, session: Arc<Session>, ctx: Arc<TurnContext>) -> BoxFuture<'a, ()>;
@@ -3388,7 +2397,7 @@ index 3c16fdcd4d2bff729d9eade748b311d14c0b9737..e4bd2e88c4257fa22266596dce6f551a
  }
 
  impl<T> AnySessionTask for T
-@@ -267,6 +301,24 @@ where
+@@ -273,6 +307,24 @@ where
      fn abort<'a>(&'a self, session: Arc<Session>, ctx: Arc<TurnContext>) -> BoxFuture<'a, ()> {
          Box::pin(SessionTask::abort(self, session, ctx))
      }
@@ -3413,201 +2422,118 @@ index 3c16fdcd4d2bff729d9eade748b311d14c0b9737..e4bd2e88c4257fa22266596dce6f551a
  }
 
  impl Session {
-@@ -383,40 +435,54 @@ impl Session {
+@@ -413,7 +465,7 @@ impl Session {
          );
          let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
          let task_future = async move {
 -            let ctx_for_finish = Arc::clone(&ctx);
--            let task_result = task_for_run
--                .run(
++            let mut ctx_for_finish = Arc::clone(&ctx);
+             let mut task_result = async {
+                 let input = match host_admission {
+                     Some(provider) => admission::admit(
+@@ -425,7 +477,7 @@ impl Session {
+                     ).await?,
+                     None => task_input,
+                 };
+-                task_for_run
++                Arc::clone(&task_for_run)
+                     .run(
+                         Arc::clone(&session),
+                         ctx,
+@@ -457,21 +509,17 @@ impl Session {
+                 if task_cancellation_token.is_cancelled() {
+                     break;
+                 }
+-                let Some(requirements) = session
+-                    .on_task_finished(Arc::clone(&ctx_for_finish), task_result)
+-                    .await
+-                else {
+-                    break;
++                let (current_context, requirements) = match session
++                    .on_task_finished(Arc::clone(&ctx_for_finish), task_result).await {
++                    TaskFinishAction::Finish => break,
++                    TaskFinishAction::Continue(current_context, requirements) => (current_context, requirements),
++                };
++                ctx_for_finish = current_context;
++                task_result = if let Some(requirements) = requirements {
++                    RegularTask::run_turns(Arc::clone(&session), Arc::clone(&ctx_for_finish), Vec::new(), requirements, RunTurnProviderStartup::Ready(None), task_cancellation_token.child_token()).await
++                } else {
++                    Arc::clone(&task_for_run).run_pending_input_continuation(Arc::clone(&session), Arc::clone(&ctx_for_finish), task_cancellation_token.child_token()).await
+                 };
+-                task_result = RegularTask::run_turns(
 -                    Arc::clone(&session),
--                    ctx,
--                    task_input,
+-                    Arc::clone(&ctx_for_finish),
+-                    Vec::new(),
+-                    requirements,
+-                    RunTurnProviderStartup::Ready(None),
 -                    task_cancellation_token.child_token(),
 -                )
--                .instrument(trace_span!("session_task.run"))
 -                .await;
--            let sess = Arc::clone(&session);
--            // Private reviewers save their transcript together with the terminal event.
--            // Errors and cancellation retain their existing save path.
--            if (!sess.is_private_guardian_reviewer().await
--                || task_cancellation_token.is_cancelled()
--                || task_result.is_err())
--                && let Err(err) = sess.flush_rollout().await
--            {
--                warn!("failed to flush rollout before completing turn: {err}");
--                sess.send_event(
--                    ctx_for_finish.as_ref(),
--                    EventMsg::Warning(WarningEvent {
--                        message: format!(
--                            "Failed to save the conversation transcript; Codex will continue retrying. Error: {err}"
--                        ),
--                    }),
--                )
--                .await;
--            }
--            if !task_cancellation_token.is_cancelled() {
--                // Finish uniformly from the spawn site so all tasks share the same lifecycle.
--                sess.on_task_finished(Arc::clone(&ctx_for_finish), task_result)
-+                let mut ctx_for_finish = Arc::clone(&ctx);
-+                let mut task_result = Arc::clone(&task_for_run)
-+                    .run(
-+                        Arc::clone(&session),
-+                        ctx,
-+                        task_input,
-+                        task_cancellation_token.child_token(),
-+                    )
-+                    .instrument(trace_span!("session_task.run"))
-                     .await;
--            }
-+                let sess = Arc::clone(&session);
-+                loop {
-+                    // Private reviewers save their transcript together with the terminal event.
-+                    // Errors and cancellation retain their existing save path.
-+                    if (!sess.is_private_guardian_reviewer().await
-+                        || task_cancellation_token.is_cancelled()
-+                        || task_result.is_err())
-+                        && let Err(err) = sess.flush_rollout().await
-+                    {
-+                        warn!("failed to flush rollout before completing turn: {err}");
-+                        sess.send_event(
-+                            ctx_for_finish.as_ref(),
-+                            EventMsg::Warning(WarningEvent {
-+                                message: format!(
-+                                    "Failed to save the conversation transcript; Codex will continue retrying. Error: {err}"
-+                                ),
-+                            }),
-+                        )
-+                        .await;
-+                    }
-+                    if task_cancellation_token.is_cancelled() {
-+                        break;
-+                    }
-+                    match sess.on_task_finished(Arc::clone(&ctx_for_finish), task_result).await {
-+                        TaskFinishAction::Finish => break,
-+                        TaskFinishAction::Continue(current_context) => {
-+                            ctx_for_finish = current_context;
-+                            task_result = Arc::clone(&task_for_run)
-+                                .run_pending_input_continuation(
-+                                    Arc::clone(&sess),
-+                                    Arc::clone(&ctx_for_finish),
-+                                    task_cancellation_token.child_token(),
-+                                )
-+                                .instrument(trace_span!("session_task.run_pending_input_continuation"))
-+                                .await;
-+                        }
-+                    }
-+                }
+             }
              done_clone.notify_waiters();
          }
-         .instrument(task_span);
-@@ -680,11 +746,17 @@ impl Session {
-         }
-     }
-
-+    #[expect(
-+        clippy::await_holding_invalid_type,
-+        reason = "task removal and the final pending-input check must remain atomic with steering"
-+    )]
-     pub async fn on_task_finished(
+@@ -752,7 +800,8 @@ impl Session {
          self: &Arc<Self>,
          turn_context: Arc<TurnContext>,
          task_result: SessionTaskResult,
--    ) {
+-    ) -> Option<McpStartupRequirements> {
 +    ) -> TaskFinishAction {
-+        let can_continue =
-+            task_result.is_ok() && turn_context.terminal_error.lock().await.is_none();
-         let (last_agent_message, abort_reason) = match task_result {
-             Ok(last_agent_message) => (last_agent_message, None),
++        let successful = task_result.is_ok();
+         let (regular_output, abort_reason, task_error) = match task_result {
+             Ok(output) => (output, None, None),
              Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-@@ -707,24 +779,40 @@ impl Session {
-                 (None, None)
+@@ -764,24 +813,28 @@ impl Session {
              }
          };
--        turn_context
--            .turn_metadata_state
--            .cancel_git_enrichment_task();
--
+         let can_continue =
+-            regular_output.is_some() && turn_context.terminal_error.lock().await.is_none();
++            successful && turn_context.terminal_error.lock().await.is_none();
          let finishing = CancellationToken::new();
          let finish_recording = finishing.clone().drop_guard();
-         let turn_state = {
+         let (turn_state, unadmitted_task, mut pending_input, outcome_handoff) = {
              let mut active = self.active_turn.lock().await;
--            active.as_mut().and_then(|active_turn| {
--                let task = active_turn.task.take()?;
--                task.handle.detach();
--                active_turn.finishing = Some(finishing);
--                Some(Arc::clone(&active_turn.turn_state))
--            })
--        };
--        let Some(turn_state) = turn_state else {
--            return;
-+            let Some(active_turn) = active.as_mut() else {
-+                return TaskFinishAction::Finish;
-+            };
-+            let Some(task) = active_turn.task.as_ref() else {
-+                return TaskFinishAction::Finish;
-+            };
-+            // steer_input holds this same lock while accepting input. Do not remove the
-+            // task or emit idle until input accepted during the rollout flush has run.
-+            if can_continue
-+                && !task.cancellation_token.is_cancelled()
-+                && task.task.supports_pending_input_continuation()
-+                && {
-+                    let turn_state = active_turn.turn_state.lock().await;
-+                    turn_state.accepts_mailbox_delivery_for_current_turn()
-+                        && (!turn_state.pending_input.is_empty()
-+                            || self.input_queue.has_pending_mailbox_items().await)
-+                }
+-            let active_turn = active.as_mut()?;
+-            if !Arc::ptr_eq(&active_turn.task.as_ref()?.turn_context, &turn_context) {
+-                return None;
+-            }
+-            if can_continue {
++            let Some(active_turn) = active.as_mut() else { return TaskFinishAction::Finish; };
++            let Some(task) = active_turn.task.as_ref() else { return TaskFinishAction::Finish; };
++            if task.turn_context.sub_id != turn_context.sub_id { return TaskFinishAction::Finish; }
++            if can_continue && !task.cancellation_token.is_cancelled()
++                && (regular_output.is_some() || task.task.supports_pending_input_continuation())
 +            {
-+                return TaskFinishAction::Continue(Arc::clone(&task.turn_context));
-+            }
-+            let Some(task) = active_turn.task.take() else {
-+                return TaskFinishAction::Finish;
-+            };
-+            task.handle.detach();
-+            active_turn.finishing = Some(finishing);
-+            Arc::clone(&active_turn.turn_state)
-         };
-+        turn_context
-+            .turn_metadata_state
-+            .cancel_git_enrichment_task();
-         let pending_input = self
-             .input_queue
-             .take_pending_input_for_turn_state(turn_state.as_ref())
-@@ -963,6 +1051,7 @@ impl Session {
+                 let state = active_turn.turn_state.lock().await;
+                 if state.accepts_mailbox_delivery_for_current_turn()
+-                    && !state.pending_input.is_empty()
++                    && (!state.pending_input.is_empty() || self.input_queue.has_pending_mailbox_items().await)
+                 {
+-                    return regular_output.map(|output| output.mcp_startup_requirements);
++                    return TaskFinishAction::Continue(
++                        Arc::clone(&task.turn_context),
++                        regular_output.map(|output| output.mcp_startup_requirements),
++                    );
+                 }
+             }
+-            let task = active_turn.task.take()?;
++            let Some(task) = active_turn.task.take() else { return TaskFinishAction::Finish; };
+             task.handle.detach();
+             active_turn.finishing = Some(finishing);
+             (
+@@ -1039,7 +1092,7 @@ impl Session {
          if cleared_active_turn {
              self.maybe_start_turn_for_pending_work().await;
          }
+-        None
 +        TaskFinishAction::Finish
      }
 
      async fn take_active_turn(&self, reason: &TurnAbortReason) -> Option<ActiveTurn> {
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
-index b7abbfc12b62e532d25062312c881a525f182e0b..dd78a78dc0d0b938af7427ff0b3b2f56110e952f 100644
+index 52f507056f722b74659b26a79eff561cfa585d97..50106b178a5930045c056f217566f9ef310a0b18 100644
 --- a/codex-rs/core/src/tasks/regular.rs
 +++ b/codex-rs/core/src/tasks/regular.rs
-@@ -2,6 +2,7 @@ use std::sync::Arc;
-
- use codex_async_utils::OrCancelExt;
- use codex_extension_api::TurnStartPhase;
-+use tokio::sync::Mutex;
- use tokio_util::sync::CancellationToken;
-
- use crate::session::TurnInput;
-@@ -20,12 +21,19 @@ use tracing::trace_span;
- use super::SessionTask;
- use super::SessionTaskResult;
-
-+/// Runs one user turn, including continuations for accepted input that arrives
-+/// while the turn is being finalized.
-+///
-+/// MCP servers and plugins explicitly required by any input remain required
-+/// for every model request in that user turn.
- #[derive(Default)]
--pub(crate) struct RegularTask;
-+pub(crate) struct RegularTask {
-+    mcp_startup_requirements: Mutex<McpStartupRequirements>,
-+}
+@@ -36,7 +36,7 @@ pub(crate) struct RegularTask;
 
  impl RegularTask {
      pub(crate) fn new() -> Self {
@@ -3616,99 +2542,54 @@ index b7abbfc12b62e532d25062312c881a525f182e0b..dd78a78dc0d0b938af7427ff0b3b2f56
      }
  }
 
-@@ -38,6 +46,30 @@ impl SessionTask for RegularTask {
-         "session_task.turn"
-     }
-
-+    fn supports_pending_input_continuation(&self) -> bool {
-+        true
-+    }
-+
-+    async fn run_pending_input_continuation(
-+        self: Arc<Self>,
-+        session: Arc<Session>,
-+        ctx: Arc<TurnContext>,
-+        cancellation_token: CancellationToken,
-+    ) -> SessionTaskResult {
-+        // Startup and TurnStarted already ran. run_turn consumes accepted input through
-+        // the normal hooks with the retained task's current workspace and settings.
-+        let mut mcp_startup_requirements = self.mcp_startup_requirements.lock().await;
-+        run_turn(
-+            session,
-+            ctx,
-+            Vec::new(),
-+            &mut mcp_startup_requirements,
-+            RunTurnProviderStartup::Ready(None),
-+            cancellation_token,
-+        )
-+        .await
-+    }
-+
-     async fn run(
-         self: Arc<Self>,
+@@ -152,43 +152,22 @@ impl RegularTask {
+     pub(super) fn run_turns(
          sess: Arc<Session>,
-@@ -117,31 +149,38 @@ impl SessionTask for RegularTask {
-             .await;
-             return Ok(None);
-         };
--        let mut next_input = input;
--        let mut mcp_startup_requirements = McpStartupRequirements::default();
--        let mut provider_startup = Some(provider_startup);
--        loop {
--            let last_agent_message = run_turn(
--                Arc::clone(&sess),
--                Arc::clone(&ctx),
--                next_input,
--                &mut mcp_startup_requirements,
--                provider_startup
--                    .take()
--                    .unwrap_or(RunTurnProviderStartup::Ready(None)),
--                cancellation_token.child_token(),
--            )
--            .instrument(run_turn_span.clone())
--            .await?;
--            // Terminal errors are already reported. Let task completion preserve pending
--            // input instead of restarting the failed turn for that same input.
--            if ctx.terminal_error.lock().await.is_some() {
--                return Ok(last_agent_message);
+         ctx: Arc<TurnContext>,
+-        mut next_input: Vec<TurnInput>,
++        next_input: Vec<TurnInput>,
+         mut mcp_startup_requirements: McpStartupRequirements,
+         provider_startup: RunTurnProviderStartup,
+         cancellation_token: CancellationToken,
+     ) -> BoxFuture<'static, SessionTaskResult> {
+         Box::pin(async move {
+-            let mut provider_startup = Some(provider_startup);
+             let run_turn_span = trace_span!(
+                 "run_turn",
+                 conversation.id = %sess.thread_id,
+                 turn.id = %ctx.sub_id,
+             );
+-            loop {
+-                let last_agent_message = run_turn(
+-                    Arc::clone(&sess),
+-                    Arc::clone(&ctx),
+-                    next_input,
+-                    &mut mcp_startup_requirements,
+-                    provider_startup
+-                        .take()
+-                        .unwrap_or(RunTurnProviderStartup::Ready(None)),
+-                    cancellation_token.child_token(),
+-                )
+-                .instrument(run_turn_span.clone())
+-                .await?;
+-                // Terminal errors are already reported. Let task completion preserve pending
+-                // input instead of restarting the failed turn for that same input.
+-                if ctx.terminal_error.lock().await.is_some()
+-                    || !sess.input_queue.has_pending_input(&sess.active_turn).await
+-                {
+-                    return Ok(Some(RegularTaskOutput {
+-                        last_agent_message,
+-                        mcp_startup_requirements,
+-                    }));
+-                }
+-                next_input = Vec::new();
 -            }
--            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
--                return Ok(last_agent_message);
--            }
--            next_input = Vec::new();
-+        let mut mcp_startup_requirements = self.mcp_startup_requirements.lock().await;
-+        // Finalization owns the atomic pending-input check and selects the active task's
-+        // latest context for continuation after workspace or model-routing replacements.
-+        run_turn(
-+            sess,
-+            ctx,
-+            input,
-+            &mut mcp_startup_requirements,
-+            provider_startup,
-+            cancellation_token,
-+        )
-+        .instrument(run_turn_span)
-+        .await
-+    }
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[tokio::test]
-+    async fn regular_task_retains_mcp_requirements_for_late_steer_continuation() {
-+        let task = RegularTask::new();
-+        {
-+            let mut requirements = task.mcp_startup_requirements.lock().await;
-+            requirements.remember_for_test("original-server", "original-plugin");
-         }
-+
-+        let requirements = task.mcp_startup_requirements.lock().await;
-+        assert!(
-+            requirements.contains_for_test("original-server", "original-plugin"),
-+            "a continuation on the same RegularTask must retain the original turn's explicit MCP requirements"
-+        );
++            let last_agent_message = run_turn(
++                sess, ctx, next_input, &mut mcp_startup_requirements,
++                provider_startup, cancellation_token,
++            ).instrument(run_turn_span).await?;
++            Ok(Some(RegularTaskOutput { last_agent_message, mcp_startup_requirements }))
+         })
      }
  }
 diff --git a/codex-rs/core/src/tools/collaboration_contract_tests.rs b/codex-rs/core/src/tools/collaboration_contract_tests.rs
@@ -4290,7 +3171,7 @@ index 0000000000000000000000000000000000000000..7e3253d3e13d69f6236b1a428f0b01ac
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
-index 628465fcb18f5421dad2488c4ff0af72b360a0c8..e860e4a9a5189e8f4c145b1d143929586db82dc6 100644
+index ebdaf3edeb5203f2904035d8bc5324df270189a7..d5bb33dee940ca20d3dc59fcd8312fe4134ab9d0 100644
 --- a/codex-rs/core/src/tools/context.rs
 +++ b/codex-rs/core/src/tools/context.rs
 @@ -333,6 +333,7 @@ impl FunctionToolOutput {
@@ -19327,18 +18208,18 @@ index ac71d82dc92ad366e87c08a3a4185714db9df2e9..b96542a858478caa23572e4d5532a912
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e0006e16bb1b 100644
+index 73446c88cca56f3c47f909a1c07145fd9a226502..f995f7a18ccdb4383ff9fbdf5a0ca583b0cdcb10 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -21,6 +21,7 @@ use crate::session::turn_context::TurnContext;
+@@ -22,6 +22,7 @@ use crate::session::tests::update_turn_settings_for_test;
+ use crate::session::turn_context::TurnContext;
  use crate::session_prefix::format_inter_agent_completion_message;
- use crate::thread_manager::thread_store_from_config;
  use crate::tools::context::ToolOutput;
 +use crate::tools::handlers::multi_agents::SupervisorFollowupParentHandler;
  use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
  use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
  use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
-@@ -33,7 +34,6 @@ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandle
+@@ -34,7 +35,6 @@ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandle
  use crate::turn_diff_tracker::TurnDiffTracker;
  use codex_extension_api::empty_extension_registry;
  use codex_features::Feature;
@@ -19346,7 +18227,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
  use codex_history::RolloutItem;
  use codex_login::AuthManager;
  use codex_login::CodexAuth;
-@@ -240,17 +240,12 @@ where
+@@ -242,17 +242,12 @@ where
  #[derive(Debug, Deserialize)]
  struct ListAgentsResult {
      agents: Vec<ListedAgentResult>,
@@ -19364,7 +18245,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
  }
 
  #[derive(Debug, Deserialize)]
-@@ -1081,6 +1076,44 @@ async fn multi_agent_v2_spawn_requires_task_name() {
+@@ -1083,6 +1078,44 @@ async fn multi_agent_v2_spawn_requires_task_name() {
      assert!(message.contains("missing field `task_name`"));
  }
 
@@ -19409,7 +18290,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
  #[tokio::test]
  async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
      let (mut session, mut turn) = make_session_and_context().await;
-@@ -1100,7 +1133,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+@@ -1102,7 +1135,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
      let session = Arc::new(session);
      let turn = Arc::new(turn);
 
@@ -19418,7 +18299,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
          .handle(invocation(
              session.clone(),
              turn.clone(),
-@@ -1174,7 +1207,7 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+@@ -1176,7 +1209,7 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
                      .clone(),
              );
 
@@ -19427,7 +18308,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
              .handle(invocation(
                  session.clone(),
                  turn.clone(),
-@@ -1185,12 +1218,10 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+@@ -1187,12 +1220,10 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
          else {
              panic!("adoption must reject fork and configuration overrides");
          };
@@ -19444,7 +18325,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      }
  }
 
-@@ -1706,8 +1737,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
+@@ -1708,8 +1739,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
      assert_eq!(
          err,
          FunctionCallError::RespondToModel(
@@ -19454,7 +18335,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
          )
      );
      let root_ops = manager
-@@ -1723,9 +1753,110 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
+@@ -1725,9 +1755,110 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
      );
  }
 
@@ -19567,7 +18448,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      std::thread::Builder::new()
          .name("goal-supervisor-followup-handler".to_string())
          .stack_size(32 * 1024 * 1024)
-@@ -1734,18 +1865,30 @@ fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper() -
+@@ -1736,18 +1867,30 @@ fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper() -
                  .enable_all()
                  .build()
                  .expect("build goal supervisor test runtime")
@@ -19604,7 +18485,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let server = start_mock_server().await;
      let request_log = mount_response_sequence(
          &server,
-@@ -1850,28 +1993,67 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1852,28 +1995,67 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
      helper_control.unregister_goal_supervisor_parent_for_test(root.thread_id);
      assert!(helper_control.get_agent_metadata(root.thread_id).is_none());
      assert!(manager.get_thread(root.thread_id).await.is_ok());
@@ -19677,7 +18558,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
              )
      }));
      timeout(Duration::from_secs(5), async {
-@@ -1880,7 +2062,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1882,7 +2064,7 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
          }
      })
      .await
@@ -19686,7 +18567,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
 
      let continuity = crate::goal_supervisor::supervisor_continuity_context_item(
          &root.thread.session,
-@@ -1902,6 +2084,18 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
+@@ -1904,6 +2086,18 @@ async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_help
              ))
      ));
 
@@ -19705,7 +18586,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let _ = manager
          .shutdown_all_threads_bounded(Duration::from_secs(5))
          .await;
-@@ -1920,32 +2114,31 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1922,32 +2116,31 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
      set_agent_control(&mut session, manager.agent_control());
      session.thread_id = root.thread_id;
      let _ = config.features.enable(Feature::MultiAgentV2);
@@ -19757,7 +18638,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let child_thread = manager
          .get_thread(agent_id)
          .await
-@@ -1968,6 +2161,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1970,6 +2163,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          )
          .await;
 
@@ -19766,7 +18647,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let output = ListAgentsHandlerV2
          .handle(invocation(
              session,
-@@ -1978,6 +2173,20 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1980,6 +2175,20 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          .await
          .expect("list_agents should succeed");
      let (content, success) = expect_text_output(output);
@@ -19787,7 +18668,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
-@@ -1986,18 +2195,13 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+@@ -1988,18 +2197,13 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
          .iter()
          .map(|agent| agent.agent_name.as_str())
          .collect::<Vec<_>>();
@@ -19807,7 +18688,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      assert_eq!(success, Some(true));
  }
 
-@@ -2146,9 +2350,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
+@@ -2148,9 +2352,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -19819,7 +18700,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
  }
 
  #[tokio::test]
-@@ -2220,8 +2423,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
+@@ -2222,8 +2425,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
 
@@ -19841,7 +18722,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
  }
 
  #[tokio::test]
-@@ -3336,35 +3550,32 @@ async fn resume_agent_noops_for_active_agent() {
+@@ -3342,35 +3556,32 @@ async fn resume_agent_noops_for_active_agent() {
  }
 
  #[tokio::test]
@@ -19901,7 +18782,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let _ = manager
          .agent_control()
          .shutdown_live_agent(agent_id)
-@@ -3374,9 +3585,6 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
+@@ -3380,9 +3591,6 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
          manager.agent_control().get_status(agent_id).await,
          AgentStatus::NotFound
      );
@@ -19911,7 +18792,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let resume_invocation = invocation(
          session.clone(),
          turn.clone(),
-@@ -5197,6 +5405,10 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5203,6 +5411,10 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
      )
      .await;
      let mut config = turn.config.as_ref().clone();
@@ -19922,24 +18803,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      config.agent_max_depth = 3;
      config
          .permissions
-@@ -5207,6 +5419,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
-         .enable(Feature::Sqlite)
-         .expect("test config should allow sqlite");
-     let state_db = init_state_db(&config).await;
-+    let thread_store = thread_store_from_config(&config, state_db.clone());
-     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
-     let manager = ThreadManager::new(
-         &config,
-@@ -5219,7 +5432,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
-         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
-         /*analytics_events_client*/ None,
-         crate::thread_manager::passthrough_image_store(),
--        thread_store_from_config(&config, state_db.clone()),
-+        thread_store.clone(),
-         local_agent_graph_store_from_state_db(state_db.as_ref()),
-         "11111111-1111-4111-8111-111111111111".to_string(),
-         /*attestation_provider*/ None,
-@@ -5295,20 +5508,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5304,20 +5516,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
      );
      assert_eq!(grandchild_success, Some(true));
 
@@ -19965,7 +18829,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      assert_eq!(
          manager.agent_control().get_status(child_thread_id).await,
          AgentStatus::NotFound
-@@ -5349,6 +5554,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5358,6 +5562,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              .permission_profile,
          owner_permission_profile
      );
@@ -19995,7 +18859,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      assert_ne!(
          manager
              .agent_control()
-@@ -5384,6 +5612,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5393,6 +5620,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
          AgentStatus::NotFound
      );
 
@@ -20015,7 +18879,7 @@ index f941a5142d402fd4941ca71936877a810940d548..3bd57f93b1f2248fb949e6e68147e000
      let operator = manager
          .start_thread(StartThreadOptions::new(config.clone()))
          .await
-@@ -5406,13 +5647,35 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5415,13 +5655,35 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              "resume_agent",
              function_payload(json!({"id": parent_thread_id.to_string()})),
          ))
@@ -20579,7 +19443,7 @@ index 0000000000000000000000000000000000000000..99bfc94d81d128d7ac46945559c967d3
 +    );
 +}
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 9029c9ec6d586eede8d5119b3a3a87138e6a2cd2..af21eb1578500efe6ff41794b3488bcd74261170 100644
+index dc6e7860589d34345e3c6d2de4911375baaf418e..b7c87103b35a08e1967af7bf9a009ee1e4449f2b 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -38,6 +38,7 @@ use crate::tools::handlers::multi_agents::ResumeAgentHandler;
@@ -20590,7 +19454,7 @@ index 9029c9ec6d586eede8d5119b3a3a87138e6a2cd2..af21eb1578500efe6ff41794b3488bcd
  use crate::tools::handlers::multi_agents::SupervisorSelfCloseHandler;
  use crate::tools::handlers::multi_agents::SupervisorSnoozeHandler;
  use crate::tools::handlers::multi_agents::WaitAgentHandler;
-@@ -750,10 +751,7 @@ fn collab_tools_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> b
+@@ -782,10 +783,7 @@ fn collab_tools_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> b
          MultiAgentVersion::V2 => {
              !turn_context.config.multi_agent_v2.disable_native_tools
                  && (turn_context.session_source.get_agent_path().is_none()
@@ -20602,7 +19466,7 @@ index 9029c9ec6d586eede8d5119b3a3a87138e6a2cd2..af21eb1578500efe6ff41794b3488bcd
          }
      }
  }
-@@ -1645,6 +1643,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+@@ -1689,6 +1687,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
      }
      if crate::goal_supervisor::is_goal_supervisor_helper_source(&turn_context.session_source) {
          registry.add(SupervisorSelfCloseHandler);
@@ -20610,7 +19474,7 @@ index 9029c9ec6d586eede8d5119b3a3a87138e6a2cd2..af21eb1578500efe6ff41794b3488bcd
          registry.add(SupervisorSnoozeHandler);
          registry.add(SupervisorCompactParentContextHandler);
      }
-@@ -1761,3 +1760,7 @@ fn code_mode_namespace_name<'a>(
+@@ -1805,3 +1804,7 @@ fn code_mode_namespace_name<'a>(
  #[cfg(test)]
  #[path = "spec_plan_tests.rs"]
  mod tests;
@@ -20619,10 +19483,10 @@ index 9029c9ec6d586eede8d5119b3a3a87138e6a2cd2..af21eb1578500efe6ff41794b3488bcd
 +#[path = "collaboration_contract_tests.rs"]
 +mod collaboration_contract_tests;
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac 100644
+index da7055f9bdd7d45770677e7630e1615125ed5ceb..bae9494ed80deedd0ee2cf403d66a79941796cc4 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -275,8 +275,30 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -276,8 +276,30 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      .await;
      assert_eq!(
          supervisor.namespace_function_names("supervisor"),
@@ -20654,7 +19518,7 @@ index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b
 
      let supervisor_path_without_role = probe(|turn| {
          turn.session_source = source("/root/goal_supervisor", "worker");
-@@ -289,6 +311,7 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -290,6 +312,7 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      );
      supervisor_path_without_role.assert_registered_lacks(&[
          "supervisor.close_self",
@@ -20662,7 +19526,7 @@ index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b
          "supervisor.snooze",
          "supervisor.compact_parent_context",
      ]);
-@@ -302,11 +325,22 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+@@ -303,11 +326,22 @@ async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
      .await;
      assert_eq!(
          supervisor_role_on_custom_path.namespace_function_names("supervisor"),
@@ -20686,7 +19550,7 @@ index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b
  }
 
  fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
-@@ -3277,10 +3311,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
+@@ -3291,10 +3325,13 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
  }
 
  #[tokio::test]
@@ -20702,7 +19566,7 @@ index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b
          turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
              parent_thread_id: ThreadId::new(),
              depth: 1,
-@@ -3293,11 +3330,20 @@ async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise
+@@ -3307,11 +3344,20 @@ async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise
      })
      .await;
 
@@ -20725,7 +19589,7 @@ index e0d47d5f3e1893f1f741f278d57c006aeefa4da8..823b0cf4d3b9d5ed6f8e90f3393a7b1b
  }
 
  #[tokio::test]
-@@ -3354,6 +3400,46 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
+@@ -3368,6 +3414,46 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
      }
  }
 
@@ -20817,22 +19681,22 @@ index 39737be60dadac7f67089b7d7501e5b73affa773..11c4968d1a47ed572b2a6314af25718b
  Use `supervisor.snooze` when useful work is already underway and no parent decision is needed. Do not snooze if an agent is waiting on parent input, has become unblocked, or needs coordination to keep working.
 
 diff --git a/codex-rs/core/tests/common/Cargo.toml b/codex-rs/core/tests/common/Cargo.toml
-index cb5c222039eb9d16c57557ce2bafc845d75e069b..f083273f7946c69553b1f59a7247563311d454ed 100644
+index 0837095d387701e4dbab5d94c9a14927f74c5ec5..8a0d8580d237394f869f927c56929cf944433e05 100644
 --- a/codex-rs/core/tests/common/Cargo.toml
 +++ b/codex-rs/core/tests/common/Cargo.toml
-@@ -45,6 +45,7 @@ serde_json = { workspace = true }
- tempfile = { workspace = true }
+@@ -50,6 +50,7 @@ tempfile = { workspace = true }
  tokio = { workspace = true, features = ["net", "test-util", "time"] }
+ tokio-rustls = { workspace = true }
  tokio-tungstenite = { workspace = true }
 +toml = { workspace = true }
  tracing = { workspace = true }
  tracing-opentelemetry = { workspace = true }
  tracing-subscriber = { workspace = true }
 diff --git a/codex-rs/core/tests/common/responses.rs b/codex-rs/core/tests/common/responses.rs
-index 13b446e29159b52e785db6447f5f18b148be7f27..554e2ec055047aa8d6d169525298ba2fa2936c9a 100644
+index c36062446a90225b0a738046c9f333d498ff4e55..11e5e38ab3589ca32756005f6a7dc296dc013c61 100644
 --- a/codex-rs/core/tests/common/responses.rs
 +++ b/codex-rs/core/tests/common/responses.rs
-@@ -1240,9 +1240,26 @@ pub async fn start_mock_server() -> MockServer {
+@@ -1270,9 +1270,26 @@ pub async fn start_mock_server() -> MockServer {
      // Provide a default `/models` response so tests remain hermetic when the client queries it.
      let _ = mount_models_once(&server, ModelsResponse { models: Vec::new() }).await;
 
@@ -21090,10 +19954,10 @@ index 0000000000000000000000000000000000000000..b9eb689dd72f3835462bc69884527bf3
 +  }
 +]
 diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
-index 5ff9df5ce864782562107256b29757f05e64b90f..c7d0a33bc9803a86e919d0e76fb02b9f6985dc3d 100644
+index 7d17e71d22d7f7c3e46d82474c235d99731fd69a..58be98a1c2e52578a395550d514ef875bb9c0153 100644
 --- a/codex-rs/core/tests/suite/agent_control_tests.rs
 +++ b/codex-rs/core/tests/suite/agent_control_tests.rs
-@@ -215,20 +215,13 @@ impl AgentControl for TestAgentControl {
+@@ -305,20 +305,13 @@ impl AgentControl for TestAgentControl {
  }
 
  #[tokio::test]
@@ -21323,10 +20187,10 @@ index 0000000000000000000000000000000000000000..70947b9789c34acd2bf7718f79b657f9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index a1de9c84b3935918c6c74b619eca3392881b56a0..451645ef0cfcdc4af8ab92ce8573757113d0f8a0 100644
+index 7f6647c7896f7eb6d111f92f10521f8f661e85a2..50e3832e97eddd7f6b258bca70d68a60be606da5 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -71,6 +71,7 @@ mod code_mode_elicitation;
+@@ -75,6 +75,7 @@ mod code_mode_elicitation;
  mod code_mode_model_messages;
  mod codex_apps_protocol;
  mod codex_delegate;
@@ -21335,7 +20199,7 @@ index a1de9c84b3935918c6c74b619eca3392881b56a0..451645ef0cfcdc4af8ab92ce85737571
  mod compact;
  mod compact_remote;
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545fc343a28e 100644
+index 6968a025c44d73107db09038a1519a5bbaad70fe..d5fc027d4a5dc549915fafc7e30e94c5b0b90467 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
 @@ -1,3 +1,4 @@
@@ -21366,7 +20230,7 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
              config
                  .features
                  .enable(Feature::Collab)
-@@ -1458,15 +1468,27 @@ async fn grandchild_full_fork_preserves_context_baseline(
+@@ -1459,15 +1469,27 @@ async fn grandchild_full_fork_preserves_context_baseline(
          ]),
      )
      .await;
@@ -21396,7 +20260,7 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
          .mount(&server)
          .await;
      let test = test_codex()
-@@ -1517,19 +1539,32 @@ async fn grandchild_full_fork_preserves_context_baseline(
+@@ -1518,19 +1540,32 @@ async fn grandchild_full_fork_preserves_context_baseline(
                  sleep(Duration::from_millis(/*millis*/ 10)).await;
              }
          })
@@ -21433,7 +20297,7 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
          if agent_name == "/root/child/grandchild" {
              assert_eq!(
                  thread.agent_status().await,
-@@ -1883,20 +1918,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -1884,20 +1919,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
          let proactive_developer_messages = proactive_request.message_input_text_groups("developer");
          assert!(
              proactive_developer_messages.iter().any(|message| {
@@ -21460,7 +20324,7 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
          );
      }
      test.submit_turn(TURN_1_PROMPT).await?;
-@@ -3886,6 +3920,10 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
+@@ -3894,6 +3928,10 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
                  .features
                  .enable(Feature::Collab)
                  .expect("test config should allow feature update");
@@ -21471,7 +20335,7 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
              let role_path = config.codex_home.join("model-only-role.toml");
              std::fs::write(&role_path, format!("model = \"{ROLE_MODEL}\"\n"))
                  .expect("write role config");
-@@ -3953,6 +3991,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
+@@ -3961,6 +3999,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
              .enable(Feature::Collab)
              .expect("test config should allow feature update");
          config.multi_agent_v2.hide_spawn_agent_metadata = false;
@@ -21480,10 +20344,10 @@ index 6862d3eb4f8320c02beb9e7fa40ba3ff9062518b..d62284b3890e18216062452f3a87545f
          std::fs::write(
              &role_path,
 diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
-index 8341ec6f4b4b58eb849705782221fa71f0111c7e..ce196537d983243ab5d9b86d58f9ae685dde3ca7 100644
+index fe910e4b52e75d61d226ab0c1f4b4ca45c292a5b..a6e45a2c28dc3f103bef4b489d4788754547e79e 100644
 --- a/codex-rs/models-manager/src/manager.rs
 +++ b/codex-rs/models-manager/src/manager.rs
-@@ -248,6 +248,21 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -297,6 +297,21 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
          presets
      }
 
@@ -21505,7 +20369,7 @@ index 8341ec6f4b4b58eb849705782221fa71f0111c7e..ce196537d983243ab5d9b86d58f9ae68
      /// List collaboration mode presets.
      ///
      /// Returns a static set of presets seeded with the configured model.
-@@ -261,6 +276,12 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -310,6 +325,12 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
          Ok(self.build_available_models(remote_models))
      }
 
@@ -21519,10 +20383,10 @@ index 8341ec6f4b4b58eb849705782221fa71f0111c7e..ce196537d983243ab5d9b86d58f9ae68
      /// Get the model identifier to use, refreshing according to the specified strategy.
      ///
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 77a6ebb65fc3460ba7c2e32b6034e5847c7694f4..85f60b22708297abaf33b21770b8d838d72ad445 100644
+index 1bb066e48253de87cf6c2f3dec41abcafed42754..9605a181afdae64e536108cc83220f14405ed5c2 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -1012,6 +1012,72 @@ async fn custom_model_overrides_survive_manager_cache_modes() {
+@@ -1094,6 +1094,72 @@ async fn custom_model_overrides_survive_manager_cache_modes() {
      assert!(!home.path().join(MODEL_CACHE_FILE).exists());
  }
 
@@ -21595,7 +20459,7 @@ index 77a6ebb65fc3460ba7c2e32b6034e5847c7694f4..85f60b22708297abaf33b21770b8d838
  #[tokio::test]
  async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
      let remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-@@ -1142,6 +1208,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -1224,6 +1290,12 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
          original_catalog
      );
 
@@ -21608,7 +20472,7 @@ index 77a6ebb65fc3460ba7c2e32b6034e5847c7694f4..85f60b22708297abaf33b21770b8d838
      manager.replace_custom_models(HashMap::new());
      assert_eq!(
          manager.try_list_models().expect("unlocked catalog"),
-@@ -2353,6 +2425,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -2443,6 +2515,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["chatgpt-only", "api-model"]
      );
@@ -21621,7 +20485,7 @@ index 77a6ebb65fc3460ba7c2e32b6034e5847c7694f4..85f60b22708297abaf33b21770b8d838
 
      auth_manager
          .set_external_auth(Arc::new(TestExternalApiKeyAuth))
-@@ -2369,6 +2447,12 @@ async fn static_manager_reads_latest_auth_mode() {
+@@ -2459,6 +2537,12 @@ async fn static_manager_reads_latest_auth_mode() {
              .collect::<Vec<_>>(),
          vec!["api-model"]
      );
@@ -21767,10 +20631,10 @@ index 0486372a5c740036b3fa6520c7b72e71f23fa7a9..4847fd99b2b1968aa3a3e4b36723df80
 +    assert_eq!(augment_tool_spec_for_code_mode(spec.clone()), spec);
 +}
 diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
-index 8b12b62935189a934f69b0ddf4ff4961390c76ab..1885b3d46cd82c6aec31f7e6e05ab0efa2df06db 100644
+index 8c84c7fb19f3adc37f259d8213ca8edcfc25760e..a3429d6ffafd9633f494403ba76ade0cb6bef54f 100644
 --- a/codex-rs/tui/src/dynamic_tools.rs
 +++ b/codex-rs/tui/src/dynamic_tools.rs
-@@ -1430,10 +1430,14 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
+@@ -1435,10 +1435,14 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
              }),
              ThreadItemPayload::InterAgentCommunication { id, communication } => json!({
                  "type": "interAgentCommunication", "id": id,
@@ -21789,10 +20653,10 @@ index 8b12b62935189a934f69b0ddf4ff4961390c76ab..1885b3d46cd82c6aec31f7e6e05ab0ef
              ThreadItemPayload::Plan { id, text } => json!({
                  "type": "plan", "id": id, "text": truncate(text, DEFAULT_OUTPUT_CHARS)
 diff --git a/codex-rs/tui/src/dynamic_tools_tests.rs b/codex-rs/tui/src/dynamic_tools_tests.rs
-index 86049ce6cd3554f9c707f9f4dc78cc05509a1f63..ec60ba94608a07a34a515a5ad7bd6b5d87213f0a 100644
+index 5190b56410712ce95db305c09df5a3351f9767c9..5639f6e8ae4295855dc8447595a9b9cc44e90cee 100644
 --- a/codex-rs/tui/src/dynamic_tools_tests.rs
 +++ b/codex-rs/tui/src/dynamic_tools_tests.rs
-@@ -439,6 +439,40 @@ fn file_backed_image_generation_is_retained_as_a_reference() -> color_eyre::Resu
+@@ -440,6 +440,40 @@ fn file_backed_image_generation_is_retained_as_a_reference() -> color_eyre::Resu
      Ok(())
  }
 

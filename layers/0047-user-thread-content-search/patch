@@ -1,8 +1,23 @@
+diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
+index ce0fc539a2064c1c81d4f6670077b32d96602810..1467e13752d2de7020a02d7f810ef955d5d9e50a 100644
+--- a/codex-rs/app-server/README.md
++++ b/codex-rs/app-server/README.md
+@@ -28,6 +28,10 @@ unreadable, or blank. It never falls back to the other memory version.
+ Pass `currentAccountOnly: true` on `thread/list` or `thread/search` to scope local
+ discovery to the current ChatGPT login. Newly created threads record that discovery
+ is account-scoped, and each recorded creator user or account ID must match.
++`thread/search` requires a complete local state database to select rollout files;
++if the database is unavailable or its metadata backfill is incomplete, it returns
++an error rather than searching the filesystem. Set `includeAttachedThreads` to
++include eligible persistent attached threads in content results.
+ Threads created before this change and threads without creator IDs stay visible
+ across account switches. Resume and revert preserve that distinction; forks are new threads.
+ Scoped requests skip candidates whose rollout header cannot be read. API-key
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 71214563af3df17f470ee1d67caff629abc3e456..c014595c1162b23b14e26236ab32bf2b9da36ffe 100644
+index 2a080498d06f07afaa6606d5ea88d97f3513a856..c2333d3e2df95364874ef71fbf499b9b68bbd29e 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
-@@ -233,6 +233,7 @@ pub use review_input::resolve_review_input;
+@@ -238,6 +238,7 @@ pub use review_input::resolve_review_input;
  pub use review_input::review_input_segment_path;
  pub use rollout_reference_index::RolloutReferenceIndex;
  pub use search::first_rollout_content_match_snippet;
@@ -45,10 +60,10 @@ index 058b472bbd98a65e55e18518a18b9190a7320607..a4de1d1501e8426fbf5cf36a5fd91eb5
      let (json_search_term, search_term) = match patterns {
          Some(patterns) => patterns,
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
-index 5061107c65553f89f39e1931f940977d531c45b0..98de7294c5deca6647c8983d333c875f37ad9aac 100644
+index 1fd4adac7ca4156c8103f155eb54dfb1f2dcaba3..3e875af71dfef48548f69b660bf146a614475dad 100644
 --- a/codex-rs/state/src/runtime/threads.rs
 +++ b/codex-rs/state/src/runtime/threads.rs
-@@ -818,7 +818,17 @@ ON CONFLICT(child_thread_id) DO NOTHING
+@@ -818,7 +818,20 @@ ON CONFLICT(child_thread_id) DO NOTHING
          page_size: usize,
          filters: ThreadFilterOptions<'_>,
      ) -> anyhow::Result<crate::ThreadsPage> {
@@ -62,12 +77,15 @@ index 5061107c65553f89f39e1931f940977d531c45b0..98de7294c5deca6647c8983d333c875f
 +        &self,
 +        page_size: usize,
 +        filters: ThreadFilterOptions<'_>,
++        include_attached_threads: bool,
 +    ) -> anyhow::Result<crate::ThreadsPage> {
-+        self.list_threads_matching(page_size, filters, /*relation_filter*/ None, true)
++        let relation =
++            include_attached_threads.then_some(crate::ThreadRelationFilter::IncludeAttached);
++        self.list_threads_matching(page_size, filters, relation, true)
              .await
      }
 
-@@ -844,7 +854,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
+@@ -844,7 +857,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
          relation_filter: crate::ThreadRelationFilter,
          filters: ThreadFilterOptions<'_>,
      ) -> anyhow::Result<crate::ThreadsPage> {
@@ -76,7 +94,7 @@ index 5061107c65553f89f39e1931f940977d531c45b0..98de7294c5deca6647c8983d333c875f
              .await
      }
 
-@@ -853,11 +863,18 @@ ON CONFLICT(child_thread_id) DO NOTHING
+@@ -853,11 +866,18 @@ ON CONFLICT(child_thread_id) DO NOTHING
          page_size: usize,
          filters: ThreadFilterOptions<'_>,
          relation_filter: Option<crate::ThreadRelationFilter>,
@@ -96,20 +114,7 @@ index 5061107c65553f89f39e1931f940977d531c45b0..98de7294c5deca6647c8983d333c875f
 
          let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
          let mut items = Vec::with_capacity(rows.len());
-@@ -878,7 +895,11 @@ ON CONFLICT(child_thread_id) DO NOTHING
-                 parent_thread_ids.remove(&overflow_item.id);
-             }
-             items.last().and_then(|item| {
--                anchor_from_item(item, filters.sort_key, relation_filter.is_some())
-+                anchor_from_item(
-+                    item,
-+                    filters.sort_key,
-+                    relation_filter.is_some() || tie_break_updated_at,
-+                )
-             })
-         } else {
-             None
-@@ -1691,11 +1712,28 @@ fn one_thread_id_from_rows(
+@@ -1763,11 +1783,28 @@ fn one_thread_id_from_rows(
      }
  }
 
@@ -134,20 +139,12 @@ index 5061107c65553f89f39e1931f940977d531c45b0..98de7294c5deca6647c8983d333c875f
 +    filters: ThreadFilterOptions<'_>,
 +    relation_filter: Option<crate::ThreadRelationFilter>,
 +    limit: usize,
-+    tie_break_updated_at: bool,
++    _tie_break_updated_at: bool,
  ) {
      if let Some(crate::ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = relation_filter {
          builder.push(
-@@ -1733,6 +1771,7 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
-         None => builder.push(" FROM threads"),
-     };
-     let include_thread_id_tiebreaker = relation_filter.is_some()
-+        || tie_break_updated_at
-         || matches!(
-             filters.sort_key,
-             SortKey::CreatedAt | SortKey::RecencyAt | SortKey::SectionPosition
 diff --git a/codex-rs/thread-store/src/local/search_threads.rs b/codex-rs/thread-store/src/local/search_threads.rs
-index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4e99290e6 100644
+index c9bd1370389c383f072d01b941601b7da3ef7963..13a97eaf0d49bf23407072f49f74558728e4186d 100644
 --- a/codex-rs/thread-store/src/local/search_threads.rs
 +++ b/codex-rs/thread-store/src/local/search_threads.rs
 @@ -1,21 +1,22 @@
@@ -213,7 +210,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
          ThreadSortKey::SectionPosition => {
              return Err(ThreadStoreError::InvalidRequest {
                  message: "section-position sorting requires a section filter".to_owned(),
-@@ -63,91 +60,82 @@ pub(super) async fn search_threads(
+@@ -63,116 +60,94 @@ pub(super) async fn search_threads(
          }
      };
      let sort_direction = match params.sort_direction {
@@ -295,7 +292,9 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 -        project_id: None,
 -        archived: params.archived,
 -        search_term: None,
--        relation_filter: None,
+-        relation_filter: params
+-            .include_attached_threads
+-            .then_some(crate::ThreadRelationFilter::IncludeAttached),
 -        use_state_db_only: state_db.is_some(),
 -    };
 -    let mut remaining_rollouts = matching_rollouts
@@ -314,6 +313,11 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 -            sort_direction,
 -        )
 -        .await?;
+-        let page_thread_ids: Vec<_> = page
+-            .items
+-            .iter()
+-            .filter_map(|item| item.thread_id)
+-            .collect();
 +        let page = state_db
 +            .list_threads_for_content_search(
 +                scan_page_size,
@@ -329,28 +333,57 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +                    sort_direction,
 +                    search_term: None,
 +                },
++                params.include_attached_threads,
 +            )
 +            .await
 +            .map_err(|err| ThreadStoreError::Internal {
 +                message: format!("failed to query the state database for thread/search: {err}"),
 +            })?;
++        let page_thread_ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
+         let mut original_paths = None;
          for item in page.items {
 -            let logical_path = rollout_search_path(item.path.as_path());
--            let Some(snippet) = (match remaining_rollouts.remove(logical_path.as_path()) {
--                Some(Some(snippet)) => Some(snippet),
--                Some(None) => first_rollout_content_match_snippet(item.path.as_path(), search_term)
--                    .await
--                    .map_err(|err| ThreadStoreError::Internal {
--                        message: format!("failed to read rollout search match: {err}"),
--                    })?,
--                None => None,
--            }) else {
-+            let Some(item) =
-+                search_candidate(store, state_db.as_ref(), item, params.archived, search_term)
-+                    .await?
+-            let Some(mut snippet) = remaining_rollouts.remove(logical_path.as_path()) else {
++            let Some(item) = search_candidate_with_access(
++                store,
++                state_db.as_ref(),
++                item,
++                params.archived,
++                search_term,
++                params.include_attached_threads,
++                params.account.as_ref(),
++                &page_thread_ids,
++                &mut original_paths,
++            )
++            .await?
 +            else {
                  continue;
              };
+-            if let Some(account) = &params.account {
+-                let Some(thread_id) = item.thread_id else {
+-                    continue;
+-                };
+-                if !account
+-                    .includes(
+-                        &store.config.codex_home,
+-                        thread_id,
+-                        Some(&item.path),
+-                        &page_thread_ids,
+-                        &mut original_paths,
+-                    )
+-                    .await
+-                {
+-                    continue;
+-                }
+-            }
+-            if snippet.is_none() {
+-                snippet = first_rollout_content_match_snippet(item.path.as_path(), search_term)
+-                    .await
+-                    .map_err(|err| ThreadStoreError::Internal {
+-                        message: format!("failed to read rollout search match: {err}"),
+-                    })?;
+-            }
+-            let Some(snippet) = snippet else { continue };
 -            matching_items.push(ThreadSearchItem { item, snippet });
 +            matching_items.push(item);
              if matching_items.len() > params.page_size {
@@ -367,7 +400,24 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
              break;
          }
      }
-@@ -167,19 +155,12 @@ pub(super) async fn search_threads(
+@@ -180,13 +155,9 @@ pub(super) async fn search_threads(
+     let more_matches_available = matching_items.len() > params.page_size;
+     matching_items.truncate(params.page_size);
+     let next_cursor = if more_matches_available {
+-        matching_items.last().and_then(|item| {
+-            if scan_params.use_state_db_only {
+-                cursor_from_thread_search_item(item, params.sort_key)
+-            } else {
+-                item.item.filesystem_cursor(sort_key)
+-            }
+-        })
++        matching_items
++            .last()
++            .and_then(|item| cursor_from_thread_search_item(item, params.sort_key))
+     } else {
+         None
+     }
+@@ -196,19 +167,12 @@ pub(super) async fn search_threads(
 
      let mut items = matching_items
          .into_iter()
@@ -391,7 +441,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
          let sectioned_thread_ids = items
              .iter()
              .filter(|item| item.thread.section.is_some())
-@@ -201,17 +182,116 @@ pub(super) async fn search_threads(
+@@ -230,17 +194,149 @@ pub(super) async fn search_threads(
      Ok(ThreadSearchPage { items, next_cursor })
  }
 
@@ -402,6 +452,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 -    // to exist, and retain the filename identifying the selected rollout after a revert.
 -    if cfg!(windows)
 -        && let Some(normalized) = path.to_str().and_then(normalize_windows_device_path)
++#[cfg(test)]
 +async fn search_candidate(
 +    store: &LocalThreadStore,
 +    state_db: &codex_state::StateRuntime,
@@ -409,7 +460,33 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +    archived: bool,
 +    search_term: &str,
 +) -> ThreadStoreResult<Option<ThreadSearchItem>> {
-+    if !is_user_chat(&item) {
++    search_candidate_with_access(
++        store,
++        state_db,
++        item,
++        archived,
++        search_term,
++        false,
++        None,
++        &[],
++        &mut None,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn search_candidate_with_access(
++    store: &LocalThreadStore,
++    state_db: &codex_state::StateRuntime,
++    item: codex_state::ThreadMetadata,
++    archived: bool,
++    search_term: &str,
++    include_attached_threads: bool,
++    account: Option<&crate::LocalHistoryAccount>,
++    page_thread_ids: &[ThreadId],
++    original_paths: &mut Option<HashMap<ThreadId, std::path::PathBuf>>,
++) -> ThreadStoreResult<Option<ThreadSearchItem>> {
++    if !is_searchable_user_chat(&item, include_attached_threads) {
 +        return Ok(None);
 +    }
 +    // Revert and archive use the matching exclusive lifecycle reservation in this store.
@@ -426,7 +503,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +    };
 +    if current.rollout_path != item.rollout_path
 +        || current.archived_at.is_some() != archived
-+        || !is_user_chat(&current)
++        || !is_searchable_user_chat(&current, include_attached_threads)
 +    {
 +        return Ok(None);
 +    }
@@ -440,6 +517,19 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +    if edges
 +        .iter()
 +        .any(|edge| edge.status == codex_state::DirectionalThreadSpawnEdgeStatus::Open)
++    {
++        return Ok(None);
++    }
++    if let Some(account) = account
++        && !account
++            .includes_exact(
++                &store.config.codex_home,
++                current.id,
++                Some(&current.rollout_path),
++                page_thread_ids,
++                original_paths,
++            )
++            .await
      {
 -        return PathBuf::from(normalized);
 +        return Ok(None);
@@ -469,25 +559,18 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +    path: &std::path::Path,
 +    search_term: &str,
 +) -> io::Result<Option<String>> {
-+    match first_rollout_content_match_snippet_exact(path, search_term).await {
-+        Err(err)
-+            if matches!(
-+                err.kind(),
-+                io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
-+            ) =>
-+        {
-+            match codex_rollout::existing_rollout_path(path).await {
-+                Some(existing_path) if existing_path != path => {
-+                    first_rollout_content_match_snippet_exact(&existing_path, search_term).await
-+                }
-+                _ => Err(err),
-+            }
-+        }
-+        result => result,
-+    }
++    first_rollout_content_match_snippet_exact(path, search_term).await
 +}
 +
++#[cfg(test)]
 +fn is_user_chat(item: &codex_state::ThreadMetadata) -> bool {
++    is_searchable_user_chat(item, false)
++}
++
++fn is_searchable_user_chat(
++    item: &codex_state::ThreadMetadata,
++    include_attached_threads: bool,
++) -> bool {
 +    let user_thread_source = match &item.thread_source {
 +        None | Some(ThreadSource::User) => true,
 +        Some(ThreadSource::Feature(feature)) => {
@@ -498,7 +581,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +        }
 +        _ => false,
 +    };
-+    item.attached_thread_parent_id.is_none()
++    (include_attached_threads || item.attached_thread_parent_id.is_none())
 +        && item.agent_nickname.is_none()
 +        && item.agent_role.is_none()
 +        && item
@@ -517,7 +600,7 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
  }
 
  fn cursor_from_thread_search_item(
-@@ -219,27 +299,37 @@ fn cursor_from_thread_search_item(
+@@ -248,21 +344,35 @@ fn cursor_from_thread_search_item(
      sort_key: ThreadSortKey,
  ) -> Option<codex_rollout::Cursor> {
      let timestamp = match sort_key {
@@ -538,16 +621,15 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +        ThreadSortKey::RecencyAt => item.item.recency_at,
          ThreadSortKey::SectionPosition => return None,
      };
-     match sort_key {
--        ThreadSortKey::RecencyAt => parse_cursor(&format!("{timestamp}|{}", item.item.thread_id?)),
--        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => parse_cursor(timestamp),
+-    parse_cursor(&format!("{timestamp}|{}", item.item.thread_id?))
++    match sort_key {
 +        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
 +            parse_cursor(&format!("{}|{}", timestamp.to_rfc3339(), item.item.id))
 +        }
-         ThreadSortKey::SectionPosition => None,
-     }
- }
-
++        ThreadSortKey::SectionPosition => None,
++    }
++}
++
 +fn parse_search_cursor(cursor: &str) -> ThreadStoreResult<codex_state::Anchor> {
 +    let invalid = || ThreadStoreError::InvalidRequest {
 +        message: format!("invalid cursor: {cursor}"),
@@ -564,16 +646,18 @@ index 460d2f7a77ce6d83b5a3a00970dcc604cfd62e08..559d6473c171447fff5dd9ed9c30f3f4
 +        .map_err(|_| invalid())?
 +        .with_timezone(&Utc);
 +    Ok(codex_state::Anchor { ts, id: thread_id })
-+}
-+
+ }
+
  async fn set_thread_search_result_names(
-     store: &LocalThreadStore,
-     items: &mut [StoredThreadSearchResult],
 diff --git a/codex-rs/thread-store/src/local/search_threads_tests.rs b/codex-rs/thread-store/src/local/search_threads_tests.rs
-index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f00d56cef8 100644
+index 65148e2816d0996ba532dc2a868cd7f8c916449c..d926bfdb6a88eca215832749928b3aeec4617fbd 100644
 --- a/codex-rs/thread-store/src/local/search_threads_tests.rs
 +++ b/codex-rs/thread-store/src/local/search_threads_tests.rs
-@@ -1,8 +1,10 @@
+@@ -1,13 +1,13 @@
+-use std::collections::HashMap;
+-use std::path::Path;
+-use std::path::PathBuf;
+-
  use chrono::Utc;
  use codex_protocol::ThreadId;
 +use codex_protocol::protocol::InternalSessionSource;
@@ -583,23 +667,220 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 -use codex_rollout::ThreadItem;
 +use codex_protocol::protocol::ThreadSource;
  use pretty_assertions::assert_eq;
++use std::collections::HashMap;
++use std::path::{Path, PathBuf};
  use tempfile::TempDir;
  use uuid::Uuid;
-@@ -12,6 +14,8 @@ use super::super::test_support::test_config;
- use super::super::test_support::write_session_file_with;
+
+@@ -17,6 +17,8 @@ use super::super::test_support::write_session_file_with;
+ use super::super::test_support::write_session_file_with_fork;
  use super::ThreadSearchItem;
  use super::cursor_from_thread_search_item;
 +use super::is_user_chat;
 +use super::search_candidate;
+ use crate::ListThreadsParams;
  use crate::SearchThreadsParams;
  use crate::SortDirection;
+@@ -24,32 +26,214 @@ use crate::ThreadRelationFilter;
  use crate::ThreadSortKey;
-@@ -22,11 +26,13 @@ fn recency_cursor_includes_thread_id_tie_breaker() {
+ use crate::ThreadStore;
+
++async fn write_named_rollout(home: &Path, id: Uuid, attached_to: Option<Uuid>) -> PathBuf {
++    let path = write_session_file_with_fork(
++        home,
++        home.join("sessions/2025/01/03"),
++        "2025-01-03T12-00-00",
++        id,
++        "searchable message",
++        Some("test-provider"),
++        attached_to,
++        attached_to.is_some(),
++        ThreadHistoryMode::Legacy,
++    )
++    .unwrap();
++    codex_rollout::append_thread_name(home, ThreadId::from_u128(id.as_u128()), "matching title")
++        .await
++        .unwrap();
++    path
++}
++
++fn inclusive_title_search() -> ListThreadsParams {
++    ListThreadsParams {
++        page_size: 10,
++        cursor: None,
++        sort_key: ThreadSortKey::CreatedAt,
++        sort_direction: SortDirection::Desc,
++        allowed_sources: vec![SessionSource::Cli],
++        model_providers: None,
++        cwd_filters: None,
++        section: None,
++        project_id: None,
++        archived: false,
++        search_term: Some("matching title".into()),
++        relation_filter: Some(ThreadRelationFilter::IncludeAttached),
++        use_state_db_only: false,
++    }
++}
++
++#[tokio::test]
++async fn title_search_returns_attached_parent_without_state_db() {
++    let home = TempDir::new().unwrap();
++    let store = LocalThreadStore::new(test_config(home.path()), None);
++    let parent = Uuid::new_v4();
++    let child = Uuid::new_v4();
++    write_named_rollout(home.path(), child, Some(parent)).await;
++    let result = store.list_threads(inclusive_title_search()).await.unwrap();
++    assert_eq!(
++        result
++            .items
++            .into_iter()
++            .map(|item| (item.thread_id, item.attached_to_thread_id))
++            .collect::<Vec<_>>(),
++        vec![(
++            ThreadId::from_u128(child.as_u128()),
++            Some(ThreadId::from_u128(parent.as_u128()))
++        )]
++    );
++}
++
++#[tokio::test]
++async fn inclusive_title_search_finds_unindexed_matches_when_filesystem_scanning_is_allowed() {
++    let home = TempDir::new().unwrap();
++    let config = test_config(home.path());
++    let state_db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let parent = Uuid::new_v4();
++    let child = Uuid::new_v4();
++    let standalone = Uuid::new_v4();
++    let parent_path = write_named_rollout(home.path(), parent, None).await;
++    write_named_rollout(home.path(), standalone, None).await;
++    write_named_rollout(home.path(), child, Some(parent)).await;
++    let parent_id = ThreadId::from_u128(parent.as_u128());
++    let child_id = ThreadId::from_u128(child.as_u128());
++    let mut row = codex_state::ThreadMetadataBuilder::new(
++        parent_id,
++        parent_path,
++        Utc::now(),
++        SessionSource::Cli,
++    )
++    .build("test-provider");
++    row.first_user_message = Some("searchable message".into());
++    row.title = "matching title".into();
++    state_db.upsert_thread(&row).await.unwrap();
++    let store = LocalThreadStore::new(config, Some(state_db));
++    let all = HashMap::from([
++        (parent_id, None),
++        (child_id, Some(parent_id)),
++        (ThreadId::from_u128(standalone.as_u128()), None),
++    ]);
++    for (use_state_db_only, expected) in [
++        (true, HashMap::from([(parent_id, None)])),
++        (false, all.clone()),
++        (true, all),
++    ] {
++        let page = store
++            .list_threads(ListThreadsParams {
++                use_state_db_only,
++                ..inclusive_title_search()
++            })
++            .await
++            .unwrap();
++        assert_eq!(
++            page.items
++                .into_iter()
++                .map(|item| (item.thread_id, item.attached_to_thread_id))
++                .collect::<HashMap<_, _>>(),
++            expected
++        );
++    }
++}
++
++#[tokio::test]
++async fn content_search_includes_authorized_attached_user_threads_only_when_requested() {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let state = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    state.mark_backfill_complete(None).await.unwrap();
++    let parent = Uuid::new_v4();
++    let uuid = Uuid::new_v4();
++    let id = ThreadId::from_u128(uuid.as_u128());
++    let path = write_session_file_with_fork(
++        home.path(),
++        home.path().join("sessions/2025/01/03"),
++        "2025-01-03T12-00-00",
++        uuid,
++        "private needle",
++        Some("test-provider"),
++        Some(parent),
++        true,
++        ThreadHistoryMode::Legacy,
++    )
++    .unwrap();
++    let content = std::fs::read_to_string(&path).unwrap();
++    let (header, rest) = content.split_once('\n').unwrap();
++    let mut header: serde_json::Value = serde_json::from_str(header).unwrap();
++    header["payload"]["account_scoped"] = true.into();
++    header["payload"]["creator_user_id"] = "owner".into();
++    std::fs::write(&path, format!("{}\n{}", header, rest)).unwrap();
++    let mut row = codex_state::ThreadMetadataBuilder::new(id, path, Utc::now(), SessionSource::Cli)
++        .build("test-provider");
++    row.attached_thread_parent_id = Some(ThreadId::from_u128(parent.as_u128()));
++    row.first_user_message = Some("private needle".into());
++    state.upsert_thread(&row).await.unwrap();
++    let store = LocalThreadStore::new(config, Some(state));
++    let mut params = SearchThreadsParams {
++        include_attached_threads: false,
++        account: Some(crate::LocalHistoryAccount {
++            user_id: Some("owner".into()),
++            account_id: None,
++        }),
++        page_size: 10,
++        cursor: None,
++        sort_key: ThreadSortKey::CreatedAt,
++        sort_direction: SortDirection::Desc,
++        allowed_sources: vec![SessionSource::Cli],
++        archived: false,
++        search_term: "needle".into(),
++    };
++    assert!(
++        store
++            .search_threads(params.clone())
++            .await
++            .unwrap()
++            .items
++            .is_empty()
++    );
++    params.include_attached_threads = true;
++    let hits = store.search_threads(params.clone()).await.unwrap().items;
++    assert_eq!(hits.len(), 1);
++    assert_eq!(hits[0].thread.thread_id, id);
++    assert_eq!(
++        hits[0].thread.attached_to_thread_id,
++        Some(ThreadId::from_u128(parent.as_u128()))
++    );
++    params.account.as_mut().unwrap().user_id = Some("other".into());
++    assert!(store.search_threads(params).await.unwrap().items.is_empty());
++}
++
+ #[test]
+-fn time_sort_cursors_include_thread_id_tie_breaker() {
++fn recency_cursor_includes_thread_id_tie_breaker() {
      let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000123")
          .expect("thread ID should parse");
      let item = ThreadSearchItem {
 -        item: ThreadItem {
 -            thread_id: Some(thread_id),
+-            created_at: Some("2026-01-27T12:34:56Z".to_string()),
+-            updated_at: Some("2026-01-27T12:34:56Z".to_string()),
 -            recency_at: Some("2026-01-27T12:34:56Z".to_string()),
 -            ..Default::default()
 -        },
@@ -613,7 +894,28 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
          snippet: String::new(),
      };
 
-@@ -50,6 +56,7 @@ async fn search_matches_selected_rollout_across_path_spellings_and_compression()
+-    for sort_key in [
+-        ThreadSortKey::CreatedAt,
+-        ThreadSortKey::UpdatedAt,
+-        ThreadSortKey::RecencyAt,
+-    ] {
+-        let cursor = cursor_from_thread_search_item(&item, sort_key).expect("cursor should build");
+-        assert_eq!(
+-            serde_json::to_string(&cursor).expect("cursor should serialize"),
+-            format!("\"2026-01-27T12:34:56Z|{thread_id}\"")
+-        );
+-    }
++    let cursor = cursor_from_thread_search_item(&item, ThreadSortKey::RecencyAt)
++        .expect("cursor should build");
++
++    assert_eq!(
++        serde_json::to_string(&cursor).expect("cursor should serialize"),
++        format!("\"2026-01-27T12:34:56Z|{thread_id}\"")
++    );
+ }
+
+ #[tokio::test]
+@@ -63,6 +247,7 @@ async fn search_matches_selected_rollout_across_path_spellings_and_compression()
          )
          .await
          .expect("initialize state database");
@@ -621,11 +923,32 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
          let uuid = Uuid::new_v4();
          let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread ID should parse");
          let selected_path = write_session_file_with(
-@@ -161,3 +168,786 @@ async fn search_matches_selected_rollout_across_path_spellings_and_compression()
-         }
+@@ -142,8 +327,16 @@ async fn search_matches_selected_rollout_across_path_spellings_and_compression()
+                     .await
+                     .expect("select rollout in database");
+
++                let selected_is_present = selected_path.is_file();
+                 for (search_term, expected) in [
+-                    ("needle", vec![(thread_id, "needle in selected rollout")]),
++                    (
++                        "needle",
++                        if selected_is_present {
++                            vec![(thread_id, "needle in selected rollout")]
++                        } else {
++                            Vec::new()
++                        },
++                    ),
+                     ("obsolete", Vec::new()),
+                 ] {
+                     let page = store
+@@ -177,146 +370,803 @@ async fn search_matches_selected_rollout_across_path_spellings_and_compression()
      }
  }
-+
+
+-async fn write_named_rollout(home: &Path, id: Uuid, attached_to: Option<Uuid>) -> PathBuf {
+-    let path = write_session_file_with_fork(
+-        home,
+-        home.join("sessions/2025/01/03"),
 +#[tokio::test]
 +async fn search_prefers_the_selected_existing_representation() {
 +    let home = TempDir::new().expect("temp dir");
@@ -643,12 +966,21 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    let plain = write_session_file_with(
 +        home.path(),
 +        dir.clone(),
-+        "2025-01-03T12-00-00",
+         "2025-01-03T12-00-00",
+-        id,
+-        "searchable message",
 +        uuid,
 +        "plain-only",
-+        Some("test-provider"),
-+        ThreadHistoryMode::Legacy,
-+    )
+         Some("test-provider"),
+-        attached_to,
+-        attached_to.is_some(),
+         ThreadHistoryMode::Legacy,
+     )
+-    .expect("write rollout");
+-    codex_rollout::append_thread_name(home, ThreadId::from_u128(id.as_u128()), "matching title")
+-        .await
+-        .expect("save thread name");
+-    path
 +    .unwrap();
 +    let temporary = write_session_file_with(
 +        home.path(),
@@ -685,6 +1017,8 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +        for (term, expected_count) in [(present, 1), (absent, 0)] {
 +            let page = store
 +                .search_threads(SearchThreadsParams {
++                    include_attached_threads: false,
++                    account: None,
 +                    page_size: 10,
 +                    cursor: None,
 +                    sort_key: ThreadSortKey::CreatedAt,
@@ -702,8 +1036,23 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +            );
 +        }
 +    }
-+}
-+
+ }
+
+-fn inclusive_title_search() -> ListThreadsParams {
+-    ListThreadsParams {
+-        page_size: 10,
+-        cursor: None,
+-        sort_key: ThreadSortKey::CreatedAt,
+-        sort_direction: SortDirection::Desc,
+-        allowed_sources: vec![SessionSource::Cli],
+-        model_providers: None,
+-        cwd_filters: None,
+-        section: None,
+-        project_id: None,
+-        archived: false,
+-        search_term: Some("matching title".to_string()),
+-        relation_filter: Some(ThreadRelationFilter::IncludeAttached),
+-        use_state_db_only: false,
 +#[cfg(target_os = "linux")]
 +#[tokio::test]
 +async fn search_does_not_open_unselected_or_internal_rollouts() {
@@ -796,6 +1145,8 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    let store = LocalThreadStore::new(config, Some(state_db));
 +    let page = store
 +        .search_threads(SearchThreadsParams {
++            include_attached_threads: false,
++            account: None,
 +            page_size: 10,
 +            cursor: None,
 +            sort_key: ThreadSortKey::CreatedAt,
@@ -819,9 +1170,9 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +            .read(&mut events)
 +            .expect_err("unselected file must not be opened");
 +        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-+    }
-+}
-+
+     }
+ }
+
 +#[cfg(target_os = "linux")]
 +fn watch_file_opens(path: &std::path::Path) -> std::fs::File {
 +    use std::os::fd::AsRawFd;
@@ -849,9 +1200,18 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    watch
 +}
 +
-+#[tokio::test]
+ #[tokio::test]
+-async fn title_and_content_search_return_attached_parent_without_state_db() {
 +async fn search_reads_only_top_level_user_rollouts() {
-+    let home = TempDir::new().expect("temp dir");
+     let home = TempDir::new().expect("temp dir");
+-    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+-    let parent = Uuid::new_v4();
+-    let child = Uuid::new_v4();
+-    write_named_rollout(home.path(), child, Some(parent)).await;
+-    let expected = vec![(
+-        ThreadId::from_u128(child.as_u128()),
+-        Some(ThreadId::from_u128(parent.as_u128())),
+-    )];
 +    let config = test_config(home.path());
 +    let state_db = codex_state::StateRuntime::init(
 +        config.sqlite.clone(),
@@ -1005,14 +1365,24 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +            std::fs::create_dir(&path).expect("replace excluded rollout with directory");
 +        }
 +    }
-+
+
+-    let list = store
+-        .list_threads(inclusive_title_search())
 +    state_db
 +        .upsert_thread_spawn_edge(
 +            parent,
 +            other_parented,
 +            codex_state::DirectionalThreadSpawnEdgeStatus::Open,
 +        )
-+        .await
+         .await
+-        .expect("search titles on disk");
+-    assert_eq!(
+-        list.items
+-            .into_iter()
+-            .map(|t| (t.thread_id, t.attached_to_thread_id))
+-            .collect::<Vec<_>>(),
+-        expected
+-    );
 +        .expect("record spawn edge");
 +    for thread_id in [promoted_root, closed_child] {
 +        state_db
@@ -1040,6 +1410,7 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +                sort_direction: codex_state::SortDirection::Desc,
 +                search_term: None,
 +            },
++            /*include_attached_threads*/ true,
 +        )
 +        .await
 +        .expect("list candidate metadata");
@@ -1049,19 +1420,35 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +            "missing candidate {id}"
 +        );
 +    }
-+
+
+-    let search = store
 +    let store = LocalThreadStore::new(config, Some(state_db));
 +    let page = store
-+        .search_threads(SearchThreadsParams {
-+            page_size: 10,
-+            cursor: None,
+         .search_threads(SearchThreadsParams {
++            include_attached_threads: false,
++            account: None,
+             page_size: 10,
+             cursor: None,
+-            sort_key: ThreadSortKey::CreatedAt,
 +            sort_key: ThreadSortKey::RecencyAt,
-+            sort_direction: SortDirection::Desc,
+             sort_direction: SortDirection::Desc,
+-            allowed_sources: vec![SessionSource::Cli],
 +            allowed_sources: vec![],
-+            archived: false,
+             archived: false,
+-            search_term: "searchable message".to_string(),
+-            include_attached_threads: true,
+-            account: None,
 +            search_term: "needle".to_string(),
-+        })
-+        .await
+         })
+         .await
+-        .expect("search messages on disk");
+-    assert_eq!(
+-        search
+-            .items
+-            .into_iter()
+-            .map(|hit| (hit.thread.thread_id, hit.thread.attached_to_thread_id))
+-            .collect::<Vec<_>>(),
+-        expected
 +        .expect("search top-level chat without reading hidden histories");
 +    let mut actual_ids = page
 +        .items
@@ -1088,7 +1475,7 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    assert!(
 +        !is_user_chat(&item),
 +        "missing session source is not classifiable"
-+    );
+     );
 +    item.source = "unrecognized-source".into();
 +    assert!(
 +        !is_user_chat(&item),
@@ -1126,13 +1513,16 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    assert!(!is_user_chat(&item));
 +    item.thread_source = Some(ThreadSource::MemoryConsolidation);
 +    assert!(!is_user_chat(&item));
-+}
-+
-+#[tokio::test]
+ }
+
+ #[tokio::test]
+-async fn inclusive_title_search_finds_unindexed_matches_when_filesystem_scanning_is_allowed() {
 +async fn search_requires_a_working_state_database() {
-+    let home = TempDir::new().expect("temp dir");
-+    let config = test_config(home.path());
+     let home = TempDir::new().expect("temp dir");
+     let config = test_config(home.path());
 +    let params = SearchThreadsParams {
++        include_attached_threads: false,
++        account: None,
 +        page_size: 10,
 +        cursor: None,
 +        sort_key: ThreadSortKey::RecencyAt,
@@ -1147,13 +1537,31 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +        .await
 +        .expect_err("missing DB must not scan files");
 +    assert!(err.to_string().contains("requires the state database"));
++    let mut attached_params = params.clone();
++    attached_params.include_attached_threads = true;
++    let err = store
++        .search_threads(attached_params)
++        .await
++        .expect_err("attached content search also requires a state database");
++    assert!(err.to_string().contains("requires the state database"));
 +
-+    let state_db = codex_state::StateRuntime::init(
-+        config.sqlite.clone(),
-+        config.default_model_provider_id.clone(),
-+    )
-+    .await
-+    .expect("initialize state database");
+     let state_db = codex_state::StateRuntime::init(
+         config.sqlite.clone(),
+         config.default_model_provider_id.clone(),
+     )
+     .await
+     .expect("initialize state database");
+-    let parent = Uuid::new_v4();
+-    let child = Uuid::new_v4();
+-    let standalone = Uuid::new_v4();
+-    let parent_path = write_named_rollout(home.path(), parent, /*attached_to*/ None).await;
+-    write_named_rollout(home.path(), standalone, /*attached_to*/ None).await;
+-    write_named_rollout(home.path(), child, Some(parent)).await;
+-    let parent_id = ThreadId::from_u128(parent.as_u128());
+-    let child_id = ThreadId::from_u128(child.as_u128());
+-    let mut row = codex_state::ThreadMetadataBuilder::new(
+-        parent_id,
+-        parent_path,
 +    let uuid = Uuid::new_v4();
 +    let id = ThreadId::from_string(&uuid.to_string()).unwrap();
 +    let path = write_session_file_with(
@@ -1183,20 +1591,40 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +    let mut stale = codex_state::ThreadMetadataBuilder::new(
 +        ThreadId::new(),
 +        stale_path,
-+        Utc::now(),
-+        SessionSource::Cli,
-+    )
-+    .build("test-provider");
+         Utc::now(),
+         SessionSource::Cli,
+     )
+     .build("test-provider");
+-    row.first_user_message = Some("searchable message".to_string());
+-    row.title = "matching title".to_string();
+-    state_db
+-        .upsert_thread(&row)
 +    stale.first_user_message = Some("needle".into());
 +    state_db.upsert_thread(&stale).await.unwrap();
 +    let page = store
 +        .search_threads(params.clone())
-+        .await
+         .await
+-        .expect("index only the parent");
 +        .expect("complete index can be searched");
 +    assert_eq!(page.items.len(), 1);
 +    assert_eq!(page.items[0].thread.thread_id, id);
 +    state_db.close().await;
-+    let store = LocalThreadStore::new(config, Some(state_db));
+     let store = LocalThreadStore::new(config, Some(state_db));
+-    let all = HashMap::from([
+-        (parent_id, None),
+-        (child_id, Some(parent_id)),
+-        (ThreadId::from_u128(standalone.as_u128()), None),
+-    ]);
+-    for (use_state_db_only, expected) in [
+-        (true, HashMap::from([(parent_id, None)])),
+-        (false, all.clone()),
+-        (true, all),
+-    ] {
+-        let page = store
+-            .list_threads(ListThreadsParams {
+-                use_state_db_only,
+-                ..inclusive_title_search()
+-            })
 +    let err = store
 +        .search_threads(params)
 +        .await
@@ -1267,7 +1695,14 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +                false,
 +                "needle",
 +            )
-+            .await
+             .await
+-            .expect("search titles");
+-        assert_eq!(
+-            page.items
+-                .into_iter()
+-                .map(|t| (t.thread_id, t.attached_to_thread_id))
+-                .collect::<HashMap<_, _>>(),
+-            expected
 +        });
 +        match change {
 +            "path" => metadata.rollout_path = replacement,
@@ -1295,7 +1730,7 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +        assert!(
 +            result.is_none(),
 +            "stale {change} metadata must not be searched"
-+        );
+         );
 +        #[cfg(target_os = "linux")]
 +        {
 +            use std::io::Read;
@@ -1372,6 +1807,8 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +                loop {
 +                    let page = store
 +                        .search_threads(SearchThreadsParams {
++                            include_attached_threads: false,
++                            account: None,
 +                            page_size: 1,
 +                            cursor,
 +                            sort_key,
@@ -1406,5 +1843,81 @@ index 959882e24384471cafaac4b9b8c095366d3d847e..36f4423cc0c54ed582dc124e84fe38f0
 +                );
 +            }
 +        }
+     }
+ }
+diff --git a/codex-rs/thread-store/src/local_history_account.rs b/codex-rs/thread-store/src/local_history_account.rs
+index 0413f4f4695f59fc2ff3740522500d1db051f041..226496e6c17d44ffe6df9d3faab7408f74ad6be7 100644
+--- a/codex-rs/thread-store/src/local_history_account.rs
++++ b/codex-rs/thread-store/src/local_history_account.rs
+@@ -25,11 +25,56 @@ impl LocalHistoryAccount {
+         rollout_path: Option<&Path>,
+         page_thread_ids: &[ThreadId],
+         original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
++    ) -> bool {
++        self.includes_with_path_policy(
++            codex_home,
++            thread_id,
++            rollout_path,
++            page_thread_ids,
++            original_paths,
++            false,
++        )
++        .await
 +    }
-+}
++
++    /// Checks the selected physical rollout without substituting a sibling representation.
++    pub(crate) async fn includes_exact(
++        &self,
++        codex_home: &Path,
++        thread_id: ThreadId,
++        rollout_path: Option<&Path>,
++        page_thread_ids: &[ThreadId],
++        original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
++    ) -> bool {
++        self.includes_with_path_policy(
++            codex_home,
++            thread_id,
++            rollout_path,
++            page_thread_ids,
++            original_paths,
++            true,
++        )
++        .await
++    }
++
++    async fn includes_with_path_policy(
++        &self,
++        codex_home: &Path,
++        thread_id: ThreadId,
++        rollout_path: Option<&Path>,
++        page_thread_ids: &[ThreadId],
++        original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
++        exact: bool,
+     ) -> bool {
+         let Some(path) = rollout_path else {
+             return false;
+         };
+-        let Ok(header) = codex_rollout::read_session_meta_line(path).await else {
++        let header = if exact {
++            codex_rollout::read_session_meta_line_exact(path).await
++        } else {
++            codex_rollout::read_session_meta_line(path).await
++        };
++        let Ok(header) = header else {
+             return false;
+         };
+         let mut meta = header.meta;
+@@ -53,7 +98,12 @@ impl LocalHistoryAccount {
+             else {
+                 return false;
+             };
+-            let Ok(header) = codex_rollout::read_session_meta_line(original).await else {
++            let header = if exact {
++                codex_rollout::read_session_meta_line_exact(original).await
++            } else {
++                codex_rollout::read_session_meta_line(original).await
++            };
++            let Ok(header) = header else {
+                 return false;
+             };
+             meta = header.meta;

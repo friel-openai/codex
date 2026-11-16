@@ -178,10 +178,10 @@ index 0381e8486e45dc7c7bce048f5cc202dfd713b847..bd15de01c087cbe139b43faf64982877
      responses_server.abort();
      Ok(())
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index b9029553bfe574e615f9cd22a0d3b737dbe7b4f8..6b7ba4f7331158be8e04da17954d826e82f9b294 100644
+index 0cedde86cf2db1577721e055bf363db81ac02c3b..adf589a368434c6c53b66b337c6d5a04666db830 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -605,6 +605,10 @@ pub struct AutoReviewToml {
+@@ -600,6 +600,10 @@ pub struct AutoReviewToml {
      /// Maximum estimated tokens per Guardian history-tool response, before the standard
      /// serialization allowance. Defaults to 4,000; stricter parent tool limits still apply.
      pub conversation_history_max_output_tokens: Option<NonZeroUsize>,
@@ -193,10 +193,10 @@ index b9029553bfe574e615f9cd22a0d3b737dbe7b4f8..6b7ba4f7331158be8e04da17954d826e
 
  #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 776cabe7bcb5d09f7193546afa95c50b82d3b68d..6fa8bb090aecd2f42ae67877abce8cd7b6f2c88f 100644
+index d8315fb96bc6017ca5709256ad42ff9a9301e50d..71da9dd06af62cfd6d754ebdae3dc284fd7866b0 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -459,6 +459,11 @@
+@@ -451,6 +451,11 @@
            "format": "uint32",
            "minimum": 0.0,
            "type": "integer"
@@ -209,20 +209,22 @@ index 776cabe7bcb5d09f7193546afa95c50b82d3b68d..6fa8bb090aecd2f42ae67877abce8cd7
        },
        "type": "object"
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 597b7622127401256a57c4c1128a92eb5976ffd4..a918e72241c73daab7c329711d86f4b9d448cb3c 100644
+index 7d00bb541af5487842480fbe73ad088b765d4535..4fc5a0653eed5766e732a93b66888fe7b2562dbd 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -8887,6 +8887,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
+@@ -8893,6 +8893,9 @@ fn config_toml_deserializes_auto_review_policy() {
+         r#"
+ [auto_review]
  policy = "Use the user-configured guardian policy."
- extra_policy = "Use the user-configured additional policy."
- experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
++extra_policy = "Use the user-configured additional policy."
++experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
 +use_ultrafast = true
  "#,
      )
      .expect("TOML deserialization should succeed");
-@@ -8904,6 +8905,51 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
-             Some("Configured template: {{ tenant_policy_config }}"),
-         )
+@@ -8902,6 +8905,51 @@ policy = "Use the user-configured guardian policy."
+         auto_review.policy.as_deref(),
+         Some("Use the user-configured guardian policy.")
      );
 +    assert!(
 +        cfg.auto_review
@@ -272,31 +274,26 @@ index 597b7622127401256a57c4c1128a92eb5976ffd4..a918e72241c73daab7c329711d86f4b9
  }
 
  #[test_case::test_case("", codex_protocol::TranscriptFormat::Line; "default_line")]
-@@ -8929,6 +8975,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
-             ),
-             experimental_conversation_history_prompt: None,
-             conversation_history_max_output_tokens: None,
-+            use_ultrafast: false,
+@@ -8919,6 +8967,10 @@ async fn load_config_uses_auto_review_guardian_policy_config(
+         features: Some(toml::from_str(features).unwrap()),
+         auto_review: Some(AutoReviewToml {
+             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
++            extra_policy: Some("  Use the user-configured additional policy.  ".to_string()),
++            experimental_policy_template: Some(
++                "  Configured template: {{ tenant_policy_config }}  ".to_string(),
++            ),
+             ..Default::default()
          }),
          ..Default::default()
-     };
-@@ -8997,6 +9044,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
-                 experimental_policy_template: None,
-                 experimental_conversation_history_prompt: None,
-                 conversation_history_max_output_tokens: None,
-+                use_ultrafast: false,
+@@ -9026,6 +9078,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
+         let cfg = ConfigToml {
+             auto_review: Some(AutoReviewToml {
+                 policy: Some("Use the user-configured guardian policy.".to_string()),
++                extra_policy: Some("Use the user-configured additional policy.".to_string()),
+                 ..Default::default()
              }),
              ..Default::default()
-         };
-@@ -9039,6 +9087,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
-             experimental_policy_template: None,
-             experimental_conversation_history_prompt: Some(String::new()),
-             conversation_history_max_output_tokens: None,
-+            use_ultrafast: false,
-         }),
-         ..Default::default()
-     };
-@@ -10470,6 +10519,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
+@@ -10514,6 +10567,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
              }),
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -305,10 +302,10 @@ index 597b7622127401256a57c4c1128a92eb5976ffd4..a918e72241c73daab7c329711d86f4b9
      );
      Ok(())
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d19900f4dc88 100644
+index c95bac785232859277a4cece23c9cdad6a29f5b5..c99f945f9453f5361534297fd447d9932dda47dc 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -751,6 +751,9 @@ pub struct Config {
+@@ -779,6 +779,9 @@ pub struct Config {
      /// Overall Guardian review budget. None means unlimited; cancellation still applies.
      pub guardian_review_timeout: Option<Duration>,
 
@@ -318,7 +315,7 @@ index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d199
      /// Whether to inject the `<permissions instructions>` developer block.
      pub include_permissions_instructions: bool,
 
-@@ -3443,6 +3446,7 @@ pub(crate) fn resolve_custom_models(
+@@ -3450,6 +3453,7 @@ pub(crate) fn resolve_custom_models(
                  routing_profile,
                  model_context_window: custom_model.model_context_window,
                  model_auto_compact_token_limit: custom_model.model_auto_compact_token_limit,
@@ -326,7 +323,7 @@ index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d199
              },
          );
      }
-@@ -4478,6 +4482,10 @@ impl Config {
+@@ -4509,6 +4513,10 @@ impl Config {
              .auto_review
              .as_ref()
              .and_then(|auto_review| auto_review.conversation_history_max_output_tokens);
@@ -337,7 +334,7 @@ index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d199
          let personality = personality.or(cfg.personality);
 
          let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
-@@ -4858,6 +4866,7 @@ impl Config {
+@@ -4894,6 +4902,7 @@ impl Config {
                  .as_ref()
                  .and_then(|auto_review| auto_review.circuit_break_action)
                  .unwrap_or_default(),
@@ -346,7 +343,7 @@ index c1a8360a131cb8e9b8541f6bfe0c6c34da25f100..1163ec3de5abbab5265d40407884d199
              plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
              model_reasoning_summary: cfg.model_reasoning_summary,
 diff --git a/codex-rs/core/src/config/runtime_refresh.rs b/codex-rs/core/src/config/runtime_refresh.rs
-index b2bf4243dde72e15d82204ae9ef835a2850d939c..1fa3206ad32a3f6eaa92f4c7b5ed7b77449aa5a9 100644
+index 835ad923fd944885a65292c7bd1607fcc805a6fb..464c5e1635e66f3567b51d13a21c3dfbf2f7f2b8 100644
 --- a/codex-rs/core/src/config/runtime_refresh.rs
 +++ b/codex-rs/core/src/config/runtime_refresh.rs
 @@ -8,6 +8,7 @@ use crate::config::constrain_mcp_servers;
@@ -357,7 +354,7 @@ index b2bf4243dde72e15d82204ae9ef835a2850d939c..1fa3206ad32a3f6eaa92f4c7b5ed7b77
  use codex_features::Feature;
  use codex_features::FeatureConfigSource;
  use codex_features::FeatureOverrides;
-@@ -69,8 +70,19 @@ impl Config {
+@@ -73,8 +74,19 @@ impl Config {
          }
          // User refreshes retain the session's managed configuration.
          layers.ensure_config_server_applied()?;
@@ -379,7 +376,7 @@ index b2bf4243dde72e15d82204ae9ef835a2850d939c..1fa3206ad32a3f6eaa92f4c7b5ed7b77
              .try_into()
              .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
          let mut configured_features = Features::from_sources(
-@@ -196,6 +208,7 @@ impl Config {
+@@ -211,6 +223,7 @@ impl Config {
          if !matches!(scope, RuntimeConfigRefresh::Mcp) {
              config.tool_suggest = resolve_tool_suggest_config_from_layer_stack(&layers);
              config.custom_models = incoming.custom_models.clone();
@@ -388,7 +385,7 @@ index b2bf4243dde72e15d82204ae9ef835a2850d939c..1fa3206ad32a3f6eaa92f4c7b5ed7b77
          config.config_layer_stack = layers
              .with_mcp_ema_cancellation(self.config_layer_stack.mcp_ema_cancellation().clone());
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index 4a15c75294c57fcbd862daa92b105107315100dc..01b5ff10f709f2af5abfa6a66a9f3c9da1497e90 100644
+index 78690d99a9c419ad34f65f4c37a98593af6891b8..a457409ca6c69eb54833e668ef853c65dfafbb3d 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
 @@ -19,7 +19,11 @@ use codex_guardian_reviewer::ReviewModel;
@@ -452,10 +449,10 @@ index 4a15c75294c57fcbd862daa92b105107315100dc..01b5ff10f709f2af5abfa6a66a9f3c9d
          spawn_config.model_auto_compact_token_limit = None;
      }
 diff --git a/codex-rs/core/src/guardian/review_session.rs b/codex-rs/core/src/guardian/review_session.rs
-index 250a5dbcce24c1bd0b6dcbddb7f4dfe5656cf8fd..ad1f8e41cf748149716338695e7606b0f13f1a52 100644
+index c72fd9447dd556356966de987e0818a07fa68427..b2f695534c5d7d6d146245a470a623878a6e06c6 100644
 --- a/codex-rs/core/src/guardian/review_session.rs
 +++ b/codex-rs/core/src/guardian/review_session.rs
-@@ -574,7 +574,12 @@ async fn run_review_on_session(
+@@ -586,7 +586,12 @@ async fn run_review_on_session(
          permission_profile: params.spawn_config.permissions.permission_profile().clone(),
          reasoning_summary: params.reasoning_summary,
          personality: params.personality,
@@ -467,13 +464,13 @@ index 250a5dbcce24c1bd0b6dcbddb7f4dfe5656cf8fd..ad1f8e41cf748149716338695e7606b0
 +            .clone()
 +            .unwrap_or_else(|| review_model.model.clone()),
          reasoning_effort: review_model.reasoning_effort.clone(),
-         cyber_access_program: parent_turn.cyber_access_program,
-         parent_response_id: params
+         cyber_access_program: parent_turn.cyber_access_program.filter(|_| {
+             crate::RequiredCyberAccessPrograms::for_thread(
 diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
-index 5b08a15b2a25c124e27f4944472ca554d0509a9a..857f98fe9781e265b871c07b61d525b5adb3d754 100644
+index 12e208833659962cdea1058c2e54b0f386e5d584..301c4cc8ad0443b8488912f78cda12d0aa9178c8 100644
 --- a/codex-rs/core/src/guardian/review_session_tests.rs
 +++ b/codex-rs/core/src/guardian/review_session_tests.rs
-@@ -681,8 +681,10 @@ async fn guardian_review_session_config_resolves_policy_and_template(
+@@ -683,8 +683,10 @@ async fn guardian_review_session_config_resolves_policy_and_template(
      );
  }
 
@@ -485,7 +482,7 @@ index 5b08a15b2a25c124e27f4944472ca554d0509a9a..857f98fe9781e265b871c07b61d525b5
      let (review_session, tx_event, rx_sub) = test_review_session().await;
      {
          let mut state = review_session.state.lock().await;
-@@ -693,7 +695,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -695,7 +697,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
                  transcript_entry_count: 0,
              });
      }
@@ -497,7 +494,7 @@ index 5b08a15b2a25c124e27f4944472ca554d0509a9a..857f98fe9781e265b871c07b61d525b5
 
      tokio::time::pause();
 
-@@ -710,9 +715,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+@@ -712,9 +717,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
      });
      let submission = rx_sub.recv().await.expect("guardian submission");
      let id = submission.id;
@@ -517,53 +514,50 @@ index 5b08a15b2a25c124e27f4944472ca554d0509a9a..857f98fe9781e265b871c07b61d525b5
      reply
          .send(Ok(TurnInputSubmission::Started {
              root_turn_id: id.clone(),
-@@ -737,6 +751,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
-         panic!("expected submitted turn completion");
-     };
-     assert_eq!(last_agent_message.as_deref(), Some("fresh"));
+@@ -742,6 +756,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+         last_agent_message.as_ref().map(GuardianReviewResponse::raw),
+         Some("fresh")
+     );
 +    assert_eq!(analytics_result.guardian_model, Some(concrete_model));
      assert_eq!(analytics_result.time_to_first_token_ms, Some(42));
      assert_eq!(disposition, SessionDisposition::Reusable);
  }
 diff --git a/codex-rs/core/src/guardian/reviewer_config.rs b/codex-rs/core/src/guardian/reviewer_config.rs
-index 66a5ed5f4a3485e02d8cde4b1be0bf4b58af5d53..d57fccd964511af5e8b72a020f81bcd1e6b47b81 100644
+index da44324df323b4d16dc9bfec7c026d277680d5b9..cd1ee8be995df4d2922f67fb67f5139a1d0d91b0 100644
 --- a/codex-rs/core/src/guardian/reviewer_config.rs
 +++ b/codex-rs/core/src/guardian/reviewer_config.rs
-@@ -140,7 +140,8 @@ async fn resolve_review_model_from_catalog(
-         catalog
-             .into_iter()
-             .filter(|entry| {
--                context.model_info.auto_review_model_override.is_some()
-+                turn.config.auto_review_use_ultrafast
-+                    || context.model_info.auto_review_model_override.is_some()
-                     || matches!(
-                         entry.origin,
-                         codex_models_manager::ModelOrigin::Provider
-@@ -151,8 +152,18 @@ async fn resolve_review_model_from_catalog(
-             .collect(),
-     );
-     let default_review_model_id = turn.provider.approval_review_preferred_model();
-+    // Resolve policy and telemetry against the concrete reviewer. Its execution alias is installed
-+    // only after model selection, so prewarming and live review resolve the same catalog entry.
-+    let parent_model_with_review_override = turn.config.auto_review_use_ultrafast.then(|| {
-+        let mut model = context.model_info.as_ref().clone();
+@@ -207,15 +207,24 @@ async fn resolve_catalog_review_model(
+         .is_some_and(AuthManager::current_auth_uses_codex_backend);
+     catalog.retain(|entry| {
+         (uses_codex_backend || entry.supported_in_api)
+-            && (parent_model.auto_review_model_override.is_some()
++            && (config.auto_review_use_ultrafast
++                || parent_model.auto_review_model_override.is_some()
+                 || matches!(
+                     entry.origin,
+                     codex_models_manager::ModelOrigin::Provider
+                         | codex_models_manager::ModelOrigin::ExplicitConfig
+                 ))
+     });
++    let parent_model_with_review_override = config.auto_review_use_ultrafast.then(|| {
++        let mut model = parent_model.clone();
 +        model.auto_review_model_override =
 +            Some(super::review::ULTRAFAST_AUTO_REVIEW_MODEL.to_owned());
 +        model
 +    });
-     let review_model = codex_guardian_reviewer::select_review_model(
--        &context.model_info,
+     let (review_model, reviewer) = codex_guardian_reviewer::select_review_model(
+-        parent_model,
 +        parent_model_with_review_override
 +            .as_ref()
-+            .unwrap_or(context.model_info.as_ref()),
-         context.reasoning_effort.as_ref(),
++            .unwrap_or(parent_model),
+         reasoning_effort,
          default_review_model_id,
-         &available_models,
+         catalog,
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e5eace024 100644
+index 18eefa252768708c4e7bd91298f564f65a7d0b91..8df80c6fa0be33bda58415e650d6cd9b52e74c3f 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
-@@ -23,6 +23,7 @@ use codex_config::NetworkDomainPermissionToml;
+@@ -21,6 +21,7 @@ use codex_config::NetworkDomainPermissionToml;
  use codex_config::NetworkDomainPermissionsToml;
  use codex_config::RequirementSource;
  use codex_config::Sourced;
@@ -571,7 +565,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
  use codex_config::config_toml::ConfigToml;
  use codex_config::types::McpServerConfig;
  use codex_exec_server::LOCAL_FS;
-@@ -81,6 +82,7 @@ use core_test_support::responses::mount_sse_once;
+@@ -80,6 +81,7 @@ use core_test_support::responses::mount_sse_once;
  use core_test_support::responses::mount_sse_sequence;
  use core_test_support::responses::sse;
  use core_test_support::responses::sse_failed;
@@ -579,7 +573,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
  use core_test_support::responses::start_mock_server;
  use core_test_support::skip_if_no_network;
  use core_test_support::streaming_sse::StreamingSseChunk;
-@@ -283,11 +285,30 @@ fn guardian_mcp_request(server: &str, tool_name: &str) -> GuardianApprovalReques
+@@ -282,11 +284,30 @@ fn guardian_mcp_request(server: &str, tool_name: &str) -> GuardianApprovalReques
 
  async fn guardian_test_session_and_turn_with_base_url(
      base_url: &str,
@@ -610,7 +604,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
      let config = Arc::new(config);
      let models_manager = test_support::models_manager_with_provider(
          config.codex_home.to_path_buf(),
-@@ -2148,6 +2169,225 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
+@@ -1588,6 +1609,225 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
      Ok(())
  }
 
@@ -836,16 +830,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata()
  -> anyhow::Result<()> {
-@@ -3557,7 +3797,7 @@ async fn guardian_review_routes_required_actions(
- #[tokio::test]
- async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
- {
--    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
-+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
-
-     let handle = std::thread::Builder::new()
-         .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-@@ -3638,7 +3878,9 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
+@@ -3077,7 +3317,9 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
          ])
          .await;
 
@@ -856,7 +841,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
          // Isolate feedback from other tests using the fixed parent session ID.
          Arc::get_mut(&mut session)
              .expect("session should be uniquely owned")
-@@ -3989,6 +4231,195 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
+@@ -3428,6 +3670,195 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
      );
  }
 
@@ -1052,7 +1037,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
  #[tokio::test]
  async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
      let server = start_mock_server().await;
-@@ -4079,6 +4510,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
+@@ -3518,6 +3949,8 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
  async fn guardian_review_session_config_isolates_parent_customizations() {
      let defaults = ResolvedModelMessages::bundled().auto_review();
      let mut parent_config = test_config().await;
@@ -1061,7 +1046,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
      let server: McpServerConfig =
          toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
      parent_config
-@@ -4090,6 +4523,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3529,6 +3962,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
          Feature::Plugins,
          Feature::GuardianV2,
          Feature::CodexHooks,
@@ -1071,7 +1056,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
      ];
      for feature in disabled_features {
          parent_config
-@@ -4101,6 +4537,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3540,6 +3976,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      parent_config.include_skill_instructions = true;
      parent_config.memories.use_memories = true;
      parent_config.memories.dedicated_tools = true;
@@ -1086,7 +1071,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
      parent_config.developer_instructions =
          Some("parent or managed config should not replace guardian policy".to_string());
      parent_config.notify = Some(vec![
-@@ -4130,15 +4574,26 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3569,15 +4013,26 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      assert!(!guardian_config.include_skill_instructions);
      assert!(!guardian_config.memories.use_memories);
      assert!(!guardian_config.memories.dedicated_tools);
@@ -1114,18 +1099,9 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
                  defaults.policy_template,
                  guardian_output_contract_prompt(),
              )
-@@ -4225,13 +4680,22 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
-             guardian_policy_config: Some(
-                 "  Use the workspace-managed guardian policy.  ".to_string(),
-             ),
-+            guardian_extra_policy: Some(
-+                "  Use the workspace-managed additional policy.  ".to_string(),
-+            ),
-             ..Default::default()
-         },
-     )
+@@ -3650,7 +4105,13 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
      .expect("config layer stack");
-     let parent_config = Config::load_config_with_layer_stack(
+     let mut parent_config = Config::load_config_with_layer_stack(
          LOCAL_FS.as_ref(),
 -        ConfigToml::default(),
 +        ConfigToml {
@@ -1138,7 +1114,7 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
          ConfigOverrides {
              cwd: Some(workspace.path().to_path_buf()),
              ..Default::default()
-@@ -4254,13 +4718,17 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+@@ -3683,6 +4144,10 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
      .expect("guardian config");
 
      assert_eq!(guardian_config.developer_instructions, None);
@@ -1149,14 +1125,6 @@ index 60f252c4dd9e533aeb98585535a7ecc7283e7fe9..7a78f56499897b9df6bddf6c3ded222e
      assert_eq!(
          guardian_config.base_instructions,
          Some(
-             GuardianPolicyInstructions::new(
-                 TranscriptFormat::Line,
-                 "Use the workspace-managed guardian policy.",
--                "",
-+                "Use the workspace-managed additional policy.",
-                 ResolvedModelMessages::bundled()
-                     .auto_review()
-                     .policy_template,
 diff --git a/codex-rs/core/src/session/config_refresh_tests.rs b/codex-rs/core/src/session/config_refresh_tests.rs
 index b584558364563bdfdbd56f682e3ba9c7c1df5879..ea4b9a890505bbda7edd97aad414446f292a4285 100644
 --- a/codex-rs/core/src/session/config_refresh_tests.rs
@@ -1272,7 +1240,7 @@ index 685fbe962079e72337a520f5035c18e6d70874a1..9880fc5dc5db275c03a214344e1cc3dc
      )]);
 
 diff --git a/codex-rs/core/src/session/model_routing.rs b/codex-rs/core/src/session/model_routing.rs
-index 2183cdb5eb483c89c668d31768bbd29e0059aa51..dadf5ccae718a73dd11b63bc5029ba4fe780a5a5 100644
+index 3457d229cb91cc1844633c7adfa0cda120071066..52387910e37ed910a5f4eded00db9411e6f2162a 100644
 --- a/codex-rs/core/src/session/model_routing.rs
 +++ b/codex-rs/core/src/session/model_routing.rs
 @@ -18,6 +18,7 @@ use tracing::info;
@@ -1329,7 +1297,7 @@ index 2183cdb5eb483c89c668d31768bbd29e0059aa51..dadf5ccae718a73dd11b63bc5029ba4f
                  return Some(ModelRoutingSelection {
                      context,
                      last_success: previous_success,
-@@ -180,23 +189,32 @@ impl Session {
+@@ -180,30 +189,32 @@ impl Session {
 
      pub(super) async fn record_model_routing_failure(
          &self,
@@ -1345,17 +1313,20 @@ index 2183cdb5eb483c89c668d31768bbd29e0059aa51..dadf5ccae718a73dd11b63bc5029ba4f
 +        // clock read cannot shorten the server deadline. Never restart its original delay.
 +        let server_retry_delay = failure.retry_after.map(RetryAfter::remaining_delay);
          let now = self.model_routing_now().await;
+-        let retry_after_at = failure.retry_after.map(|retry_after| {
+-            chrono::Duration::from_std(retry_after.remaining_delay())
 +        let server_retry_at = server_retry_delay.map(|delay| {
 +            chrono::Duration::from_std(delay)
-+                .ok()
-+                .and_then(|delay| now.checked_add_signed(delay))
-+                .unwrap_or(DateTime::<Utc>::MAX_UTC)
-+        });
+                 .ok()
+                 .and_then(|delay| now.checked_add_signed(delay))
+                 .unwrap_or(DateTime::<Utc>::MAX_UTC)
+         });
+-        let minimum_retry_at = failure.minimum_retry_at.max(retry_after_at);
          self.state.lock().await.model_routing.record_failure(
              candidate,
              failure.class,
              now,
--            failure.minimum_retry_at,
+-            minimum_retry_at,
 +            failure.minimum_retry_at.max(server_retry_at),
          );
      }
@@ -1367,7 +1338,7 @@ index 2183cdb5eb483c89c668d31768bbd29e0059aa51..dadf5ccae718a73dd11b63bc5029ba4f
              return;
          };
          self.state
-@@ -265,6 +283,17 @@ impl Session {
+@@ -272,6 +283,17 @@ impl Session {
      }
  }
 
@@ -1386,10 +1357,10 @@ index 2183cdb5eb483c89c668d31768bbd29e0059aa51..dadf5ccae718a73dd11b63bc5029ba4f
      match error.details() {
          CodexErrorDetails::ServerOverloaded => Some(ModelRoutingFailure {
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5ba9670d30 100644
+index 71c72c706d493b59a02a9829b66b553e723c2aa4..b502aba691f003b54aec51faf33b0dc689a942c4 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -519,6 +519,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -524,6 +524,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
                  &turn.sub_id,
                  TurnSettingsUpdate {
                      summary: Some(ReasoningSummary::Detailed),
@@ -1397,7 +1368,7 @@ index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5b
                      ..Default::default()
                  }
              )
-@@ -556,6 +557,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -561,6 +562,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
          routed.initial_settings.selected().approval_policy,
          prepared.settings.selected().approval_policy
      );
@@ -1408,7 +1379,7 @@ index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5b
      assert!(
          session
              .try_replace_active_turn_context(&prepared, &routed)
-@@ -613,6 +618,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -618,6 +623,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
      assert_eq!(step.settings.model_info.slug, MODEL_B);
      assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
      assert_eq!(step.environments.all_selections(), environments);
@@ -1419,7 +1390,7 @@ index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5b
      assert_eq!(desired_step_settings(&session).await, future);
      finish.notify_one();
  }
-@@ -763,6 +772,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -768,6 +777,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          finish,
          ..
      } = activation_fixture(activation_models()).await;
@@ -1438,7 +1409,7 @@ index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5b
      let before_workspace = session
          .prepare_turn_context_replacement(&turn)
          .await
-@@ -794,6 +815,17 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -799,6 +820,17 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          refreshed.initial_settings.selected(),
          prepared.settings.selected()
      );
@@ -1456,7 +1427,7 @@ index bee65574b47d407d61d652d1d1c6468ccb3e9cbf..016f78e5f2308d94f31e7d3008860d5b
      assert_eq!(refreshed.model_info().slug, MODEL_A);
      assert_eq!(
          refreshed
-@@ -819,6 +851,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -824,6 +856,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
      finish.notify_one();
  }
 
@@ -1633,10 +1604,10 @@ index 54b8e69e70f3a76c95240deb6a431b705aa7bae1..44bcbd0c5972e14e5d02fb08e41b3e36
      );
      config.base_instructions = Some(configured_instructions.to_string());
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 49da61ab13ad6d0548963982301e3a68c91e1027..883da7aa9d6cce8d88f954303c174a87f355cfb0 100644
+index 6949b0a23dbbf614f992bfe36cd5e55e4ed1dc52..79bfefd5946420936b75ceeccb5103a2a24ac861 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -6546,6 +6546,7 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6458,6 +6458,7 @@ async fn turn_context_with_model_updates_model_fields() {
              Arc::clone(&settings.model_info),
              &codex_features::Features::with_defaults(),
          );
@@ -1644,7 +1615,7 @@ index 49da61ab13ad6d0548963982301e3a68c91e1027..883da7aa9d6cce8d88f954303c174a87
      });
      Arc::make_mut(&mut turn_context.config).service_tier =
          turn_context.initial_settings.service_tier.clone();
-@@ -6557,11 +6558,13 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6469,11 +6470,13 @@ async fn turn_context_with_model_updates_model_fields() {
          .collaboration_mode
          .settings
          .reasoning_effort = Some(ReasoningEffortConfig::High);
@@ -1660,7 +1631,7 @@ index 49da61ab13ad6d0548963982301e3a68c91e1027..883da7aa9d6cce8d88f954303c174a87
      turn_context.next_step_settings.store(Arc::clone(&current));
      let updated = turn_context
          .with_model("gpt-5.5".to_string(), &session.services.models_manager)
-@@ -6603,6 +6606,21 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -6515,6 +6518,21 @@ async fn turn_context_with_model_updates_model_fields() {
          &turn_context.next_step_settings.load_full()
      ));
      assert!(!Arc::ptr_eq(&captured, &updated.initial_settings));
@@ -1683,11 +1654,11 @@ index 49da61ab13ad6d0548963982301e3a68c91e1027..883da7aa9d6cce8d88f954303c174a87
          &updated.initial_settings,
          &updated.next_step_settings.load_full()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5616e23f1 100644
+index 4259f6c4b936c675267db02bbe120881f1471682..050c0ab2f421f47bda9e74a40b07992acfd30e0b 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -173,6 +173,19 @@ pub(crate) struct McpStartupRequirements {
-     required_plugins: HashSet<String>,
+@@ -213,6 +213,19 @@ async fn preserve_initial_input_during<T>(
+     Ok(result)
  }
 
 +#[cfg(test)]
@@ -1706,7 +1677,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
  /// Provider startup state for a regular turn.
  ///
  /// A cooling routing candidate defers provider session creation, startup prewarm consumption, and
-@@ -745,7 +758,7 @@ pub(crate) async fn run_turn(
+@@ -797,7 +810,7 @@ pub(crate) async fn run_turn(
                          sess.notify_model_routing_candidate_change(previous, &turn_context, reason)
                              .await;
                      }
@@ -1715,7 +1686,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                          .await;
                      initial_routing_change_pending = false;
                  }
-@@ -755,16 +768,30 @@ pub(crate) async fn run_turn(
+@@ -808,16 +821,30 @@ pub(crate) async fn run_turn(
                      refresh_turn_context,
                  } = sampling_request_output;
                  if refresh_turn_context {
@@ -1756,7 +1727,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                      let display_roots =
                          turn_diff_display_roots(refreshed_step_context.as_ref()).await;
                      turn_diff_tracker
-@@ -1093,7 +1120,7 @@ pub(crate) async fn run_turn(
+@@ -1149,7 +1176,7 @@ pub(crate) async fn run_turn(
              Err(failure) => {
                  let routing_failure = classify_model_routing_failure(&failure.error);
                  if let Some(routing_failure) = routing_failure.as_ref() {
@@ -1765,7 +1736,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                          .await;
                  }
                  if failure.reroute_safe
-@@ -1101,15 +1128,36 @@ pub(crate) async fn run_turn(
+@@ -1157,15 +1184,36 @@ pub(crate) async fn run_turn(
                      && let Some(profile_name) = turn_context.model_profile.clone()
                  {
                      let mut last_compaction_error = None;
@@ -1811,7 +1782,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                          if !sess
                              .wait_for_model_routing_retry(selection.retry_at, &cancellation_token)
                              .await
-@@ -1120,33 +1168,33 @@ pub(crate) async fn run_turn(
+@@ -1176,33 +1224,33 @@ pub(crate) async fn run_turn(
                          routed.model_routing_previous_candidate = None;
                          routed.model_routing_selection_reason = None;
                          let routed = Arc::new(routed);
@@ -1863,7 +1834,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                              &routed_step_context,
                              &mut client_session,
                          )
-@@ -1159,9 +1207,6 @@ pub(crate) async fn run_turn(
+@@ -1215,9 +1263,6 @@ pub(crate) async fn run_turn(
                                      CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                                  ) =>
                              {
@@ -1873,7 +1844,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                                  return Err(err);
                              }
                              Err(err) => {
-@@ -1169,20 +1214,14 @@ pub(crate) async fn run_turn(
+@@ -1225,20 +1270,14 @@ pub(crate) async fn run_turn(
                                      classify_model_routing_failure(&err)
                                  {
                                      sess.record_model_routing_failure(
@@ -1895,7 +1866,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                                  info!("Turn error during model reroute compaction: {err:#}");
                                  let error = err.to_codex_protocol_error();
                                  sess.emit_turn_error_lifecycle(
-@@ -1203,7 +1242,7 @@ pub(crate) async fn run_turn(
+@@ -1259,7 +1298,7 @@ pub(crate) async fn run_turn(
                              // segment and rebuilds from the compacted local history.
                              client_session.reset_for_model_reroute();
                              sess.notify_model_routing_change(
@@ -1904,7 +1875,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -1237,24 +1276,13 @@ pub(crate) async fn run_turn(
+@@ -1293,24 +1332,13 @@ pub(crate) async fn run_turn(
                          } else {
                              routed_step_context
                          };
@@ -1934,7 +1905,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -1283,9 +1311,6 @@ pub(crate) async fn run_turn(
+@@ -1339,9 +1367,6 @@ pub(crate) async fn run_turn(
                          continue 'turn;
                      }
                      if let Some(err) = last_compaction_error {
@@ -1944,7 +1915,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                          info!("Turn error during model reroute compaction: {err:#}");
                          let error = err.to_codex_protocol_error();
                          sess.emit_turn_error_lifecycle(
-@@ -1992,7 +2017,7 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -2082,7 +2107,7 @@ async fn maybe_run_previous_model_inline_compact(
  /// the task's previous-turn configuration.
  async fn maybe_run_model_reroute_inline_compact(
      sess: &Arc<Session>,
@@ -1953,7 +1924,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
      routed_step_context: &Arc<StepContext>,
      client_session: &mut ModelClientSession,
  ) -> CodexResult<bool> {
-@@ -2006,7 +2031,11 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -2096,7 +2121,11 @@ async fn maybe_run_model_reroute_inline_compact(
      }
      let routed_turn_context = &routed_step_context.turn;
      let reason = if comp_hash_changed(
@@ -1966,7 +1937,7 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
          routed_turn_context.model_info().comp_hash.as_deref(),
      ) {
          Some(CompactionReason::CompHashChanged)
-@@ -2031,10 +2060,12 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -2121,10 +2150,12 @@ async fn maybe_run_model_reroute_inline_compact(
                  .model_context_window()
                  .is_some_and(|context_window| active_context_tokens >= context_window),
          };
@@ -1983,10 +1954,10 @@ index 45c060953959bfacde7207fc9409b971ec5ac422..5a247d03bb54d204420549182bb76fc5
                  .is_some_and(|(previous, routed)| previous > routed);
          (routed_limit_reached && is_model_downshift).then_some(CompactionReason::ModelDownshift)
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafca919f40d 100644
+index 4b2d8a792b76396b8d3a40097254e1a2a2bf69cc..e856f578ed2682d6f213627139cd670f6b2e68bf 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -810,9 +810,20 @@ impl TurnContext {
+@@ -867,9 +867,20 @@ impl TurnContext {
          &self,
          model: String,
          models_manager: &SharedModelsManager,
@@ -2007,7 +1978,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
          let model_info = models_manager
              .get_model_info(model.as_str(), &config.to_models_manager_config())
              .await;
-@@ -821,7 +832,7 @@ impl TurnContext {
+@@ -878,7 +889,7 @@ impl TurnContext {
              .iter()
              .map(|preset| preset.effort.clone())
              .collect::<Vec<_>>();
@@ -2016,7 +1987,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
              if supported_reasoning_levels.contains(current_reasoning_effort) {
                  Some(current_reasoning_effort.clone())
              } else {
-@@ -845,17 +856,16 @@ impl TurnContext {
+@@ -902,17 +913,16 @@ impl TurnContext {
              )
              .await;
          let model_info = Arc::new(model_info);
@@ -2039,7 +2010,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
          let available_models = models_manager
-@@ -968,7 +978,7 @@ impl TurnContext {
+@@ -1030,7 +1040,7 @@ impl TurnContext {
          validation: RoutingCandidateValidation,
      ) -> Option<Self> {
          let mut routed = self
@@ -2048,7 +2019,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
              .await;
          let mut model_info = Arc::clone(&routed.initial_settings.model_info);
          if let Some(custom_model) = self.config.custom_models.get(model_profile) {
-@@ -1011,7 +1021,10 @@ impl TurnContext {
+@@ -1073,7 +1083,10 @@ impl TurnContext {
              {
                  return None;
              }
@@ -2060,7 +2031,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
                  Arc::make_mut(&mut model_info)
                      .service_tiers
                      .push(ModelServiceTier {
-@@ -1039,11 +1052,10 @@ impl TurnContext {
+@@ -1101,11 +1114,10 @@ impl TurnContext {
              /*developer_instructions*/ None,
          );
          selected.service_tier = service_tier;
@@ -2076,7 +2047,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
          config.service_tier = settings.service_tier.clone();
          routed.multi_agent_version =
              config.multi_agent_version_for_model(settings.model_info.multi_agent_version);
-@@ -1755,6 +1767,9 @@ impl Session {
+@@ -1879,6 +1891,9 @@ impl Session {
              .await;
          let mut refreshed = Arc::try_unwrap(refreshed)
              .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
@@ -2086,7 +2057,7 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
 
          crate::skills::preserve_implicit_skill_invocations(
              current.extension_data.as_ref(),
-@@ -1771,7 +1786,17 @@ impl Session {
+@@ -1895,7 +1910,17 @@ impl Session {
          if let (Some(profile_name), Some(candidate)) = (
              current.model_profile.as_deref(),
              current.model_routing_candidate.as_ref(),
@@ -2106,10 +2077,10 @@ index 3a3a778f6be69aa824ffb54cccae6d22ad4c8500..92d606b387679e97bc195d043e43aafc
                  .with_unchecked_routing_candidate(
                      profile_name,
 diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
-index 079a4cdb2163815870b32fea37f8d062e0ccd872..0f12feaec65c5ab8b1aef318f09e1ba467cb297f 100755
+index 3e3998e7909eb9335f59be617ca63b3ad63f09fd..97ae96d501e7c33e28d7e5a2881e4f88fc05f9e6 100755
 --- a/codex-rs/core/tests/suite/client_websockets.rs
 +++ b/codex-rs/core/tests/suite/client_websockets.rs
-@@ -126,6 +126,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
+@@ -133,6 +133,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
              }),
              model_context_window: None,
              model_auto_compact_token_limit: None,
@@ -2118,7 +2089,7 @@ index 079a4cdb2163815870b32fea37f8d062e0ccd872..0f12feaec65c5ab8b1aef318f09e1ba4
      )]);
      let mut primary_model = model_info_from_slug(ROUTED_WEBSOCKET_PRIMARY);
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index 27d1a71f8188b067944cfb6b6463136662210dec..9770663b909306643cc8648f5155e956097a832f 100644
+index ab5a20bfcc1725fd1dc01fe73a3a0508b44d9e65..1e8081a665966aa043a26a6820fae49a6c304832 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -92,6 +92,10 @@ async fn guardian_history_survives_restart_and_user_fork(
@@ -2169,10 +2140,10 @@ index 0661010e378dc09fa597ceb160ffc4017762db4c..489e2866e6f71e8298cf964f475f9bd3
      )])
  }
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
-index c5a9c627ff558d1565efed9e1eb430e1f7a56bb3..39937af11be526394b6cd5b556444b7dabfbfb51 100644
+index 3435be6c1320e19afb52fb21c837823db09b9b0d..fc2c620b998e483943cd72c515353316ab00b60a 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
 +++ b/codex-rs/core/tests/suite/model_switching.rs
-@@ -842,6 +842,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
+@@ -843,6 +843,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
              routing_profile: None,
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -2287,7 +2258,7 @@ index ea081bade889fd848cb3214e4e4f4acc6cebc3f4..96e6bec1d835ea60f74ab3611888a1d6
          Feature::GuardianV2,
          Feature::TokenBudget,
 diff --git a/codex-rs/model-provider/src/gcp/gcp_tests.rs b/codex-rs/model-provider/src/gcp/gcp_tests.rs
-index d0ff4772d69b411fb469e067ebab21d8eb15b57b..836d699af8ab14397044a8b63db96415de44a8d8 100644
+index 172add8c1b96723e050cab498a2afef7889bb606..db68c2ea951c7772fa7f2d19897f2fed98455e4b 100644
 --- a/codex-rs/model-provider/src/gcp/gcp_tests.rs
 +++ b/codex-rs/model-provider/src/gcp/gcp_tests.rs
 @@ -1,4 +1,8 @@
@@ -2299,7 +2270,7 @@ index d0ff4772d69b411fb469e067ebab21d8eb15b57b..836d699af8ab14397044a8b63db96415
  use codex_protocol::config_types::ModelProviderAuthInfo;
  use codex_protocol::openai_models::ApplyPatchToolType;
  use codex_protocol::openai_models::ModelOrigin;
-@@ -323,6 +327,7 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
+@@ -325,6 +329,7 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
                  routing_profile: None,
                  model_context_window: None,
                  model_auto_compact_token_limit: None,
@@ -2307,7 +2278,7 @@ index d0ff4772d69b411fb469e067ebab21d8eb15b57b..836d699af8ab14397044a8b63db96415
              },
          )]);
          let home = tempfile::tempdir().unwrap();
-@@ -365,6 +370,101 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
+@@ -367,6 +372,101 @@ async fn configured_vertex_models_filter_catalog_and_normalize_tool_metadata_wit
      }
  }
 
@@ -2422,30 +2393,1090 @@ index 48a7fec0fcd2914933a35b1abba92d9ce891a11b..aa974ad7762d65780b0463b00dd6766d
      )]);
      for _ in 0..2 {
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index 7bc878dd33442b1f5fea9be5b097686fdc2b20de..d676cf2c18527f9cb2d336ba8ac2b2e7e51aee67 100644
+index f04aebf42e7d2f0e81d6abd5d9d298c870f4d368..3733bb40a0f55d173ef887d6f10468859dbfb78a 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
-@@ -1653,6 +1653,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
-                 model_context_window: None,
-                 routing_profile: None,
-                 model_auto_compact_token_limit: None,
+@@ -776,6 +776,1075 @@ impl ModelProvider for ConfiguredModelProvider {
+     }
+ }
+
++#[cfg(test)]
++mod tests {
++    use std::future::Future;
++    use std::num::NonZeroU64;
++    use std::sync::atomic::AtomicUsize;
++    use std::sync::atomic::Ordering;
++    use std::task::Context;
++    use std::task::Waker;
++
++    use codex_http_client::HttpClientFactory;
++    use codex_http_client::OutboundProxyPolicy;
++    use codex_login::auth::AgentIdentityAuthPolicy;
++    use codex_login::auth::BedrockApiKeyAuth;
++    use codex_model_provider_info::AwsAuthRefreshConfig;
++    use codex_model_provider_info::AwsCredentialExportConfig;
++    use codex_model_provider_info::ModelProviderAwsAuthInfo;
++    use codex_model_provider_info::WireApi;
++    use codex_model_provider_info::create_oss_provider_with_base_url;
++    use codex_models_manager::ModelsManagerConfig;
++    use codex_models_manager::manager::RefreshStrategy;
++    use codex_protocol::account::PlanType;
++    use codex_protocol::config_types::ModelProviderAuthInfo;
++    use codex_protocol::openai_models::ModelInfo;
++    use codex_protocol::openai_models::ModelsResponse;
++    use codex_protocol::protocol::SessionSource;
++    use codex_utils_redacted_string::RedactedString;
++    use pretty_assertions::assert_eq;
++    use serde_json::json;
++    use wiremock::Mock;
++    use wiremock::MockServer;
++    use wiremock::ResponseTemplate;
++    use wiremock::matchers::header_regex;
++    use wiremock::matchers::method;
++    use wiremock::matchers::path;
++
++    use super::*;
++    use crate::auth::AgentIdentitySessionFallback;
++    use crate::shared_state::process_shared_state;
++
++    fn provider_info_with_command_auth() -> ModelProviderInfo {
++        ModelProviderInfo {
++            auth: Some(ModelProviderAuthInfo {
++                command: "print-token".to_string(),
++                args: Vec::new(),
++                timeout_ms: NonZeroU64::new(5_000).expect("timeout should be non-zero"),
++                refresh_interval_ms: 300_000,
++                cwd: std::env::current_dir()
++                    .expect("current dir should be available")
++                    .try_into()
++                    .expect("current dir should be absolute"),
++            }),
++            requires_openai_auth: false,
++            ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
++        }
++    }
++
++    fn test_codex_home() -> std::path::PathBuf {
++        std::env::temp_dir().join(format!("codex-model-provider-test-{}", std::process::id()))
++    }
++
++    fn provider_for(base_url: String) -> ModelProviderInfo {
++        ModelProviderInfo {
++            name: "mock".into(),
++            base_url: Some(base_url),
++            model_catalog_url: None,
++            env_key: None,
++            env_key_instructions: None,
++            experimental_bearer_token: None,
++            auth: None,
++            gateway_oauth: None,
++            aws: None,
++            wire_api: WireApi::Responses,
++            query_params: None,
++            http_headers: None,
++            env_http_headers: None,
++            request_max_retries: Some(0),
++            stream_max_retries: Some(0),
++            stream_idle_timeout_ms: Some(5_000),
++            websocket_connect_timeout_ms: None,
++            requires_openai_auth: false,
++            supports_websockets: false,
++            supports_standalone_web_search: false,
++            capabilities: None,
++            project_id: None,
++            location: None,
++            credential_file: None,
++            include_internal_metadata: false,
++        }
++    }
++
++    fn remote_model(slug: &str) -> ModelInfo {
++        serde_json::from_value(json!({
++            "slug": slug,
++            "display_name": slug,
++            "description": null,
++            "default_reasoning_level": "medium",
++            "supported_reasoning_levels": [],
++            "shell_type": "shell_command",
++            "visibility": "list",
++            "supported_in_api": true,
++            "priority": 0,
++            "upgrade": null,
++            "support_verbosity": false,
++            "default_verbosity": null,
++            "apply_patch_tool_type": null,
++            "truncation_policy": {"mode": "bytes", "limit": 10_000},
++            "supports_image_detail_original": false,
++            "context_window": 272_000,
++            "max_context_window": 272_000,
++            "experimental_supported_tools": [],
++        }))
++        .expect("valid model")
++    }
++
++    fn bedrock_api_key_auth() -> CodexAuth {
++        CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
++            api_key: "bedrock-api-key-test".to_string(),
++            region: "us-east-1".to_string(),
++        })
++    }
++
++    #[tokio::test]
++    async fn scoped_auth_ignores_scope_for_non_openai_provider() {
++        let provider = create_model_provider(
++            create_oss_provider_with_base_url("http://localhost:11434/v1", WireApi::Responses),
++            /*auth_manager*/ None,
++        );
++
++        let auth = provider
++            .api_auth_for_scope(ProviderAuthScope {
++                agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
++                session_source: SessionSource::Cli,
++                agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
++            })
++            .await
++            .expect("auth should resolve");
++
++        assert!(auth.auth.to_auth_headers().unwrap().is_empty());
++    }
++
++    #[test]
++    fn openai_provider_enables_remote_compaction() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider.capabilities(),
++            ProviderCapabilities {
++                remote_compaction: RemoteCompactionSupport::V2,
++                ..ProviderCapabilities::default()
++            }
++        );
++    }
++
++    #[test]
++    fn configured_provider_remote_compaction_matches_provider_support() {
++        let cases = [
++            (
++                ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++                RemoteCompactionSupport::V2,
++            ),
++            (
++                ModelProviderInfo {
++                    name: "Azure".to_string(),
++                    base_url: Some("https://example.com/openai".to_string()),
++                    ..ModelProviderInfo::default()
++                },
++                RemoteCompactionSupport::V2,
++            ),
++            (
++                ModelProviderInfo {
++                    name: "Custom".to_string(),
++                    base_url: Some("https://example.openai.azure.com/openai/v1".to_string()),
++                    ..ModelProviderInfo::default()
++                },
++                RemoteCompactionSupport::V2,
++            ),
++            (
++                provider_for("https://example.test/v1".to_string()),
++                RemoteCompactionSupport::Unsupported,
++            ),
++        ];
++
++        for (provider_info, expected) in cases {
++            let provider = create_model_provider(provider_info, /*auth_manager*/ None);
++            assert_eq!(provider.capabilities().remote_compaction, expected);
++        }
++    }
++
++    #[test]
++    fn configured_provider_uses_default_approval_review_preferred_model() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider.approval_review_preferred_model(),
++            DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
++        );
++    }
++
++    #[test]
++    fn configured_provider_uses_luna_for_approval_review_with_api_key_auth() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
++                "openai-api-key",
++            ))),
++        );
++
++        assert_eq!(provider.approval_review_preferred_model(), "gpt-5.6-luna");
++    }
++
++    #[test]
++    fn configured_provider_uses_default_approval_review_model_with_chatgpt_auth() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(AuthManager::from_auth_for_testing(
++                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++            )),
++        );
++
++        assert_eq!(
++            provider.approval_review_preferred_model(),
++            DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
++        );
++    }
++
++    struct RotatingAuth(AtomicUsize);
++
++    impl codex_login::ExternalAuth for RotatingAuth {
++        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
++            Box::pin(async move {
++                let key = if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
++                    "sk-proj-fedramp-synthetic-test-key"
++                } else {
++                    "commercial-key"
++                };
++                Ok(CodexAuth::from_api_key(key))
++            })
++        }
++
++        fn refresh(
++            &self,
++            _context: codex_login::ExternalAuthRefreshContext,
++        ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
++            self.resolve()
++        }
++    }
++
++    #[tokio::test]
++    async fn configured_provider_resolves_default_and_explicit_endpoints() {
++        let provider = create_model_provider(
++            provider_for("https://example.test/v1".to_string()),
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider
++                .runtime_base_url()
++                .await
++                .expect("runtime base URL should resolve"),
++            Some("https://example.test/v1".to_string())
++        );
++        assert_eq!(
++            provider.api_provider_and_auth().await.unwrap().0.base_url,
++            "https://example.test/v1"
++        );
++
++        let home = tempfile::tempdir().unwrap();
++        let auth = AuthManager::from_auth_for_testing_with_home(
++            CodexAuth::from_api_key("initial-key"),
++            home.path().to_path_buf(),
++        );
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(auth.clone()),
++        );
++        for (api_key, expected_base_url) in [
++            ("legacy-key", "https://api.openai.com/v1"),
++            (
++                "sk-proj-fedramp-synthetic-test-key",
++                "https://gov.api.openai.com/v1",
++            ),
++            ("commercial-key", "https://api.openai.com/v1"),
++        ] {
++            codex_login::login_with_api_key(
++                home.path(),
++                api_key,
++                codex_login::AuthCredentialsStoreMode::File,
++                codex_login::AuthKeyringBackendKind::default(),
++            )
++            .unwrap();
++            auth.reload().await;
++            let (api_provider, api_auth) = provider.api_provider_and_auth().await.unwrap();
++            assert_eq!(api_provider.base_url, expected_base_url);
++            let headers = api_auth.to_auth_headers().unwrap();
++            assert_eq!(
++                headers[http::header::AUTHORIZATION].to_str().unwrap(),
++                format!("Bearer {api_key}")
++            );
++        }
++        assert_eq!(provider.info().base_url, None);
++
++        let rotating_auth = Arc::new(RotatingAuth(AtomicUsize::new(0)));
++        auth.set_external_auth(rotating_auth.clone()).await.unwrap();
++        for (api_key, expected_base_url, expected_fedramp_header) in [
++            ("commercial-key", "https://api.openai.com/v1", None),
++            (
++                "sk-proj-fedramp-synthetic-test-key",
++                "https://gov.api.openai.com/v1",
++                Some("true"),
++            ),
++            ("commercial-key", "https://api.openai.com/v1", None),
++        ] {
++            let reads_before = rotating_auth.0.load(Ordering::SeqCst);
++            let (api_provider, api_auth) = provider.api_provider_and_auth().await.unwrap();
++            assert_eq!(rotating_auth.0.load(Ordering::SeqCst), reads_before + 1);
++            let headers = api_auth.to_auth_headers().unwrap();
++            let expected_authorization = format!("Bearer {api_key}");
++            assert_eq!(
++                (
++                    api_provider.base_url.as_str(),
++                    headers
++                        .get(http::header::AUTHORIZATION)
++                        .and_then(|value| value.to_str().ok()),
++                    headers
++                        .get("X-OpenAI-Fedramp")
++                        .and_then(|value| value.to_str().ok()),
++                ),
++                (
++                    expected_base_url,
++                    Some(expected_authorization.as_str()),
++                    expected_fedramp_header,
++                )
++            );
++        }
++    }
++
++    #[test]
++    fn create_model_provider_builds_command_auth_manager_without_base_manager() {
++        let provider = create_model_provider(
++            provider_info_with_command_auth(),
++            /*auth_manager*/ None,
++        );
++
++        let auth_manager = provider
++            .auth_manager()
++            .expect("command auth provider should have an auth manager");
++
++        assert!(auth_manager.has_external_auth());
++    }
++
++    #[test]
++    fn create_model_provider_does_not_use_openai_auth_manager_for_amazon_bedrock_provider() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
++                profile: Some("codex-bedrock".to_string()),
++                region: None,
++                credential_export: None,
++                auth_refresh: None,
++            })),
++            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
++                "openai-api-key",
++            ))),
++        );
++
++        assert!(provider.auth_manager().is_none());
++    }
++
++    #[tokio::test]
++    async fn shared_bedrock_auth_refresh_is_reused_only_for_matching_configuration() {
++        const TEST_NAME: &str = "provider::tests::shared_bedrock_auth_refresh_is_reused_only_for_matching_configuration";
++        const HELPER_ARG: &str = "CODEX_BEDROCK_SHARED_AUTH_REFRESH_COMMAND";
++        const SUBPROCESS_ARG: &str = "CODEX_BEDROCK_SHARED_AUTH_REFRESH_SUBPROCESS";
++        let arguments = std::env::args().collect::<Vec<_>>();
++        if let Some(index) = arguments.iter().position(|argument| argument == HELPER_ARG) {
++            let counter = &arguments[index + 2];
++            std::thread::sleep(std::time::Duration::from_millis(50));
++            let mut counter = std::fs::OpenOptions::new()
++                .create(true)
++                .append(true)
++                .open(counter)
++                .expect("refresh invocation counter should open");
++            std::io::Write::write_all(&mut counter, b"1").expect("write invocation counter");
++            return;
++        }
++
++        let counter = std::env::temp_dir().join(format!("bedrock-refresh-{}", std::process::id()));
++        if !arguments.iter().any(|argument| argument == SUBPROCESS_ARG) {
++            std::fs::create_dir(&counter).expect("AWS command directory should be created");
++            let executable = std::env::current_exe().expect("test executable should be available");
++            let aws = counter.join(format!("aws{}", std::env::consts::EXE_SUFFIX));
++            std::fs::hard_link(&executable, &aws)
++                .or_else(|_| codex_utils_cargo_bin::copy_executable(&executable, &aws))
++                .expect("test executable should be installed as aws");
++            let existing_path = std::env::var_os("PATH").unwrap_or_default();
++            let path = std::env::join_paths(
++                std::iter::once(counter.clone()).chain(std::env::split_paths(&existing_path)),
++            )
++            .expect("test executable PATH should be valid");
++            let output = tokio::process::Command::new(executable)
++                .args(["--exact", TEST_NAME, "--skip", SUBPROCESS_ARG])
++                .env("PATH", path)
++                .env_remove("AWS_ACCESS_KEY_ID")
++                .env_remove("AWS_SECRET_ACCESS_KEY")
++                .output()
++                .await
++                .expect("isolated AWS refresh test should run");
++            std::fs::remove_dir_all(&counter).expect("AWS command directory should be removed");
++            assert!(output.status.success(), "{output:?}");
++            return;
++        }
++        let _ = std::fs::remove_file(&counter);
++        let aws = ModelProviderAwsAuthInfo {
++            profile: Some("codex-bedrock".to_string()),
++            region: Some("us-west-2".to_string()),
++            credential_export: None,
++            auth_refresh: Some(AwsAuthRefreshConfig {
++                command: "aws".to_string(),
++                args: Vec::from(
++                    [
++                        "--exact",
++                        TEST_NAME,
++                        "--skip",
++                        HELPER_ARG,
++                        "--skip",
++                        counter.to_str().expect("counter path should be UTF-8"),
++                    ]
++                    .map(RedactedString::from),
++                ),
++                timeout_ms: NonZeroU64::new(10_000).expect("timeout should be non-zero"),
++            }),
++        };
++        let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(Some(aws.clone()));
++
++        let first = create_model_provider(
++            provider_info.clone(),
++            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
++                "openai-api-key",
++            ))),
++        );
++        let second = create_model_provider(provider_info.clone(), /*auth_manager*/ None);
++        let shared_state = process_shared_state();
++        let shared_recovery = shared_state
++            .aws_auth_recovery(&aws)
++            .expect("test provider should have refresh configured");
++        assert_eq!(Arc::strong_count(&shared_recovery), 3);
++        assert!(first.auth_manager().is_none() && second.auth_manager().is_none());
++
++        for provider in [&first, &second] {
++            for (status, body, recoverable) in [
++                (http::StatusCode::UNAUTHORIZED, "ExpiredToken", true),
++                (http::StatusCode::FORBIDDEN, "InvalidClientTokenId", true),
++                (http::StatusCode::FORBIDDEN, "AccessDeniedException", false),
++            ] {
++                let error = TransportError::Http {
++                    retry_after: None,
++                    status,
++                    url: None,
++                    headers: None,
++                    body: Some(body.to_string()),
++                };
++                assert_eq!(provider.is_recoverable_auth_error(&error), recoverable);
++            }
++        }
++
++        let mut invalid_aws = aws.clone();
++        invalid_aws.auth_refresh.as_mut().expect("refresh").command = "not-aws".into();
++        let invalid_provider = create_model_provider(
++            ModelProviderInfo::create_amazon_bedrock_provider(Some(invalid_aws)),
++            /*auth_manager*/ None,
++        );
++        let error = invalid_provider
++            .recover_from_unauthorized()
++            .await
++            .expect_err("non-aws command should be rejected");
++        assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
++        assert_eq!(error.to_string(), "AWS auth refresh command must be `aws`");
++
++        let (first_result, second_result) = tokio::join!(
++            first.recover_from_unauthorized(),
++            second.recover_from_unauthorized()
++        );
++        assert_eq!(
++            [first_result, second_result].map(|result| result.expect("provider should recover")),
++            [ProviderUnauthorizedRecovery::Recovered; 2]
++        );
++        let read_counter = || std::fs::read_to_string(&counter).expect("read counter");
++        assert_eq!(read_counter(), "1");
++
++        assert_eq!(
++            first
++                .recover_from_unauthorized()
++                .await
++                .expect("later generation should recover"),
++            ProviderUnauthorizedRecovery::Recovered
++        );
++        assert_eq!(read_counter(), "11");
++
++        let fixture = tempfile::tempdir().expect("export fixture should be created");
++        let export_counter = fixture.path().join("exports");
++        let export_gate = fixture.path().join("release");
++        #[cfg(unix)]
++        let (command, mut args) = (
++            "sh".to_string(),
++            vec![
++                "-c".to_string(),
++                r#"printf '1\n' >> "$1"
++while [ ! -e "$2" ]; do :; done
++printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
++"#
++                .to_string(),
++                "export-credentials".to_string(),
++            ],
++        );
++        #[cfg(windows)]
++        let (command, mut args) = {
++            let script = fixture.path().join("export.cmd");
++            std::fs::write(
++                &script,
++                concat!(
++                    "@echo off\r\n>> \"%~1\" echo 1\r\n",
++                    ":wait\r\nif not exist \"%~2\" goto wait\r\n",
++                    "echo {\"AccessKeyId\":\"exported\",\"SecretAccessKey\":\"secret\"}\r\n",
++                ),
++            )
++            .expect("export script should be written");
++            (
++                "cmd.exe".to_string(),
++                vec![
++                    "/D".to_string(),
++                    "/Q".to_string(),
++                    "/C".to_string(),
++                    script.to_string_lossy().into_owned(),
++                ],
++            )
++        };
++        args.extend(
++            [&export_counter, &export_gate].map(|path| path.to_string_lossy().into_owned()),
++        );
++        let provider_info =
++            ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
++                profile: None,
++                credential_export: Some(AwsCredentialExportConfig {
++                    command,
++                    args: args.into_iter().map(RedactedString::from).collect(),
++                    timeout_ms: NonZeroU64::new(5_000).expect("timeout should be non-zero"),
++                }),
++                ..aws.clone()
++            }));
++        let first_export = create_model_provider(provider_info.clone(), /*auth_manager*/ None);
++        let second_export = create_model_provider(provider_info, /*auth_manager*/ None);
++        let first_refresh = first_export.recover_from_unauthorized();
++        let second_refresh = second_export.recover_from_unauthorized();
++        tokio::pin!(first_refresh, second_refresh);
++        tokio::time::timeout(std::time::Duration::from_secs(10), async {
++            tokio::select! {
++                result = &mut first_refresh => panic!("export should wait for its gate: {result:?}"),
++                () = async {
++                    while !export_counter.exists() {
++                        tokio::task::yield_now().await;
++                    }
++                } => {}
++            }
++        }).await.expect("export should start after login");
++        assert_eq!(read_counter(), "111");
++        {
++            // Queue another recovery after login finishes, while export still holds the lock.
++            let mut context = Context::from_waker(Waker::noop());
++            assert!(second_refresh.as_mut().poll(&mut context).is_pending());
++        }
++        std::fs::write(&export_gate, []).expect("export gate should open");
++        let (first_result, second_result) = tokio::join!(first_refresh, second_refresh);
++        assert_eq!(
++            [first_result, second_result].map(|result| result.expect("provider should recover")),
++            [ProviderUnauthorizedRecovery::Recovered; 2]
++        );
++        assert_eq!(read_counter(), "111");
++        assert_eq!(
++            std::fs::read_to_string(export_counter)
++                .expect("read export counter")
++                .lines()
++                .collect::<Vec<_>>(),
++            vec!["1"]
++        );
++        std::fs::remove_file(&counter).expect("refresh invocation counter should be removed");
++
++        let different_profile = ModelProviderAwsAuthInfo {
++            profile: Some("another-bedrock-profile".to_string()),
++            ..aws.clone()
++        };
++        let other_recovery = shared_state
++            .aws_auth_recovery(&different_profile)
++            .expect("test provider should have refresh configured");
++        assert!(!Arc::ptr_eq(&shared_recovery, &other_recovery));
++
++        let released_recovery = Arc::downgrade(&shared_recovery);
++        drop((first, second, shared_recovery));
++        assert!(released_recovery.upgrade().is_none());
++        assert!(shared_state.aws_auth_recovery(&aws).is_some());
++    }
++
++    #[tokio::test]
++    async fn create_model_provider_uses_managed_auth_for_amazon_bedrock_provider() {
++        let auth = bedrock_api_key_auth();
++        let provider = create_model_provider(
++            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
++            Some(AuthManager::from_auth_for_testing(auth.clone())),
++        );
++
++        assert_eq!(provider.auth().await, Some(auth));
++    }
++
++    #[test]
++    fn openai_provider_returns_unauthenticated_openai_account_state() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Ok(ProviderAccountState {
++                account: None,
++                requires_openai_auth: true,
++            })
++        );
++    }
++
++    #[test]
++    fn openai_provider_returns_api_key_account_state() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
++                "openai-api-key",
++            ))),
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Ok(ProviderAccountState {
++                account: Some(ProviderAccount::ApiKey),
++                requires_openai_auth: true,
++            })
++        );
++    }
++
++    #[test]
++    fn openai_provider_returns_chatgpt_account_state_without_email() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(AuthManager::from_auth_for_testing(
++                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++            )),
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Ok(ProviderAccountState {
++                account: Some(ProviderAccount::Chatgpt {
++                    email: None,
++                    plan_type: PlanType::Unknown,
++                }),
++                requires_openai_auth: true,
++            })
++        );
++    }
++
++    #[test]
++    fn openai_provider_rejects_bedrock_api_key_account_state() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            Some(AuthManager::from_auth_for_testing(bedrock_api_key_auth())),
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Err(ProviderAccountError::UnsupportedBedrockApiKeyAuth)
++        );
++    }
++
++    #[test]
++    fn custom_non_openai_provider_returns_no_account_state() {
++        let provider = create_model_provider(
++            ModelProviderInfo {
++                name: "Custom".to_string(),
++                base_url: Some("http://localhost:1234/v1".to_string()),
++                wire_api: WireApi::Responses,
++                requires_openai_auth: false,
++                ..Default::default()
++            },
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Ok(ProviderAccountState {
++                account: None,
++                requires_openai_auth: false,
++            })
++        );
++    }
++
++    #[test]
++    fn amazon_bedrock_provider_returns_bedrock_account_state() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
++            /*auth_manager*/ None,
++        );
++
++        assert_eq!(
++            provider.account_state(),
++            Ok(ProviderAccountState {
++                account: Some(ProviderAccount::AmazonBedrock {
++                    uses_codex_managed_credentials: false,
++                }),
++                requires_openai_auth: false,
++            })
++        );
++    }
++
++    #[tokio::test]
++    async fn amazon_bedrock_provider_creates_static_models_manager() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
++            /*auth_manager*/ None,
++        );
++        let manager = provider.models_manager(
++            test_codex_home(),
++            /*config_model_catalog*/ None,
++            Default::default(),
++        );
++        let uncached_manager =
++            provider.models_manager_without_cache(/*config_model_catalog*/ None);
++
++        let catalog = manager
++            .raw_model_catalog(
++                RefreshStrategy::Online,
++                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++            )
++            .await;
++        let uncached_catalog = uncached_manager
++            .raw_model_catalog(
++                RefreshStrategy::Online,
++                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++            )
++            .await;
++        assert_eq!(uncached_catalog, catalog);
++        let sourced_catalog = manager
++            .model_catalog_with_origins(
++                RefreshStrategy::InMemory,
++                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++            )
++            .await;
++        assert_eq!(sourced_catalog.len(), catalog.models.len());
++        assert!(
++            sourced_catalog
++                .iter()
++                .all(|entry| { entry.origin == codex_models_manager::ModelOrigin::Provider })
++        );
++        for slug in [
++            "openai.gpt-6.1-sol",
++            "openai.gpt-6.1-terra",
++            "openai.gpt-6-sol",
++            "openai.gpt-6-luna",
++            "openai.gpt-5.6-sol",
++            "openai.gpt-6-astra",
++        ] {
++            let model_info = manager
++                .get_model_info(
++                    slug,
++                    &ModelsManagerConfig {
++                        model_context_window: Some(1_000_000),
++                        ..Default::default()
++                    },
++                )
++                .await;
++            let mut expected_model_info = manager
++                .get_model_info(slug, &ModelsManagerConfig::default())
++                .await;
++            expected_model_info.context_window = Some(872_000);
++            assert_eq!(model_info, expected_model_info);
++        }
++
++        let models = catalog
++            .models
++            .iter()
++            .map(|model| (model.slug.as_str(), model.display_name.as_str()))
++            .collect::<Vec<_>>();
++
++        assert_eq!(
++            models,
++            vec![
++                ("openai.gpt-6.1-sol", "GPT-6.1 Sol"),
++                ("openai.gpt-6-astra", "GPT-6-Astra"),
++                ("openai.gpt-6.1-terra", "GPT-6.1 Terra"),
++                ("openai.gpt-6-sol", "GPT-6 Sol"),
++                ("openai.gpt-6-luna", "GPT-6 Luna"),
++                ("openai.gpt-5.6-sol", "GPT-5.6 Sol"),
++                ("openai.gpt-5.6-terra", "GPT-5.6 Terra"),
++                ("openai.gpt-5.6-luna", "GPT-5.6 Luna"),
++                ("openai.gpt-5.5", "GPT-5.5"),
++            ]
++        );
++
++        let available_models = manager
++            .list_models(
++                RefreshStrategy::Online,
++                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++            )
++            .await;
++        assert_eq!(
++            available_models
++                .iter()
++                .map(|preset| preset.model.as_str())
++                .collect::<Vec<_>>(),
++            vec![
++                "openai.gpt-6.1-sol",
++                "openai.gpt-6-astra",
++                "openai.gpt-6.1-terra",
++                "openai.gpt-6-sol",
++                "openai.gpt-6-luna",
++                "openai.gpt-5.6-sol",
++                "openai.gpt-5.6-terra",
++                "openai.gpt-5.6-luna",
++                "openai.gpt-5.5",
++            ]
++        );
++
++        let default_model = available_models
++            .iter()
++            .find(|preset| preset.is_default)
++            .expect("Bedrock catalog should have a default model");
++
++        assert_eq!(default_model.model, "openai.gpt-6.1-sol");
++    }
++
++    #[tokio::test]
++    async fn configured_bedrock_catalog_preserves_service_tiers() {
++        let mut configured_model = codex_models_manager::bundled_models_response()
++            .expect("bundled models should parse")
++            .models
++            .into_iter()
++            .find(|model| model.slug == "gpt-5.5")
++            .expect("bundled models should include GPT-5.5");
++        configured_model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
++            id: "custom-tier".to_string(),
++            name: "Custom tier".to_string(),
++            description: "User-defined tier description.".to_string(),
++        }];
++        configured_model.default_service_tier = Some("custom-tier".to_string());
++        let configured_catalog = ModelsResponse {
++            models: vec![configured_model],
++        };
++        let aliases = HashMap::from([(
++            "local-reviewer".to_string(),
++            CustomModelConfig {
++                model: "gpt-5.5".to_string(),
++                model_context_window: None,
++                routing_profile: None,
++                model_auto_compact_token_limit: None,
 +                trust_candidate_constraints: false,
-             },
-         )]);
-         let mut expected = configured_catalog.clone();
-@@ -1754,6 +1755,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
-                 model_context_window: Some(64_000),
-                 routing_profile: None,
-                 model_auto_compact_token_limit: Some(48_000),
++            },
++        )]);
++        let mut expected = configured_catalog.clone();
++        expected.models[0].web_search_tool_type =
++            codex_protocol::openai_models::WebSearchToolType::Text;
++
++        let mut gov_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
++        gov_provider.base_url =
++            Some("https://bedrock-mantle.us-gov-west-1.api.aws/openai/v1".to_string());
++        for provider_info in [
++            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
++            ModelProviderInfo::create_amazon_bedrock_runtime_provider(/*aws*/ None),
++            gov_provider,
++        ] {
++            let provider = create_model_provider(provider_info, /*auth_manager*/ None);
++            let cache = Arc::new(crate::test_support::UnusedModelsCache);
++            for (manager, has_aliases) in [
++                (
++                    provider.models_manager(
++                        test_codex_home(),
++                        Some(configured_catalog.clone()),
++                        aliases.clone(),
++                    ),
++                    true,
++                ),
++                (
++                    provider.models_manager_without_cache(Some(configured_catalog.clone())),
++                    false,
++                ),
++                (
++                    provider.models_manager_with_cache(
++                        Some(configured_catalog.clone()),
++                        cache,
++                        aliases.clone(),
++                    ),
++                    true,
++                ),
++            ] {
++                let catalog = manager
++                    .raw_model_catalog(
++                        RefreshStrategy::Online,
++                        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++                    )
++                    .await;
++                assert_eq!(catalog, expected);
++                let sourced_catalog = manager
++                    .model_catalog_with_origins(
++                        RefreshStrategy::InMemory,
++                        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++                    )
++                    .await;
++                assert_eq!(sourced_catalog.len(), 1);
++                assert_eq!(
++                    sourced_catalog[0].origin,
++                    codex_models_manager::ModelOrigin::ExplicitConfig
++                );
++                assert_eq!(
++                    manager
++                        .custom_models_snapshot()
++                        .contains_key("local-reviewer"),
++                    has_aliases
++                );
++                if has_aliases {
++                    let alias = manager
++                        .get_model_info("local-reviewer", &ModelsManagerConfig::default())
++                        .await;
++                    assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
++                    assert_eq!(alias.service_tiers, expected.models[0].service_tiers);
++                    assert_eq!(
++                        alias.default_service_tier,
++                        expected.models[0].default_service_tier
++                    );
++                    assert_eq!(
++                        alias.web_search_tool_type,
++                        expected.models[0].web_search_tool_type
++                    );
++                    assert_eq!(
++                        alias.origin,
++                        codex_models_manager::ModelOrigin::ExplicitConfig
++                    );
++                }
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn configured_catalog_preserves_origins_and_custom_aliases() {
++        let provider = create_model_provider(
++            ModelProviderInfo::create_openai_provider(None),
++            /*auth_manager*/ None,
++        );
++        let mut catalog = codex_models_manager::bundled_models_response().unwrap();
++        catalog.models.retain(|model| model.slug == "gpt-5.5");
++        assert_eq!(catalog.models.len(), 1);
++        let aliases = HashMap::from([(
++            "local-reviewer".to_string(),
++            CustomModelConfig {
++                model: "gpt-5.5".to_string(),
++                model_context_window: Some(64_000),
++                routing_profile: None,
++                model_auto_compact_token_limit: Some(48_000),
 +                trust_candidate_constraints: false,
-             },
-         )]);
-         let home = tempfile::tempdir().unwrap();
++            },
++        )]);
++        let home = tempfile::tempdir().unwrap();
++        let cache = Arc::new(crate::test_support::UnusedModelsCache);
++        for manager in [
++            provider.models_manager(home.path().into(), Some(catalog.clone()), aliases.clone()),
++            provider.models_manager_with_cache(Some(catalog.clone()), cache, aliases.clone()),
++        ] {
++            assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
++            let sourced_catalog = manager
++                .model_catalog_with_origins(
++                    RefreshStrategy::InMemory,
++                    HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++                )
++                .await;
++            assert_eq!(sourced_catalog.len(), 1);
++            assert_eq!(sourced_catalog[0].model.as_ref(), &catalog.models[0]);
++            assert_eq!(
++                sourced_catalog[0].origin,
++                codex_models_manager::ModelOrigin::ExplicitConfig
++            );
++            let alias = manager
++                .get_model_info("local-reviewer", &ModelsManagerConfig::default())
++                .await;
++            assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
++            assert_eq!(alias.context_window, Some(64_000));
++            assert_eq!(alias.auto_compact_token_limit, Some(48_000));
++            assert_eq!(
++                alias.origin,
++                codex_models_manager::ModelOrigin::ExplicitConfig
++            );
++        }
++        assert!(!home.path().join("models_cache.json").exists());
++    }
++
++    #[tokio::test]
++    async fn configured_provider_models_manager_uses_provider_bearer_token() {
++        let server = MockServer::start().await;
++        let remote_models = vec![remote_model("provider-model")];
++
++        Mock::given(method("GET"))
++            .and(path("/models"))
++            .and(header_regex("Authorization", "Bearer provider-token"))
++            .respond_with(
++                ResponseTemplate::new(200)
++                    .insert_header("content-type", "application/json")
++                    .set_body_json(ModelsResponse {
++                        models: remote_models.clone(),
++                    }),
++            )
++            .expect(2)
++            .mount(&server)
++            .await;
++
++        let mut provider_info = provider_for(server.uri());
++        provider_info.experimental_bearer_token = Some("provider-token".into());
++        provider_info.model_catalog_url = Some(format!("{}/models", server.uri()).into());
++        provider_info.http_headers = Some(std::collections::HashMap::from([(
++            codex_login::default_client::RESIDENCY_HEADER_NAME.to_string(),
++            "us".into(),
++        )]));
++        for auth in [
++            None,
++            Some(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
++        ] {
++            // Disabled discovery must ignore the catalog cached by the enabled run.
++            for enabled in [true, false] {
++                let provider = create_model_provider(
++                    provider_info.clone(),
++                    auth.clone().map(AuthManager::from_auth_for_testing),
++                );
++                let manager = provider.models_manager(
++                    test_codex_home(),
++                    /*config_model_catalog*/ None,
++                    Default::default(),
++                );
++                manager.set_api_key_model_discovery_enabled(enabled);
++                let refresh_strategy = if enabled {
++                    RefreshStrategy::Online
++                } else {
++                    RefreshStrategy::Offline
++                };
++                let catalog = manager
++                    .raw_model_catalog(
++                        refresh_strategy,
++                        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++                    )
++                    .await;
++
++                assert_eq!(
++                    catalog
++                        .models
++                        .iter()
++                        .any(|model| model.slug == "provider-model"),
++                    enabled
++                );
++            }
++        }
++    }
++}
++
+ pub(crate) mod test_support {
+     use super::*;
+
 diff --git a/codex-rs/models-manager/src/catalog_origin_tests.rs b/codex-rs/models-manager/src/catalog_origin_tests.rs
-index 25b553d35d69d9c843af8d427ea89389a1e96afb..f76bdda360d0d8a7e840e74d4d46ce4d1aa311cc 100644
+index a763c09fed3c125bf542de22774ed8840a25c8ae..3725b1a77b2cc8c4e83f0351b0a1a403b7f97efe 100644
 --- a/codex-rs/models-manager/src/catalog_origin_tests.rs
 +++ b/codex-rs/models-manager/src/catalog_origin_tests.rs
-@@ -133,6 +133,7 @@ async fn static_catalog_records_its_supplied_origin() {
+@@ -150,6 +150,7 @@ async fn static_catalog_records_its_supplied_origin() {
                      routing_profile: None,
                      model_context_window: None,
                      model_auto_compact_token_limit: None,
@@ -2453,7 +3484,7 @@ index 25b553d35d69d9c843af8d427ea89389a1e96afb..f76bdda360d0d8a7e840e74d4d46ce4d
                  },
              ),
              (
-@@ -142,6 +143,7 @@ async fn static_catalog_records_its_supplied_origin() {
+@@ -159,6 +160,7 @@ async fn static_catalog_records_its_supplied_origin() {
                      routing_profile: None,
                      model_context_window: None,
                      model_auto_compact_token_limit: None,
@@ -2462,10 +3493,10 @@ index 25b553d35d69d9c843af8d427ea89389a1e96afb..f76bdda360d0d8a7e840e74d4d46ce4d
              ),
          ]);
 diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
-index 835cccfe0d7451ac2c989595a7661d998da2c741..e377ae7109284331c19446fa36ba80346c1bb75f 100644
+index e519a21dc826c15c86b6c8a1984a035804433ffa..d173a6271eb27a1279b931f92eb42cd860c08375 100644
 --- a/codex-rs/models-manager/src/config.rs
 +++ b/codex-rs/models-manager/src/config.rs
-@@ -24,6 +24,11 @@ pub struct CustomModelConfig {
+@@ -26,6 +26,11 @@ pub struct CustomModelConfig {
      pub model_context_window: Option<i64>,
      /// Optional auto-compaction limit applied to every candidate in this alias.
      pub model_auto_compact_token_limit: Option<i64>,
@@ -2478,10 +3509,10 @@ index 835cccfe0d7451ac2c989595a7661d998da2c741..e377ae7109284331c19446fa36ba8034
 
  impl CustomModelConfig {
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b0288488df9f 100644
+index 9605a181afdae64e536108cc83220f14405ed5c2..8d1d19ccd033f8210a137968bafb515ba749632c 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -884,6 +884,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -908,6 +908,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
              routing_profile: None,
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -2489,7 +3520,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          },
      );
      let mut remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-@@ -934,6 +935,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -958,6 +959,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
                  routing_profile: None,
                  model_context_window: Some(64_000),
                  model_auto_compact_token_limit: Some(48_000),
@@ -2497,7 +3528,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
              },
          )]),
          model_context_window: Some(32_000),
-@@ -951,6 +953,38 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -975,6 +977,38 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
      assert_eq!(overridden.auto_compact_token_limit, Some(48_000));
      assert!(overridden.include_skills_usage_instructions);
      assert_eq!(overridden.origin, ModelOrigin::ExplicitConfig);
@@ -2536,7 +3567,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
  }
 
  #[tokio::test]
-@@ -964,6 +998,7 @@ async fn custom_model_overrides_survive_manager_cache_modes() {
+@@ -1046,6 +1080,7 @@ async fn custom_model_overrides_survive_manager_cache_modes() {
              routing_profile: None,
              model_context_window: Some(64_000),
              model_auto_compact_token_limit: Some(48_000),
@@ -2544,7 +3575,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          },
      )]);
      let managers = [
-@@ -1027,6 +1062,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
+@@ -1109,6 +1144,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                  routing_profile: None,
                  model_context_window: None,
                  model_auto_compact_token_limit: None,
@@ -2552,7 +3583,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
              },
          ),
          (
-@@ -1036,6 +1072,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
+@@ -1118,6 +1154,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                  routing_profile: None,
                  model_context_window: None,
                  model_auto_compact_token_limit: None,
@@ -2560,7 +3591,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
              },
          ),
      ]);
-@@ -1044,6 +1081,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
+@@ -1126,6 +1163,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
          ModelsResponse {
              models: vec![remote],
          },
@@ -2568,7 +3599,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          custom_models,
      );
 
-@@ -1095,6 +1133,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
+@@ -1177,6 +1215,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
              routing_profile: None,
              model_context_window: Some(64_000),
              model_auto_compact_token_limit: None,
@@ -2576,7 +3607,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          },
      )]);
 
-@@ -1166,7 +1205,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -1248,7 +1287,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
      assert_eq!(
          original_catalog,
          vec![crate::CatalogModel {
@@ -2585,7 +3616,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
              origin: ModelOrigin::Provider,
          }]
      );
-@@ -1177,6 +1216,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -1259,6 +1298,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
              routing_profile: None,
              model_context_window: None,
              model_auto_compact_token_limit: None,
@@ -2593,7 +3624,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          },
      )]);
      manager.replace_custom_models(replacement.clone());
-@@ -1187,7 +1227,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+@@ -1269,7 +1309,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
          construct_model_info_for_custom_alias(
              "profile-added",
              &replacement["profile-added"],
@@ -2602,7 +3633,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
          )
          .into(),
      );
-@@ -1243,6 +1283,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
+@@ -1325,6 +1365,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
          routing_profile: None,
          model_context_window: None,
          model_auto_compact_token_limit: None,
@@ -2610,7 +3641,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
      };
      let manager = Arc::new(StaticModelsManager::new_with_custom_models(
          /*auth_manager*/ None,
-@@ -1696,7 +1737,7 @@ async fn originator_catalogs_share_alias_updates_but_keep_remote_metadata_separa
+@@ -1778,7 +1819,7 @@ async fn originator_catalogs_share_alias_updates_but_keep_remote_metadata_separa
              .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
              .await,
          vec![crate::CatalogModel {
@@ -2619,7 +3650,7 @@ index 85f60b22708297abaf33b21770b8d838d72ad445..1aa8f1f491ac9c70dffc3c81a581b028
              origin: ModelOrigin::Provider,
          }]
      );
-@@ -1705,7 +1746,7 @@ async fn originator_catalogs_share_alias_updates_but_keep_remote_metadata_separa
+@@ -1787,7 +1828,7 @@ async fn originator_catalogs_share_alias_updates_but_keep_remote_metadata_separa
              .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
              .await,
          vec![crate::CatalogModel {

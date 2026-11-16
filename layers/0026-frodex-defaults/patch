@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index db8512954efd73dffae5766a601d35f479c53e18..2ab63f653bad42be4deb9fed5bc84c4e04169459 100644
+index 5438f425ea14033acf6d5e4873cef9441016e10e..95b83a8ef237001d70b8d071186d19a00fae609c 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-@@ -3435,12 +3435,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
+@@ -3464,12 +3464,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
  }
 
  #[tokio::test]
@@ -31,7 +31,7 @@ index db8512954efd73dffae5766a601d35f479c53e18..2ab63f653bad42be4deb9fed5bc84c4e
          .write(codex_home.path())?;
      let thread_id = create_fake_rollout(
          codex_home.path(),
-@@ -3482,10 +3495,11 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
+@@ -3511,10 +3524,11 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
      timeout(DEFAULT_READ_TIMEOUT, first.initialize()).await??;
      tokio::time::sleep(Duration::from_millis(100)).await;
      assert!(
@@ -47,7 +47,7 @@ index db8512954efd73dffae5766a601d35f479c53e18..2ab63f653bad42be4deb9fed5bc84c4e
          "the future deadline must not run before restart"
      );
      first.shutdown_gracefully().await?;
-@@ -3521,6 +3535,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
+@@ -3550,6 +3564,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
      assert!(input.contains("# Goal Supervisor Assignment"));
      assert!(input.contains("continue after app-server restart"));
 
@@ -85,10 +85,10 @@ index db8512954efd73dffae5766a601d35f479c53e18..2ab63f653bad42be4deb9fed5bc84c4e
  }
 
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 5fd56b06e3b15765acf7409c39d552410122ce03..718792a7822e7db973b7516c09eeca59e3bd68bf 100644
+index 71da9dd06af62cfd6d754ebdae3dc284fd7866b0..8ca2843741a9cf62a659e3b7801ce180f63d3965 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -3319,7 +3319,7 @@
+@@ -3424,7 +3424,7 @@
            "type": "boolean"
          },
          "enable_thread_adoption": {
@@ -98,10 +98,10 @@ index 5fd56b06e3b15765acf7409c39d552410122ce03..718792a7822e7db973b7516c09eeca59
          },
          "enabled": {
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index a918e72241c73daab7c329711d86f4b9d448cb3c..b9d3cb384277a7a1a7a22d9ec004aa0473c7ebd6 100644
+index 4fc5a0653eed5766e732a93b66888fe7b2562dbd..032daf4bebe3c21d8d8a87596ec6711d845d6f43 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -13199,9 +13199,11 @@ enabled = true
+@@ -13248,9 +13248,11 @@ enabled = true
      assert_eq!(
          (
              config.agent_max_threads,
@@ -114,7 +114,7 @@ index a918e72241c73daab7c329711d86f4b9d448cb3c..b9d3cb384277a7a1a7a22d9ec004aa04
      );
 
      Ok(())
-@@ -13341,24 +13343,39 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+@@ -13411,24 +13413,39 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
  }
 
  #[test]
@@ -160,10 +160,10 @@ index a918e72241c73daab7c329711d86f4b9d448cb3c..b9d3cb384277a7a1a7a22d9ec004aa04
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 1163ec3de5abbab5265d40407884d19900f4dc88..34056290ff55c558416276168b40fc8fd17bb510 100644
+index c99f945f9453f5361534297fd447d9932dda47dc..abadcdb7e2459c9491aeed1c83b216314ce84b39 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -261,8 +261,9 @@ impl Default for GhostSnapshotConfig {
+@@ -275,8 +275,9 @@ impl Default for GhostSnapshotConfig {
  /// files are *silently truncated* to this size so we do not take up too much of
  /// the context window.
  pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
@@ -175,7 +175,7 @@ index 1163ec3de5abbab5265d40407884d19900f4dc88..34056290ff55c558416276168b40fc8f
  pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
  pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
  pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-@@ -1416,7 +1417,7 @@ pub struct MultiAgentV2Config {
+@@ -1450,7 +1451,7 @@ pub struct MultiAgentV2Config {
      pub disable_direct_message: bool,
      pub message_board_in_memory: bool,
      pub message_board_remote: Option<codex_features::RemoteMessageBoardConfigToml>,
@@ -184,7 +184,7 @@ index 1163ec3de5abbab5265d40407884d19900f4dc88..34056290ff55c558416276168b40fc8f
      pub enable_thread_adoption: bool,
      pub non_code_mode_only: bool,
  }
-@@ -1442,7 +1443,7 @@ impl MultiAgentV2Config {
+@@ -1476,7 +1477,7 @@ impl MultiAgentV2Config {
              disable_direct_message: false,
              message_board_in_memory: false,
              message_board_remote: None,
@@ -194,7 +194,7 @@ index 1163ec3de5abbab5265d40407884d19900f4dc88..34056290ff55c558416276168b40fc8f
          }
      }
 diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
-index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb324359eaf8378 100644
+index 609fba971a073cf42268dfd825fba1a2e89d3595..c86a15f566474ce349f4d0c51e755008a67ae206 100644
 --- a/codex-rs/core/src/session/multi_agents.rs
 +++ b/codex-rs/core/src/session/multi_agents.rs
 @@ -6,7 +6,6 @@ use codex_prompts::ResolvedMessage;
@@ -205,7 +205,7 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
  use codex_protocol::protocol::MultiAgentVersion;
  use codex_protocol::protocol::SessionSource;
  use codex_protocol::protocol::SubAgentSource;
-@@ -93,23 +92,15 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
+@@ -101,18 +100,13 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
          .multi_agent_mode_hint_text
          .as_deref()
          .or(multi_agent_messages.hint);
@@ -214,7 +214,7 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 +    // default. Catalog mode templates supply wording without restricting the reasoning effort.
      let multi_agent_mode = match hint {
          Some(text) => MultiAgentMode::Custom(text.to_owned()),
--        None => {
+         None => {
 -            let (message, builtin) =
 -                if settings.effective_reasoning_effort() == Some(ReasoningEffort::Ultra) {
 -                    (multi_agent_messages.proactive, MultiAgentMode::Proactive)
@@ -224,23 +224,24 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 -                        MultiAgentMode::ExplicitRequestOnly,
 -                    )
 -                };
--            match message {
--                ResolvedMessage::Catalog(text) => MultiAgentMode::Custom(text.to_owned()),
--                ResolvedMessage::Bundled(_) => builtin,
--            }
--        }
-+        None => match multi_agent_messages.proactive {
-+            ResolvedMessage::Catalog(text) => MultiAgentMode::Custom(text.to_owned()),
-+            ResolvedMessage::Bundled(_) => MultiAgentMode::Proactive,
-+        },
-     };
-
-     match &turn_context.session_source {
++            let message = multi_agent_messages.proactive;
+             if config.disable_native_tools {
+                 let policy = message
+                     .text()
+@@ -123,7 +117,7 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
+             } else {
+                 match message {
+                     ResolvedMessage::Catalog(text) => MultiAgentMode::Custom(text.to_owned()),
+-                    ResolvedMessage::Bundled(_) => builtin,
++                    ResolvedMessage::Bundled(_) => MultiAgentMode::Proactive,
+                 }
+             }
+         }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index c9ef0821b4a9a90ffab128fba2546d358fe2d245..2b03ba7b4f38423bfadc3cc07cddd0324c89f326 100644
+index b8841a86b77eea941f79e3c8c0b96e14392c6413..26af80bb17a8c18ebe7cc648edf494eebba20176 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13936,6 +13936,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+@@ -13892,6 +13892,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
          |config| {
              if enable_multi_agent_v2 {
                  let _ = config.features.enable(Feature::MultiAgentV2);
@@ -252,7 +253,7 @@ index c9ef0821b4a9a90ffab128fba2546d358fe2d245..2b03ba7b4f38423bfadc3cc07cddd032
              }
              config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
              config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
-@@ -16891,16 +16896,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -16860,16 +16865,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
  async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
      let mut config = build_test_config(codex_home.path()).await;
@@ -274,10 +275,10 @@ index c9ef0821b4a9a90ffab128fba2546d358fe2d245..2b03ba7b4f38423bfadc3cc07cddd032
      let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
          .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342b0260337 100644
+index f995f7a18ccdb4383ff9fbdf5a0ca583b0cdcb10..d43a090331355684a8ba74cdc8879456a326f694 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -1115,7 +1115,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
+@@ -1117,7 +1117,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
  }
 
  #[tokio::test]
@@ -286,7 +287,7 @@ index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342
      let (mut session, mut turn) = make_session_and_context().await;
      let manager = thread_manager(&turn);
      let root = manager
-@@ -1125,6 +1125,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+@@ -1127,6 +1127,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
      set_agent_control(&mut session, manager.agent_control());
      session.thread_id = root.thread_id;
      let mut config = (*turn.config).clone();
@@ -294,7 +295,7 @@ index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342
      config
          .features
          .enable(Feature::MultiAgentV2)
-@@ -1146,7 +1147,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+@@ -1148,7 +1149,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
          ))
          .await
      else {
@@ -303,7 +304,7 @@ index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342
      };
      let Err(promote_error) = PromoteAgentHandler
          .handle(invocation(
-@@ -1157,7 +1158,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+@@ -1159,7 +1160,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
          ))
          .await
      else {
@@ -312,7 +313,7 @@ index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342
      };
 
      let expected = FunctionCallError::RespondToModel(
-@@ -5154,12 +5155,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -5160,12 +5161,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
          .expect("closed children should load");
      assert_eq!(closed_children, Vec::<ThreadId>::new());
 
@@ -328,10 +329,10 @@ index 3bd57f93b1f2248fb949e6e68147e0006e16bb1b..4e79a82d569a539d8e3d0a18cd04f342
          .await
          .expect("list_agents should succeed");
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac..b1f143393ee930d00abb845b7687af870a913cb1 100644
+index bae9494ed80deedd0ee2cf403d66a79941796cc4..9e81fa76a8949e2f36c014fef63b1e51a52b14b7 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -2848,6 +2848,10 @@ async fn code_mode_excludes_default_namespace_tools() {
+@@ -2862,6 +2862,10 @@ async fn code_mode_excludes_default_namespace_tools() {
 
  #[tokio::test]
  async fn multi_agent_feature_selects_one_agent_tool_family() {
@@ -342,7 +343,7 @@ index 823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac..b1f143393ee930d00abb845b7687af87
      let v1 = probe(|turn| {
          set_feature(turn, Feature::Collab, /*enabled*/ true);
          set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-@@ -2993,9 +2997,11 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
+@@ -3007,9 +3011,11 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
  }
 
  #[tokio::test]
@@ -356,7 +357,7 @@ index 823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac..b1f143393ee930d00abb845b7687af87
      })
      .await;
 
-@@ -3014,13 +3020,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
+@@ -3028,13 +3034,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
              ))
      );
 
@@ -371,7 +372,7 @@ index 823b0cf4d3b9d5ed6f8e90f3393a7b1b1c6611ac..b1f143393ee930d00abb845b7687af87
      assert_eq!(
          enabled.namespace_function_names(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
          &[
-@@ -3046,7 +3046,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
+@@ -3060,7 +3060,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
              )
          })
      else {
@@ -396,7 +397,7 @@ index 9921a132dc7963eb54831c472edacbf3f343ab0c..cc3924a48ee07ffcaf7b8054fcb54eca
                          if incremental_tools {
                              config
 diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
-index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d477ea4ea 100644
+index aa086aaaa72c2825202e2145484450ddee23ae8c..18b1ffd3f1caeb512ccfddb9fb511687bca5ca29 100644
 --- a/codex-rs/core/tests/suite/multi_agent_mode.rs
 +++ b/codex-rs/core/tests/suite/multi_agent_mode.rs
 @@ -128,6 +128,56 @@ async fn submit_turn(
@@ -456,7 +457,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn ultra_reasoning_uses_highest_non_ultra_and_proactive_mode() -> Result<()> {
      skip_if_no_network!(Ok(()));
-@@ -229,12 +279,13 @@ async fn mode_hints_override_reasoning_effort(source: ModeHintSource) -> Result<
+@@ -252,12 +302,13 @@ async fn mode_hints_override_reasoning_effort(
  }
 
  #[test_case(ReasoningEffort::Ultra, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_PROACTIVE_TEXT); "ultra uses proactive override")]
@@ -473,7 +474,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
      effort: ReasoningEffort,
      proactive: Option<&'static str>,
      expected_hint: Option<&str>,
-@@ -281,7 +332,7 @@ async fn catalog_proactive_mode_is_ultra_only(
+@@ -304,7 +355,7 @@ async fn catalog_proactive_mode_is_ultra_only(
      Ok(())
  }
 
@@ -482,7 +483,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
  #[test_case(ReasoningEffort::Ultra, [CATALOG_PROACTIVE_TEXT, SECOND_MODEL_PROACTIVE_TEXT]; "proactive mode")]
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn model_switch_refreshes_catalog_role_and_mode(
-@@ -480,7 +531,7 @@ async fn changing_configured_mode_hint_to_empty_emits_no_update() -> Result<()>
+@@ -503,7 +554,7 @@ async fn changing_configured_mode_hint_to_empty_emits_no_update() -> Result<()>
  }
 
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -491,7 +492,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
      skip_if_no_network!(Ok(()));
 
      let server = start_mock_server().await;
-@@ -535,7 +586,7 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
+@@ -558,7 +609,7 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
              count_containing(&second_texts, PROACTIVE_TEXT),
              count_containing(&second_texts, NO_SPAWN_TEXT),
          ),
@@ -500,7 +501,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
      );
      test.codex.ensure_rollout_materialized().await;
      test.codex.flush_rollout().await?;
-@@ -552,16 +603,13 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
+@@ -575,16 +626,13 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
                  .cloned()
          })
          .collect::<Vec<_>>();
@@ -519,7 +520,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
      skip_if_no_network!(Ok(()));
 
      let server = start_mock_server().await;
-@@ -612,7 +660,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
+@@ -635,7 +683,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
              count_containing(&texts, NO_SPAWN_TEXT),
              count_containing(&texts, PROACTIVE_TEXT),
          ),
@@ -528,7 +529,7 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
      );
 
      Ok(())
-@@ -631,6 +679,14 @@ async fn ultra_on_multi_agent_v1_uses_highest_non_ultra_without_mode_instruction
+@@ -721,6 +769,14 @@ async fn ultra_on_multi_agent_v1_uses_highest_non_ultra_without_mode_instruction
      let test = test_codex()
          .with_model_info_override("gpt-5.4", add_ultra_reasoning)
          .with_config(|config| {
@@ -544,10 +545,10 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
          })
          .build(&server)
 diff --git a/codex-rs/core/tests/suite/pending_input_persistence.rs b/codex-rs/core/tests/suite/pending_input_persistence.rs
-index 0ebb34066316f887a1af8447119926314fccabcd..e030947bce1bab18da058a817bbd2ebbe405d685 100644
+index 6312e5342acdabdc133983c4c9bf179e63f7b0f2..503643796f41c1bcff049b096b33b0a5e5b43abf 100644
 --- a/codex-rs/core/tests/suite/pending_input_persistence.rs
 +++ b/codex-rs/core/tests/suite/pending_input_persistence.rs
-@@ -625,6 +625,11 @@ async fn cancelled_spawn_discards_provisional_child(caller: SpawnCaller) -> anyh
+@@ -754,6 +754,11 @@ async fn cancelled_spawn_discards_provisional_child(caller: SpawnCaller) -> anyh
                      .features
                      .enable(Feature::MultiAgentV2)
                      .expect("enable V2");
@@ -560,10 +561,10 @@ index 0ebb34066316f887a1af8447119926314fccabcd..e030947bce1bab18da058a817bbd2ebb
              config
                  .features
 diff --git a/codex-rs/core/tests/suite/skills_extension.rs b/codex-rs/core/tests/suite/skills_extension.rs
-index d941aae97362bcfda0b6e86e322259e57f6dac3e..ae8fbb3d25c0e587d9e96cfcbbdd2b46a01fdb84 100644
+index 004a9abc056582a26277931635663c86bbf6cca8..67be6897bdc06728347c451483dbdc77683b1d8e 100644
 --- a/codex-rs/core/tests/suite/skills_extension.rs
 +++ b/codex-rs/core/tests/suite/skills_extension.rs
-@@ -3089,6 +3089,13 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
+@@ -3626,6 +3626,13 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
              config.cloud_skill_enabled = true;
              config.model_provider.name = "Skills compaction test".to_string();
              config.model_post_turn_compact_threshold_percent = 50;
@@ -578,10 +579,10 @@ index d941aae97362bcfda0b6e86e322259e57f6dac3e..ae8fbb3d25c0e587d9e96cfcbbdd2b46
                  .features
                  .enable(Feature::DeferredExecutor)
 diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
-index d685525d8a975b1309e223dce54e95703b857a77..4b46809cfb09656fea818ee5db07e429bcbad199 100644
+index cd90a92b8c9bcaf69adc6db886f84bb8b0df54df..abd81c6fbbd0da77573325f01ece9f01ffa367bb 100644
 --- a/codex-rs/core/tests/suite/spawn_agent_description.rs
 +++ b/codex-rs/core/tests/suite/spawn_agent_description.rs
-@@ -224,6 +224,10 @@ pub(super) async fn model_catalog_refresh_requests(
+@@ -225,6 +225,10 @@ pub(super) async fn model_catalog_refresh_requests(
          .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
          .with_model("visible-model")
          .with_config(move |config| {
@@ -593,10 +594,10 @@ index d685525d8a975b1309e223dce54e95703b857a77..4b46809cfb09656fea818ee5db07e429
                  .features
                  .enable(Feature::Collab)
 diff --git a/codex-rs/features/src/feature_configs.rs b/codex-rs/features/src/feature_configs.rs
-index 527c5ad1ff72db2636af2346ff25bf101f09cdb1..4cea2da0bf76b5f5c9165e33232773097369f4b2 100644
+index 229cce96e4c38ee025b365cca9c0f7dda89b48bb..36357e2b9e64880fd97b8f114915904c1593a6d3 100644
 --- a/codex-rs/features/src/feature_configs.rs
 +++ b/codex-rs/features/src/feature_configs.rs
-@@ -357,7 +357,7 @@ pub struct MultiAgentV2ConfigToml {
+@@ -374,7 +374,7 @@ pub struct MultiAgentV2ConfigToml {
      /// Use a session-scoped remote board instead of local storage.
      #[serde(skip_serializing_if = "Option::is_none")]
      pub message_board_remote: Option<RemoteMessageBoardConfigToml>,
@@ -606,10 +607,10 @@ index 527c5ad1ff72db2636af2346ff25bf101f09cdb1..4cea2da0bf76b5f5c9165e3323277309
      pub enable_thread_adoption: Option<bool>,
      #[serde(skip_serializing_if = "Option::is_none")]
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 5efedf1b3d92057ac30c1f09499e1980c486169f..c9b884e5fd6a597c92e5ff41bc6c24ac49b56127 100644
+index 98caccb72bf271a74585115b0e39b12d1ae49a88..38b2739607a48c5fd90845d5add5325fe6609b4f 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -1609,7 +1609,7 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1662,7 +1662,7 @@ pub const FEATURES: &[FeatureSpec] = &[
          id: Feature::MultiAgentV2,
          key: "multi_agent_v2",
          stage: Stage::Stable,
@@ -618,7 +619,7 @@ index 5efedf1b3d92057ac30c1f09499e1980c486169f..c9b884e5fd6a597c92e5ff41bc6c24ac
      },
      FeatureSpec {
          id: Feature::ModelCatalogInContext,
-@@ -1662,8 +1662,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1721,8 +1721,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::AgentPromptInjection,
          key: "agent_prompt_injection",
@@ -629,7 +630,7 @@ index 5efedf1b3d92057ac30c1f09499e1980c486169f..c9b884e5fd6a597c92e5ff41bc6c24ac
      },
      FeatureSpec {
          id: Feature::SpawnCsv,
-@@ -2148,12 +2148,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -2237,12 +2237,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::GoalSupervisor,
          key: "goal_supervisor",
@@ -645,10 +646,10 @@ index 5efedf1b3d92057ac30c1f09499e1980c486169f..c9b884e5fd6a597c92e5ff41bc6c24ac
      FeatureSpec {
          id: Feature::TokenBudget,
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index efa7eed9845e73f45944b0bcf52b92884291637b..ecee979203af7e0a300db0a18947c7a4c4fda77b 100644
+index b5f058de4e30e0453bd29e0977e2cea737f7e01c..19a2b9ccff8fa59a055e7e9c34e07e758697cfc6 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -568,31 +568,49 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
+@@ -573,31 +573,49 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
  }
 
  #[test]

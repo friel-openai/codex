@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index e7238e6405e293045047305267330349744fdb0a..9439e30a4ef64a8d890782360671773f621686dc 100644
+index fc062529bcc6d7b62f935736eb6bb50893d06cd5..407cfaa06462f4dea43c69bf27e61d99e69516a1 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2299,7 +2299,7 @@ impl ThreadRequestProcessor {
+@@ -2319,7 +2319,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index e7238e6405e293045047305267330349744fdb0a..9439e30a4ef64a8d890782360671773f
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -7019,6 +7019,28 @@ impl ThreadRequestProcessor {
+@@ -7066,6 +7066,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,10 +41,10 @@ index e7238e6405e293045047305267330349744fdb0a..9439e30a4ef64a8d890782360671773f
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index a59d8a1af9929ddbe0dc7c86bf9a261a2066b031..1e4bc4fd01e3b9f1c6feb029e88d5943f023ccb3 100644
+index 2224e0d4ddcb6f8fbee307d0b4a2fcc24d5048ec..34398e54b4aa256f1616dd8bb6b47cdc6c1f756b 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -152,6 +152,7 @@ mod skills_list;
+@@ -154,6 +154,7 @@ mod skills_list;
  mod sleep;
  mod sqlite_recovery;
  mod thread_archive;
@@ -274,7 +274,7 @@ index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/rollout_compression.rs b/codex-rs/core/tests/suite/rollout_compression.rs
-index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763cae0479e 100644
+index 4f5b77cc3c907d94b75b68de53603873caec751d..39b44b41b3b532923ae19d4e2a7e85d422acedcf 100644
 --- a/codex-rs/core/tests/suite/rollout_compression.rs
 +++ b/codex-rs/core/tests/suite/rollout_compression.rs
 @@ -35,6 +35,7 @@ use pretty_assertions::assert_eq;
@@ -315,7 +315,7 @@ index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763
      let original_bytes = paths
          .iter()
          .map(std::fs::read)
-@@ -151,7 +156,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -154,7 +159,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
          }
      })
      .await
@@ -336,7 +336,7 @@ index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763
      for (path, original) in paths.into_iter().zip(original_bytes) {
          let compressed = std::fs::File::open(path.with_extension("jsonl.zst"))?;
          assert_eq!(zstd::stream::decode_all(compressed)?, original);
-@@ -212,6 +229,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -215,6 +232,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
          "reading the ancestor must not materialize it"
      );
      assert!(parent_path.with_extension("jsonl.zst").exists());
@@ -349,10 +349,10 @@ index b578ac82d0a1fbbee78ddd429c553008e5059d7c..60dbfedcd3ea6a9f67f46703aae32763
      Ok(())
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17c0830497 100644
+index 01689292fa34aa36989890f48b5c7d4e902d5878..ca529602e808b2ec42df50020588308ca03b19d9 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -806,6 +806,7 @@ async fn worker_preserves_inherited_acl_through_append() -> anyhow::Result<()> {
+@@ -807,6 +807,7 @@ async fn worker_preserves_inherited_acl_through_append() -> anyhow::Result<()> {
  #[cfg(unix)]
  #[tokio::test]
  async fn worker_preserves_alternate_group_through_materialization() -> anyhow::Result<()> {
@@ -360,29 +360,24 @@ index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17
      use std::os::unix::fs::MetadataExt;
      use std::process::Command;
 
-@@ -818,17 +819,45 @@ async fn worker_preserves_alternate_group_through_materialization() -> anyhow::R
-     let original_group = fs::metadata(&path)?.gid();
-     let groups = Command::new("id").arg("-G").output()?;
-     assert!(groups.status.success());
--    let Some(group) = std::str::from_utf8(&groups.stdout)?
-+    let groups = std::str::from_utf8(&groups.stdout)?
-         .split_whitespace()
-         .map(str::parse::<u32>)
--        .collect::<Result<Vec<_>, _>>()?
--        .into_iter()
--        .find(|group| *group != original_group)
--    else {
--        eprintln!("skipping ownership regression: no alternate supplementary group");
-+        .collect::<Result<Vec<_>, _>>()?;
-+    #[cfg(target_os = "linux")]
-+    let groups = {
+@@ -825,34 +826,39 @@ async fn worker_preserves_alternate_group_through_materialization() -> anyhow::R
+         .collect::<Result<Vec<_>, _>>()?;
+     #[cfg(target_os = "linux")]
+     let groups = {
+-        // Unmapped supplementary groups appear as the overflow GID in Bazel's
+-        // user namespace, but chown cannot use them.
+-        let gid_map = fs::read_to_string("/proc/self/gid_map")?;
+-        let mapped_groups = gid_map
 +        let mappings = fs::read_to_string("/proc/self/gid_map")?
-+            .lines()
+             .lines()
+-            .map(|line| {
 +            .map(|line| -> anyhow::Result<(u64, u64)> {
-+                let fields = line
-+                    .split_whitespace()
-+                    .map(str::parse::<u64>)
-+                    .collect::<Result<Vec<_>, _>>()?;
+                 let fields = line
+                     .split_whitespace()
+                     .map(str::parse::<u64>)
+                     .collect::<Result<Vec<_>, _>>()?;
+-                anyhow::ensure!(fields.len() == 3, "invalid GID mapping: {line}");
+-                Ok(fields[0]..fields[0] + fields[2])
 +                let [inside, _outside, count] = fields.as_slice() else {
 +                    anyhow::bail!("invalid group mapping row: {line}");
 +                };
@@ -391,19 +386,22 @@ index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17
 +                    .context("group mapping overflow")?;
 +                anyhow::ensure!(end <= 1_u64 << 32, "invalid group mapping extent");
 +                Ok((*inside, end))
-+            })
-+            .collect::<anyhow::Result<Vec<_>>>()?;
+             })
+             .collect::<anyhow::Result<Vec<_>>>()?;
 +        // An overflow GID can appear in supplementary groups without being usable by chown.
-+        groups
-+            .into_iter()
-+            .filter(|group| {
+         groups
+             .into_iter()
+             .filter(|group| {
+-                mapped_groups
 +                mappings
-+                    .iter()
+                     .iter()
+-                    .any(|range| range.contains(&u64::from(*group)))
 +                    .any(|(start, end)| (*start..*end).contains(&u64::from(*group)))
-+            })
-+            .collect::<Vec<_>>()
-+    };
-+    let Some(group) = groups.into_iter().find(|group| *group != original_group) else {
+             })
+             .collect::<Vec<_>>()
+     };
+     let Some(group) = groups.into_iter().find(|group| *group != original_group) else {
+-        eprintln!("skipping ownership regression: no alternate supplementary group");
 +        eprintln!("skipping ownership regression: no mapped alternate supplementary group");
          return Ok(());
      };
@@ -413,7 +411,7 @@ index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17
      assert_eq!(fs::metadata(&path)?.gid(), group);
 
      worker::run(home.path().to_path_buf(), Startup).await?;
-@@ -1027,6 +1056,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+@@ -1051,6 +1057,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
      Ok(())
  }
 
@@ -448,10 +446,10 @@ index 5ad16c1e476f7fadbf8bff2889c27ed9f1168b5c..3205c5695323c603d5aa862967f11e17
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index d055f12ca4e49567b2cfa849d496a48878b744cf..b1f4613b9d121ae67cd405dee4bb0bf4f6c97fa1 100644
+index 333e11bdf993ffe84e8ad437d9cf591589fd0b6f..a259d59008f9f78d57568c376bb61a6c1a00b470 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1211,12 +1211,12 @@ async fn select_thread_candidates(
+@@ -1259,12 +1259,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }
@@ -471,10 +469,10 @@ index d055f12ca4e49567b2cfa849d496a48878b744cf..b1f4613b9d121ae67cd405dee4bb0bf4
      Ok(selected)
  }
 diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
-index 47957d070176cfd5554a627b5f25744364c62805..fae33e028b3d6f95067c47697999bf75d7664cfc 100644
+index 9b790843c4489f3519a4c2c128ae356aea7e53e5..a8bc6fae221bbf8608a4b8df21c945ade6e2f4eb 100644
 --- a/codex-rs/rollout/src/writer_lock_tests.rs
 +++ b/codex-rs/rollout/src/writer_lock_tests.rs
-@@ -240,3 +240,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
+@@ -260,3 +260,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
      );
      assert!(writer.acquire(thread_id).is_ok());
  }
@@ -865,7 +863,7 @@ index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd2
 +    assert!(!path.exists());
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
-index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..330346500e828cb3925458cf38fe6a039933e8e3 100644
+index 4fd105d538074d0933f74cb09ca4d82767895ed5..b2c0c092d7f65e846b6216e8fa6160f0ea0892c4 100644
 --- a/codex-rs/thread-store/src/local/archive_thread.rs
 +++ b/codex-rs/thread-store/src/local/archive_thread.rs
 @@ -1,14 +1,16 @@
@@ -978,10 +976,10 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..330346500e828cb3925458cf38fe6a03
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 516a04b5ac9a642780b8057edb5b18d376780f26..d807fba12c66b17b15d6a0c3048595cd4e537777 100644
+index 3cb78c1c651dcbb9d559393631cb108a9199be5c..84d0ad26f53c5c753553c6253337bb01a64c5c28 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -1705,8 +1705,6 @@ impl ThreadStore for LocalThreadStore {
+@@ -1723,8 +1723,6 @@ impl ThreadStore for LocalThreadStore {
 
      fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move {
@@ -990,7 +988,7 @@ index 516a04b5ac9a642780b8057edb5b18d376780f26..d807fba12c66b17b15d6a0c3048595cd
              archive_thread::archive_threads(
                  self,
                  ArchiveThreadsParams {
-@@ -1723,12 +1721,7 @@ impl ThreadStore for LocalThreadStore {
+@@ -1741,12 +1739,7 @@ impl ThreadStore for LocalThreadStore {
          &self,
          params: ArchiveThreadsParams,
      ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
@@ -2489,10 +2487,10 @@ index f29c26a2491fe29b48de133cfae37c91ed6c0830..16c23b4baaf30b40dc6dc6dd98c843e4
          drop(file);
          physical_io::sync_parent_directory_blocking(&path)
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index f68ea6d94971ac625d8c975868ac9eba7f937d77..72c37e0aab7692daf8b7fc1e2dcb6db335181863 100644
+index 9a515fe5b4cca172edaa36aa1adeae3928e80a1a..59c7827851332d3cc3b9ca224785379d9357e095 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -416,6 +416,11 @@ async fn reserve_segment_writers(
+@@ -415,6 +415,11 @@ async fn reserve_segment_writers(
          };
          let (source_path, live_recorder, allow_missing_source) = match live_source {
              Some((source_path, recorder, allow_missing_source)) => {
@@ -2505,7 +2503,7 @@ index f68ea6d94971ac625d8c975868ac9eba7f937d77..72c37e0aab7692daf8b7fc1e2dcb6db3
              }
              None => {
 diff --git a/codex-rs/tui/src/session_archive_commands_tests.rs b/codex-rs/tui/src/session_archive_commands_tests.rs
-index 8d94c50c314bbaf385d91fd3d3bde9ad6431daa5..d5a646286682e09708eda8d47eed91078b18d6b8 100644
+index 18657465d040b1b81b78c1bbf71681aa4a6ca7ff..8b27bbd1651e4b35058c9825280043a46a0e8f98 100644
 --- a/codex-rs/tui/src/session_archive_commands_tests.rs
 +++ b/codex-rs/tui/src/session_archive_commands_tests.rs
 @@ -504,12 +504,35 @@ async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_e

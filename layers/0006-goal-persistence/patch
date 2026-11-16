@@ -61,7 +61,7 @@ index a37a3e958cce958324f98af55009fffcd5f38be5..57e027af549c8a4f5b629fee4e717252
 +    }
  }
 diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
-index 82aeaf7f46f92244e59279012bc1033934fbe25a..2d9ea24ce458235e0e4dcee560f8ccb131aa629f 100644
+index bada44de510d3fb2e22b5d8fa5ba25a1aa6896ea..aff0f062414699d197c2d79f7254ddc6d5737df8 100644
 --- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 @@ -158,17 +158,19 @@ impl ThreadGoalRequestProcessor {
@@ -75,7 +75,7 @@ index 82aeaf7f46f92244e59279012bc1033934fbe25a..2d9ea24ce458235e0e4dcee560f8ccb1
 +            && let Some(thread) = loaded_thread.as_ref()
          {
              self.config_manager
-                 .check_thread_model_provider_for_input(thread.config().await.as_ref())
+                 .check_thread_model_provider(thread.config().await.as_ref())
                  .await
                  .map_err(|error| config_load_error(&error))?;
          }
@@ -130,7 +130,7 @@ index 82aeaf7f46f92244e59279012bc1033934fbe25a..2d9ea24ce458235e0e4dcee560f8ccb1
              Some(thread) => thread.rollout_path().ok_or_else(|| {
                  invalid_request(format!(
 diff --git a/codex-rs/core/BUILD.bazel b/codex-rs/core/BUILD.bazel
-index 4c04c5d6b40f7f625e14ce5726b2e59b2e559603..58554b97fec42cf01e1653c9a5f320daa211f179 100644
+index 723cee347c07682cfea592b45a02c3945a5dd923..2922c507111e3ebab360effba54867913ad0efa5 100644
 --- a/codex-rs/core/BUILD.bazel
 +++ b/codex-rs/core/BUILD.bazel
 @@ -2,7 +2,12 @@ load("//:defs.bzl", "codex_rust_crate")
@@ -148,10 +148,10 @@ index 4c04c5d6b40f7f625e14ce5726b2e59b2e559603..58554b97fec42cf01e1653c9a5f320da
      crate_srcs = glob(["src/**/*.rs"]) + [
          "//codex-rs/ext/guardian-v2:src/sync_reviewer/reviewer_config.rs",
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 1a4fe6db0efceec5a36f544dac65ab42ff85c148..c6e68472f14b5b0b9db4cd6f103bf90ff1f1839b 100644
+index 57616157c1aea2c40cec7ee0fdca6875d52b7294..29a03d94d5a967474053de35f2a7b2aac1d5e290 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -1056,6 +1056,9 @@
+@@ -1037,6 +1037,9 @@
              "gcp_setup_wizard": {
                "type": "boolean"
              },
@@ -161,7 +161,7 @@ index 1a4fe6db0efceec5a36f544dac65ab42ff85c148..c6e68472f14b5b0b9db4cd6f103bf90f
              "goals": {
                "type": "boolean"
              },
-@@ -7842,6 +7845,9 @@
+@@ -8182,6 +8185,9 @@
          "gcp_setup_wizard": {
            "type": "boolean"
          },
@@ -171,13 +171,6 @@ index 1a4fe6db0efceec5a36f544dac65ab42ff85c148..c6e68472f14b5b0b9db4cd6f103bf90f
          "goals": {
            "type": "boolean"
          },
-@@ -8760,4 +8766,4 @@
-   },
-   "title": "ConfigToml",
-   "type": "object"
--}
-\ No newline at end of file
-+}
 diff --git a/codex-rs/core/root_agent_supervisor_prompt.md b/codex-rs/core/root_agent_supervisor_prompt.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..141eec9d0981380eccb34879e229eb41fdf0230e
@@ -216,18 +209,18 @@ index 0000000000000000000000000000000000000000..141eec9d0981380eccb34879e229eb41
 +
 +Treat messages from the supervisor as task instructions.
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index b9ea2ce5c633c3ccfd039ae71aa70b13d4d0d28f..6c2e94bc88492a64251a2616dd61de28c1f16ee2 100644
+index a40a2d7b38b8bcca7cd3ef8bfb370bdba8941ebd..424c8d011552f6e293f98477ec2f6774e8840c34 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -39,6 +39,7 @@ use codex_context_fragments::set_annotated_content;
- use codex_context_fragments::truncate_annotated_text;
+@@ -40,6 +40,7 @@ use codex_context_fragments::truncate_annotated_text;
  use codex_history::CodexHarnessMetadata;
  use codex_history::ResponseItemEnvelope;
+ use codex_http_client::RetryAfter;
 +use codex_protocol::AgentPath;
  use codex_protocol::ResponseItemId;
  use codex_protocol::error::CodexErr;
  use codex_protocol::error::CodexErrorDetails;
-@@ -87,6 +88,7 @@ impl CompactionReporting {
+@@ -88,6 +89,7 @@ impl CompactionReporting {
      }
  }
  const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
@@ -235,7 +228,7 @@ index b9ea2ce5c633c3ccfd039ae71aa70b13d4d0d28f..6c2e94bc88492a64251a2616dd61de28
  pub(crate) const UNIFIED_EXEC_PROCESS_WARNING_PREFIX: &str =
      "Warning: The maximum number of unified exec process";
 
-@@ -455,6 +457,7 @@ async fn run_compact_task_inner_impl(
+@@ -441,6 +443,7 @@ async fn run_compact_task_inner_impl(
          }
      };
 
@@ -243,17 +236,40 @@ index b9ea2ce5c633c3ccfd039ae71aa70b13d4d0d28f..6c2e94bc88492a64251a2616dd61de28
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
      let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
-@@ -477,6 +480,9 @@ async fn run_compact_task_inner_impl(
-         // belongs to this compaction turn.
-         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+@@ -470,13 +473,11 @@ async fn run_compact_task_inner_impl(
+         let summary = new_history
+             .pop()
+             .ok_or_else(|| CodexErr::Fatal("local compaction summary is missing".to_string()))?;
+-        new_history.extend(
+-            history
+-                .annotated_items()
+-                .iter()
+-                .filter(|envelope| is_retained_pending_mail(envelope, first))
+-                .cloned(),
+-        );
++        for envelope in history.annotated_items().iter().filter(|envelope| is_retained_pending_mail(envelope, first)) {
++            if !new_history.contains(envelope) {
++                new_history.push(envelope.clone());
++            }
++        }
+         new_history.sort_by_key(|envelope| {
+             envelope
+                 .metadata
+@@ -488,8 +489,13 @@ async fn run_compact_task_inner_impl(
+             COMPACT_USER_MESSAGE_MAX_TOKENS,
+             &history.file_audio_durations,
+         );
++        if let Some(agent_path) = agent_path.as_ref() {
++            retain_subagent_assignment_with_pending_mail(history.annotated_items(), &mut new_history, agent_path, first);
++        }
+         new_history =
+             crate::compact_pending_input::insert_summary(new_history, summary, pending_sequence);
++    } else if let Some(agent_path) = agent_path.as_ref() {
++        retain_subagent_assignment_and_recent_messages(history.annotated_items(), &mut new_history, agent_path);
      }
-+    if let Some(agent_path) = agent_path.as_ref() {
-+        retain_subagent_assignment_and_recent_messages(history_items, &mut new_history, agent_path);
-+    }
+     let rendered = world_state.render_full_with_host_roster().await;
      let (window_number, window_ids) = sess.advance_auto_compact_window().await;
-
-     let (new_history, world_state_baseline) = build_compaction_replacement_history(
-@@ -660,6 +666,71 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
+@@ -674,6 +680,87 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
      message.starts_with(UNIFIED_EXEC_PROCESS_WARNING_PREFIX)
  }
 
@@ -322,30 +338,46 @@ index b9ea2ce5c633c3ccfd039ae71aa70b13d4d0d28f..6c2e94bc88492a64251a2616dd61de28
 +    compacted_history.splice(insertion_index..insertion_index, retained_messages);
 +}
 +
++fn retain_subagent_assignment_with_pending_mail(
++    previous_history: &[ResponseItemEnvelope],
++    compacted_history: &mut Vec<ResponseItemEnvelope>,
++    agent_path: &AgentPath,
++    pending_sequence: u64,
++) {
++    let retained_pending = compacted_history.iter()
++        .filter(|envelope| is_retained_pending_mail(envelope, pending_sequence))
++        .cloned().collect::<Vec<_>>();
++    retain_subagent_assignment_and_recent_messages(previous_history, compacted_history, agent_path);
++    for envelope in retained_pending {
++        if !compacted_history.contains(&envelope) { compacted_history.push(envelope); }
++    }
++    compacted_history.sort_by_key(|envelope| envelope.metadata.as_ref().and_then(|metadata| metadata.history_sequence));
++}
++
  pub(crate) fn is_compaction_filtered_history_item(item: &ResponseItem) -> bool {
      let ResponseItem::Message { role, content, .. } = item else {
          return false;
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 0f60562453099ff12292a6d3c15d6148b7229981..b0d763b188933ad3cde60859a9b20544c54a9913 100644
+index 2ecd970be6f3add2aadf83fc4d037cb52edbb6f8..2cdd37dcb26f6c352518f579aad7ed4210637559 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -13,6 +13,7 @@ use crate::compact::CompactionAnalyticsAttempt;
+@@ -15,6 +15,7 @@ use crate::compact::CompactionAnalyticsAttempt;
  use crate::compact::CompactionAnalyticsDetails;
  use crate::compact::CompactionReporting;
  use crate::compact::compaction_status_from_result;
 +use crate::compact::retain_subagent_assignment_and_recent_messages;
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
- use crate::compact_remote_history::HistoryItemGroup;
-@@ -783,6 +784,7 @@ fn truncate_message_text_to_token_budget(
- #[cfg(test)]
- mod tests {
-     use super::*;
+ use crate::compact_pending_input::MAX_RETAINED_AGENT_MESSAGE_TOKENS;
+@@ -857,6 +858,7 @@ mod tests {
+     use crate::agent::host::AgentUsageAccounting;
+     use crate::agent::host::AgentUsageReport;
+     use crate::agent::host::UsageAccountingDecision;
 +    use codex_protocol::AgentPath;
      use codex_protocol::models::ContentItem;
      use codex_protocol::models::ContentItemKind;
      use codex_protocol::models::InternalChatMessageMetadataPassthrough;
-@@ -902,6 +904,64 @@ mod tests {
+@@ -1018,6 +1020,64 @@ mod tests {
          );
      }
 
@@ -411,11 +443,11 @@ index 0f60562453099ff12292a6d3c15d6148b7229981..b0d763b188933ad3cde60859a9b20544
      fn build_v2_compacted_history_preserves_retained_metadata_sidecar() {
          let retained = message("user", "keep", /*phase*/ None);
 diff --git a/codex-rs/core/src/compact_remote_v2_installation.rs b/codex-rs/core/src/compact_remote_v2_installation.rs
-index f956b6c2a205dd36249d17169ae62cd4e4d2df63..72aada0d34f443bc106fc34ac8726ca7f2916b74 100644
+index ada0904069f9260fc6439358654bd5ebdf549390..4a5079745d3835496815bf400e2abe8acdfaa61c 100644
 --- a/codex-rs/core/src/compact_remote_v2_installation.rs
 +++ b/codex-rs/core/src/compact_remote_v2_installation.rs
-@@ -193,7 +193,7 @@ async fn build_and_install_compaction(
-         sess.record_rollout_budget_usage(token_usage).await?;
+@@ -195,7 +195,7 @@ async fn build_and_install_compaction(
+             .await?;
          analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
      }
 -    let (compacted_history, retained_images) = build_v2_compacted_history(
@@ -423,9 +455,9 @@ index f956b6c2a205dd36249d17169ae62cd4e4d2df63..72aada0d34f443bc106fc34ac8726ca7
          prompt_input,
          prompt_input_metadata,
          compaction_output,
-@@ -204,6 +204,24 @@ async fn build_and_install_compaction(
-             RetainedImageBudget::Disabled
+@@ -207,6 +207,24 @@ async fn build_and_install_compaction(
          },
+         crate::session::file_audio::snapshot(sess).await.as_ref(),
      );
 +    if let Some(agent_path) = turn_context.session_source.get_agent_path() {
 +        let previous_history = sess.clone_history().await;
@@ -449,17 +481,26 @@ index f956b6c2a205dd36249d17169ae62cd4e4d2df63..72aada0d34f443bc106fc34ac8726ca7
      let installing_prefix = prefix.is_some();
      let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
 diff --git a/codex-rs/core/src/compact_remote_v2_installation_tests.rs b/codex-rs/core/src/compact_remote_v2_installation_tests.rs
-index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68c590ccc0 100644
+index 4771e99fde61958f655cd80483130f2650fbc4a4..d915ffe3cc5ffadb1fe80454b28868f71cc43d2e 100644
 --- a/codex-rs/core/src/compact_remote_v2_installation_tests.rs
 +++ b/codex-rs/core/src/compact_remote_v2_installation_tests.rs
-@@ -15,12 +15,14 @@ use tokio_util::sync::CancellationToken;
+@@ -9,6 +9,7 @@ use crate::context::world_state::WorldState;
+ use crate::session::CompactionPrefix;
+ use codex_login::CodexAuth;
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::models::AgentMessageInputContent;
+ use core_test_support::responses;
+ use futures::future::BoxFuture;
+ use pretty_assertions::assert_eq;
+@@ -20,6 +21,7 @@ use tokio_util::sync::CancellationToken;
  enum HistoryChange {
      Replacement,
      Account,
 +    Append,
  }
 
- #[test_case(HistoryChange::Replacement, CompactionFallback::Skip; "replacement optional")]
+ #[derive(Default)]
+@@ -50,6 +52,7 @@ impl AgentSessionReader for FailingRosterRead {
  #[test_case(HistoryChange::Account, CompactionFallback::Skip; "account optional")]
  #[test_case(HistoryChange::Replacement, CompactionFallback::Foreground; "replacement required")]
  #[test_case(HistoryChange::Account, CompactionFallback::Foreground; "account required")]
@@ -467,7 +508,7 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
  #[tokio::test]
  async fn prepared_prefix_rejection_respects_caller_intent(
      change: HistoryChange,
-@@ -33,7 +35,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+@@ -62,7 +65,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
      provider.base_url = Some(format!("{}/v1", server.uri()));
      provider.supports_websockets = false;
      let server_uri = server.uri();
@@ -476,7 +517,7 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
          crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
              CodexAuth::create_dummy_chatgpt_auth_for_testing(),
              Vec::new(),
-@@ -45,6 +47,18 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+@@ -74,6 +77,18 @@ async fn prepared_prefix_rejection_respects_caller_intent(
              },
          )
          .await;
@@ -495,7 +536,7 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
      let requests = responses::mount_sse_once(
          &server,
          responses::sse(vec![
-@@ -64,7 +78,32 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+@@ -93,7 +108,32 @@ async fn prepared_prefix_rejection_respects_caller_intent(
          "content": [{"type": "input_text", "text": "original turn"}]
      }))
      .expect("user message");
@@ -528,9 +569,18 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
 +    sess.replace_history(originals.clone(), /*reference_context_item*/ None)
          .await;
      let history = sess.clone_history().await;
-     let auth = sess.services.model_client.auth_owner_generation();
-@@ -79,8 +118,8 @@ async fn prepared_prefix_rejection_respects_caller_intent(
-         attempt: RemoteCompactV2Attempt {
+     let auth = sess.services.model_client.auth_owner();
+@@ -101,7 +141,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+         generation: history.history_version(),
+         len: history.annotated_items().len(),
+         auth_owner: match change {
+-            HistoryChange::Replacement => auth,
++            HistoryChange::Replacement | HistoryChange::Append => auth,
+             HistoryChange::Account => Some(
+                 codex_login::AuthManager::from_auth_for_testing_with_home(
+                     CodexAuth::from_api_key("other-account"),
+@@ -132,8 +172,8 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+             rejected_audio_file_ids: Default::default(),
              input_goal_ids: Default::default(),
              trace_input_history: None,
 -            prompt_input: vec![original.clone()],
@@ -540,10 +590,12 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
              compaction_output: ResponseItem::Compaction {
                  id: None,
                  encrypted_content: "stale-summary".to_string(),
-@@ -107,11 +146,38 @@ async fn prepared_prefix_rejection_respects_caller_intent(
-         HistoryChange::Account => {
-             candidate.prefix.auth_owner_generation = Some(auth.unwrap_or_default().wrapping_add(1));
-         }
+@@ -150,6 +190,36 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+         },
+     };
+     let world_state = WorldState::default();
++    match change {
++        HistoryChange::Replacement | HistoryChange::Account => {}
 +        HistoryChange::Append => {
 +            let mut live_agent = assignment.clone();
 +            if let ResponseItem::AgentMessage { id, content, .. } = &mut live_agent {
@@ -571,73 +623,32 @@ index b7eda1ced3c1862366d47789d443bd5021fee57e..750471cbffec618c531783b112048f68
 +                .await
 +                .expect("record late goal");
 +        }
-     }
-     // Rewritten histories still fit the captured length; length alone cannot reject them.
-     let history = sess.clone_history().await;
-     assert!(history.annotated_items().len() >= candidate.prefix.len);
--    if !matches!(change, HistoryChange::Account) {
-+    if matches!(change, HistoryChange::Replacement) {
-         assert_ne!(history.history_version(), candidate.prefix.generation);
-     }
-     let before = sess
-@@ -140,15 +206,11 @@ async fn prepared_prefix_rejection_respects_caller_intent(
-         CompactionReporting::Immediate,
-     )
-     .await
--    .expect("reject stale result without failing compaction");
--    // The foreground response has no usage; stale candidate statistics must not leak.
--    assert_eq!(
--        (
--            analytics.compaction_summary_tokens,
--            analytics.cached_input_tokens,
--            analytics.cache_write_input_tokens
--        ),
--        (None, None, None),
-+    .expect("install or reject the prepared result without failing compaction");
-+    let reported_usage = (
-+        analytics.compaction_summary_tokens,
-+        analytics.cached_input_tokens,
-+        analytics.cache_write_input_tokens,
-     );
-     let after = sess
-         .clone_history()
-@@ -156,6 +218,34 @@ async fn prepared_prefix_rejection_respects_caller_intent(
-         .raw_items()
-         .cloned()
-         .collect::<Vec<_>>();
++    }
+     let mut analytics = CompactionAnalyticsDetails::default();
+     let mut compaction = Box::pin(run_compaction(
+         &sess,
+@@ -191,6 +261,19 @@ async fn prepared_prefix_rejection_respects_caller_intent(
+     let installed = compaction
+         .await
+         .expect("reject stale result without failing compaction");
 +    if matches!(change, HistoryChange::Append) {
 +        assert!(installed);
-+        assert_eq!(reported_usage, (Some(777), Some(9), Some(5)));
++        assert_eq!((analytics.compaction_summary_tokens, analytics.cached_input_tokens, analytics.cache_write_input_tokens), (Some(777), Some(9), Some(5)));
 +        assert_eq!(requests.requests().len(), 0);
-+        for id in [
-+            "original_assignment",
-+            "independent_assignment",
-+            "live_agent_suffix",
-+            "live_independent_suffix",
-+        ] {
-+            assert_eq!(
-+                after
-+                    .iter()
-+                    .filter(|item| item.id().is_some_and(|item_id| item_id.as_str() == id))
-+                    .count(),
-+                1,
-+                "item {id} must appear exactly once"
-+            );
++        let before_items = before.raw_items().cloned().collect::<Vec<_>>();
++        let after = sess.clone_history().await;
++        let after_items = after.raw_items().cloned().collect::<Vec<_>>();
++        for id in ["original_assignment", "independent_assignment", "live_agent_suffix", "live_independent_suffix"] {
++            assert_eq!(after_items.iter().filter(|item| item.id().is_some_and(|item_id| item_id.as_str() == id)).count(), 1, "item {id} must appear exactly once");
 +        }
-+        assert_eq!(
-+            &after[after.len() - 3..],
-+            &before[before.len() - 3..],
-+            "live agent messages and the late goal keep their identities and order"
-+        );
++        assert_eq!(&after_items[after_items.len() - 3..], &before_items[before_items.len() - 3..]);
 +        return;
 +    }
-+    // The foreground response has no usage; stale candidate statistics must not leak.
-+    assert_eq!(reported_usage, (None, None, None));
-     match fallback {
-         CompactionFallback::Skip => {
-             assert!(!installed);
+     // The foreground response has no usage; stale candidate statistics must not leak.
+     assert_eq!(
+         (
 diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
-index f09a29a6a4712b52063fa032721d47d8181c6532..4f3c55a690f9d3a99c1592bb52ab0d1fa2b18c2c 100644
+index f09a29a6a4712b52063fa032721d47d8181c6532..cd87e788269263e39f3c2ee00f0cc63cdc8275c7 100644
 --- a/codex-rs/core/src/compact_tests.rs
 +++ b/codex-rs/core/src/compact_tests.rs
 @@ -10,6 +10,7 @@ use codex_history::ResponseItemEnvelope;
@@ -648,7 +659,7 @@ index f09a29a6a4712b52063fa032721d47d8181c6532..4f3c55a690f9d3a99c1592bb52ab0d1f
  use codex_protocol::models::ContentItemKind;
  use codex_protocol::models::ContentItemMetadata;
  use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
-@@ -264,6 +265,84 @@ fn user_message(text: &str) -> ResponseItem {
+@@ -264,6 +265,101 @@ fn user_message(text: &str) -> ResponseItem {
      }
  }
 
@@ -730,14 +741,31 @@ index f09a29a6a4712b52063fa032721d47d8181c6532..4f3c55a690f9d3a99c1592bb52ab0d1f
 +    assert_eq!(vec![assignment, latest, summary], compacted_history);
 +}
 +
++#[test]
++fn compaction_keeps_assignment_and_pending_mail_in_summary_order() {
++    let agent_path = AgentPath::try_from("/root/release_build").expect("valid agent path");
++    let make_message = |sequence, text: &str| ResponseItemEnvelope {
++        item: agent_message("/root", agent_path.as_str(), text),
++        metadata: Some(CodexHarnessMetadata { history_sequence: Some(sequence), ..Default::default() }),
++    };
++    let assignment = make_message(1, "original assignment");
++    let pending = make_message(2, "pending message");
++    let previous = vec![assignment.clone(), pending.clone()];
++    let summary = ResponseItemEnvelope::new(user_message(&format!("{SUMMARY_PREFIX}\nsummary")));
++    let mut compacted = vec![pending.clone()];
++    retain_subagent_assignment_with_pending_mail(&previous, &mut compacted, &agent_path, 2);
++    let compacted = crate::compact_pending_input::insert_summary(compacted, summary.clone(), Some(2));
++    assert_eq!(compacted, vec![assignment, summary, pending]);
++}
++
  fn compacted_user_message<'a>(text: &str, original: &'a ResponseItem) -> CompactedUserMessage<'a> {
      CompactedUserMessage {
          message: text.to_string(),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259b44ace92 100644
+index 06ed768a2570d4ffccf525db54fcaee6491bfd14..089d15fd5bf943b9bb48acdfe49b1f14b9b1e697 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -327,7 +327,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
+@@ -338,7 +338,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
  mod rollout_reconstruction_tests;
 
  const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
@@ -749,7 +777,7 @@ index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259
 
  async fn load_agent_prompt_fallback(
      codex_home: &Path,
-@@ -348,10 +352,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
+@@ -359,10 +363,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
      load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
  }
 
@@ -778,7 +806,7 @@ index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259
  fn history_contains_developer_text(
      history: &crate::context_manager::ContextManager,
      expected: &str,
-@@ -378,6 +400,11 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -389,6 +411,11 @@ pub(crate) async fn load_agent_role_prompt(
      }
 
      let role_prompt = match session_source {
@@ -790,7 +818,7 @@ index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259
          SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
          SessionSource::Cli
          | SessionSource::VSCode
-@@ -385,7 +412,19 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -396,7 +423,19 @@ pub(crate) async fn load_agent_role_prompt(
          | SessionSource::Mcp
          | SessionSource::Custom(_)
          | SessionSource::Internal(_)
@@ -811,7 +839,7 @@ index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2886,6 +2925,11 @@ impl Session {
+@@ -3059,6 +3098,11 @@ impl Session {
          }
      }
 
@@ -824,10 +852,10 @@ index b6f46024b8121cf991fb80e6cafe23c6c0ef606a..083f163906bdfbc3997c5edde2657259
          let state = self.state.lock().await;
          state.session_configuration.provider.info().clone()
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index ba291dd6e8b41ab322ca34aed0abf9aa890767d8..a9ab0512c6351a632dfa226223852c0e6f4a921f 100644
+index d2aaa7cfc26782e610c01e99644d94ad628e01ec..34815c63199aff68be6881b14e7d2523a03f5bef 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -15225,6 +15225,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -15111,6 +15111,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
      assert!(prompt.contains("Prefer direct execution over coordination"));
  }
 
@@ -922,7 +950,7 @@ index ba291dd6e8b41ab322ca34aed0abf9aa890767d8..a9ab0512c6351a632dfa226223852c0e
  #[tokio::test]
  async fn subagent_prompt_is_for_regular_subagents_only() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
-@@ -15249,6 +15337,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -15135,6 +15223,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
      )
      .await
      .expect("write subagent override");
@@ -941,7 +969,7 @@ index ba291dd6e8b41ab322ca34aed0abf9aa890767d8..a9ab0512c6351a632dfa226223852c0e
 
      assert_eq!(
          load_root_agent_prompt(codex_home.path()).await,
-@@ -15258,6 +15358,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -15144,6 +15244,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
          load_subagent_prompt(codex_home.path()).await,
          "custom subagent"
      );
@@ -957,10 +985,10 @@ index ba291dd6e8b41ab322ca34aed0abf9aa890767d8..a9ab0512c6351a632dfa226223852c0e
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971ec5ac422 100644
+index 579b0b932e6cdb86d96cc03f32190993ed8603fb..4259f6c4b936c675267db02bbe120881f1471682 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -67,6 +67,7 @@ use crate::tasks::emit_compact_metric;
+@@ -69,6 +69,7 @@ use crate::tasks::emit_compact_metric;
  use crate::tools::ToolRouter;
  use crate::tools::context::SharedTurnDiffTracker;
  use crate::tools::handlers::is_set_workspace_cwd_tool;
@@ -968,7 +996,7 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -3354,11 +3355,12 @@ async fn drain_in_flight(
+@@ -3537,11 +3538,12 @@ async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
      sess: Arc<Session>,
      step_context: &StepContext,
@@ -983,7 +1011,7 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
                  mark_thread_memory_mode_polluted_if_external_context(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -3372,13 +3374,16 @@ async fn drain_in_flight(
+@@ -3555,13 +3557,16 @@ async fn drain_in_flight(
                  )
                  .await;
              }
@@ -1001,7 +1029,7 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
  }
 
  fn assign_missing_streamed_response_item_id(
-@@ -4483,7 +4488,7 @@ async fn try_run_sampling_request(
+@@ -4736,7 +4741,7 @@ async fn try_run_sampling_request(
      if workspace_cwd_call_seen && tool_call_count != 1 {
          step_context.reject_context_transition_mixed_with_sibling_tool();
      }
@@ -1010,7 +1038,7 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
          let _tool_blocking_timing_guard = turn_context
              .turn_timing_state
              .begin_tool_blocking(tool_runtime.batch_timing());
-@@ -4493,11 +4498,16 @@ async fn try_run_sampling_request(
+@@ -4746,11 +4751,16 @@ async fn try_run_sampling_request(
              conversation.id = %sess.thread_id,
              turn.id = %turn_context.sub_id,
          );
@@ -1031,7 +1059,7 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
 
      if should_emit_token_count {
          // A tool call such as request_user_input can intentionally pause the turn. Emit token
-@@ -4507,6 +4517,10 @@ async fn try_run_sampling_request(
+@@ -4760,6 +4770,10 @@ async fn try_run_sampling_request(
          sess.send_token_count_event(&turn_context).await;
      }
 
@@ -1043,18 +1071,10 @@ index 09f2c9cf123a7ad554327f09f30ced7a215985c6..45c060953959bfacde7207fc9409b971
          return Err(CodexErr::TurnAborted);
      }
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index e52993f26201f694d7c14dc8bffdc2012fbc2d77..1f19671dbc3e4f6732934bb8ce3eabb06aa4a5f2 100644
+index 89f20b25df24477e02504ea0ad6e19abd8e536fe..ecc5dfd674c443b34fa6d527959e1f0c0b28e413 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
-@@ -2,7 +2,6 @@ use std::pin::Pin;
- use std::sync::Arc;
-
- use codex_extension_api::ExtensionData;
--use codex_history::ResponseItemEnvelope;
- use codex_protocol::ResponseItemId;
- use codex_protocol::config_types::ModeKind;
- use codex_protocol::items::TurnItem;
-@@ -16,6 +15,7 @@ use crate::session::step_context::StepContext;
+@@ -17,6 +17,7 @@ use crate::session::step_context::StepContext;
  use crate::session::turn_context::TurnContext;
  use crate::tools::call_trace;
  use crate::tools::handlers::is_set_workspace_cwd_tool;
@@ -1062,7 +1082,7 @@ index e52993f26201f694d7c14dc8bffdc2012fbc2d77..1f19671dbc3e4f6732934bb8ce3eabb0
  use crate::tools::parallel::ToolCallRuntime;
  use codex_memories_read::citations::parse_memory_citation;
  use codex_memories_read::citations::thread_ids_from_memory_citation;
-@@ -218,7 +218,7 @@ async fn record_stage1_output_usage_for_memory_citation(
+@@ -227,7 +228,7 @@ async fn record_stage1_output_usage_for_memory_citation(
  /// queuing any tool execution futures. This records items immediately so
  /// history and rollout stay in sync even if the turn is later cancelled.
  pub(crate) type InFlightFuture<'f> =
@@ -1071,7 +1091,7 @@ index e52993f26201f694d7c14dc8bffdc2012fbc2d77..1f19671dbc3e4f6732934bb8ce3eabb0
 
  #[derive(Default)]
  pub(crate) struct OutputItemResult {
-@@ -363,7 +363,7 @@ pub(crate) async fn handle_output_item_done(
+@@ -399,7 +400,7 @@ pub(crate) async fn handle_output_item_done(
                          // The call is already in history; resume needs its output even if we never dispatch.
                          let output =
                              ToolCallRuntime::aborted_response(&call, /*elapsed_secs*/ None);
@@ -1081,7 +1101,7 @@ index e52993f26201f694d7c14dc8bffdc2012fbc2d77..1f19671dbc3e4f6732934bb8ce3eabb0
                      runtime.handle_tool_call(call, cancellation_token).await
                  })
 diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
-index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625decd0a7a3 100644
+index 56786c152c2d1525cca9de231b344761a9210574..3c7e15bd3d9f077048cf59c8f5cde084944b2b58 100644
 --- a/codex-rs/core/src/stream_events_utils_tests.rs
 +++ b/codex-rs/core/src/stream_events_utils_tests.rs
 @@ -13,6 +13,7 @@ use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
@@ -1092,7 +1112,7 @@ index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625d
  use crate::tools::parallel::ToolCallRuntime;
  use crate::turn_diff_tracker::TurnDiffTracker;
  use codex_extension_api::ExtensionData;
-@@ -382,7 +383,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -386,7 +387,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
      // Await in reverse order: each result must already own its record before history attachment.
      let mut outputs = Vec::new();
      for (arguments, future) in pending.into_iter().rev() {
@@ -1103,7 +1123,7 @@ index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625d
          let item = &envelope.item;
          let ResponseItem::FunctionCallOutput {
              call_id: output_call_id,
-@@ -437,10 +440,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -443,10 +446,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
      let _ = session
          .refresh_runtime_config(current_config, config.clone())
          .await;
@@ -1119,7 +1139,7 @@ index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625d
      assert!(result.item.executed_tool_call_metadata().is_none());
      session
          .services
-@@ -458,11 +464,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+@@ -464,11 +470,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
          .expect("re-enable metadata");
      let current_config = session.get_config().await;
      let _ = session.refresh_runtime_config(current_config, config).await;
@@ -1137,7 +1157,7 @@ index a7b47e13709243f61f56889b85995f800519584d..dfca9e69b6f65883fb94af690b9c625d
  }
 
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
-index 252ca66b742346085517448eb00f38e26dce72c9..628465fcb18f5421dad2488c4ff0af72b360a0c8 100644
+index 4460563e663a2f5076e4c1d4ec90c27400e2882f..ebdaf3edeb5203f2904035d8bc5324df270189a7 100644
 --- a/codex-rs/core/src/tools/context.rs
 +++ b/codex-rs/core/src/tools/context.rs
 @@ -303,6 +303,8 @@ pub struct FunctionToolOutput {
@@ -1188,7 +1208,7 @@ index 252ca66b742346085517448eb00f38e26dce72c9..628465fcb18f5421dad2488c4ff0af72
          function_tool_response(call_id, payload, self.body.clone(), self.success)
      }
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbcbc022d5e 100644
+index 0af29fc33353955e4e48c2c322e2fdec8da305c3..784830f5ec8162eadb0ef8cb3090e156d624528f 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -35,6 +35,17 @@ use codex_protocol::error::CodexErr;
@@ -1209,7 +1229,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
  struct ToolCallTimingGuard {
      started_at: Option<Instant>,
      execution_started_at: Arc<OnceLock<Instant>>,
-@@ -108,7 +119,7 @@ impl ToolCallRuntime {
+@@ -109,7 +120,7 @@ impl ToolCallRuntime {
          self,
          call: ToolCall,
          cancellation_token: CancellationToken,
@@ -1218,7 +1238,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
          let error_call = call.clone();
          let source = call.direct_source();
          let recorder = self.session.services.executed_tool_calls.clone();
-@@ -133,20 +144,22 @@ impl ToolCallRuntime {
+@@ -135,24 +146,22 @@ impl ToolCallRuntime {
                      {
                          call.set_tool_result_metadata(ToolResultMetadata::new(metadata));
                      }
@@ -1245,13 +1265,17 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
 +                        .get_or_insert_default()
 +                        .delivered_assistant_message = Some(text.clone());
 +                }
-+                recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
++                recorder.attach_direct_call_to_output(&mut response.item, recorded_call, &item_id_generator);
              }
--            recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
+-            recorder.attach_direct_call_to_output(
+-                &mut response.item,
+-                recorded_call,
+-                &item_id_generator,
+-            );
              Ok(response)
          }
      }
-@@ -447,6 +460,14 @@ impl ToolCallRuntime {
+@@ -453,6 +462,14 @@ impl ToolCallRuntime {
          self.timing.as_ref().map(|timing| timing.batch.clone())
      }
 
@@ -1266,7 +1290,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
      fn tool_task_join_error(err: JoinError) -> FunctionCallError {
          FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
      }
-@@ -815,6 +836,7 @@ mod tests {
+@@ -823,6 +840,7 @@ mod tests {
          } else {
              Arc::new(ImmediateHandler {
                  tool_name: tool_name.clone(),
@@ -1274,7 +1298,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
              })
          };
          let step_context = StepContext::for_test(Arc::clone(&turn_context));
-@@ -918,6 +940,7 @@ mod tests {
+@@ -927,6 +945,7 @@ mod tests {
 
      struct ImmediateHandler {
          tool_name: codex_tools::ToolName,
@@ -1282,7 +1306,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
      }
 
      impl ToolExecutor<ToolInvocation> for ImmediateHandler {
-@@ -941,10 +964,13 @@ mod tests {
+@@ -950,10 +969,13 @@ mod tests {
              ToolInvocation: 'a,
          {
              Box::pin(async {
@@ -1300,7 +1324,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
              })
          }
      }
-@@ -983,9 +1009,12 @@ mod tests {
+@@ -992,9 +1014,12 @@ mod tests {
          }
      }
 
@@ -1315,7 +1339,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
          let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
          let records = Arc::new(std::sync::Mutex::new(Vec::new()));
          let (finish_started_tx, finish_started_rx) = oneshot::channel();
-@@ -1004,6 +1033,7 @@ mod tests {
+@@ -1013,6 +1038,7 @@ mod tests {
          let tool_name = codex_tools::ToolName::plain("test_tool");
          let handler = Arc::new(ImmediateHandler {
              tool_name: tool_name.clone(),
@@ -1323,7 +1347,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
          }) as Arc<dyn CoreToolRuntime>;
          let step_context = StepContext::for_test(Arc::clone(&turn_context));
          let router = Arc::new(ToolRouter::from_parts(
-@@ -1049,10 +1079,12 @@ mod tests {
+@@ -1059,10 +1085,12 @@ mod tests {
                  success: Some(true),
              },
          };
@@ -1340,7 +1364,7 @@ index 4361a91aa74fc56ab73145d228ebde941788b767..f003c86343bcf68f7020466522bb9bbc
 
          let actual = records
              .lock()
-@@ -1063,6 +1095,26 @@ mod tests {
+@@ -1073,6 +1101,26 @@ mod tests {
 
          Ok(())
      }
@@ -1609,18 +1633,18 @@ index 6d1d7a9230083a554bda372341337108a546c90a..2df28551f1e3befbf87469a181715631
          strict: false,
          defer_loading: None,
 diff --git a/codex-rs/ext/goal/src/tool.rs b/codex-rs/ext/goal/src/tool.rs
-index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0658678b6 100644
+index 85e7433c5639ae5a2199a874c26d48b1e3f502d8..488a92864f0e504469d8f20964304d41e9094834 100644
 --- a/codex-rs/ext/goal/src/tool.rs
 +++ b/codex-rs/ext/goal/src/tool.rs
-@@ -37,7 +37,6 @@ pub(crate) struct GoalToolExecutor {
+@@ -41,7 +41,6 @@ pub(crate) struct GoalToolExecutor {
      analytics: GoalAnalytics,
      event_emitter: GoalEventEmitter,
      metrics: GoalMetrics,
 -    max_goal_token_budget: Option<i64>,
  }
 
- #[derive(Clone, Copy)]
-@@ -64,7 +63,9 @@ struct UpdateGoalArgs {
+ #[derive(Clone)]
+@@ -68,7 +67,9 @@ struct UpdateGoalArgs {
  #[serde(rename_all = "camelCase")]
  struct GoalToolResponse {
      goal: Option<ThreadGoal>,
@@ -1630,7 +1654,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
      completion_budget_report: Option<String>,
  }
 
-@@ -92,7 +93,6 @@ impl GoalToolExecutor {
+@@ -96,7 +97,6 @@ impl GoalToolExecutor {
              analytics,
              event_emitter,
              metrics,
@@ -1638,7 +1662,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
          }
      }
 
-@@ -103,7 +103,7 @@ impl GoalToolExecutor {
+@@ -107,7 +107,7 @@ impl GoalToolExecutor {
          analytics: GoalAnalytics,
          event_emitter: GoalEventEmitter,
          metrics: GoalMetrics,
@@ -1646,8 +1670,8 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
 +        _max_goal_token_budget: Option<i64>,
      ) -> Self {
          Self {
-             kind: GoalToolKind::Create,
-@@ -114,7 +114,6 @@ impl GoalToolExecutor {
+             kind: GoalToolKind::Create(thread_manager),
+@@ -118,7 +118,6 @@ impl GoalToolExecutor {
              analytics,
              event_emitter,
              metrics,
@@ -1655,7 +1679,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
          }
      }
 
-@@ -135,7 +134,6 @@ impl GoalToolExecutor {
+@@ -139,7 +138,6 @@ impl GoalToolExecutor {
              analytics,
              event_emitter,
              metrics,
@@ -1663,9 +1687,9 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
          }
      }
  }
-@@ -205,13 +203,20 @@ impl GoalToolExecutor {
-         &self,
+@@ -212,13 +210,20 @@ impl GoalToolExecutor {
          invocation: ToolCall<'_>,
+         thread_manager: &Weak<ThreadManager>,
      ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
 -        let mut request: CreateGoalRequest = parse_arguments(invocation.function_arguments()?)?;
 +        let arguments = invocation.function_arguments()?;
@@ -1688,7 +1712,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
 
          let goal = self
              .state_db
-@@ -220,7 +225,7 @@ impl GoalToolExecutor {
+@@ -227,7 +232,7 @@ impl GoalToolExecutor {
                  self.thread_id,
                  request.objective.as_str(),
                  codex_state::ThreadGoalStatus::Active,
@@ -1697,7 +1721,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
              )
              .await
              .map_err(|err| FunctionCallError::RespondToModel(format!("failed to create goal: {err}")))?
-@@ -424,26 +429,6 @@ where
+@@ -442,26 +447,6 @@ where
          .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
  }
 
@@ -1724,7 +1748,7 @@ index a2b7006f6e8e9ecc5123ab52bec34e7ff9786dbe..07bea84a38e4e5ab1d66d57a6fafd4d0
  fn goal_response(
      goal: Option<ThreadGoal>,
      completion_budget_report: CompletionBudgetReport,
-@@ -527,12 +512,8 @@ pub(crate) fn state_status_from_protocol(
+@@ -545,12 +530,8 @@ pub(crate) fn state_status_from_protocol(
  }
 
  fn completion_budget_report(goal: &ThreadGoal) -> Option<String> {
@@ -2299,10 +2323,10 @@ index 8faa045d7e02402df53fe4a574469150440fa19a..a7ed9e4fe7220570ad07d3c5e23790cb
 +        .map_err(anyhow::Error::msg)
 +}
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 8b514fba5e0a624c9da0bafad979c8940eaad65f..ed74f136f005f2baf5b2b9b21222f2465caae871 100644
+index f8145c3136c0b0c2267371dcabc9befe52fc7452..ce5bb2f3c68e8e4c1f11a5fe2a4cb3491942b713 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -441,6 +441,8 @@ pub enum Feature {
+@@ -465,6 +465,8 @@ pub enum Feature {
      GuardianExt,
      /// Enable persisted thread goals and automatic goal continuation.
      Goals,
@@ -2311,7 +2335,7 @@ index 8b514fba5e0a624c9da0bafad979c8940eaad65f..ed74f136f005f2baf5b2b9b21222f246
      /// Add current context-window metadata to model-visible context.
      TokenBudget,
      /// Enables experimental context management.
-@@ -2127,6 +2129,16 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -2232,6 +2234,16 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -2329,10 +2353,10 @@ index 8b514fba5e0a624c9da0bafad979c8940eaad65f..ed74f136f005f2baf5b2b9b21222f246
          id: Feature::TokenBudget,
          key: "token_budget",
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index df4162f8eaadf1b60c8538a054614f457bc8f74f..02892e0ad4a969c04d8dc26a03fedc028018267c 100644
+index 10b592bc044451637a6ed12da08d2effeeadc0f7..135155a36526323caa1cd75eab25c53822bfc052 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -581,6 +581,20 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+@@ -586,6 +586,20 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
      assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
  }
 
@@ -2354,10 +2378,10 @@ index df4162f8eaadf1b60c8538a054614f457bc8f74f..02892e0ad4a969c04d8dc26a03fedc02
  fn apps_require_feature_flag_and_chatgpt_auth() {
      let mut features = Features::with_defaults();
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 0c5961d33af5e1ef60f86c74a4614a9f10003d15..c37fb1faf04bfdc0b728235b7fa665ed14fb71b0 100644
+index b6791c69f3fd08a246fe72266fef494953913c34..767fd3d8ca81c459e5142675b15391277b358590 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -4452,7 +4452,15 @@ pub enum ThreadGoalStatus {
+@@ -4582,7 +4582,15 @@ pub enum ThreadGoalStatus {
      Complete,
  }
 
@@ -2374,7 +2398,7 @@ index 0c5961d33af5e1ef60f86c74a4614a9f10003d15..c37fb1faf04bfdc0b728235b7fa665ed
 
  pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
      if value.is_empty() {
-@@ -4463,6 +4471,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
+@@ -4593,6 +4601,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
              "goal objective must be at most {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
          ));
      }
@@ -2402,7 +2426,7 @@ index 0c5961d33af5e1ef60f86c74a4614a9f10003d15..c37fb1faf04bfdc0b728235b7fa665ed
      Ok(())
  }
 
-@@ -5001,6 +5030,35 @@ mod tests {
+@@ -5131,6 +5160,35 @@ mod tests {
          Ok(())
      }
 
@@ -2439,10 +2463,10 @@ index 0c5961d33af5e1ef60f86c74a4614a9f10003d15..c37fb1faf04bfdc0b728235b7fa665ed
      fn feature_thread_source_serializes_as_its_app_owned_label() -> Result<()> {
          let source = ThreadSource::Feature("automation".to_string());
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
-index 4c9960624facc976c0dd37ec22046395e267e90f..62642803e660cb6af66ebd3df65b93bb3cf7ed4c 100644
+index dfb2834af58acbe8a5081648a6222995a351843f..5d5735fd57bec60d465f3604eac0f88524245c83 100644
 --- a/codex-rs/state/src/lib.rs
 +++ b/codex-rs/state/src/lib.rs
-@@ -85,7 +85,10 @@ pub use model::ThreadRelationFilter;
+@@ -86,7 +86,10 @@ pub use model::ThreadRelationFilter;
  pub use model::ThreadSection;
  pub use model::ThreadSectionAppearance;
  pub use model::ThreadSectionsPage;
@@ -2453,7 +2477,7 @@ index 4c9960624facc976c0dd37ec22046395e267e90f..62642803e660cb6af66ebd3df65b93bb
  pub use runtime::ExternalAgentConfigImportDetailsRecord;
  pub use runtime::ExternalAgentConfigImportFailureRecord;
  pub use runtime::ExternalAgentConfigImportHistoryRecord;
-@@ -94,6 +97,7 @@ pub use runtime::GoalAccountingMode;
+@@ -95,6 +98,7 @@ pub use runtime::GoalAccountingMode;
  pub use runtime::GoalAccountingOutcome;
  pub use runtime::GoalStore;
  pub use runtime::GoalUpdate;
@@ -3180,7 +3204,7 @@ index d8e14b752bd77b7b779954b2e471057b8fd9c8e6..5967dcbf29c3dac3597cb8133a771b2e
  async fn guardian_metadata_cleanup_preserves_custom_names_and_titles() {
      let sqlite_home = crate::runtime::test_support::unique_temp_dir();
 diff --git a/codex-rs/state/src/model/mod.rs b/codex-rs/state/src/model/mod.rs
-index c0b9f446386c685dfed9a4360716169558ea2b40..0a7eaf87dd178060fdfaa6b7092754c55f43e616 100644
+index a6a0a0faf2fc373d079446f815a543f047e489e4..615ddf4c78457f299b983cdcb66c3b68fc80f3f8 100644
 --- a/codex-rs/state/src/model/mod.rs
 +++ b/codex-rs/state/src/model/mod.rs
 @@ -49,6 +49,7 @@ pub use thread_metadata::ThreadRelationFilter;
@@ -3189,13 +3213,13 @@ index c0b9f446386c685dfed9a4360716169558ea2b40..0a7eaf87dd178060fdfaa6b7092754c5
  pub use thread_metadata::ThreadSectionsPage;
 +pub use thread_metadata::ThreadSpawnDescendantIdentity;
  pub use thread_metadata::ThreadsPage;
+ pub use thread_metadata_builder::ThreadMetadataBuilder;
 
- pub(crate) use thread_goal::ThreadGoalRow;
 diff --git a/codex-rs/state/src/model/thread_metadata.rs b/codex-rs/state/src/model/thread_metadata.rs
-index 223519f50b0eadd2702419949c915185336e8419..88bd68dc542b502d346113d1196bb4ddcf47a05d 100644
+index cf72159b85e926288f8a745638876de32fb6e38b..960a63dfaf113ccd645d39e2295aaa053c2fda5a 100644
 --- a/codex-rs/state/src/model/thread_metadata.rs
 +++ b/codex-rs/state/src/model/thread_metadata.rs
-@@ -122,6 +122,21 @@ pub struct ExtractionOutcome {
+@@ -121,6 +121,21 @@ pub struct ExtractionOutcome {
      pub parse_errors: usize,
  }
 
@@ -3218,7 +3242,7 @@ index 223519f50b0eadd2702419949c915185336e8419..88bd68dc542b502d346113d1196bb4dd
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub struct ThreadMetadata {
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de4bbbadd4 100644
+index 0cfa0866b89c7ed4bcf2aa50b6578f2e9b6b107a..02694ac9af2c8b1b5858b0117fcbcaabba926fd9 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
 @@ -19,9 +19,11 @@ use crate::model::datetime_to_epoch_millis;
@@ -3247,7 +3271,7 @@ index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de
  pub use guardian_feedback::GuardianReviewRecord;
  pub use guardian_feedback::MAX_GUARDIAN_REVIEW_BYTES;
  pub use guardian_feedback::MAX_GUARDIAN_REVIEW_RECORDS;
-@@ -212,6 +217,25 @@ impl StateRuntime {
+@@ -224,6 +229,25 @@ impl StateRuntime {
                  return Err(err);
              }
          };
@@ -3273,7 +3297,7 @@ index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de
          let started = Instant::now();
          let backfill_state_result = ensure_backfill_state_row_in_pool(pool.as_ref()).await;
          crate::telemetry::record_init_result(
-@@ -266,7 +290,7 @@ impl StateRuntime {
+@@ -278,7 +302,7 @@ impl StateRuntime {
          let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
          let runtime = Arc::new(Self {
              reclamation: reclamation::SqliteReclamationWorker::spawn(sqlite.clone()),
@@ -3282,7 +3306,7 @@ index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de
              memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
              memories_v2: Arc::new(tokio::sync::OnceCell::new()),
              thread_queue: SqliteQueueStore::new(queue_pool),
-@@ -361,6 +385,52 @@ async fn close_sqlite_pools(pools: &[&SqlitePool]) {
+@@ -391,6 +415,52 @@ async fn close_sqlite_pools(pools: &[Option<&SqlitePool>]) {
      }
  }
 
@@ -3335,7 +3359,7 @@ index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de
  /// Open and migrate the rebuildable paginated thread-history database.
  pub async fn open_thread_history_db(sqlite: &SqliteConfig) -> anyhow::Result<SqlitePool> {
      let migrator = runtime_thread_history_migrator();
-@@ -472,12 +542,16 @@ mod tests {
+@@ -502,12 +572,16 @@ mod tests {
      use super::test_support::unique_temp_dir;
      use crate::DB_INIT_METRIC;
      use crate::DbTelemetry;
@@ -3352,7 +3376,7 @@ index 2ecd9592c69aa2c7aade3f083a5bb95b5dfd8233..b1ae2d4cccab6fa46809696875e919de
      use std::collections::BTreeMap;
      use std::collections::BTreeSet;
      use std::path::Path;
-@@ -546,6 +620,461 @@ mod tests {
+@@ -576,6 +650,461 @@ mod tests {
              .expect("open sqlite pool")
      }
 
@@ -4565,7 +4589,7 @@ index 9f5855431444216525c145f6c889e740ecbf56f0..18801f78b7a507802f0ea493aeb3fd6a
      async fn deleting_thread_deletes_goal() {
          let runtime = test_runtime().await;
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
-index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c2207b837a4a 100644
+index d3af817278104cd424a1ad7065c9095a4f7cc3b5..e41f50358c2d3afe63b4ccb08038a510dfe38e5d 100644
 --- a/codex-rs/state/src/runtime/threads.rs
 +++ b/codex-rs/state/src/runtime/threads.rs
 @@ -233,6 +233,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
@@ -4624,7 +4648,7 @@ index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c220
      /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
      pub async fn find_thread_spawn_child_by_path(
          &self,
-@@ -877,6 +926,103 @@ WHERE id = ?
+@@ -902,6 +951,103 @@ WHERE id = ?
          Ok(result.rows_affected() > 0)
      }
 
@@ -4728,7 +4752,7 @@ index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c220
      /// Allocate a persisted `updated_at` value for thread-list cursor ordering.
      ///
      /// We keep a process-local high-water mark so hot rollout writes can get unique,
-@@ -3531,6 +3677,153 @@ mod tests {
+@@ -3670,6 +3816,153 @@ mod tests {
          );
      }
 
@@ -4882,7 +4906,7 @@ index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c220
      #[tokio::test]
      async fn list_threads_orders_and_pages_by_recency_at() {
          let codex_home = unique_temp_dir();
-@@ -3936,6 +4229,161 @@ mod tests {
+@@ -4075,6 +4368,161 @@ mod tests {
          assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
      }
 
@@ -5045,10 +5069,10 @@ index e9ac846b233b18f84145820fe94237e6168e40b0..5f2aad9ee19bbf972a849fa26360c220
      async fn thread_spawn_children_without_status_filter_lists_all_statuses() {
          let codex_home = unique_temp_dir();
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6d9ff0583 100644
+index b449f87c545328b0d601e0b85c40b26cd868e82f..11cfc1356eff013be51d4c655aa4b48b3a390648 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -10,10 +10,12 @@
+@@ -11,10 +11,12 @@
  )]
 
  use crate::DbTelemetry;
@@ -5061,7 +5085,7 @@ index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6
  use codex_file_system::LocalLogsDir;
  use codex_utils_absolute_path::AbsolutePathBuf;
  use log::LevelFilter;
-@@ -24,6 +26,8 @@ use sqlx::migrate::Migrator;
+@@ -25,6 +27,8 @@ use sqlx::migrate::Migrator;
  use sqlx::sqlite::SqliteConnectOptions;
  use sqlx::sqlite::SqlitePoolOptions;
  use sqlx::sqlite::SqliteSynchronous;
@@ -5070,7 +5094,7 @@ index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6
  use std::path::Path;
  use std::path::PathBuf;
  use std::sync::Arc;
-@@ -51,6 +55,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
+@@ -52,6 +56,36 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
  const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
  const STATE_DB_FILENAME: &str = "state_5.sqlite";
  const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
@@ -5107,7 +5131,7 @@ index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6
 
  #[derive(Clone, Copy, Eq, PartialEq)]
  enum RecoveryMode {
-@@ -410,7 +444,15 @@ impl SqliteConfig {
+@@ -411,7 +445,15 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {
@@ -5122,9 +5146,9 @@ index e8bfe8beef9a77df5459d1d368145d867713dfdb..0beab39a36cbf6b000c76460e59005e6
 +                repair_frodex_goal_supervisor_state_migration(&pool).await?;
                  repair_legacy_recency_migration_version(&pool, migrator).await?;
              }
-             migrator.run(&pool).await.map_err(anyhow::Error::from)
+             // SQLx's SQLite migration lock is a no-op. Keep version checks and changes in
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc99637f8f8ef 100644
+index 1e36d5cae18e0be8154bb7dc1f50cdbda67e0b5e..42c575fdae2ce3f44db98c9d35606efd008da52d 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -44,6 +44,7 @@ use crate::ThreadStore;
@@ -5135,7 +5159,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
  use crate::UpdateThreadMetadataParams;
  use crate::error::reject_paginated_history_mode;
 
-@@ -441,6 +442,159 @@ mod tests {
+@@ -443,6 +444,159 @@ mod tests {
          assert_eq!(updated.name.as_deref(), Some("renamed"));
      }
 
@@ -5295,7 +5319,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      fn create_thread_params(
          thread_id: ThreadId,
          history_mode: ThreadHistoryMode,
-@@ -514,6 +668,7 @@ pub struct InMemoryThreadStoreCalls {
+@@ -516,6 +670,7 @@ pub struct InMemoryThreadStoreCalls {
      pub read_thread_by_rollout_path: usize,
      pub list_threads: usize,
      pub update_thread_metadata: usize,
@@ -5303,7 +5327,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      pub archive_thread: usize,
      pub unarchive_thread: usize,
      pub delete_thread: usize,
-@@ -536,6 +691,7 @@ struct InMemoryThreadStoreState {
+@@ -538,6 +693,7 @@ struct InMemoryThreadStoreState {
      calls: InMemoryThreadStoreCalls,
      repeated_list_threads_cursor: Option<String>,
      created_threads: HashMap<ThreadId, CreateThreadParams>,
@@ -5311,7 +5335,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      histories: HashMap<ThreadId, Vec<RolloutItem>>,
      metadata_updates: HashMap<ThreadId, ThreadMetadataPatch>,
      sections: HashMap<ThreadId, String>,
-@@ -543,6 +699,36 @@ struct InMemoryThreadStoreState {
+@@ -545,6 +701,36 @@ struct InMemoryThreadStoreState {
      section_entered_at: HashMap<ThreadId, DateTime<Utc>>,
      names: HashMap<ThreadId, Option<String>>,
      rollout_paths: HashMap<PathBuf, ThreadId>,
@@ -5348,7 +5372,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
  }
 
  impl InMemoryThreadStore {
-@@ -586,9 +772,41 @@ impl InMemoryThreadStore {
+@@ -588,9 +774,41 @@ impl InMemoryThreadStore {
              .store(true, Ordering::Relaxed);
      }
 
@@ -5390,7 +5414,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
          let session_meta = SessionMeta {
              attached_thread: params.attached_thread,
              session_id: params.session_id,
-@@ -629,6 +847,7 @@ impl InMemoryThreadStore {
+@@ -631,6 +849,7 @@ impl InMemoryThreadStore {
                  meta: session_meta,
                  git: None,
              })));
@@ -5398,7 +5422,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
          state.created_threads.insert(params.thread_id, params);
          Ok(())
      }
-@@ -799,6 +1018,70 @@ impl InMemoryThreadStore {
+@@ -801,6 +1020,70 @@ impl InMemoryThreadStore {
          stored_thread_from_state(&state, params.thread_id, /*include_history*/ false)
      }
 
@@ -5469,7 +5493,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      async fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -905,6 +1188,7 @@ impl InMemoryThreadStore {
+@@ -907,6 +1190,7 @@ impl InMemoryThreadStore {
          let mut state = self.state.lock().await;
          let existed = state.histories.remove(&params.thread_id).is_some();
          state.created_threads.remove(&params.thread_id);
@@ -5477,7 +5501,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
          state.names.remove(&params.thread_id);
          state.metadata_updates.remove(&params.thread_id);
          state.sections.remove(&params.thread_id);
-@@ -1068,6 +1352,13 @@ impl ThreadStore for InMemoryThreadStore {
+@@ -1072,6 +1356,13 @@ impl ThreadStore for InMemoryThreadStore {
          })
      }
 
@@ -5491,7 +5515,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1112,6 +1403,11 @@ fn stored_thread_from_state(
+@@ -1116,6 +1407,11 @@ fn stored_thread_from_state(
      });
      let name = state.names.get(&thread_id).cloned().flatten();
      let metadata = state.metadata_updates.get(&thread_id);
@@ -5503,7 +5527,7 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
      let rollout_path = state
          .rollout_paths
          .iter()
-@@ -1141,13 +1437,13 @@ fn stored_thread_from_state(
+@@ -1154,13 +1450,13 @@ fn stored_thread_from_state(
              .flatten(),
          created_at: metadata
              .and_then(|metadata| metadata.created_at)
@@ -5521,10 +5545,10 @@ index f5cfc0d1da364d3c527602a0b299a9fbf39adfa7..76ddf9ff471fe2043ffa257aca5bc996
          section: state
              .sections
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index 6860da2610ce1d8b6e602ba58e69580655095ede..3df10a31bfdda3e67e1ed25cb7b41f1d33f54105 100644
+index 440564ff93af3d8cf7495b2721ccd3a0fbb87ed4..3976b21f456e89267f8b62b8ef1e66ad33c3e9b8 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
-@@ -121,5 +121,6 @@ pub use types::ThreadRelationFilter;
+@@ -129,5 +129,6 @@ pub use types::ThreadRelationFilter;
  pub use types::ThreadSearchPage;
  pub use types::ThreadSortKey;
  pub use types::TimelinePage;
@@ -5532,7 +5556,7 @@ index 6860da2610ce1d8b6e602ba58e69580655095ede..3df10a31bfdda3e67e1ed25cb7b41f1d
  pub use types::TurnPage;
  pub use types::UpdateThreadMetadataParams;
 diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
-index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b82035b5b6 100644
+index 44accb469256572b8377ee696a196981ab2b1030..4d4ba9f740bdc1435003fcfb27704f7e80b645b8 100644
 --- a/codex-rs/thread-store/src/live_thread.rs
 +++ b/codex-rs/thread-store/src/live_thread.rs
 @@ -4,7 +4,10 @@ use std::path::PathBuf;
@@ -5595,7 +5619,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
  /// Owns persistence acquisition and its live thread while initialization is still fallible.
  ///
  /// If initialization returns early after persistence has been opened, dropping this guard discards
-@@ -186,6 +214,7 @@ impl LiveThread {
+@@ -195,6 +223,7 @@ impl LiveThread {
              metadata_sync: Arc::new(Mutex::new(metadata_sync)),
              persistence_mode: Arc::new(Mutex::new(persistence_mode)),
              persistence_restart_required: Arc::new(AtomicBool::new(false)),
@@ -5603,7 +5627,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
              persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
          })
      }
-@@ -266,6 +295,7 @@ impl LiveThread {
+@@ -275,6 +304,7 @@ impl LiveThread {
                  metadata_sync: Arc::new(Mutex::new(metadata_sync)),
                  persistence_mode: Arc::new(Mutex::new(ThreadPersistenceMode::Durable)),
                  persistence_restart_required: Arc::new(AtomicBool::new(false)),
@@ -5611,7 +5635,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
                  persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
              },
              history,
-@@ -288,6 +318,7 @@ impl LiveThread {
+@@ -297,6 +327,7 @@ impl LiveThread {
          if items.is_empty() {
              return Ok(());
          }
@@ -5619,7 +5643,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
          let update = self
              .metadata_sync
              .lock()
-@@ -309,9 +340,50 @@ impl LiveThread {
+@@ -318,9 +349,50 @@ impl LiveThread {
                  .await
                  .mark_pending_update_applied(&update);
          }
@@ -5670,7 +5694,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
      async fn persist_appended_items(
          &self,
          raw_items: &[RolloutItem],
-@@ -367,7 +439,9 @@ impl LiveThread {
+@@ -376,7 +448,9 @@ impl LiveThread {
          *persistence_mode = ThreadPersistenceMode::Durable;
          drop(persistence_mode);
          let update = self.metadata_sync.lock().await.take_pending_update();
@@ -5681,7 +5705,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
      }
 
      #[expect(
-@@ -383,7 +457,9 @@ impl LiveThread {
+@@ -392,7 +466,9 @@ impl LiveThread {
          }
          drop(persistence_mode);
          self.flush_pending_metadata_update_for_existing_history()
@@ -5692,7 +5716,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
      }
 
      /// Returns whether this thread should remain memory-only until explicitly persisted.
-@@ -426,6 +502,7 @@ impl LiveThread {
+@@ -435,6 +511,7 @@ impl LiveThread {
          let frozen = freeze_result.map(Some)?;
          drop(persistence_mode);
          self.flush_pending_metadata_update().await?;
@@ -5700,7 +5724,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
          Ok(frozen)
      }
 
-@@ -558,6 +635,9 @@ impl LiveThread {
+@@ -567,6 +644,9 @@ impl LiveThread {
          } else {
              Ok(())
          };
@@ -5710,7 +5734,7 @@ index 8226b9620b94a4fb8425c36dda3d2b01bf564ecd..f4c0c233eddbf2f996136c48f27a68b8
          let shutdown_result = self.thread_store.shutdown_thread(self.thread_id).await;
          match (metadata_result, shutdown_result) {
              (Err(metadata_error), Err(shutdown_error)) => Err(ThreadStoreError::Internal {
-@@ -747,3 +827,7 @@ impl LiveThread {
+@@ -756,3 +836,7 @@ impl LiveThread {
          Ok(())
      }
  }
@@ -5925,10 +5949,10 @@ index 0000000000000000000000000000000000000000..ff81ce71be9320414b53ee5ae642e384
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fbc8a0106e 100644
+index 72e1133049fff87e756b28cb153abc9054953818..01fc47af075dd9cb03f30d708c5bd78b4305e289 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -129,6 +129,7 @@ use crate::ThreadStoreError;
+@@ -131,6 +131,7 @@ use crate::ThreadStoreError;
  use crate::ThreadStoreFuture;
  use crate::ThreadStoreResult;
  use crate::TimelinePage;
@@ -5936,7 +5960,7 @@ index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fb
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -1180,6 +1181,27 @@ impl ThreadStore for LocalThreadStore {
+@@ -1204,6 +1205,27 @@ impl ThreadStore for LocalThreadStore {
          })
      }
 
@@ -5964,7 +5988,7 @@ index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fb
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1469,6 +1491,116 @@ mod tests {
+@@ -1492,6 +1514,116 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -6081,7 +6105,7 @@ index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fb
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -3160,6 +3292,23 @@ mod tests {
+@@ -3184,6 +3316,23 @@ mod tests {
          }))
      }
 
@@ -6106,7 +6130,7 @@ index 652193570e02f980778d090dc0f55158ca3adf2b..b72056d89b55b1bf092aa0b4bea8d5fb
          let (items, _, _) = RolloutRecorder::load_rollout_items(path)
              .await
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index 89b6e9342c898950316714f9302082fd551f98aa..99991fe8c7e6f7299b5b8269b588e2f1aa9118f1 100644
+index 2c79dceeac4bf7eb846c0f97aa304b35843b2b30..313925c8caa161f6ddc5582234d2b0757e3395b2 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -60,6 +60,7 @@ use crate::ThreadPage;
@@ -6117,7 +6141,7 @@ index 89b6e9342c898950316714f9302082fd551f98aa..99991fe8c7e6f7299b5b8269b588e2f1
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -601,6 +602,17 @@ pub trait ThreadStore: Any + Send + Sync {
+@@ -634,6 +635,17 @@ pub trait ThreadStore: Any + Send + Sync {
          params: UpdateThreadMetadataParams,
      ) -> ThreadStoreFuture<'_, Option<StoredThread>>;
 
@@ -6136,7 +6160,7 @@ index 89b6e9342c898950316714f9302082fd551f98aa..99991fe8c7e6f7299b5b8269b588e2f1
      fn move_thread_to_section(
          &self,
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index 20b59ae2d2859ee87c4e5cc02c2f741b1ffcd005..f0838893f9e665274da30c993fd9756533335131 100644
+index adcff8bf9843a1fd46f53d3805faae86238d2a9d..69c57fcb62a773bc331978eded90e5988196604f 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -1,5 +1,6 @@
@@ -6146,7 +6170,7 @@ index 20b59ae2d2859ee87c4e5cc02c2f741b1ffcd005..f0838893f9e665274da30c993fd97565
 
  use chrono::DateTime;
  use chrono::Utc;
-@@ -1118,6 +1119,17 @@ pub struct UpdateThreadMetadataParams {
+@@ -1208,6 +1209,17 @@ pub struct UpdateThreadMetadataParams {
      pub include_archived: bool,
  }
 
@@ -6165,10 +6189,10 @@ index 20b59ae2d2859ee87c4e5cc02c2f741b1ffcd005..f0838893f9e665274da30c993fd97565
  #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
  pub struct MoveThreadToSectionParams {
 diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
-index 3a4c1e87c865cbd03e682d588713788befcc260b..94d83120cbcec17f8531bdbfd08cf9b78e2207d5 100644
+index 01481a1eaf4c6a02f7ca6f90de0e056587df3079..394e413cefe0db3c5427571a4e821b7b9a93f983 100644
 --- a/codex-rs/tools/src/tool_output.rs
 +++ b/codex-rs/tools/src/tool_output.rs
-@@ -22,6 +22,11 @@ pub trait ToolOutput: Send {
+@@ -23,6 +23,11 @@ pub trait ToolOutput: Send {
      /// Called before recording model-visible history; implementations must not measure time here.
      fn set_handler_duration_ms(&mut self, _handler_duration_ms: u64) {}
 
@@ -6180,7 +6204,7 @@ index 3a4c1e87c865cbd03e682d588713788befcc260b..94d83120cbcec17f8531bdbfd08cf9b7
      /// Whether this output contains external context that should disable memory generation when
      /// `memories.disable_on_external_context` is enabled.
      fn contains_external_context(&self) -> bool {
-@@ -90,6 +95,10 @@ where
+@@ -91,6 +96,10 @@ where
          (**self).set_handler_duration_ms(handler_duration_ms);
      }
 
