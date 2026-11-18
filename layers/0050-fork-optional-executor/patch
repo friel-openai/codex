@@ -1,218 +1,178 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index f770186f7a393843de1fc268c10894bbd635ba93..8d4d3e4f5043895c7f679e897fb036fb188b5061 100644
+index 8d4d3e4f5043895c7f679e897fb036fb188b5061..e25d4352bcc45350545b19281b12f4ee32466893 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
- use codex_app_server_protocol::RequestId;
- use codex_app_server_protocol::Thread;
- use codex_app_server_protocol::ThreadClosedNotification;
-+use codex_app_server_protocol::ThreadForkResponse;
- use codex_app_server_protocol::ThreadItem;
- use codex_app_server_protocol::ThreadItemPayload;
- use codex_app_server_protocol::ThreadLoadedListParams;
-@@ -1766,6 +1767,331 @@ async fn cold_resume_and_sends_do_not_wait_for_saved_secondaries(by_path: bool)
+@@ -62,6 +62,7 @@ use serde_json::json;
+ use tempfile::TempDir;
+ use tokio::net::TcpListener;
+ use tokio::sync::Notify;
++use tokio::sync::Semaphore;
+ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+ use tokio::time::timeout;
+@@ -1960,12 +1961,27 @@ async fn thread_fork_defers_disconnected_implicit_secondary_but_keeps_explicit_r
+ }
+
+ #[tokio::test]
+-async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resume() -> Result<()> {
++async fn fork_with_unregistered_implicit_secondary_verifies_first_registration() -> Result<()> {
+     use codex_app_server_protocol::EnvironmentAddResponse;
+
++    const EARLY_CALL: &str = "late-secondary-before-verification";
++    const LATER_CALL: &str = "late-secondary-after-verification";
++    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
++    let call = |id: &'static str| {
++        responses::sse(vec![
++            responses::ev_response_created(id),
++            responses::ev_exec_command_call_with_args(
++                id,
++                &json!({"cmd": "echo synthetic", "environment_id": "late", "login": false}),
++            ),
++            responses::ev_completed(id),
++        ])
++    };
+     let server = create_mock_responses_server_sequence(vec![
++        call(EARLY_CALL),
+         create_final_assistant_message_sse_response("continued locally")?,
+-        create_final_assistant_message_sse_response("continued after cold resume")?,
++        call(LATER_CALL),
++        create_final_assistant_message_sse_response("continued after verification")?,
+     ])
+     .await;
+     let codex_home = TempDir::new()?;
+@@ -1977,7 +1993,7 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
+         .with_model("gpt-5.4")
+         .with_sandbox_mode("danger-full-access")
+         .with_provider_config("supports_websockets = false")
+-        .with_root_config("thread_unload_delay_secs = 1")
++        .enable_feature(Feature::UnifiedExec)
+         .write(codex_home.path())?;
+     let source_id = seed_resume_with_saved_environments(
+         codex_home.path(),
+@@ -2011,9 +2027,9 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
+     let (stop, stop_receiver) = oneshot::channel();
+     let executor = tokio::spawn(serve_instruction_discovery_executor(
+         listener,
+-        InstructionDiscoveryExecutor::Ready {
++        InstructionDiscoveryExecutor::ReadyWithProcess {
+             source: remote_source,
+-            read_once: false,
++            process_call_id: LATER_CALL,
+         },
+         Arc::clone(&requests),
+         stop_receiver,
+@@ -2026,16 +2042,17 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
+         .await?;
+     let _: EnvironmentAddResponse =
+         timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++    let previous_events = app.json_log_events()?;
+     let first = timeout(
+         BOUNDED_RESUME_TIMEOUT,
+         app.start_turn_and_wait_for_completion(text_turn_params(
+             fork.thread.id.clone(),
+-            "Continue without adopting the later registration",
++            "Continue while the secondary is being verified",
+         )),
+     )
+     .await??;
+     assert_eq!(first.turn.status, TurnStatus::Completed);
+-    assert_eq!(requests.instruction_reads.load(Ordering::Relaxed), 0);
++    assert_eq!(requests.process_starts.load(Ordering::Relaxed), 0);
+     assert!(
+         responses::received_responses_requests(&server)
+             .await
+@@ -2046,27 +2063,14 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
+                 .all(|text| !text.contains(AGENTS_INSTRUCTIONS)))
+     );
+
+-    let request = app
+-        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+-            thread_id: fork.thread.id.clone(),
+-        })
+-        .await?;
+-    let unsubscribe: ThreadUnsubscribeResponse =
+-        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+-    assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
+-    let closed: ThreadClosedNotification =
+-        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+-    assert_eq!(closed.thread_id, fork.thread.id);
+-    let previous_events = app.json_log_events()?;
+-    let request = app
+-        .send_thread_resume_request(ThreadResumeParams {
+-            thread_id: fork.thread.id.clone(),
+-            exclude_turns: true,
+-            ..Default::default()
+-        })
+-        .await?;
+-    let _: ThreadResumeResponse =
+-        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request)).await??;
++    let early_requests = responses::received_responses_requests(&server).await;
++    let (output, success) = early_requests
++        .last()
++        .context("early execution response")?
++        .function_call_output_content_and_success(EARLY_CALL)
++        .context("denial while AGENTS.md verification is pending")?;
++    assert_ne!(success, Some(true));
++    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
+     wait_for_optional_secondary_verification(&app, "late", &previous_events, true).await?;
+     let resumed = timeout(
+         BOUNDED_RESUME_TIMEOUT,
+@@ -2078,6 +2082,7 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
+     .await??;
+     assert_eq!(resumed.turn.status, TurnStatus::Completed);
+     assert!(requests.instruction_reads.load(Ordering::Relaxed) > 0);
++    assert_eq!(requests.process_starts.load(Ordering::Relaxed), 1);
+     assert!(
+         responses::received_responses_requests(&server)
+             .await
+@@ -2092,6 +2097,231 @@ async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resu
      Ok(())
  }
 
 +#[tokio::test]
-+async fn thread_fork_defers_disconnected_implicit_secondary_but_keeps_explicit_required()
-+-> Result<()> {
-+    const EARLY_CALL: &str = "fork-secondary-before-verification";
-+    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
-+    let server = create_mock_responses_server_sequence(vec![
-+        responses::sse(vec![
-+            responses::ev_response_created("early-fork-exec"),
-+            responses::ev_exec_command_call_with_args(
-+                EARLY_CALL,
-+                &json!({"cmd": "echo must-not-start", "environment_id": "secondary", "login": false}),
-+            ),
-+            responses::ev_completed("early-fork-exec"),
-+        ]),
-+        create_final_assistant_message_sse_response("continued while unavailable")?,
-+        create_final_assistant_message_sse_response("retry discovery")?,
-+        create_final_assistant_message_sse_response("continued after verification")?,
-+    ])
-+    .await;
-+    let codex_home = TempDir::new()?;
-+    let workspace_dir = TempDir::new()?;
-+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
-+    std::fs::write(workspace.join("AGENTS.md"), "local workspace instructions")?;
-+    let remote_source = PathUri::from_abs_path(&workspace).join("AGENTS.override.md")?;
-+    let recovered = Arc::new(AtomicBool::new(true));
-+    let requests = Arc::new(InstructionDiscoveryRequests::default());
-+    let listener = TcpListener::bind("127.0.0.1:0").await?;
-+    std::fs::write(
-+        codex_home.path().join("environments.toml"),
-+        format!(
-+            "[[environments]]\nid = \"secondary\"\nurl = \"ws://{}\"\n",
-+            listener.local_addr()?
-+        ),
-+    )?;
-+    let (stop, stop_receiver) = oneshot::channel();
-+    let executor = tokio::spawn(serve_instruction_discovery_executor(
-+        listener,
-+        InstructionDiscoveryExecutor::Recoverable {
-+            source: remote_source,
-+            recovered: Arc::clone(&recovered),
-+        },
-+        Arc::clone(&requests),
-+        stop_receiver,
-+    ));
-+    MockResponsesConfig::new(&server.uri())
-+        .with_model("gpt-5.4")
-+        .with_sandbox_mode("danger-full-access")
-+        .with_provider_config("supports_websockets = false")
-+        .enable_feature(Feature::UnifiedExec)
-+        .write(codex_home.path())?;
-+    let implicit_id = seed_resume_with_saved_environments(
-+        codex_home.path(),
-+        &workspace,
-+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
-+        true,
-+        None,
-+    )?;
-+    let required_id = seed_resume_with_saved_environments(
-+        codex_home.path(),
-+        &workspace,
-+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
-+        false,
-+        None,
-+    )?;
-+    let explicit_id = seed_resume_with_saved_environments(
-+        codex_home.path(),
-+        &workspace,
-+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
-+        false,
-+        None,
-+    )?;
-+    let explicit_path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &explicit_id);
-+    let explicit_contents = std::fs::read_to_string(&explicit_path)?;
-+    let mut explicit_settings: serde_json::Value =
-+        serde_json::from_str(explicit_contents.lines().last().context("saved settings")?)?;
-+    explicit_settings["payload"]["thread_settings"]["environments"]["implicit_selection"] =
-+        json!(false);
-+    writeln!(
-+        OpenOptions::new().append(true).open(explicit_path)?,
-+        "{explicit_settings}"
-+    )?;
-+    let remote_primary_id = seed_resume_with_saved_environments(
-+        codex_home.path(),
-+        &workspace,
-+        &["secondary", LOCAL_ENVIRONMENT_ID],
-+        true,
-+        None,
-+    )?;
-+    let mut app = TestAppServer::builder()
-+        .with_codex_home(codex_home.path())
-+        .without_auto_env()
-+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
-+        .build_initialized()
-+        .await?;
-+    let request = app
-+        .send_thread_resume_request(ThreadResumeParams {
-+            thread_id: implicit_id.clone(),
-+            exclude_turns: true,
-+            ..Default::default()
-+        })
-+        .await?;
-+    let _: ThreadResumeResponse =
-+        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request)).await??;
-+    wait_for_optional_secondary_verification(&app, "secondary", &[], true).await?;
-+    recovered.store(false, Ordering::Relaxed);
-+    let request = app
-+        .send_raw_request(
-+            "thread/fork",
-+            Some(json!({
-+                "threadId": implicit_id, "excludeTurns": true,
-+            })),
-+        )
-+        .await?;
-+    let fork: ThreadForkResponse =
-+        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
-+    assert_eq!(
-+        fork.instruction_sources,
-+        [LegacyAppPathString::from_path(&workspace.join("AGENTS.md"))]
-+    );
-+    for thread_id in [required_id, explicit_id, remote_primary_id] {
-+        let request = app
-+            .send_raw_request(
-+                "thread/fork",
-+                Some(json!({
-+                    "threadId": thread_id, "excludeTurns": true,
-+                })),
-+            )
-+            .await?;
-+        let error = timeout(
-+            BOUNDED_RESUME_TIMEOUT,
-+            app.read_stream_until_error_message(RequestId::Integer(request)),
-+        )
-+        .await??;
-+        assert_eq!(error.error.code, -32600);
-+        assert!(error.error.message.contains("secondary"));
++async fn fork_never_adopts_replaced_first_registration() -> Result<()> {
++    for scenario in [
++        FirstRegistrationRace::ReplaceBeforeTurn,
++        FirstRegistrationRace::ReplaceDuringVerification,
++    ] {
++        exercise_first_registration_race(scenario).await?;
 +    }
-+    let first = timeout(
-+        BOUNDED_RESUME_TIMEOUT,
-+        app.start_turn_and_wait_for_completion(text_turn_params(
-+            fork.thread.id.clone(),
-+            "Continue while the secondary is unavailable",
-+        )),
-+    )
-+    .await??;
-+    assert_eq!(first.turn.status, TurnStatus::Completed);
-+    let responses = responses::received_responses_requests(&server).await;
-+    assert!(responses.iter().all(|request| {
-+        request
-+            .message_input_texts("user")
-+            .iter()
-+            .all(|text| !text.contains(AGENTS_INSTRUCTIONS))
-+    }));
-+    let (output, success) = responses
-+        .last()
-+        .context("execution denial response")?
-+        .function_call_output_content_and_success(EARLY_CALL)
-+        .context("execution denial for the unverified secondary")?;
-+    assert_ne!(success, Some(true));
-+    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
-+    recovered.store(true, Ordering::Relaxed);
-+    let previous_events = app.json_log_events()?;
-+    let primed = timeout(
-+        BOUNDED_RESUME_TIMEOUT,
-+        app.start_turn_and_wait_for_completion(text_turn_params(
-+            fork.thread.id.clone(),
-+            "Retry the secondary after it recovers",
-+        )),
-+    )
-+    .await??;
-+    assert_eq!(primed.turn.status, TurnStatus::Completed);
-+    wait_for_optional_secondary_verification(&app, "secondary", &previous_events, true).await?;
-+    let completed = timeout(
-+        BOUNDED_RESUME_TIMEOUT,
-+        app.start_turn_and_wait_for_completion(text_turn_params(
-+            fork.thread.id,
-+            "Continue after verification",
-+        )),
-+    )
-+    .await??;
-+    assert_eq!(completed.turn.status, TurnStatus::Completed);
-+    let responses = responses::received_responses_requests(&server).await;
-+    assert!(responses.iter().any(|request| {
-+        request
-+            .message_input_texts("user")
-+            .iter()
-+            .any(|text| text.contains(AGENTS_INSTRUCTIONS))
-+    }));
-+    let _ = stop.send(());
-+    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
 +    Ok(())
 +}
 +
 +#[tokio::test]
-+async fn fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resume() -> Result<()> {
++async fn fork_cancels_first_registration_verification_on_unload() -> Result<()> {
++    exercise_first_registration_race(FirstRegistrationRace::CancelDuringVerification).await
++}
++
++#[derive(Clone, Copy, Eq, PartialEq)]
++enum FirstRegistrationRace {
++    ReplaceBeforeTurn,
++    ReplaceDuringVerification,
++    CancelDuringVerification,
++}
++
++async fn exercise_first_registration_race(scenario: FirstRegistrationRace) -> Result<()> {
 +    use codex_app_server_protocol::EnvironmentAddResponse;
 +
++    const EARLY_CALL: &str = "first-registration-before-verification";
++    const LATER_CALL: &str = "replacement-registration-exec";
++    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
++    let call = |id: &'static str| {
++        responses::sse(vec![
++            responses::ev_response_created(id),
++            responses::ev_exec_command_call_with_args(
++                id,
++                &json!({"cmd": "echo synthetic", "environment_id": "late", "login": false}),
++            ),
++            responses::ev_completed(id),
++        ])
++    };
 +    let server = create_mock_responses_server_sequence(vec![
++        call(EARLY_CALL),
 +        create_final_assistant_message_sse_response("continued locally")?,
-+        create_final_assistant_message_sse_response("continued after cold resume")?,
++        call(LATER_CALL),
++        create_final_assistant_message_sse_response("rejected replacement")?,
 +    ])
 +    .await;
 +    let codex_home = TempDir::new()?;
@@ -225,13 +185,14 @@ index f770186f7a393843de1fc268c10894bbd635ba93..8d4d3e4f5043895c7f679e897fb036fb
 +        .with_sandbox_mode("danger-full-access")
 +        .with_provider_config("supports_websockets = false")
 +        .with_root_config("thread_unload_delay_secs = 1")
++        .enable_feature(Feature::UnifiedExec)
 +        .write(codex_home.path())?;
 +    let source_id = seed_resume_with_saved_environments(
 +        codex_home.path(),
 +        &workspace,
 +        &[LOCAL_ENVIRONMENT_ID, "late"],
 +        true,
-+        Some("late"),
++        None,
 +    )?;
 +    let mut app = TestAppServer::builder()
 +        .with_codex_home(codex_home.path())
@@ -247,176 +208,902 @@ index f770186f7a393843de1fc268c10894bbd635ba93..8d4d3e4f5043895c7f679e897fb036fb
 +        .await?;
 +    let fork: ThreadForkResponse =
 +        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
-+    assert_eq!(
-+        fork.instruction_sources,
-+        [LegacyAppPathString::from_path(&workspace.join("AGENTS.md"))]
-+    );
 +
-+    let listener = TcpListener::bind("127.0.0.1:0").await?;
-+    let address = listener.local_addr()?;
-+    let requests = Arc::new(InstructionDiscoveryRequests::default());
-+    let (stop, stop_receiver) = oneshot::channel();
-+    let executor = tokio::spawn(serve_instruction_discovery_executor(
-+        listener,
-+        InstructionDiscoveryExecutor::Ready {
-+            source: remote_source,
-+            read_once: false,
++    let first_listener = TcpListener::bind("127.0.0.1:0").await?;
++    let first_address = first_listener.local_addr()?;
++    let first_requests = Arc::new(InstructionDiscoveryRequests::default());
++    let gate = Arc::new(Semaphore::new(0));
++    let (_stop_first, first_stop) = oneshot::channel();
++    let first_executor = tokio::spawn(serve_instruction_discovery_executor(
++        first_listener,
++        InstructionDiscoveryExecutor::HeldMetadata {
++            source: remote_source.clone(),
++            gate: Arc::clone(&gate),
++            process_call_id: EARLY_CALL,
 +        },
-+        Arc::clone(&requests),
-+        stop_receiver,
++        Arc::clone(&first_requests),
++        first_stop,
 +    ));
 +    let request = app
 +        .send_raw_request(
 +            "environment/add",
-+            Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{address}")})),
++            Some(
++                json!({"environmentId": "late", "execServerUrl": format!("ws://{first_address}")}),
++            ),
 +        )
 +        .await?;
 +    let _: EnvironmentAddResponse =
 +        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++
++    let replacement_listener = TcpListener::bind("127.0.0.1:0").await?;
++    let replacement_address = replacement_listener.local_addr()?;
++    let replacement_requests = Arc::new(InstructionDiscoveryRequests::default());
++    let (_stop_replacement, replacement_stop) = oneshot::channel();
++    let replacement_executor = tokio::spawn(serve_instruction_discovery_executor(
++        replacement_listener,
++        InstructionDiscoveryExecutor::ReadyWithProcess {
++            source: remote_source,
++            process_call_id: LATER_CALL,
++        },
++        Arc::clone(&replacement_requests),
++        replacement_stop,
++    ));
++    if scenario == FirstRegistrationRace::ReplaceBeforeTurn {
++        let request = app
++            .send_raw_request(
++                "environment/add",
++                Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{replacement_address}")})),
++            )
++            .await?;
++        let _: EnvironmentAddResponse =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++    }
 +    let first = timeout(
 +        BOUNDED_RESUME_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
 +            fork.thread.id.clone(),
-+            "Continue without adopting the later registration",
++            "Continue locally",
 +        )),
 +    )
 +    .await??;
 +    assert_eq!(first.turn.status, TurnStatus::Completed);
-+    assert_eq!(requests.instruction_reads.load(Ordering::Relaxed), 0);
-+    assert!(
-+        responses::received_responses_requests(&server)
-+            .await
-+            .iter()
-+            .all(|request| request
-+                .message_input_texts("user")
-+                .iter()
-+                .all(|text| !text.contains(AGENTS_INSTRUCTIONS)))
-+    );
-+
-+    let request = app
-+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
-+            thread_id: fork.thread.id.clone(),
-+        })
++    if scenario != FirstRegistrationRace::ReplaceBeforeTurn {
++        timeout(
++            DEFAULT_READ_TIMEOUT,
++            first_requests.stalled_metadata_seen.notified(),
++        )
 +        .await?;
-+    let unsubscribe: ThreadUnsubscribeResponse =
-+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
-+    assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
-+    let closed: ThreadClosedNotification =
-+        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
-+    assert_eq!(closed.thread_id, fork.thread.id);
-+    let previous_events = app.json_log_events()?;
-+    let request = app
-+        .send_thread_resume_request(ThreadResumeParams {
-+            thread_id: fork.thread.id.clone(),
-+            exclude_turns: true,
-+            ..Default::default()
-+        })
++    }
++    if scenario == FirstRegistrationRace::CancelDuringVerification {
++        let request = app
++            .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
++                thread_id: fork.thread.id.clone(),
++            })
++            .await?;
++        let unsubscribe: ThreadUnsubscribeResponse =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++        assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
++        let closed: ThreadClosedNotification =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
++        assert_eq!(closed.thread_id, fork.thread.id);
++        gate.add_permits(1);
++        timeout(
++            DEFAULT_READ_TIMEOUT,
++            first_requests.metadata_released.notified(),
++        )
 +        .await?;
-+    let _: ThreadResumeResponse =
-+        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request)).await??;
-+    wait_for_optional_secondary_verification(&app, "late", &previous_events, true).await?;
-+    let resumed = timeout(
++        assert_eq!(first_requests.process_starts.load(Ordering::Relaxed), 0);
++        assert_eq!(
++            replacement_requests.process_starts.load(Ordering::Relaxed),
++            0
++        );
++        first_executor.abort();
++        replacement_executor.abort();
++        let _ = first_executor.await;
++        let _ = replacement_executor.await;
++        return Ok(());
++    }
++    if scenario == FirstRegistrationRace::ReplaceDuringVerification {
++        let request = app
++            .send_raw_request(
++                "environment/add",
++                Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{replacement_address}")})),
++            )
++            .await?;
++        let _: EnvironmentAddResponse =
++            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++        gate.add_permits(1);
++        timeout(
++            DEFAULT_READ_TIMEOUT,
++            first_requests.metadata_released.notified(),
++        )
++        .await?;
++    }
++    let second = timeout(
 +        BOUNDED_RESUME_TIMEOUT,
 +        app.start_turn_and_wait_for_completion(text_turn_params(
 +            fork.thread.id,
-+            "Continue after verifying the registered secondary",
++            "Do not adopt the replacement",
 +        )),
 +    )
 +    .await??;
-+    assert_eq!(resumed.turn.status, TurnStatus::Completed);
-+    assert!(requests.instruction_reads.load(Ordering::Relaxed) > 0);
-+    assert!(
-+        responses::received_responses_requests(&server)
-+            .await
-+            .iter()
-+            .any(|request| request
-+                .message_input_texts("user")
-+                .iter()
-+                .any(|text| text.contains(AGENTS_INSTRUCTIONS)))
++    assert_eq!(second.turn.status, TurnStatus::Completed);
++    let sent = responses::received_responses_requests(&server).await;
++    for (index, call_id) in [(1, EARLY_CALL), (3, LATER_CALL)] {
++        let (output, success) = sent[index]
++            .function_call_output_content_and_success(call_id)
++            .context("execution denial")?;
++        assert_ne!(success, Some(true));
++        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
++    }
++    assert_eq!(first_requests.process_starts.load(Ordering::Relaxed), 0);
++    assert_eq!(
++        replacement_requests.process_starts.load(Ordering::Relaxed),
++        0
 +    );
-+    let _ = stop.send(());
-+    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
++    assert_eq!(
++        replacement_requests
++            .instruction_reads
++            .load(Ordering::Relaxed),
++        0
++    );
++    first_executor.abort();
++    replacement_executor.abort();
++    let _ = first_executor.await;
++    let _ = replacement_executor.await;
 +    Ok(())
 +}
 +
  #[tokio::test]
  async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments()
  -> Result<()> {
+@@ -2685,6 +2915,15 @@ enum InstructionDiscoveryExecutor {
+         source: PathUri,
+         read_once: bool,
+     },
++    ReadyWithProcess {
++        source: PathUri,
++        process_call_id: &'static str,
++    },
++    HeldMetadata {
++        source: PathUri,
++        gate: Arc<Semaphore>,
++        process_call_id: &'static str,
++    },
+     Stalled,
+     Recoverable {
+         source: PathUri,
+@@ -2697,7 +2936,9 @@ enum InstructionDiscoveryExecutor {
+ struct InstructionDiscoveryRequests {
+     total: AtomicUsize,
+     stalled_metadata_seen: Notify,
++    metadata_released: Notify,
+     instruction_reads: AtomicUsize,
++    process_starts: AtomicUsize,
+     allow_repeated_instruction_reads: AtomicBool,
+ }
+
+@@ -2714,9 +2955,12 @@ async fn serve_instruction_discovery_executor(
+     let mut websocket = accept_exec_server_environment(listener, environment_info.clone()).await?;
+     let instruction_path = match &executor {
+         InstructionDiscoveryExecutor::Ready { source, .. }
++        | InstructionDiscoveryExecutor::ReadyWithProcess { source, .. }
++        | InstructionDiscoveryExecutor::HeldMetadata { source, .. }
+         | InstructionDiscoveryExecutor::Recoverable { source, .. } => serde_json::to_value(source)?,
+         InstructionDiscoveryExecutor::Stalled => serde_json::Value::Null,
+     };
++    let mut metadata_was_held = false;
+     loop {
+         let request = tokio::select! {
+             biased;
+@@ -2728,6 +2972,8 @@ async fn serve_instruction_discovery_executor(
+         let is_instruction_path = request["params"]["path"] == instruction_path;
+         let stalled = match &executor {
+             InstructionDiscoveryExecutor::Ready { .. } => false,
++            InstructionDiscoveryExecutor::ReadyWithProcess { .. } => false,
++            InstructionDiscoveryExecutor::HeldMetadata { .. } => false,
+             InstructionDiscoveryExecutor::Stalled => true,
+             InstructionDiscoveryExecutor::Recoverable { recovered, .. } => {
+                 !recovered.load(Ordering::Relaxed)
+@@ -2739,14 +2985,25 @@ async fn serve_instruction_discovery_executor(
+                 requests.stalled_metadata_seen.notify_one();
+                 continue;
+             }
+-            Some("fs/getMetadata") => json!({
++            Some("fs/getMetadata") => {
++                if is_instruction_path
++                    && !metadata_was_held
++                    && let InstructionDiscoveryExecutor::HeldMetadata { gate, .. } = &executor
++                {
++                    metadata_was_held = true;
++                    requests.stalled_metadata_seen.notify_one();
++                    gate.acquire().await?.forget();
++                    requests.metadata_released.notify_one();
++                }
++                json!({
+                 "isDirectory": false,
+                 "isFile": is_instruction_path,
+                 "isSymlink": false,
+                 "size": if is_instruction_path { AGENTS_INSTRUCTIONS.len() } else { 0 },
+                 "createdAtMs": 0,
+                 "modifiedAtMs": 0,
+-            }),
++                })
++            }
+             Some("fs/readFile") if is_instruction_path => {
+                 let previous_reads = requests.instruction_reads.fetch_add(1, Ordering::Relaxed);
+                 anyhow::ensure!(
+@@ -2773,7 +3030,31 @@ async fn serve_instruction_discovery_executor(
+                 "config": {"layers": [], "cloudInsertionIndex": 0},
+                 "requirements": {"layers": [], "cloudInsertionIndex": 0},
+             }),
+-            Some("process/start") => anyhow::bail!("unexpected process/start: {request}"),
++            Some("process/start") => {
++                let process_call_id = match &executor {
++                    InstructionDiscoveryExecutor::ReadyWithProcess {
++                        process_call_id, ..
++                    }
++                    | InstructionDiscoveryExecutor::HeldMetadata {
++                        process_call_id, ..
++                    } => process_call_id,
++                    _ => anyhow::bail!("unexpected process/start: {request}"),
++                };
++                anyhow::ensure!(request["params"]["metadata"]["toolCallId"] == *process_call_id);
++                requests.process_starts.fetch_add(1, Ordering::Relaxed);
++                json!({"processId": request["params"]["processId"], "sandboxType": "none"})
++            }
++            Some("process/read")
++                if matches!(
++                    &executor,
++                    InstructionDiscoveryExecutor::ReadyWithProcess { .. }
++                        | InstructionDiscoveryExecutor::HeldMetadata { .. }
++                ) =>
++            {
++                json!({
++                    "chunks": [], "nextSeq": 0, "exited": true, "exitCode": 0, "closed": true, "failure": null,
++                })
++            }
+             _ => {
+                 let error = json!({"code": -32601, "message": "not supported by test executor"});
+                 let response = json!({"id": id, "error": error});
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index 622e882f546ec1f0a016fffcc85247db3e883984..44b64bd700eb34de3fb9610d0aa024622ec5b7bc 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -14,6 +14,7 @@ use codex_exec_server::EnvironmentInfo;
+ use codex_exec_server::EnvironmentManager;
+ use codex_exec_server::ExecServerError;
+ use codex_exec_server::ExecutorFileSystem;
++use codex_exec_server::FirstEnvironmentRegistration;
+ use codex_exec_server::SelectedCapabilityRootsStatus;
+ use codex_protocol::capabilities::CapabilityRootLocation;
+ use codex_protocol::capabilities::EnvironmentCapabilityRoots;
+@@ -402,14 +403,29 @@ impl DefaultSecondaryEnvironment {
+     }
+ }
+
+-/// The exact optional rejection and its original registration, not an ID to resolve later.
++/// The rejected selection and the single registration eligible for later verification.
+ pub(crate) struct InitialDefaultSecondary {
+     pub(crate) rejection: TurnEnvironmentSelection,
+-    registration: Weak<Environment>,
++    registration: InitialSecondaryRegistration,
+     pub(crate) revoked: CancellationToken,
+     background: Option<BackgroundSecondaryVerification>,
+ }
+
++/// The registration present at startup, or the first registration captured while it was absent.
++enum InitialSecondaryRegistration {
++    Existing(Weak<Environment>),
++    First(FirstEnvironmentRegistration),
++}
++
++impl InitialSecondaryRegistration {
++    fn get(&self) -> Option<Arc<Environment>> {
++        match self {
++            Self::Existing(environment) => environment.upgrade(),
++            Self::First(capture) => capture.get(),
++        }
++    }
++}
++
+ /// Optional read-only verification can prepare a later turn, but cannot change an active turn.
+ struct BackgroundSecondaryVerification {
+     limit: Arc<Semaphore>,
+@@ -716,7 +732,14 @@ impl ThreadEnvironments {
+                 if selection.config != EnvironmentConfigState::FromThread {
+                     continue;
+                 }
+-                let current = environment_manager.get_environment(&selection.environment_id);
++                let first_capture = startup.capture_missing_secondaries.then(|| {
++                    environment_manager
++                        .capture_first_environment_registration(&selection.environment_id)
++                });
++                let current = match &first_capture {
++                    Some(capture) => capture.get(),
++                    None => environment_manager.get_environment(&selection.environment_id),
++                };
+                 if current
+                     .as_ref()
+                     .is_some_and(|environment| !environment.is_remote())
+@@ -735,17 +758,26 @@ impl ThreadEnvironments {
+                 if startup.cold_resume {
+                     deferred_on_resume.insert(selection.environment_id.clone());
+                 }
+-                if let Some(registration) = registration {
++                let recovery_registration = match registration.as_ref() {
++                    Some(registration) => Some(InitialSecondaryRegistration::Existing(
++                        Arc::downgrade(registration),
++                    )),
++                    None => first_capture.map(InitialSecondaryRegistration::First),
++                };
++                if let Some(recovery_registration) = recovery_registration {
+                     let original = Arc::new(InitialDefaultSecondary {
+                         rejection: selection.clone(),
+-                        registration: Arc::downgrade(&registration),
++                        registration: recovery_registration,
+                         revoked: CancellationToken::new(),
+                         background: Some(BackgroundSecondaryVerification {
+                             limit: Arc::clone(&limit),
+                             pending: Mutex::new(None),
+                         }),
+                     });
+-                    let _ = original.take_verified_or_start(&config, &normalized, &registration);
++                    if let Some(registration) = registration {
++                        let _ =
++                            original.take_verified_or_start(&config, &normalized, &registration);
++                    }
+                     initially_unavailable
+                         .push(DefaultSecondaryEnvironment::InitiallyUnavailable(original));
+                 }
+@@ -868,7 +900,7 @@ impl ThreadEnvironments {
+                 initially_unavailable.push(DefaultSecondaryEnvironment::InitiallyUnavailable(
+                     Arc::new(InitialDefaultSecondary {
+                         rejection: selection.clone(),
+-                        registration: registration.clone(),
++                        registration: InitialSecondaryRegistration::Existing(registration.clone()),
+                         revoked: CancellationToken::new(),
+                         background: None,
+                     }),
+@@ -1732,7 +1764,10 @@ impl ThreadEnvironments {
+                 let DefaultSecondaryEnvironment::InitiallyUnavailable(original) = default else {
+                     return None;
+                 };
+-                let registration = original.registration.upgrade()?;
++                let registration = original.registration.get()?;
++                if !registration.is_remote() {
++                    return None;
++                }
+                 let mut input = original.rejection.clone();
+                 input.config = EnvironmentConfigState::FromThread;
+                 let (selection, _) = resolve_selection_config(input, &state.thread_defaults);
+@@ -2901,7 +2936,7 @@ mod tests {
+             resolve_turn_environments(manager, &[local.clone(), rejection.clone()]).await;
+         let original = Arc::new(InitialDefaultSecondary {
+             rejection: rejection.clone(),
+-            registration: Arc::downgrade(&remote),
++            registration: InitialSecondaryRegistration::Existing(Arc::downgrade(&remote)),
+             revoked: CancellationToken::new(),
+             background: None,
+         });
+@@ -2955,6 +2990,99 @@ mod tests {
+         );
+     }
+
++    #[tokio::test]
++    async fn captured_first_registration_stays_bound_and_cancellation_revokes_attempt() {
++        let manager = Arc::new(EnvironmentManager::default_for_tests());
++        let capture = manager.capture_first_environment_registration(REMOTE_ENVIRONMENT_ID);
++        manager
++            .upsert_environment(
++                REMOTE_ENVIRONMENT_ID.to_string(),
++                "ws://127.0.0.1:1".to_string(),
++                None,
++            )
++            .expect("first registration");
++        let first = manager
++            .get_environment(REMOTE_ENVIRONMENT_ID)
++            .expect("first");
++        manager
++            .upsert_environment(
++                REMOTE_ENVIRONMENT_ID.to_string(),
++                "ws://127.0.0.1:2".to_string(),
++                None,
++            )
++            .expect("replacement registration");
++        let local = TurnEnvironmentSelection {
++            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
++            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
++            workspace_roots: Vec::new(),
++            config: EnvironmentConfigState::FromThread,
++            selected_capability_roots: Default::default(),
++        };
++        let rejection = TurnEnvironmentSelection {
++            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
++            config: EnvironmentConfigState::StartupUnavailable,
++            ..local.clone()
++        };
++        let environments =
++            resolve_turn_environments(Arc::clone(&manager), &[local.clone(), rejection.clone()])
++                .await;
++        let original = Arc::new(InitialDefaultSecondary {
++            rejection: rejection.clone(),
++            registration: InitialSecondaryRegistration::First(capture),
++            revoked: CancellationToken::new(),
++            background: None,
++        });
++        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
++        let admissions = environments
++            .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
++            .expect("captured first registration");
++        let admission = &admissions.secondaries[0];
++        assert!(Arc::ptr_eq(&admission.registration, &first));
++        assert!(!environments.is_current_registration(admission));
++        let attempt = admission.initial_recovery.as_ref().expect("attempt");
++        environments.update_selections(std::slice::from_ref(&local));
++        assert!(attempt.revoked.is_cancelled());
++        assert_eq!(environments.snapshot_now().all_selections(), [local]);
++    }
++
++    #[tokio::test]
++    async fn captured_non_remote_registration_cannot_be_admitted_as_a_secondary() {
++        let manager = Arc::new(EnvironmentManager::default_for_tests());
++        // Use the real local registration as a synthetic wrong-kind capture.
++        let capture = manager.capture_first_environment_registration(LOCAL_ENVIRONMENT_ID);
++        let local = TurnEnvironmentSelection {
++            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
++            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
++            workspace_roots: Vec::new(),
++            config: EnvironmentConfigState::FromThread,
++            selected_capability_roots: Default::default(),
++        };
++        let rejection = TurnEnvironmentSelection {
++            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
++            config: EnvironmentConfigState::StartupUnavailable,
++            ..local.clone()
++        };
++        let environments =
++            resolve_turn_environments(Arc::clone(&manager), &[local.clone(), rejection.clone()])
++                .await;
++        let original = Arc::new(InitialDefaultSecondary {
++            rejection: rejection.clone(),
++            registration: InitialSecondaryRegistration::First(capture),
++            revoked: CancellationToken::new(),
++            background: None,
++        });
++        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
++        assert!(
++            environments
++                .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
++                .is_none()
++        );
++        assert_eq!(
++            environments.snapshot_now().all_selections(),
++            [local, rejection]
++        );
++    }
++
+     #[tokio::test]
+     async fn default_thread_environment_requests_use_manager_default_id() {
+         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 36f33c364740cecb1487ae79c81cf1075415e2eb..17bb1c00dfa21d021c93946eea7c22986878188c 100644
+index 17bb1c00dfa21d021c93946eea7c22986878188c..9599318fdc235da3d6d3d2cdfcec99cc77fe394e 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -2789,13 +2789,25 @@ impl ThreadManager {
-         {
-             meta.meta.multi_agent_version = Some(multi_agent_version);
-         }
--        let mut environments = settings_history_override
-+        let settings_history = settings_history_override
-             .as_deref()
--            .map(|history| persisted_thread_environment_requests(history))
--            .unwrap_or_else(|| match model_history_override.as_deref() {
--                Some(model_history) => persisted_thread_environment_requests(model_history),
--                None => persisted_thread_environment_requests(response_history.as_ref()),
--            });
-+            .or(model_history_override.as_deref())
-+            .unwrap_or(response_history.as_ref());
-+        let implicit_saved_selection = settings_history
-+            .iter()
-+            .rev()
-+            .find_map(|item| match item {
-+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => Some(
-+                    event
-+                        .thread_settings
-+                        .environments
-+                        .as_ref()
-+                        .is_some_and(|selection| selection.implicit_selection),
-+                ),
-+                _ => None,
-+            })
-+            .unwrap_or(false);
-+        let mut environments = persisted_thread_environment_requests(settings_history);
-         if options.config.workspace_roots_explicit
-             && let Some(environments) = environments.as_mut()
-         {
-@@ -2822,7 +2834,41 @@ impl ThreadManager {
-         }
-         let agent_control = self.agent_control_for_config(&options.config);
-         options.initial_history = history;
-+        let inherited_selection = options.environments.is_none();
-         options.environments = options.environments.or(environments);
-+        if inherited_selection
-+            && implicit_saved_selection
-+            && options.inherited_environments.is_none()
-+            && options
-+                .thread_extension_init
-+                .get::<StartupEnvironmentDiscovery>()
-+                .is_none()
-+            && options
-+                .environments
-+                .as_ref()
-+                .and_then(|environments| environments.first())
-+                .is_some_and(|primary| {
-+                    primary.environment_id == LOCAL_ENVIRONMENT_ID
-+                        && primary.config == EnvironmentConfigState::FromThread
-+                })
-+        {
-+            // A fork inherits the parent's implicit default secondaries, not a new requirement
-+            // that they be reachable before the child starts.
-+            for selection in options.environments.as_mut().into_iter().flatten().skip(1) {
-+                if selection.config == EnvironmentConfigState::StartupUnavailable {
-+                    selection.config = EnvironmentConfigState::FromThread;
+@@ -596,6 +596,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
+     pub(crate) cold_resume: bool,
+     /// Ordinary local conversation does not await registry secondaries.
+     pub(crate) defer_registry_secondaries: bool,
++    /// Forks can verify the first registration for a saved, currently absent secondary.
++    pub(crate) capture_missing_secondaries: bool,
+     /// Explicit exceptions for one cold resume, never part of saved settings.
+     pub(crate) optional_on_resume: Arc<HashSet<String>>,
+     /// Present only for the actual local-primary registry selection at a new app-server start.
+@@ -666,6 +668,7 @@ impl StartThreadOptions {
+                 implicit_selection,
+                 cold_resume: false,
+                 defer_registry_secondaries: implicit_selection,
++                capture_missing_secondaries: false,
+                 optional_on_resume: Arc::default(),
+                 default_registrations,
+             });
+@@ -776,6 +779,7 @@ impl StartThreadOptions {
+                 implicit_selection,
+                 cold_resume: true,
+                 defer_registry_secondaries,
++                capture_missing_secondaries: false,
+                 optional_on_resume: Arc::new(optional_on_resume),
+                 default_registrations: HashMap::new(),
+             });
+@@ -2865,6 +2869,7 @@ impl ThreadManager {
+                     implicit_selection: true,
+                     cold_resume: true,
+                     defer_registry_secondaries: true,
++                    capture_missing_secondaries: true,
+                     optional_on_resume: Arc::default(),
+                     default_registrations: HashMap::new(),
+                 });
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index a99e7a3956bda3d5d16b7bc28a905106118da2a9..cf71fadb77740fa84bee30e2fcfd610fd8e17a42 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -1,6 +1,7 @@
+ mod connect_options;
+ mod discovery_recovery;
+ mod discovery_v2;
++mod first_registration;
+ pub use discovery_v2::supports_capability_discovery_v2;
+
+ use std::collections::HashMap;
+@@ -59,6 +60,8 @@ use tracing::instrument::WithSubscriber;
+ mod accepted;
+
+ pub use connect_options::RemoteEnvironmentOptions;
++use first_registration::FirstRegistration;
++use first_registration::FirstRegistrationWatches;
+
+ pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
+ pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
+@@ -106,11 +109,15 @@ pub enum ConnectionAttemptOutcome {
+ pub struct EnvironmentManager {
+     default_environment: Option<String>,
+     pub(super) environments: RwLock<HashMap<String, Arc<Environment>>>,
++    first_registration_watches: FirstRegistrationWatches<Environment>,
+     local_environment: Option<Arc<Environment>>,
+     local_runtime_paths: Option<ExecServerRuntimeOptions>,
+     http_client_factory: HttpClientFactory,
+ }
+
++/// A one-shot capture of the current or first later registration for an environment ID.
++pub type FirstEnvironmentRegistration = FirstRegistration<Environment>;
++
+ /// Information supplied by the environment owner when an environment is ready.
+ #[derive(Clone, Debug, Default, Eq, PartialEq)]
+ pub struct EnvironmentReadyInfo {
+@@ -157,6 +164,7 @@ impl EnvironmentManager {
+                 LOCAL_ENVIRONMENT_ID.to_string(),
+                 Arc::new(Environment::default_for_tests()),
+             )])),
++            first_registration_watches: FirstRegistrationWatches::default(),
+             local_environment: Some(Arc::new(Environment::default_for_tests())),
+             local_runtime_paths: None,
+             // Test-only construction has no application config from which to resolve proxy policy.
+@@ -169,6 +177,7 @@ impl EnvironmentManager {
+         Self {
+             default_environment: None,
+             environments: RwLock::new(HashMap::new()),
++            first_registration_watches: FirstRegistrationWatches::default(),
+             local_environment: None,
+             local_runtime_paths: None,
+             http_client_factory,
+@@ -250,6 +259,7 @@ impl EnvironmentManager {
+         let manager = Self {
+             default_environment: Some(REMOTE_ENVIRONMENT_ID.to_string()),
+             environments: RwLock::new(HashMap::new()),
++            first_registration_watches: FirstRegistrationWatches::default(),
+             local_environment: None,
+             local_runtime_paths,
+             http_client_factory,
+@@ -366,6 +376,7 @@ impl EnvironmentManager {
+         Ok(Self {
+             default_environment,
+             environments: RwLock::new(environment_map),
++            first_registration_watches: FirstRegistrationWatches::default(),
+             local_environment,
+             local_runtime_paths,
+             http_client_factory,
+@@ -428,6 +439,26 @@ impl EnvironmentManager {
+             .cloned()
+     }
+
++    /// Atomically captures the current registration or watches for the first registration.
++    /// Dropping the capture cancels an unfulfilled watch.
++    pub fn capture_first_environment_registration(
++        &self,
++        environment_id: &str,
++    ) -> FirstEnvironmentRegistration {
++        let environments = self
++            .environments
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        self.first_registration_watches
++            .capture(environment_id, environments.get(environment_id))
++    }
++
++    // The caller holds the environments write lock, so capture and insertion cannot cross.
++    fn capture_registered_environment(&self, environment_id: &str, environment: &Arc<Environment>) {
++        self.first_registration_watches
++            .inserted(environment_id, environment);
++    }
++
+     /// Removes a registration without invalidating existing handles or changing the default ID.
+     /// The caller must coordinate removal with use and registration. The returned environment
+     /// remains alive until its last handle is dropped, outside the registry lock.
+@@ -487,7 +518,8 @@ impl EnvironmentManager {
+                 self.provisioning_noise_environment(provider_if_missing, Some(Err(error)))?,
+             ),
+         };
+-        environments.insert(environment_id, Arc::clone(&environment));
++        environments.insert(environment_id.clone(), Arc::clone(&environment));
++        self.capture_registered_environment(&environment_id, &environment);
+         Ok(Some(environment))
+     }
+
+@@ -567,7 +599,8 @@ impl EnvironmentManager {
+
+         let environment =
+             Arc::new(self.provisioning_noise_environment(provider, /*initial_result*/ None)?);
+-        environments.insert(environment_id, Arc::clone(&environment));
++        environments.insert(environment_id.clone(), Arc::clone(&environment));
++        self.capture_registered_environment(&environment_id, &environment);
+         Ok(environment)
+     }
+
+@@ -601,7 +634,8 @@ impl EnvironmentManager {
+                 .environments
+                 .write()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            let replaced = environments.insert(environment_id, Arc::clone(&environment));
++            let replaced = environments.insert(environment_id.clone(), Arc::clone(&environment));
++            self.capture_registered_environment(&environment_id, &environment);
+             if let Some(client) = replaced.as_ref().and_then(|old| old.remote_client.as_ref()) {
+                 client.retire_initial_recovery();
+             }
+@@ -1755,6 +1789,29 @@ mod tests {
+         assert!(manager.get_environment("does-not-exist").is_none());
+     }
+
++    #[tokio::test]
++    async fn first_registration_capture_does_not_follow_replacement_before_use() {
++        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
++        let capture = manager.capture_first_environment_registration("executor-a");
++        assert!(capture.get().is_none());
++
++        let first = Arc::new(Environment::default_for_tests());
++        manager
++            .insert_environment("executor-a".to_string(), Arc::clone(&first))
++            .expect("register first environment");
++        let second = Arc::new(Environment::default_for_tests());
++        manager
++            .insert_environment("executor-a".to_string(), Arc::clone(&second))
++            .expect("replace environment");
++        assert!(Arc::ptr_eq(&capture.get().expect("captured first"), &first));
++        assert!(Arc::ptr_eq(
++            &manager.get_environment("executor-a").expect("current"),
++            &second
++        ));
++        drop(first);
++        assert!(capture.get().is_none());
++    }
++
+     #[tokio::test]
+     async fn environment_manager_upserts_named_remote_environment() {
+         let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
+diff --git a/codex-rs/exec-server/src/environment/accepted.rs b/codex-rs/exec-server/src/environment/accepted.rs
+index a3772a24860ac4ad9378179200824a9fa7067e6b..9aa6b7283326ed3dee223d380cd452db7d7fa959 100644
+--- a/codex-rs/exec-server/src/environment/accepted.rs
++++ b/codex-rs/exec-server/src/environment/accepted.rs
+@@ -37,6 +37,7 @@ impl EnvironmentManager {
+         Ok(Self {
+             default_environment: Some(environment_id.clone()),
+             environments: RwLock::new(HashMap::from([(environment_id, environment)])),
++            first_registration_watches: Default::default(),
+             local_environment: None,
+             local_runtime_paths: None,
+             http_client_factory,
+diff --git a/codex-rs/exec-server/src/environment/first_registration.rs b/codex-rs/exec-server/src/environment/first_registration.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c119d5c69fc2307c91db2cac68ffa2277bdfb8a
+--- /dev/null
++++ b/codex-rs/exec-server/src/environment/first_registration.rs
+@@ -0,0 +1,198 @@
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::sync::OnceLock;
++use std::sync::Weak;
++
++type Slot<T> = OnceLock<Weak<T>>;
++type Pending<T> = Mutex<HashMap<String, Vec<Weak<Slot<T>>>>>;
++
++/// One capture of a current registration or the first later registration for an ID.
++/// Removing or replacing that registration cannot transfer the capture.
++pub struct FirstRegistration<T> {
++    environment_id: String,
++    slot: Arc<Slot<T>>,
++    pending: Weak<Pending<T>>,
++}
++
++impl<T> FirstRegistration<T> {
++    /// Returns the captured registration while it remains alive.
++    pub fn get(&self) -> Option<Arc<T>> {
++        self.slot.get()?.upgrade()
++    }
++}
++
++impl<T> Drop for FirstRegistration<T> {
++    fn drop(&mut self) {
++        let Some(pending) = self.pending.upgrade() else {
++            return;
++        };
++        let mut pending = pending
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(entries) = pending.get_mut(&self.environment_id) {
++            let slot = Arc::downgrade(&self.slot);
++            entries.retain(|entry| entry.strong_count() != 0 && !entry.ptr_eq(&slot));
++            if entries.is_empty() {
++                pending.remove(&self.environment_id);
++            }
++        }
++    }
++}
++
++/// Pending first-registration captures, synchronized with the caller's registry lock.
++#[derive(Debug)]
++pub(super) struct FirstRegistrationWatches<T> {
++    pending: Arc<Pending<T>>,
++}
++
++impl<T> Default for FirstRegistrationWatches<T> {
++    fn default() -> Self {
++        Self {
++            pending: Arc::default(),
++        }
++    }
++}
++
++impl<T> FirstRegistrationWatches<T> {
++    /// The caller holds the registry read or write lock while obtaining `current` and calling this.
++    pub(super) fn capture(
++        &self,
++        environment_id: &str,
++        current: Option<&Arc<T>>,
++    ) -> FirstRegistration<T> {
++        let slot = Arc::new(OnceLock::new());
++        if let Some(environment) = current {
++            let _ = slot.set(Arc::downgrade(environment));
++        } else {
++            self.pending
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .entry(environment_id.to_string())
++                .or_default()
++                .push(Arc::downgrade(&slot));
++        }
++        FirstRegistration {
++            environment_id: environment_id.to_string(),
++            slot,
++            pending: Arc::downgrade(&self.pending),
++        }
++    }
++
++    /// The caller holds the same registry write lock while installing the registration.
++    pub(super) fn inserted(&self, environment_id: &str, environment: &Arc<T>) {
++        let captures = self
++            .pending
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .remove(environment_id);
++        if let Some(captures) = captures {
++            for capture in captures {
++                if let Some(capture) = capture.upgrade() {
++                    let _ = capture.set(Arc::downgrade(environment));
 +                }
 +            }
-+            options
-+                .thread_extension_init
-+                .insert(StartupEnvironmentDiscovery {
-+                    implicit_selection: true,
-+                    cold_resume: true,
-+                    defer_registry_secondaries: true,
-+                    optional_on_resume: Arc::default(),
-+                    default_registrations: HashMap::new(),
-+                });
 +        }
-         let mut request =
-             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
-         if let Some(native_persistence) = native_persistence {
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::Barrier;
++    use std::sync::RwLock;
++
++    #[derive(Default)]
++    struct Registry {
++        current: RwLock<HashMap<String, Arc<u8>>>,
++        watches: FirstRegistrationWatches<u8>,
++    }
++
++    impl Registry {
++        fn capture(&self, id: &str) -> FirstRegistration<u8> {
++            let current = self.current.read().expect("registry");
++            self.watches.capture(id, current.get(id))
++        }
++
++        fn insert(&self, id: &str, value: Arc<u8>) {
++            let mut current = self.current.write().expect("registry");
++            current.insert(id.to_string(), Arc::clone(&value));
++            self.watches.inserted(id, &value);
++        }
++    }
++
++    #[test]
++    fn first_registration_never_becomes_a_replacement() {
++        let registry = Registry::default();
++        let capture = registry.capture("worker");
++        assert!(capture.get().is_none());
++        let first = Arc::new(1);
++        registry.insert("worker", Arc::clone(&first));
++        let replacement = Arc::new(2);
++        registry.insert("worker", Arc::clone(&replacement));
++        assert!(Arc::ptr_eq(&capture.get().expect("first"), &first));
++        drop(first);
++        assert!(capture.get().is_none());
++    }
++
++    #[test]
++    fn dropping_capture_removes_pending_watch() {
++        let registry = Registry::default();
++        let capture = registry.capture("worker");
++        assert_eq!(
++            registry.watches.pending.lock().expect("pending")["worker"].len(),
++            1
++        );
++        drop(capture);
++        assert!(registry.watches.pending.lock().expect("pending").is_empty());
++        registry.insert("worker", Arc::new(1));
++        assert!(registry.watches.pending.lock().expect("pending").is_empty());
++    }
++
++    #[test]
++    fn cancellation_racing_insert_leaves_no_pending_watch() {
++        for _ in 0..100 {
++            let registry = Arc::new(Registry::default());
++            let capture = registry.capture("worker");
++            let barrier = Arc::new(Barrier::new(2));
++            std::thread::scope(|scope| {
++                let writer_registry = Arc::clone(&registry);
++                let writer_barrier = Arc::clone(&barrier);
++                scope.spawn(move || {
++                    writer_barrier.wait();
++                    writer_registry.insert("worker", Arc::new(1));
++                });
++                barrier.wait();
++                drop(capture);
++            });
++            assert!(registry.watches.pending.lock().expect("pending").is_empty());
++        }
++    }
++
++    #[test]
++    fn capture_and_first_insert_cannot_miss_each_other() {
++        for _ in 0..100 {
++            let registry = Arc::new(Registry::default());
++            let barrier = Arc::new(Barrier::new(2));
++            let first = Arc::new(1);
++            std::thread::scope(|scope| {
++                let writer_registry = Arc::clone(&registry);
++                let writer_barrier = Arc::clone(&barrier);
++                let writer_first = Arc::clone(&first);
++                scope.spawn(move || {
++                    writer_barrier.wait();
++                    writer_registry.insert("worker", writer_first);
++                });
++                barrier.wait();
++                let capture = registry.capture("worker");
++                scope.spawn(move || {
++                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++                    while capture.get().is_none() && std::time::Instant::now() < deadline {
++                        std::thread::yield_now();
++                    }
++                    assert!(Arc::ptr_eq(&capture.get().expect("first"), &first));
++                });
++            });
++        }
++    }
++}
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 4ef470c1491c7f4cf33c109bd2ad6d1112c6f34d..72eff826d9aff0450c6918b98296767ff1e76b9b 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -121,6 +121,7 @@ pub use environment::EnvironmentConnectionState;
+ pub use environment::EnvironmentManager;
+ pub use environment::EnvironmentObservedStatus;
+ pub use environment::EnvironmentReadyInfo;
++pub use environment::FirstEnvironmentRegistration;
+ pub use environment::LOCAL_ENVIRONMENT_ID;
+ pub use environment::MAX_SELECTED_CAPABILITY_ROOTS;
+ pub use environment::REMOTE_ENVIRONMENT_ID;

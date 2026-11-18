@@ -87,7 +87,9 @@
       "target": "all",
       "tests": [
         "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
-        "suite::v2::selected_environment::fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resume",
+        "suite::v2::selected_environment::fork_cancels_first_registration_verification_on_unload",
+        "suite::v2::selected_environment::fork_never_adopts_replaced_first_registration",
+        "suite::v2::selected_environment::fork_with_unregistered_implicit_secondary_verifies_first_registration",
         "suite::v2::selected_environment::initially_unavailable_default_secondary_joins_an_ordinary_later_turn",
         "suite::v2::selected_environment::initially_unavailable_default_secondary_rejects_replaced_registration",
         "suite::v2::selected_environment::later_turn_denies_stdin_for_terminal_in_quarantined_default_secondary",
@@ -229,6 +231,8 @@
       "target": null,
       "tests": [
         "agents_md::tests::stalled_remote_project_instructions_fail_closed_and_can_be_retried",
+        "environment_selection::tests::captured_first_registration_stays_bound_and_cancellation_revokes_attempt",
+        "environment_selection::tests::captured_non_remote_registration_cannot_be_admitted_as_a_secondary",
         "environment_selection::tests::failed_environment_cannot_be_inherited_by_spawn_agent",
         "environment_selection::tests::initially_unavailable_default_keeps_its_child_denial_and_revokes_active_reselection",
         "environment_selection::tests::registry_primary_failure_is_distinct_from_pending_owner_configuration",
@@ -659,7 +663,12 @@
         "client::tests::connected_view_rejects_replacement_rpc_but_can_terminate_started_process",
         "client::tests::initial_recovery_pending_start_cleanup_stops_after_original_rpc_closes",
         "client::tests::initial_recovery_revocation_denies_queued_process_start_before_dispatch",
-        "client::tests::initial_recovery_revokes_cached_new_io_but_allows_process_cleanup"
+        "client::tests::initial_recovery_revokes_cached_new_io_but_allows_process_cleanup",
+        "environment::first_registration::tests::cancellation_racing_insert_leaves_no_pending_watch",
+        "environment::first_registration::tests::capture_and_first_insert_cannot_miss_each_other",
+        "environment::first_registration::tests::dropping_capture_removes_pending_watch",
+        "environment::first_registration::tests::first_registration_never_becomes_a_replacement",
+        "environment::tests::first_registration_capture_does_not_follow_replacement_before_use"
       ]
     },
     {
