@@ -87,11 +87,13 @@
       "target": "all",
       "tests": [
         "suite::v2::environment_add::selected_environment_emits_connection_lifecycle_notifications",
+        "suite::v2::selected_environment::fork_with_unregistered_implicit_secondary_can_verify_it_after_cold_resume",
         "suite::v2::selected_environment::initially_unavailable_default_secondary_joins_an_ordinary_later_turn",
         "suite::v2::selected_environment::initially_unavailable_default_secondary_rejects_replaced_registration",
         "suite::v2::selected_environment::later_turn_denies_stdin_for_terminal_in_quarantined_default_secondary",
         "suite::v2::selected_environment::later_turn_preserves_remote_instructions_and_executes_after_session_rejoin",
         "suite::v2::selected_environment::ordinary_cold_resume_and_sends_do_not_wait_for_saved_secondaries",
+        "suite::v2::selected_environment::thread_fork_defers_disconnected_implicit_secondary_but_keeps_explicit_required",
         "suite::v2::selected_environment::thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments",
         "suite::v2::selected_environment::thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls",
         "suite::v2::selected_environment::turn_start_fails_when_required_remote_instruction_refresh_fails",
