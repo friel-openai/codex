@@ -1,0 +1,3 @@
+Retry rollout lookup across materialization
+
+A concurrent compressed-to-plain materialization can move the two representations between their metadata checks. Retry the plain path only when both checks report NotFound, preserving the existing plain-first preference and other error behavior.
