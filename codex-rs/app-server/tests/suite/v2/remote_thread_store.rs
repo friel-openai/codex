@@ -302,6 +302,8 @@ async fn thread_list_repeated_cursor_returns_internal_error() -> Result<()> {
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: codex_thread_store::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
@@ -552,6 +554,8 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {

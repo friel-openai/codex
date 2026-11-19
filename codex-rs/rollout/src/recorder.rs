@@ -15,6 +15,7 @@ use std::sync::Mutex;
 
 use chrono::SecondsFormat;
 use codex_protocol::RolloutId;
+use codex_protocol::SegmentId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -46,6 +47,11 @@ use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
+use super::list::get_positioned_threads_in_root_with_state_db;
+use super::list::PositionedThreadsPage;
+use super::list::get_threads_with_state_db;
+use super::list::parse_cursor;
+use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
 use super::ordinal::ordinal_state_for_rollout;
@@ -54,6 +60,7 @@ use super::session_index::find_thread_names_by_ids;
 use crate::InitialHistory;
 use crate::ResumedHistory;
 use crate::RolloutItem;
+use crate::RolloutLine;
 use crate::config::RolloutConfigView;
 use crate::state_db;
 use crate::state_db::StateDbHandle;
@@ -117,7 +124,17 @@ pub enum RolloutRecorderParams {
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
+        /// First lineage-relative ordinal written to this rollout.
+        initial_rollout_ordinal: u64,
         initial_window_id: Option<codex_protocol::ContextWindowId>,
+    },
+    /// Creates a replacement or fork rollout at a specific path without resetting its ordinal.
+    CreateAtPath {
+        path: PathBuf,
+        session_meta: Box<SessionMeta>,
+        base_instructions: BaseInstructions,
+        dynamic_tools: Vec<DynamicToolSpec>,
+        initial_rollout_ordinal: u64,
     },
     Resume {
         path: PathBuf,
@@ -128,6 +145,9 @@ enum RolloutCmd {
     AddItems(Vec<RolloutItem>),
     ReadUnpersistedSessionMeta {
         ack: oneshot::Sender<Option<SessionMeta>>,
+    },
+    BufferedItems {
+        ack: oneshot::Sender<Vec<RolloutItem>>,
     },
     Persist {
         ack: oneshot::Sender<std::io::Result<()>>,
@@ -239,6 +259,7 @@ impl RolloutRecorderParams {
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            initial_rollout_ordinal: 0,
             initial_window_id: None,
         }
     }
@@ -383,6 +404,18 @@ impl RolloutRecorderParams {
         } = &mut self
         {
             *window_id = Some(initial_window_id);
+        }
+        self
+    }
+
+    /// Sets the first lineage-relative ordinal for a newly created paginated rollout.
+    pub fn with_initial_rollout_ordinal(mut self, initial_rollout_ordinal: u64) -> Self {
+        if let Self::Create {
+            initial_rollout_ordinal: ordinal,
+            ..
+        } = &mut self
+        {
+            *ordinal = initial_rollout_ordinal;
         }
         self
     }
@@ -619,6 +652,7 @@ impl RolloutRecorder {
                     sort_key,
                     file_config,
                     search_term,
+                    state_db_ctx.as_deref(),
                 )
                 .await?
             }
@@ -630,6 +664,7 @@ impl RolloutRecorder {
                     sort_key,
                     file_config,
                     search_term,
+                    state_db_ctx.as_deref(),
                 )
                 .await?
             }
@@ -653,7 +688,7 @@ impl RolloutRecorder {
 
         // For metadata-filtered listings the filesystem page is the page we return. Track those
         // IDs so the later DB page only triggers full reconciliation for DB-only hits.
-        let fs_page_thread_ids = fs_page
+        let fs_page_thread_ids = fs_page.page
             .items
             .iter()
             .filter_map(|item| item.thread_id)
@@ -662,7 +697,7 @@ impl RolloutRecorder {
         // Warm the DB by repairing every filesystem hit before querying SQLite. Source/provider/cwd
         // filters are already validated from rollout head metadata, so lightweight read-repair is
         // enough there. Search can depend on full title metadata, so keep full reconciliation.
-        for item in &fs_page.items {
+        for item in &fs_page.page.items {
             if search_term.is_some() {
                 state_db::reconcile_rollout_from_disk(
                     state_db,
@@ -880,7 +915,7 @@ impl RolloutRecorder {
 
         let mut cursor = cursor.cloned();
         loop {
-            let page = get_threads(
+            let page = get_threads_with_state_db(
                 codex_home,
                 page_size,
                 cursor.as_ref(),
@@ -889,6 +924,7 @@ impl RolloutRecorder {
                 model_providers,
                 cwd_filter.as_ref().map(std::slice::from_ref),
                 default_provider,
+                state_db_ctx.as_deref(),
             )
             .await?;
             if let Some(path) = select_resume_path(&page, filter_cwd, default_provider).await {
@@ -954,10 +990,13 @@ impl RolloutRecorder {
                 history_mode,
                 history_base,
                 subagent_history_start_ordinal,
+                initial_rollout_ordinal,
                 initial_window_id,
             } => {
+                let initial_rollout_ordinal =
+                    history_base.map_or(initial_rollout_ordinal, |base| base.end_ordinal_exclusive);
                 let ordinal_state =
-                    RolloutOrdinalState::for_new_rollout(history_mode, history_base);
+                    RolloutOrdinalState::for_new_rollout_at(history_mode, initial_rollout_ordinal);
                 let (path, started_at) =
                     precompute_new_rollout_path(config, conversation_id, rollout_id_override)?;
 
@@ -972,6 +1011,7 @@ impl RolloutRecorder {
                 let session_meta = SessionMeta {
                     session_id,
                     id: conversation_id,
+                    segment_id: Some(SegmentId::new()),
                     forked_from_id,
                     attached_thread,
                     forked_from_ordinal_exclusive: forked_from_ordinal_exclusive
@@ -1005,6 +1045,38 @@ impl RolloutRecorder {
                     multi_agent_version,
                     context_window: initial_window_id.map(SessionContextWindow::new),
                 };
+
+                RolloutWriterState {
+                    writer: None,
+                    deferred_creation: true,
+                    pending_items: Vec::new(),
+                    meta: Some(session_meta),
+                    cwd: cwd.clone(),
+                    rollout_path: path,
+                    ordinal_state,
+                    last_logged_error: None,
+                }
+            }
+            RolloutRecorderParams::CreateAtPath {
+                path,
+                session_meta,
+                base_instructions,
+                dynamic_tools,
+                initial_rollout_ordinal,
+            } => {
+                let mut session_meta = *session_meta;
+                let ordinal_state = RolloutOrdinalState::for_new_rollout_at(
+                    session_meta.history_mode,
+                    initial_rollout_ordinal,
+                );
+                session_meta.segment_id = Some(SegmentId::new());
+                session_meta.cwd = cwd.clone();
+                session_meta.cli_version = env!("CARGO_PKG_VERSION").to_string();
+                session_meta.model_provider = Some(config.model_provider_id().to_string());
+                session_meta.base_instructions = Some(base_instructions);
+                session_meta.dynamic_tools = (!dynamic_tools.is_empty()).then_some(dynamic_tools);
+                session_meta.memory_mode =
+                    (!config.generate_memories()).then_some("disabled".to_string());
 
                 RolloutWriterState {
                     writer: None,
@@ -1098,6 +1170,29 @@ impl RolloutRecorder {
             })
     }
 
+    /// Returns canonical items that have not been written successfully yet.
+    ///
+    /// The response is ordered after every earlier recorder command, so callers can combine it
+    /// with the rollout file while they hold the surrounding thread-writer reservation.
+    pub async fn buffered_canonical_items(&self) -> std::io::Result<Vec<RolloutItem>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(RolloutCmd::BufferedItems { ack: tx })
+            .await
+            .map_err(|error| {
+                self.writer_task.terminal_failure().unwrap_or_else(|| {
+                    IoError::other(format!("failed to inspect buffered rollout items: {error}"))
+                })
+            })?;
+        rx.await.map_err(|error| {
+            self.writer_task.terminal_failure().unwrap_or_else(|| {
+                IoError::other(format!(
+                    "failed waiting to inspect buffered rollout items: {error}"
+                ))
+            })
+        })
+    }
+
     /// Materialize the rollout file and persist all buffered items.
     ///
     /// This is idempotent. If materialization fails, the recorder keeps all pending items in memory
@@ -1143,9 +1238,43 @@ impl RolloutRecorder {
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors) = Self::load_rollout_lines(path).await?;
+        Ok((
+            lines.into_iter().map(|line| line.item).collect(),
+            thread_id,
+            parse_errors,
+        ))
+    }
+
+    /// Loads physical rollout records without discarding their lineage ordinals.
+    pub async fn load_rollout_lines(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        Self::load_rollout_lines_with_path_policy(path, false, None).await
+    }
+
+    /// Loads records from exactly the selected physical rollout representation.
+    pub async fn load_rollout_lines_exact(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        Self::load_rollout_lines_with_path_policy(path, true, None).await
+    }
+
+    /// Loads an exact physical rollout up to a previously validated decoded byte boundary.
+    pub async fn load_rollout_lines_exact_bounded(
+        path: &Path, byte_limit: u64,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        Self::load_rollout_lines_with_path_policy(path, true, Some(byte_limit)).await
+    }
+
+    async fn load_rollout_lines_with_path_policy(
+        path: &Path,
+        exact: bool,
+        byte_limit: Option<u64>,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
-        compression::read_rollout_lines(path, |reader| {
-            let mut items: Vec<RolloutItem> = Vec::new();
+        compression::read_rollout_lines(path, exact, byte_limit, |reader| {
+            let mut lines: Vec<RolloutLine> = Vec::new();
             let mut thread_id: Option<ThreadId> = None;
             let mut parse_errors = 0usize;
             let mut saw_non_empty_line = false;
@@ -1167,6 +1296,9 @@ impl RolloutRecorder {
                     trace!("skipping legacy ghost_snapshot rollout line");
                     continue;
                 }
+                if normalize_legacy_sleep_item_completed_rollout_line(&mut value) {
+                    trace!("normalized legacy item_completed Sleep rollout line");
+                }
                 if thread_id.is_none() {
                     // The first SessionMeta belongs to this rollout. Later SessionMeta lines
                     // can be copied from fork history, so only validate unknown history modes
@@ -1174,24 +1306,33 @@ impl RolloutRecorder {
                     reject_unknown_thread_history_mode(&value)?;
                 }
 
+                let is_rollout_reference = matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("rollout_reference" | "fork_reference")
+                );
                 let rollout_line = match crate::decode_rollout_line(value) {
                     Ok(rollout_line) => rollout_line,
                     Err(e) => {
+                        if is_rollout_reference {
+                            return Err(IoError::new(
+                                std::io::ErrorKind::InvalidData,
+                                "invalid rollout reference record",
+                            ));
+                        }
                         trace!("failed to parse rollout line: {e}");
                         parse_errors = parse_errors.saturating_add(1);
                         continue;
                     }
                 };
 
-                let item = rollout_line.item;
                 // Use the FIRST SessionMeta encountered in the file as the canonical
                 // thread id and main session information. Keep all items intact.
                 if thread_id.is_none()
-                    && let RolloutItem::SessionMeta(session_meta_line) = &item
+                    && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
                 {
                     thread_id = Some(session_meta_line.meta.id);
                 }
-                items.push(item);
+                lines.push(rollout_line);
             }
             if !saw_non_empty_line {
                 return Err(IoError::other("empty session file"));
@@ -1199,11 +1340,11 @@ impl RolloutRecorder {
 
             tracing::debug!(
                 "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-                items.len(),
+                lines.len(),
                 thread_id,
                 parse_errors,
             );
-            Ok((items, thread_id, parse_errors))
+            Ok((lines, thread_id, parse_errors))
         })
         .await
     }
@@ -1354,31 +1495,55 @@ fn is_legacy_ghost_snapshot_response_item(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("ghost_snapshot")
 }
 
+fn normalize_legacy_sleep_item_completed_rollout_line(value: &mut Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return false;
+    }
+    let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("Sleep")
+        || !item.contains_key("duration_ms")
+    {
+        return false;
+    }
+
+    item.insert("type".to_string(), Value::String("Extension".to_string()));
+    item.insert("kind".to_string(), Value::String("clock.sleep".to_string()));
+    if let Some(duration_ms) = item.remove("duration_ms") {
+        item.insert("durationMs".to_string(), duration_ms);
+    }
+    true
+}
+
 fn truncate_fs_page(
-    mut page: ThreadsPage,
+    mut positioned: PositionedThreadsPage,
     page_size: usize,
-    sort_key: ThreadSortKey,
 ) -> ThreadsPage {
+    let page = &mut positioned.page;
     if page.items.len() <= page_size {
-        return page;
+        return positioned.page;
     }
     page.items.truncate(page_size);
-    page.next_cursor = page
-        .items
-        .last()
-        .and_then(|item| item.filesystem_cursor(sort_key));
-    page
+    page.next_cursor = page_size.checked_sub(1).and_then(|index| positioned.positions.get(index)).cloned();
+    positioned.page
 }
 
 fn page_from_filesystem_scan(
-    page: ThreadsPage,
+    page: PositionedThreadsPage,
     sort_direction: SortDirection,
     page_size: usize,
-    sort_key: ThreadSortKey,
+    _sort_key: ThreadSortKey,
 ) -> ThreadsPage {
     match sort_direction {
-        SortDirection::Asc => page,
-        SortDirection::Desc => truncate_fs_page(page, page_size, sort_key),
+        SortDirection::Asc => page.page,
+        SortDirection::Desc => truncate_fs_page(page, page_size),
     }
 }
 
@@ -1514,7 +1679,8 @@ async fn list_threads_from_files_desc(
     sort_key: ThreadSortKey,
     config: ThreadListConfig<'_>,
     search_term: Option<&str>,
-) -> std::io::Result<ThreadsPage> {
+    state_db: Option<&StateRuntime>,
+) -> std::io::Result<PositionedThreadsPage> {
     if let Some(search_term) = search_term {
         let mut matching_items = Vec::new();
         let mut scanned_files = 0usize;
@@ -1523,19 +1689,22 @@ async fn list_threads_from_files_desc(
         let scan_page_size = page_size.saturating_mul(8).clamp(256, 2048);
 
         loop {
-            let mut page = list_threads_from_files_desc_unfiltered(
+            let positioned = list_threads_from_files_desc_positioned(
                 codex_home,
                 scan_page_size,
                 page_cursor.as_ref(),
                 sort_key,
                 config,
+                state_db,
             )
             .await?;
+            let mut page = positioned.page;
             scanned_files = scanned_files.saturating_add(page.num_scanned_files);
             reached_scan_cap |= page.reached_scan_cap;
             filter_thread_items_by_search_term(codex_home, &mut page.items, Some(search_term))
                 .await?;
-            matching_items.extend(page.items);
+            let matched_ids = page.items.iter().filter_map(|item| item.thread_id).collect::<HashSet<_>>();
+            matching_items.extend(positioned.positions.into_iter().filter(|position| position.thread_id().is_some_and(|id| matched_ids.contains(&id))).zip(page.items));
             page_cursor = page.next_cursor;
             if matching_items.len() > page_size || page_cursor.is_none() {
                 break;
@@ -1546,36 +1715,45 @@ async fn list_threads_from_files_desc(
             matching_items.len() > page_size || page_cursor.is_some() || reached_scan_cap;
         matching_items.truncate(page_size);
         let next_cursor = if more_matches_available {
-            matching_items
-                .last()
-                .and_then(|item| item.filesystem_cursor(sort_key))
+            matching_items.last().map(|(position, _)| position.clone())
         } else {
             None
         };
 
-        return Ok(ThreadsPage {
-            items: matching_items,
+        let (positions, items) = matching_items.into_iter().unzip();
+        return Ok(PositionedThreadsPage { page: ThreadsPage {
+            items,
             next_cursor,
             num_scanned_files: scanned_files,
             reached_scan_cap,
-        });
+        }, positions });
     }
 
-    list_threads_from_files_desc_unfiltered(codex_home, page_size, cursor, sort_key, config).await
+    list_threads_from_files_desc_positioned(
+        codex_home,
+        page_size,
+        cursor,
+        sort_key,
+        config,
+        state_db,
+    )
+    .await
 }
 
-async fn list_threads_from_files_desc_unfiltered(
+async fn list_threads_from_files_desc_positioned(
     codex_home: &Path,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
     config: ThreadListConfig<'_>,
-) -> std::io::Result<ThreadsPage> {
+    state_db: Option<&StateRuntime>,
+) -> std::io::Result<PositionedThreadsPage> {
     let root = codex_home.join(match config.layout {
         ThreadListLayout::Flat => ARCHIVED_SESSIONS_SUBDIR,
         ThreadListLayout::NestedByDate => SESSIONS_SUBDIR,
     });
-    get_threads_in_root(root, page_size, cursor, sort_key, config).await
+    let archived = matches!(config.layout, ThreadListLayout::Flat);
+    get_positioned_threads_in_root_with_state_db(root, page_size, cursor, sort_key, config, state_db, Some(archived)).await
 }
 
 async fn list_threads_from_files_asc(
@@ -1585,42 +1763,39 @@ async fn list_threads_from_files_asc(
     sort_key: ThreadSortKey,
     config: ThreadListConfig<'_>,
     search_term: Option<&str>,
-) -> std::io::Result<ThreadsPage> {
+    state_db: Option<&StateRuntime>,
+) -> std::io::Result<PositionedThreadsPage> {
     let mut all_items = Vec::new();
     let mut scanned_files = 0usize;
     let mut reached_scan_cap = false;
     let mut page_cursor = None;
     let scan_page_size = page_size.saturating_mul(8).clamp(256, 2048);
     loop {
-        let page = list_threads_from_files_desc(
+        let positioned = list_threads_from_files_desc_positioned(
             codex_home,
             scan_page_size,
             page_cursor.as_ref(),
             sort_key,
             config,
-            /*search_term*/ None,
+            state_db,
         )
         .await?;
+        let page = positioned.page;
         scanned_files = scanned_files.saturating_add(page.num_scanned_files);
         reached_scan_cap |= page.reached_scan_cap;
-        all_items.extend(page.items);
+        all_items.extend(positioned.positions.into_iter().zip(page.items));
         page_cursor = page.next_cursor;
         if page_cursor.is_none() {
             break;
         }
     }
 
-    filter_thread_items_by_search_term(codex_home, &mut all_items, search_term).await?;
-
-    let mut keyed_items = all_items
-        .into_iter()
-        .filter_map(|item| item.filesystem_sort_key(sort_key).map(|key| (key, item)))
-        .collect::<Vec<_>>();
-    keyed_items.sort_by_key(|(key, _)| *key);
-    let mut all_items = keyed_items
-        .into_iter()
-        .map(|(_, item)| item)
-        .collect::<Vec<_>>();
+    if let Some(search_term) = search_term {
+        let ids = all_items.iter().filter_map(|(_, item)| item.thread_id).collect::<HashSet<_>>();
+        let names = find_thread_names_by_ids(codex_home, &ids).await?;
+        all_items.retain(|(_, item)| item.thread_id.and_then(|id| names.get(&id)).is_some_and(|name| name.contains(search_term)));
+    }
+    all_items.sort_by_key(|(position, _)| (position.timestamp(), position.thread_id().map(|id| id.to_string())));
 
     if let Some(cursor) = cursor {
         let anchor = (
@@ -1629,31 +1804,30 @@ async fn list_threads_from_files_asc(
                 .thread_id()
                 .and_then(|id| uuid::Uuid::parse_str(&id.to_string()).ok()),
         );
-        all_items.retain(|item| {
-            item.filesystem_sort_key(sort_key)
-                .is_some_and(|key| match anchor.1 {
-                    Some(anchor_id) => key > (anchor.0, anchor_id),
-                    _ => key.0 > anchor.0,
-                })
+        all_items.retain(|(position, _)| {
+            let id = position.thread_id().and_then(|id| uuid::Uuid::parse_str(&id.to_string()).ok());
+            match anchor.1 {
+                Some(anchor_id) => id.is_some_and(|id| (position.timestamp(), id) > (anchor.0, anchor_id)),
+                _ => position.timestamp() > anchor.0,
+            }
         });
     }
 
     let more_matches_available = all_items.len() > page_size || reached_scan_cap;
     all_items.truncate(page_size);
     let next_cursor = if more_matches_available {
-        all_items
-            .last()
-            .and_then(|item| item.filesystem_cursor(sort_key))
+        all_items.last().map(|(position, _)| position.clone())
     } else {
         None
     };
 
-    Ok(ThreadsPage {
-        items: all_items,
+    let (positions, items) = all_items.into_iter().unzip();
+    Ok(PositionedThreadsPage { page: ThreadsPage {
+        items,
         next_cursor,
         num_scanned_files: scanned_files,
         reached_scan_cap,
-    })
+    }, positions })
 }
 
 async fn filter_thread_items_by_search_term(
@@ -1923,6 +2097,9 @@ async fn rollout_writer(
                 state.add_items(items);
                 state.flush_if_materialized().await;
             }
+            RolloutCmd::BufferedItems { ack } => {
+                let _ = ack.send(state.pending_items.clone());
+            }
             RolloutCmd::Persist { ack } => {
                 let _ = ack.send(state.persist().await);
             }
@@ -2177,6 +2354,7 @@ async fn resume_candidate_matches_cwd(
             RolloutItem::TurnContext(turn_context) => Some(&turn_context.cwd),
             RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

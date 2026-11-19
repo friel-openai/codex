@@ -30,7 +30,7 @@ pub(in crate::local) async fn first_user_preview(
     prefix: &RolloutLineage,
 ) -> ThreadStoreResult<Option<String>> {
     let pool = store.thread_history_db().await?;
-    for segment in prefix.for_history_page().await?.segments() {
+    for segment in prefix.for_history_page(store).await?.segments() {
         let mut messages = sqlx::query_scalar::<_, String>(
             r#"SELECT item_json FROM thread_items
                WHERE thread_id = ?1 AND rollout_ordinal >= ?2 AND rollout_ordinal < ?3

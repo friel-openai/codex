@@ -2,6 +2,7 @@
 //! These checkpoints are harness metadata; compaction and replay never acknowledge new input.
 
 use codex_history::ResponseItemEnvelope;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SamplingProgress {
@@ -23,6 +24,23 @@ impl SamplingProgress {
     }
 
     pub(super) fn restore(items: &mut [ResponseItemEnvelope]) -> Self {
+        let mut progress = Self::from_assigned_items(items);
+        // Legacy inputs have no delivery proof. Give them distinct identities and keep
+        // them pending until a normal request includes them; never guess from output order.
+        progress.assign_missing_sequences(items);
+        progress
+    }
+
+    /// Keeps a shared fork prefix intact unless legacy items need sequence assignment.
+    pub(super) fn restore_shared(items: &mut Arc<Vec<ResponseItemEnvelope>>) -> Self {
+        if items.iter().all(|item| item.metadata.as_ref().and_then(|m| m.history_sequence).is_some()) {
+            Self::from_assigned_items(items)
+        } else {
+            Self::restore(Arc::make_mut(items))
+        }
+    }
+
+    fn from_assigned_items(items: &[ResponseItemEnvelope]) -> Self {
         let mut progress = Self::default();
         for metadata in items.iter().filter_map(|item| item.metadata.as_ref()) {
             progress.last_sequence = progress
@@ -33,9 +51,6 @@ impl SamplingProgress {
                 .max(metadata.sampled_through_sequence.unwrap_or_default());
         }
         progress.last_sequence = progress.last_sequence.max(progress.sampled_through);
-        // Legacy inputs have no delivery proof. Give them distinct identities and keep
-        // them pending until a normal request includes them; never guess from output order.
-        progress.assign_missing_sequences(items);
         progress
     }
 
