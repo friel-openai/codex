@@ -202,6 +202,7 @@ fn session_telemetry_for_request(
 struct ModelClientState {
     thread_id: ThreadId,
     item_id_generator: ItemIdGenerator,
+    prompt_cache_key_override: Option<ThreadId>,
     provider: SharedModelProvider,
     workspace_routing: WorkspaceRoutingContext,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -222,6 +223,7 @@ struct ModelClientState {
     cached_websocket_session: StdMutex<WebsocketSession>,
     /// Last full tool list used for sampling, retained across turns and connection resets.
     last_inference_tools: StdMutex<Option<Arc<[ToolSpec]>>>,
+    latest_response_continuation: StdMutex<Option<ResponseContinuation>>,
 }
 
 impl std::fmt::Debug for ModelClientState {
@@ -361,6 +363,30 @@ struct WebsocketContinuation {
     from_untraced_warmup: bool,
 }
 
+/// A completed provider response that a fork may reuse under the same transport identity.
+#[derive(Debug, Clone)]
+pub(crate) struct ResponseContinuation {
+    request: ResponsesApiRequest,
+    last_response: LastResponse,
+    transport: ResponseContinuationTransport,
+}
+
+/// Authentication and routing identity captured when the provider request was sent.
+#[derive(Debug, Clone, Default)]
+struct ResponseContinuationTransport {
+    auth_owner: Option<AuthOwner>,
+    connection_key: Option<Arc<ResponsesConnectionKey>>,
+    responses_headers: ApiHeaderMap,
+    runtime_id: Option<String>,
+    parent_routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
+}
+
+/// Publishes completed responses with the identity used at request dispatch, not completion.
+struct ResponseContinuationRecorder {
+    client_state: Arc<ModelClientState>,
+    transport: ResponseContinuationTransport,
+}
+
 #[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
@@ -372,7 +398,7 @@ struct WebsocketSession {
     runtime_id: Option<String>,
     /// Owner of the cached state, including before a connection is opened.
     auth_owner: Option<AuthOwner>,
-    connection_key: Option<ResponsesConnectionKey>,
+    connection_key: Option<Arc<ResponsesConnectionKey>>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
@@ -534,6 +560,21 @@ impl WebsocketSession {
         };
     }
 
+    fn from_response_continuation(continuation: ResponseContinuation) -> Self {
+        let (tx_last_response, rx_last_response) = oneshot::channel();
+        let _ = tx_last_response.send(continuation.last_response);
+        Self {
+            auth_owner: continuation.transport.auth_owner,
+            connection_key: continuation.transport.connection_key,
+            responses_headers: continuation.transport.responses_headers,
+            runtime_id: continuation.transport.runtime_id,
+            parent_routing_affinity: continuation.transport.parent_routing_affinity,
+            last_request: Some(continuation.request),
+            last_response_rx: Some(rx_last_response),
+            ..Default::default()
+        }
+    }
+
     fn set_connection_reused(&self, connection_reused: bool) {
         *self
             .connection_reused
@@ -546,6 +587,15 @@ impl WebsocketSession {
             .connection_reused
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ResponseContinuation {
+    pub(crate) fn for_fork(mut self) -> Self {
+        self.request
+            .input
+            .retain(|item| !matches!(item, ResponseItem::Reasoning { .. }));
+        self
     }
 }
 
@@ -616,6 +666,7 @@ impl ModelClient {
             state: Arc::new(ModelClientState {
                 thread_id,
                 item_id_generator,
+                prompt_cache_key_override: None,
                 provider: model_provider,
                 workspace_routing,
                 auth_env_telemetry,
@@ -635,6 +686,7 @@ impl ModelClient {
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
                 last_inference_tools: StdMutex::new(None),
+                latest_response_continuation: StdMutex::new(None),
             }),
             agent_identity_policy,
             prompt_cache_key_policy: PromptCacheKey::default(),
@@ -649,6 +701,23 @@ impl ModelClient {
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
             required_cyber_access_programs: None,
         }
+    }
+
+    pub(crate) fn with_inherited_response(
+        mut self,
+        prompt_cache_key_override: Option<ThreadId>,
+        response_continuation: Option<ResponseContinuation>,
+    ) -> Self {
+        let state = Arc::get_mut(&mut self.state).expect("new model client state is unshared");
+        state.prompt_cache_key_override = prompt_cache_key_override;
+        state.cached_websocket_session = StdMutex::new(
+            response_continuation
+                .clone()
+                .map(WebsocketSession::from_response_continuation)
+                .unwrap_or_default(),
+        );
+        state.latest_response_continuation = StdMutex::new(response_continuation);
+        self
     }
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
@@ -728,7 +797,10 @@ impl ModelClient {
             return format!("{source}:{parent_thread_id}");
         }
 
-        metadata.session_id.clone()
+        self.state
+            .prompt_cache_key_override
+            .map(|prompt_cache_key| prompt_cache_key.to_string())
+            .unwrap_or_else(|| metadata.session_id.clone())
     }
 
     // ChatGPT derives cache affinity from the Responses session-id header. Keep the
@@ -766,6 +838,37 @@ impl ModelClient {
 
     pub(crate) fn auth_owner(&self) -> Option<AuthOwner> {
         codex_model_provider::request_auth_owner(self.state.provider.as_ref())
+    }
+
+    pub(crate) fn fork_prompt_cache_key(&self) -> ThreadId {
+        // Ephemeral root forks carry the parent's UUID through session context.
+        // Internal agents use separate scoped keys that must not escape into forks.
+        self.session_id_override
+            .as_deref()
+            .filter(|_| !self.state.session_source.is_non_root_agent())
+            .and_then(|key| ThreadId::from_string(key).ok())
+            .or(self.state.prompt_cache_key_override)
+            .unwrap_or(self.state.thread_id)
+    }
+
+    pub(crate) fn response_continuation_for_fork(&self) -> Option<ResponseContinuation> {
+        if !self.responses_websocket_enabled() {
+            return None;
+        }
+        self.state
+            .latest_response_continuation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|continuation| {
+                continuation.transport.auth_owner == self.auth_owner()
+                    && continuation
+                        .transport
+                        .auth_owner
+                        .as_ref()
+                        .is_none_or(AuthOwner::is_current)
+            })
+            .map(ResponseContinuation::for_fork)
     }
 
     fn take_cached_websocket_session(&self) -> WebsocketSession {
@@ -1189,10 +1292,11 @@ impl ModelClient {
         }
         let is_openai = self.state.provider.info().is_openai();
         // These prompt-only items are rebuilt on every request. Hash their visible payloads
-        // within the thread so retries and resumed sessions preserve their identity.
+        // using fork_prompt_cache_key() so retries, resumes and unchanged forks preserve
+        // continuation identity. Changed payloads still produce different item IDs.
         let prefix_namespace = Uuid::new_v5(
             &Uuid::NAMESPACE_OID,
-            self.state.thread_id.to_string().as_bytes(),
+            self.fork_prompt_cache_key().to_string().as_bytes(),
         );
         let mut prefix = Vec::new();
         let tools = if model_info.use_responses_lite {
@@ -1634,6 +1738,8 @@ impl<'a> ResponsesHttpExecutor<'a> {
         ApiResponsesOptions {
             session_id: Some(self.client.responses_session_id(responses_metadata)),
             thread_id: Some(responses_metadata.thread_id.to_string()),
+            // This transport option overrides session-id, not the request body's cache policy.
+            prompt_cache_key: None,
             session_source: Some(self.client.state.session_source.clone()),
             extra_headers: {
                 let mut headers = build_responses_headers(
@@ -1862,20 +1968,20 @@ impl ModelClientSession {
             None
         };
         let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
-        let reset_reason = match self.websocket_session.connection.as_ref() {
-            // Reauthenticate before each runtime request; an open socket cannot prove liveness.
-            Some(_)
-                if runtime_id.is_some()
-                    || self.websocket_session.responses_headers != *responses_headers
-                    || self.websocket_session.connection_key.as_ref() != Some(&connection_key)
-                    || self.websocket_session.runtime_id != runtime_id
-                    || self.websocket_session.parent_routing_affinity
-                        != parent_routing_affinity =>
-            {
-                Some("other")
+        let reset_reason = if (self.websocket_session.connection.is_some()
+            || self.websocket_session.last_request.is_some())
+            && (self.websocket_session.connection_key.as_deref() != Some(&connection_key)
+                || self.websocket_session.responses_headers != *responses_headers
+                || self.websocket_session.runtime_id != runtime_id
+                || self.websocket_session.parent_routing_affinity != parent_routing_affinity
+                || (runtime_id.is_some() && self.websocket_session.connection.is_some()))
+        {
+            Some("other")
+        } else {
+            match self.websocket_session.connection.as_ref() {
+                Some(conn) if conn.is_closed().await => Some("connection_closed"),
+                Some(_) | None => None,
             }
-            Some(conn) if conn.is_closed().await => Some("connection_closed"),
-            Some(_) | None => None,
         };
         let needs_new = self.websocket_session.connection.is_none() || reset_reason.is_some();
         // Resolving an external auth provider can change ownership during client setup.
@@ -1886,11 +1992,18 @@ impl ModelClientSession {
         }
 
         if needs_new || owner_changed {
-            self.websocket_session.reset(if owner_changed {
-                Some("other")
-            } else {
-                reset_reason
-            });
+            // A fork has a completed response but no socket. Preserve that response
+            // only for its first connection under the same authentication and route.
+            if owner_changed
+                || reset_reason.is_some()
+                || self.websocket_session.last_response_rx.is_none()
+            {
+                self.websocket_session.reset(if owner_changed {
+                    Some("other")
+                } else {
+                    reset_reason
+                });
+            }
             let reauth = self
                 .websocket_session
                 .last_connected_auth_revision
@@ -1916,7 +2029,7 @@ impl ModelClientSession {
             self.websocket_session.responses_headers = responses_headers.clone();
             self.websocket_session.runtime_id = runtime_id;
             self.websocket_session.auth_owner = auth_owner;
-            self.websocket_session.connection_key = Some(connection_key);
+            self.websocket_session.connection_key = Some(Arc::new(connection_key));
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
         } else {
@@ -2110,6 +2223,8 @@ impl ResponsesHttpExecutor<'_> {
                         &self.client.state,
                         interceptors,
                         /*last_response_tx*/ None,
+                        /*continuation_recorder*/ None,
+                        /*request*/ None,
                     ));
                 }
                 Err(ApiError::Transport(unauthorized_transport))
@@ -2479,6 +2594,20 @@ impl ModelClientSession {
                 &self.client.state,
                 interceptors,
                 Some(last_response_tx),
+                Some(ResponseContinuationRecorder {
+                    client_state: Arc::clone(&self.client.state),
+                    transport: ResponseContinuationTransport {
+                        auth_owner: self.websocket_session.auth_owner.clone(),
+                        connection_key: self.websocket_session.connection_key.clone(),
+                        responses_headers: self.websocket_session.responses_headers.clone(),
+                        runtime_id: self.websocket_session.runtime_id.clone(),
+                        parent_routing_affinity: self
+                            .websocket_session
+                            .parent_routing_affinity
+                            .clone(),
+                    },
+                }),
+                self.websocket_session.last_request.clone(),
             );
             self.websocket_session.last_response_rx = Some(last_response_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2736,6 +2865,8 @@ fn map_response_stream(
     client: &ModelClientState,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
     last_response_tx: Option<oneshot::Sender<LastResponse>>,
+    continuation_recorder: Option<ResponseContinuationRecorder>,
+    request: Option<ResponsesApiRequest>,
 ) -> ResponseStream {
     let routing_affinity = api_stream.routing_affinity.take();
     let upstream_request_id = api_stream.upstream_request_id.take();
@@ -2747,6 +2878,8 @@ fn map_response_stream(
         inference_trace_attempt,
         client,
         last_response_tx,
+        continuation_recorder,
+        request,
     );
     stream.interrupt = interrupt;
     stream.routing_affinity = routing_affinity;
@@ -2760,6 +2893,8 @@ fn map_response_events<S>(
     inference_trace_attempt: InferenceTraceAttempt,
     client: &ModelClientState,
     mut last_response_tx: Option<oneshot::Sender<LastResponse>>,
+    continuation_recorder: Option<ResponseContinuationRecorder>,
+    request: Option<ResponsesApiRequest>,
 ) -> ResponseStream
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2776,8 +2911,9 @@ where
 
     tokio::spawn(async move {
         let mut logged_error = false;
-        let collect_output_items =
-            last_response_tx.is_some() || inference_trace_attempt.needs_output_items();
+        let collect_output_items = last_response_tx.is_some()
+            || (continuation_recorder.is_some() && request.is_some())
+            || inference_trace_attempt.needs_output_items();
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let mut active_item_id: Option<ResponseItemId> = None;
         let (request_start, mut ttft_ms) = (Instant::now(), None);
@@ -2845,13 +2981,27 @@ where
                         &token_usage,
                         &items_added,
                     );
-                    if let Some(sender) = last_response_tx.take() {
-                        let _ = sender.send(LastResponse {
-                            response_id: response_id.clone(),
-                            items_added,
-                        });
+                    let last_response = LastResponse {
+                        response_id: response_id.clone(),
+                        items_added: std::mem::take(&mut items_added),
+                    };
+                    if let (Some(recorder), Some(request)) = (&continuation_recorder, &request)
+                        && !last_response.response_id.is_empty()
+                    {
+                        *recorder
+                            .client_state
+                            .latest_response_continuation
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(ResponseContinuation {
+                                request: request.clone(),
+                                last_response: last_response.clone(),
+                                transport: recorder.transport.clone(),
+                            });
                     }
-                    items_added = Vec::new();
+                    if let Some(sender) = last_response_tx.take() {
+                        let _ = sender.send(last_response);
+                    }
                     if tx_event
                         .send(Ok(ResponseEvent::Completed {
                             response_id,
