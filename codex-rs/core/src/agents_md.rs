@@ -32,10 +32,12 @@ use codex_extension_api::Instructions;
 use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 use toml::Value as TomlValue;
@@ -58,10 +60,25 @@ const PROJECT_DOC_BUDGET_GUIDANCE: &str = "Trim your project instructions to fit
 const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 pub(crate) const REMOTE_AGENTS_MD_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 
+/// Instruction reads that authorized the exact remote selections at startup.
+#[derive(Default)]
+pub(crate) struct StartupProjectInstructions {
+    pub(crate) by_environment: HashMap<String, (TurnEnvironmentSelection, Option<LoadedAgentsMd>)>,
+}
+
 /// Loads repository instructions across the selected environments.
 pub(crate) async fn load_project_instructions(
     config: &Config,
     environments: &TurnEnvironmentSnapshot,
+    warnings: &mut Vec<String>,
+) -> io::Result<LoadedAgentsMd> {
+    load_project_instructions_with_startup(config, environments, None, warnings).await
+}
+
+pub(crate) async fn load_project_instructions_with_startup(
+    config: &Config,
+    environments: &TurnEnvironmentSnapshot,
+    startup: Option<&StartupProjectInstructions>,
     warnings: &mut Vec<String>,
 ) -> io::Result<LoadedAgentsMd> {
     let mut loaded = LoadedAgentsMd::default();
@@ -78,6 +95,38 @@ pub(crate) async fn load_project_instructions(
                 turn_environment.selection.environment_id
             ));
             break;
+        }
+
+        if let Some(startup) = startup
+            && turn_environment.environment().is_remote()
+        {
+            let selection = turn_environment.selection();
+            let Some((_, docs)) = startup
+                .by_environment
+                .get(&selection.environment_id)
+                .filter(|(admitted, _)| admitted == &selection)
+            else {
+                return Err(io::Error::other(format!(
+                    "AGENTS.md startup instructions do not match environment `{}`",
+                    selection.environment_id,
+                )));
+            };
+            if let Some(docs) = docs {
+                for entry in &docs.entries {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let mut entry = entry.clone();
+                    entry
+                        .contents
+                        .truncate(entry.contents.floor_char_boundary(remaining));
+                    if !entry.contents.trim().is_empty() {
+                        remaining -= entry.contents.len();
+                        loaded.entries.push(entry);
+                    }
+                }
+            }
+            continue;
         }
 
         let sandbox = instruction_discovery_sandbox(turn_environment);
@@ -145,13 +194,13 @@ fn instruction_discovery_sandbox(
     .then(|| environment.sandbox_context(/*additional_permissions*/ None))
 }
 
-/// Checks that a remote workspace can supply project instructions before startup admits it.
-pub(crate) async fn check_startup_project_instructions(
+/// Reads a remote workspace's instructions before startup admits it.
+pub(crate) async fn read_startup_project_instructions(
     config: &Config,
     environment: &TurnEnvironment,
-) -> io::Result<()> {
+) -> io::Result<Option<LoadedAgentsMd>> {
     if config.active_project.is_untrusted() {
-        return Ok(());
+        return Ok(None);
     }
     let sandbox = instruction_discovery_sandbox(environment);
     let mut warnings = Vec::new();
@@ -162,8 +211,7 @@ pub(crate) async fn check_startup_project_instructions(
         sandbox.as_ref(),
         &mut warnings,
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn read_environment_agents_md(
