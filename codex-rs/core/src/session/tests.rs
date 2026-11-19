@@ -6480,6 +6480,8 @@ async fn set_rate_limits_retains_previous_credits() {
         turn_extension_init: Default::default(),
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -6604,6 +6606,8 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         turn_extension_init: Default::default(),
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -7969,6 +7973,8 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         turn_extension_init: Default::default(),
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         step_settings: Arc::new(StepSettings {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
@@ -9624,6 +9630,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let session_configuration = SessionConfiguration {
         turn_extension_init: Default::default(),
         environments: default_environments.clone(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -9967,6 +9975,8 @@ async fn make_session_with_config_and_rx(
     let session_configuration = SessionConfiguration {
         turn_extension_init: Default::default(),
         environments: default_environments.clone(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -10108,6 +10118,8 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     let session_configuration = SessionConfiguration {
         turn_extension_init: Default::default(),
         environments: default_environments.clone(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
@@ -12165,6 +12177,8 @@ where
     let session_configuration = SessionConfiguration {
         turn_extension_init: Default::default(),
         environments: default_environments.clone(),
+        implicit_environment_selection: false,
+        resume_optional_environment_ids: Default::default(),
         provider: create_model_provider(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
