@@ -476,8 +476,11 @@ pub async fn resolve_rollout_reference_path_excluding(
     if let Some(rollout_id) = identity
         .rollout_id()
         .or_else(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
-        && let Some(path) = crate::find_rollout_path_by_rollout_id(codex_home, rollout_id).await?
-        && let Some(path) = validated_candidate(codex_home, path.as_path(), identity).await?
+        && let Some(path) =
+            crate::find_rollout_path_by_rollout_id_excluding(codex_home, rollout_id, excluded)
+                .await?
+        && let Some(path) =
+            validated_candidate(codex_home, path.as_path(), identity, excluded).await?
     {
         return Ok(path);
     }

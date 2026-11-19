@@ -2115,6 +2115,7 @@ pub async fn index_rollout_paths_by_rollout_id(
     for subdir in [SESSIONS_SUBDIR, ARCHIVED_SESSIONS_SUBDIR] {
         visit_rollout_filenames::<()>(
             codex_home.join(subdir).as_path(),
+            /*excluded_path*/ None,
             |_file_name| true,
             |file_name, path| {
                 paths.entry(file_name.rollout_id()).or_insert(path);
