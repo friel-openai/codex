@@ -976,6 +976,7 @@
         "reference::tests::recent_materialization_bounds_compressed_reference_chains",
         "reference::tests::reference_filters_preserve_envelope_metadata_and_file_id_images",
         "reference::tests::resolver_rejects_file_symlink_that_escapes_codex_home",
+        "reference::tests::resolver_relocated_fallback_excludes_failed_plain_copy",
         "reference::tests::resolver_requires_the_referenced_physical_rollout_id",
         "reference::tests::resolver_uses_validated_rotated_compressed_segment",
         "rollout_reference_index::tests::immutable_segment_reference_does_not_count_physical_target",
