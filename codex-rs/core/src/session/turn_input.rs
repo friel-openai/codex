@@ -484,6 +484,7 @@ async fn start_or_steer(
             else {
                 unreachable!("explicit user input can enter Plan mode");
             };
+            crate::goal_supervisor::invalidate_snooze_for_new_user_turn(session).await;
             turn_context
                 .turn_metadata_state
                 .update_responsesapi_client_metadata(responsesapi_client_metadata);
@@ -540,7 +541,7 @@ async fn start_if_idle(
         responsesapi_client_metadata,
         ..
     } = request;
-    if session.input_queue.has_trigger_turn_mailbox_items().await {
+    if session.has_pending_turn_start_work().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
         });
@@ -594,7 +595,7 @@ async fn start_if_idle(
         Arc::clone(&active_turn.turn_state)
     };
 
-    if session.input_queue.has_trigger_turn_mailbox_items().await {
+    if session.has_pending_turn_start_work().await {
         session.clear_reserved_idle_turn(&turn_state).await;
         session.maybe_start_turn_for_pending_work().await;
         return Ok(TurnInputSubmission::NotSubmitted {
@@ -634,6 +635,9 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    if kind == TurnStartKind::User {
+        crate::goal_supervisor::invalidate_snooze_for_new_user_turn(session).await;
+    }
     turn_context
         .turn_metadata_state
         .update_responsesapi_client_metadata(responsesapi_client_metadata);
