@@ -883,6 +883,7 @@
       "kind": "lib",
       "target": null,
       "tests": [
+        "tests::client_version_omits_prerelease_and_build_metadata",
         "manager::tests::catalog_origin_tests::static_catalog_records_its_supplied_origin",
         "manager::tests::custom_model_alias_uses_backing_model_metadata_and_request_model",
         "manager::tests::custom_model_overrides_survive_manager_cache_modes",

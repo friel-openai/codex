@@ -1,0 +1,36 @@
+diff --git a/codex-rs/models-manager/src/lib.rs b/codex-rs/models-manager/src/lib.rs
+index 30fb15a752ee4841963c1396f5a8fc3b16383683..c730a506cd03dae3a8f44cf5a43a886630e939e3 100644
+--- a/codex-rs/models-manager/src/lib.rs
++++ b/codex-rs/models-manager/src/lib.rs
+@@ -24,12 +24,24 @@ pub fn bundled_models_response()
+     serde_json::from_str(include_str!("../models.json"))
+ }
+
+-/// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
++/// Remove prerelease and build metadata from the client version.
+ pub fn client_version_to_whole() -> String {
+-    format!(
+-        "{}.{}.{}",
+-        env!("CARGO_PKG_VERSION_MAJOR"),
+-        env!("CARGO_PKG_VERSION_MINOR"),
+-        env!("CARGO_PKG_VERSION_PATCH")
+-    )
++    whole_version(env!("CARGO_PKG_VERSION")).to_owned()
++}
++
++fn whole_version(version: &str) -> &str {
++    version.split(['-', '+']).next().unwrap_or(version)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::whole_version;
++
++    #[test]
++    fn client_version_omits_prerelease_and_build_metadata() {
++        assert_eq!(whole_version("0.169.0"), "0.169.0");
++        assert_eq!(whole_version("0.169.0+frodex.0"), "0.169.0");
++        assert_eq!(whole_version("0.169.0-alpha.4"), "0.169.0");
++        assert_eq!(whole_version("0.169.0-alpha.4+frodex.1"), "0.169.0");
++    }
+ }
