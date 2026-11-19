@@ -523,6 +523,7 @@
         "tools::spec_plan::collaboration_contract_tests::canonical_collaboration_contract_matches_pinned_upstream",
         "tools::spec_plan::collaboration_contract_tests::custom_model_aliases_do_not_change_the_pinned_collaboration_contract",
         "tools::spec_plan::collaboration_contract_tests::frodex_namespaces_do_not_change_the_pinned_collaboration_contract",
+        "tools::spec_plan::tests::catalog_safety_failed_first_party_catalog_cannot_expose_fallback_tools",
         "tools::spec_plan::tests::multi_agent_feature_selects_one_agent_tool_family",
         "tools::spec_plan::tests::multi_agent_v2_ownership_tools_use_separate_default_namespace",
         "unified_exec::async_watcher::tests::completed_output_preserves_bytes_before_subscription::no_late_output",
@@ -873,10 +874,12 @@
       "target": null,
       "tests": [
         "gcp::tests::configured_vertex_models_filter_catalog_and_normalize_tool_metadata_without_cache",
+        "models_endpoint::tests::catalog_safety_failed_guard_is_limited_to_the_first_party_provider",
         "models_endpoint::originator_tests::originator_catalogs_are_isolated_and_reused_from_disk",
         "provider::tests::amazon_bedrock_provider_creates_static_models_manager",
         "provider::tests::configured_bedrock_catalog_preserves_service_tiers",
         "provider::tests::configured_catalog_preserves_origins_and_custom_aliases",
+        "provider::tests::configured_provider_resolves_default_and_explicit_endpoints",
         "gcp::tests::bundled_vertex_models_filter_catalog_and_normalize_unsupported_tool_metadata"
       ]
     },
@@ -887,6 +890,11 @@
       "target": null,
       "tests": [
         "tests::client_version_omits_prerelease_and_build_metadata",
+        "manager::tests::catalog_safety_explicit_provider_and_unattempted_catalog_keep_unknown_model_behavior",
+        "manager::tests::catalog_safety_failure_marks_fallback_and_retains_provider_snapshot",
+        "manager::tests::catalog_safety_failure_uses_only_matching_provider_cache_and_identity",
+        "manager::tests::catalog_safety_identity_change_during_failure_blocks_both_uncertain_identities",
+        "manager::tests::catalog_safety_successful_catalog_keeps_unknown_model_compatibility",
         "manager::tests::catalog_origin_tests::static_catalog_records_its_supplied_origin",
         "manager::tests::custom_model_alias_uses_backing_model_metadata_and_request_model",
         "manager::tests::custom_model_overrides_survive_manager_cache_modes",
