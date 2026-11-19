@@ -29,6 +29,7 @@ use crate::McpServerPermissions;
 use crate::binding_clients::McpBindingClients;
 use crate::client_tool_catalog::ClientToolCatalog;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
@@ -107,10 +108,11 @@ async fn test_step(
         client_supports_network_policy_meta_capability: false,
         codex_apps_tools_cache_context: None,
     });
-    let clients = Arc::new(McpBindingClients::new(
-        HashMap::from([(SERVER_NAME.to_string(), Arc::clone(&managed_client))]),
-        Vec::new(),
-    ));
+    let binding_client = McpPooledBindingClient::for_test(Arc::clone(&managed_client));
+    let clients = Arc::new(McpBindingClients::new(HashMap::from([(
+        SERVER_NAME.to_string(),
+        binding_client.clone(),
+    )]), Vec::new()));
     let connections = Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true));
     let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
     config.host_cwd = config.host_cwd.join(label);
@@ -142,7 +144,7 @@ async fn test_step(
     let config = Arc::new(config);
     let prepared = PreparedMcpCall::new(
         Arc::clone(&connections),
-        managed_client,
+        binding_client,
         Arc::clone(&config),
         tool_catalog.read(Arc::new).await,
         tool.clone(),
