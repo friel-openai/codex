@@ -56,6 +56,7 @@ pub(super) async fn suspend_turn_and_shutdown(
     let turn_id = task.turn_context.sub_id.clone();
     // A suspended task emits no terminal outcome.
     drop(task.outcome_handoff);
+    session.revoke_turn_initial_recovery(task.turn_context.as_ref());
     // Normal shutdown records a terminal turn event, preventing another worker from
     // recovering this turn under its original ID. Cancel the task without that event.
     task.cancellation_token.cancel();

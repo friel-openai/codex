@@ -655,6 +655,7 @@ impl Session {
             prompt_cache_ttl: start_options.prompt_cache_ttl,
             cyber_access_program: start_options.cyber_access_program,
             helper_admission: triggered.then_some(helper_admission).flatten(),
+            allow_initial_default_recovery: false,
         };
         let turn_context = match session_configuration {
             Some(configuration) => {
@@ -812,21 +813,28 @@ impl Session {
                 (None, None, Some(err))
             }
         };
-        let can_continue =
-            successful && turn_context.terminal_error.lock().await.is_none();
+        let can_continue = successful && turn_context.terminal_error.lock().await.is_none();
         let finishing = CancellationToken::new();
         let finish_recording = finishing.clone().drop_guard();
         let (turn_state, unadmitted_task, mut pending_input, outcome_handoff) = {
             let mut active = self.active_turn.lock().await;
-            let Some(active_turn) = active.as_mut() else { return TaskFinishAction::Finish; };
-            let Some(task) = active_turn.task.as_ref() else { return TaskFinishAction::Finish; };
-            if task.turn_context.sub_id != turn_context.sub_id { return TaskFinishAction::Finish; }
-            if can_continue && !task.cancellation_token.is_cancelled()
+            let Some(active_turn) = active.as_mut() else {
+                return TaskFinishAction::Finish;
+            };
+            let Some(task) = active_turn.task.as_ref() else {
+                return TaskFinishAction::Finish;
+            };
+            if task.turn_context.sub_id != turn_context.sub_id {
+                return TaskFinishAction::Finish;
+            }
+            if can_continue
+                && !task.cancellation_token.is_cancelled()
                 && (regular_output.is_some() || task.task.supports_pending_input_continuation())
             {
                 let state = active_turn.turn_state.lock().await;
                 if state.accepts_mailbox_delivery_for_current_turn()
-                    && (!state.pending_input.is_empty() || self.input_queue.has_pending_mailbox_items().await)
+                    && (!state.pending_input.is_empty()
+                        || self.input_queue.has_pending_mailbox_items().await)
                 {
                     return TaskFinishAction::Continue(
                         Arc::clone(&task.turn_context),
@@ -834,7 +842,9 @@ impl Session {
                     );
                 }
             }
-            let Some(task) = active_turn.task.take() else { return TaskFinishAction::Finish; };
+            let Some(task) = active_turn.task.take() else {
+                return TaskFinishAction::Finish;
+            };
             task.handle.detach();
             active_turn.finishing = Some(finishing);
             (
@@ -1060,6 +1070,7 @@ impl Session {
         };
         let saved_guardian_completion =
             matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
+        self.revoke_turn_initial_recovery(turn_context.as_ref());
         if !saved_guardian_completion {
             self.send_event(turn_context.as_ref(), event.clone()).await;
         }
@@ -1139,6 +1150,7 @@ impl Session {
         error: Option<ErrorEvent>,
     ) {
         let sub_id = task.turn_context.sub_id.clone();
+        self.revoke_turn_initial_recovery(task.turn_context.as_ref());
         if task.cancellation_token.is_cancelled() {
             self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                 .await;
