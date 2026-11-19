@@ -36,7 +36,7 @@ pub(crate) struct RegularTask;
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -152,43 +152,22 @@ impl RegularTask {
     pub(super) fn run_turns(
         sess: Arc<Session>,
         ctx: Arc<TurnContext>,
-        mut next_input: Vec<TurnInput>,
+        next_input: Vec<TurnInput>,
         mut mcp_startup_requirements: McpStartupRequirements,
         provider_startup: RunTurnProviderStartup,
         cancellation_token: CancellationToken,
     ) -> BoxFuture<'static, SessionTaskResult> {
         Box::pin(async move {
-            let mut provider_startup = Some(provider_startup);
             let run_turn_span = trace_span!(
                 "run_turn",
                 conversation.id = %sess.thread_id,
                 turn.id = %ctx.sub_id,
             );
-            loop {
-                let last_agent_message = run_turn(
-                    Arc::clone(&sess),
-                    Arc::clone(&ctx),
-                    next_input,
-                    &mut mcp_startup_requirements,
-                    provider_startup
-                        .take()
-                        .unwrap_or(RunTurnProviderStartup::Ready(None)),
-                    cancellation_token.child_token(),
-                )
-                .instrument(run_turn_span.clone())
-                .await?;
-                // Terminal errors are already reported. Let task completion preserve pending
-                // input instead of restarting the failed turn for that same input.
-                if ctx.terminal_error.lock().await.is_some()
-                    || !sess.input_queue.has_pending_input(&sess.active_turn).await
-                {
-                    return Ok(Some(RegularTaskOutput {
-                        last_agent_message,
-                        mcp_startup_requirements,
-                    }));
-                }
-                next_input = Vec::new();
-            }
+            let last_agent_message = run_turn(
+                sess, ctx, next_input, &mut mcp_startup_requirements,
+                provider_startup, cancellation_token,
+            ).instrument(run_turn_span).await?;
+            Ok(Some(RegularTaskOutput { last_agent_message, mcp_startup_requirements }))
         })
     }
 }
