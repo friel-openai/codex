@@ -27,6 +27,102 @@ use crate::ThreadPersistenceMetadata;
 use crate::ThreadStore;
 
 #[tokio::test]
+async fn revert_database_error_retains_replacement_when_cutover_is_unknown() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let state_db = codex_state::StateRuntime::init(config.sqlite.clone(), config.default_model_provider_id.clone()).await.expect("initialize state database");
+    let store = LocalThreadStore::new(config, Some(state_db.clone()));
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    store.append_items(AppendThreadItemsParams { thread_id, items: vec![
+        turn_started("turn-1"), turn_completed("turn-1"), turn_started("turn-2"), turn_completed("turn-2"),
+    ] }).await.expect("append turns");
+    let old_path = store.live_rollout_path(thread_id).await.expect("source rollout");
+    store.shutdown_thread(thread_id).await.expect("close source writer");
+    codex_rollout::state_db::reconcile_rollout(Some(state_db.as_ref()), &old_path, "test-provider", None, &[], Some(false), None).await;
+    let pause = std::sync::Arc::new(super::RevertPublicationPause::default());
+    super::REVERT_PUBLICATION_PAUSES.lock().expect("pause mutex").insert(thread_id, pause.clone());
+    let task_store = store.clone();
+    let request = tokio::spawn(async move {
+        task_store.revert_thread(RevertThreadParams { thread_id, before_turn_id: "turn-2".to_string(), multi_agent_version: None }).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.persisted.notified()).await.expect("replacement persisted");
+    let replacement = rollout_paths_for_thread(home.path(), thread_id).await.into_iter().find(|path| path != &old_path).expect("new replacement path");
+    state_db.close().await;
+    pause.resume.notify_one();
+    let error = request.await.expect("join revert").expect_err("closed database must fail cutover");
+    assert!(matches!(error, crate::ThreadStoreError::Internal { .. }));
+    assert!(replacement.exists(), "the replacement is retained when the CAS outcome is unknown");
+}
+
+#[tokio::test]
+async fn revert_cas_mismatch_keeps_selected_path_and_removes_replacement() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let state_db = codex_state::StateRuntime::init(config.sqlite.clone(), config.default_model_provider_id.clone()).await.expect("initialize state database");
+    let store = LocalThreadStore::new(config, Some(state_db.clone()));
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    store.append_items(AppendThreadItemsParams { thread_id, items: vec![
+        turn_started("turn-1"), turn_completed("turn-1"), turn_started("turn-2"), turn_completed("turn-2"),
+    ] }).await.expect("append turns");
+    let old_path = store.live_rollout_path(thread_id).await.expect("source rollout");
+    store.shutdown_thread(thread_id).await.expect("close source writer");
+    codex_rollout::state_db::reconcile_rollout(Some(state_db.as_ref()), &old_path, "test-provider", None, &[], Some(false), None).await;
+    let pause = std::sync::Arc::new(super::RevertPublicationPause::default());
+    super::REVERT_PUBLICATION_PAUSES.lock().expect("pause mutex").insert(thread_id, pause.clone());
+    let task_store = store.clone();
+    let request = tokio::spawn(async move {
+        task_store.revert_thread(RevertThreadParams { thread_id, before_turn_id: "turn-2".to_string(), multi_agent_version: None }).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.persisted.notified()).await.expect("replacement persisted");
+    let paths = rollout_paths_for_thread(home.path(), thread_id).await;
+    let replacement = paths.into_iter().find(|path| path != &old_path).expect("new replacement path");
+    let selected = home.path().join("other-selected-path.jsonl");
+    assert!(state_db.replace_rollout_path_if_current(thread_id, &old_path, &selected).await.expect("change selection"));
+    pause.resume.notify_one();
+    let error = request.await.expect("join revert").expect_err("CAS must reject changed selection");
+    assert!(matches!(error, crate::ThreadStoreError::Conflict { .. }));
+    assert_eq!(state_db.get_thread(thread_id).await.expect("read result").expect("thread").rollout_path, selected);
+    assert!(!replacement.exists(), "unpublished replacement must be removed");
+}
+
+#[tokio::test]
+async fn cancelled_revert_finishes_cutover_and_releases_reservations() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let state_db = codex_state::StateRuntime::init(config.sqlite.clone(), config.default_model_provider_id.clone()).await.expect("initialize state database");
+    let store = LocalThreadStore::new(config, Some(state_db.clone()));
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    store.append_items(AppendThreadItemsParams { thread_id, items: vec![
+        turn_started("turn-1"), turn_completed("turn-1"),
+        turn_started("turn-2"), turn_completed("turn-2"),
+    ] }).await.expect("append turns");
+    let old_path = store.live_rollout_path(thread_id).await.expect("source rollout");
+    store.shutdown_thread(thread_id).await.expect("close source writer");
+    codex_rollout::state_db::reconcile_rollout(Some(state_db.as_ref()), &old_path, "test-provider", None, &[], Some(false), None).await;
+    let pause = std::sync::Arc::new(super::RevertPublicationPause::default());
+    super::REVERT_PUBLICATION_PAUSES.lock().expect("pause mutex").insert(thread_id, pause.clone());
+    let task_store = store.clone();
+    let request = tokio::spawn(async move {
+        task_store.revert_thread(RevertThreadParams { thread_id, before_turn_id: "turn-2".to_string(), multi_agent_version: None }).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.persisted.notified()).await.expect("replacement persisted");
+    assert_eq!(state_db.get_thread(thread_id).await.expect("read source").expect("thread").rollout_path, old_path);
+    assert!(store.acquire_writer_lock(thread_id).is_err(), "publication retains the writer lock");
+    request.abort();
+    let _ = request.await;
+    pause.resume.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.completed.notified()).await.expect("publication completes");
+    let selected = state_db.get_thread(thread_id).await.expect("read result").expect("thread").rollout_path;
+    assert_ne!(selected, old_path);
+    assert!(selected.exists());
+    tokio::time::timeout(std::time::Duration::from_secs(10), store.live_writer_locks.lock_lifecycle(thread_id)).await.expect("lifecycle lock released");
+    assert!(store.acquire_writer_lock(thread_id).is_ok(), "writer lock released");
+}
+
+#[tokio::test]
 async fn revert_keeps_thread_id_and_hides_suffix_across_repeated_reverts() {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
@@ -369,6 +465,8 @@ async fn create_paginated_thread(store: &LocalThreadStore, thread_id: ThreadId) 
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             runtime_workspace_roots: Some(vec![store.config.codex_home.join("workspace").abs()]),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),

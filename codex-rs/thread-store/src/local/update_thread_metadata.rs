@@ -78,7 +78,7 @@ pub(super) async fn update_thread_metadata(
     // that intentionally run without a state runtime.
     let history_mode = if has_explicit_metadata || store.state_db.is_some() {
         match live_writer::live_writer_parts(store, thread_id).await {
-            Ok((_recorder, _rollout_id, history_mode)) => Some(history_mode),
+            Ok((_recorder, _rollout_id, history_mode, _persistence_mode)) => Some(history_mode),
             Err(ThreadStoreError::ThreadNotFound { .. }) if has_explicit_metadata => Some(
                 read_thread::read_thread(
                     store,
