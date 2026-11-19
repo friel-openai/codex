@@ -420,9 +420,11 @@ async fn full_history_reads_damaged_rotated_ancestor_without_rewriting_history_b
         .reserve_rollout_writers(&[thread_id])
         .await
         .expect("reserve source");
-    let lineage = RolloutLineage {
-        root_rollout_id: thread_id,
-        segments: vec![
+    let lineage = RolloutLineage::from_segments(
+        thread_id,
+        thread_id,
+        path.clone(),
+        vec![
             segment(
                 thread_id,
                 ancestor_id,
@@ -432,7 +434,7 @@ async fn full_history_reads_damaged_rotated_ancestor_without_rewriting_history_b
             ),
             segment(thread_id, thread_id, &path, /*start_ordinal*/ 4, None),
         ],
-    };
+    );
 
     let (lineage, _, full_history, session_meta) = store
         .materialize_clean_fork_lineage(
@@ -489,12 +491,14 @@ async fn full_history_damaged_tail_keeps_last_complete_ordinal_and_cutoff_checks
         .reserve_rollout_writers(&[thread_id])
         .await
         .expect("reserve source");
-    let lineage = RolloutLineage {
-        root_rollout_id: thread_id,
-        segments: vec![segment(
+    let lineage = RolloutLineage::from_segments(
+        thread_id,
+        thread_id,
+        path.clone(),
+        vec![segment(
             thread_id, thread_id, &path, /*start_ordinal*/ 1, None,
         )],
-    };
+    );
     let (lineage, _, full_history, _) = store
         .materialize_clean_fork_lineage(
             thread_id,
@@ -517,16 +521,18 @@ async fn full_history_damaged_tail_keeps_last_complete_ordinal_and_cutoff_checks
         end_ordinal_exclusive: 3,
         end_byte_offset: bytes.len() as u64,
     };
-    let claimed_lineage = RolloutLineage {
-        root_rollout_id: thread_id,
-        segments: vec![segment(
+    let claimed_lineage = RolloutLineage::from_segments(
+        thread_id,
+        thread_id,
+        path.clone(),
+        vec![segment(
             thread_id,
             thread_id,
             &path,
             /*start_ordinal*/ 1,
             Some(claimed_end),
         )],
-    };
+    );
     assert!(
         store
             .materialize_clean_fork_lineage(
