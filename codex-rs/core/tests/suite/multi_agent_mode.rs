@@ -26,7 +26,8 @@ use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
 
-const NO_SPAWN_TEXT: &str = "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.";
+const NO_SPAWN_TEXT: &str =
+    "Any earlier instruction enabling proactive multi-agent delegation no longer applies.";
 const PROACTIVE_TEXT: &str = "Proactive multi-agent delegation is active.";
 const CUSTOM_MODE_HINT_TEXT: &str = "Use the configured delegation policy.";
 const CATALOG_MODE_HINT_TEXT: &str = "Use the model catalog delegation policy.";
