@@ -135,6 +135,7 @@
         "suite::v2::thread_fork::native_fork_of_fork_rollout_file_opens_are_bounded::ephemeral_32",
         "suite::v2::thread_fork::native_fork_of_fork_rollout_file_opens_are_bounded::ephemeral_8",
         "suite::v2::thread_fork::native_history_base_latest_fork_without_turns_opens_are_bounded",
+        "suite::v2::thread_fork::paginated_thread_fork_at_named_boundaries_keeps_only_terminal_prefix",
         "suite::v2::thread_fork::paginated_thread_fork_ephemeral_remains_pathless_and_omits_listing",
         "suite::v2::thread_fork::paginated_thread_fork_preserves_completed_items_and_updated_item_snapshots",
         "suite::v2::thread_fork::pathless_ephemeral_thread_rejects_codex_home_path_after_reload",
@@ -146,6 +147,7 @@
         "suite::v2::thread_fork::segmented_paginated_explicit_fork_near_tip_opens_are_bounded::ephemeral_128",
         "suite::v2::thread_fork::segmented_paginated_explicit_fork_near_tip_opens_are_bounded::ephemeral_32",
         "suite::v2::thread_fork::thread_fork_creates_new_thread_and_emits_started",
+        "suite::v2::thread_fork::thread_fork_at_last_turn_id_keeps_only_terminal_prefix",
         "suite::v2::thread_fork::thread_fork_defers_inherited_active_goal_until_next_turn",
         "suite::v2::thread_fork::thread_fork_ephemeral_remains_pathless_and_omits_listing",
         "suite::v2::thread_fork::thread_fork_freezes_active_paginated_turn_as_interrupted::attached",
@@ -677,6 +679,16 @@
         "environment::first_registration::tests::wait_does_not_adopt_a_replacement_after_the_first_drops",
         "environment::first_registration::tests::wait_observes_first_insert_before_or_after_waiting",
         "environment::tests::first_registration_capture_does_not_follow_replacement_before_use"
+      ]
+    },
+    {
+      "package": "codex-external-agent-migration",
+      "binary": "codex-external-agent-migration",
+      "kind": "lib",
+      "target": null,
+      "tests": [
+        "sessions::append::tests::native_append_preserves_moderated_message_identity",
+        "sessions::append::tests::native_append_retains_display_items_and_exact_model_prefix"
       ]
     },
     {
