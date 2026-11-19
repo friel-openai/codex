@@ -52,7 +52,6 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::plain_output_text;
 use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
-use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::ReverseJsonlScanner;
@@ -4562,6 +4561,7 @@ impl ThreadRequestProcessor {
                     ThreadItemEntry {
                         turn_id: turn.id.clone(),
                         item,
+                        output_deferred: false,
                         started_at_ms: timestamps.started_at_ms,
                         completed_at_ms: timestamps.completed_at_ms,
                     }
@@ -8235,8 +8235,10 @@ impl ThreadRequestProcessor {
             .and_then(|fork| fork.preview_before_compaction.take())
         {
             preview
-        } else if paginated_source || ephemeral {
-            preview_from_rollout_items(&history_items)
+        } else if prepared_fork.is_some()
+            || (ephemeral && last_turn_id.is_none() && before_turn_id.is_none())
+        {
+            preview_from_rollout_items(&source_history_items)
         } else {
             String::new()
         };
