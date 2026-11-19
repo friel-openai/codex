@@ -1,0 +1,1565 @@
+diff --git a/codex-rs/core/src/agent/control/ownership_tests.rs b/codex-rs/core/src/agent/control/ownership_tests.rs
+index 7e082c1d95155493170c8343aaff35081f3aebee..1dbc5d92e63da73cca5d08ec076a66044f8ec0b0 100644
+--- a/codex-rs/core/src/agent/control/ownership_tests.rs
++++ b/codex-rs/core/src/agent/control/ownership_tests.rs
+@@ -7,6 +7,8 @@ use pretty_assertions::assert_eq;
+ fn stored_root(config: &Config) -> StoredThread {
+     let now = chrono::Utc::now();
+     StoredThread {
++        creator_user_id: None,
++        creator_account_id: None,
+         originator: None,
+         thread_id: ThreadId::new(),
+         extra_config: None,
+@@ -17,6 +19,7 @@ fn stored_root(config: &Config) -> StoredThread {
+                 .to_path_buf(),
+         ),
+         forked_from_id: None,
++        attached_to_thread_id: None,
+         parent_thread_id: None,
+         preview: "original root".to_string(),
+         name: None,
+diff --git a/codex-rs/core/src/agent/control_lazy_target_tests.rs b/codex-rs/core/src/agent/control_lazy_target_tests.rs
+index 9d28928f83342c7b8884d36c32fc351e40dfd0c7..41ee7a04448f5b7cde20187dd0fb470931466009 100644
+--- a/codex-rs/core/src/agent/control_lazy_target_tests.rs
++++ b/codex-rs/core/src/agent/control_lazy_target_tests.rs
+@@ -23,15 +23,15 @@ async fn inspect_restores_indexed_identity_without_loading_rollout(target_kind:
+         agent_nickname: Some("Worker".to_string()),
+         agent_role: Some("worker".to_string()),
+     });
+-    let mut builder = codex_state::ThreadMetadataBuilder::new(
++    let builder = codex_state::ThreadMetadataBuilder::new(
+         child_id,
+         rollout_path.to_path_buf(),
+         chrono::Utc::now(),
+         source,
+-    );
+-    builder.agent_path = Some(child_path.to_string());
+-    builder.agent_nickname = Some("Worker".to_string());
+-    builder.agent_role = Some("worker".to_string());
++    )
++    .with_agent_path(Some(child_path.to_string()))
++    .with_agent_nickname(Some("Worker".to_string()))
++    .with_agent_role(Some("worker".to_string()));
+     let state_db = harness.state_db.as_ref().expect("state database");
+     state_db
+         .upsert_thread(&builder.build("openai"))
+diff --git a/codex-rs/core/src/agent/control_metadata_tests.rs b/codex-rs/core/src/agent/control_metadata_tests.rs
+index 2b3e2a5e27aa544fa3fad30edbf15b0b14ab70d4..2c0fa625cd6a405c996963988ed456bc2f70f44b 100644
+--- a/codex-rs/core/src/agent/control_metadata_tests.rs
++++ b/codex-rs/core/src/agent/control_metadata_tests.rs
+@@ -19,8 +19,14 @@ fn goal_supervisor_reconciliation_does_not_migrate_indexed_children() {
+             let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+             let manager = ThreadManager::new(
+                 &config,
+-                auth.clone(),
+-                crate::thread_manager::build_models_manager(&config, auth),
++                crate::build_startup_models(
++                    &config,
++                    auth,
++                    uuid::Uuid::new_v4().to_string(),
++                    Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                        config.codex_home.to_path_buf(),
++                    )),
++                ),
+                 crate::CodexAppsToolsCache::default(),
+                 SessionSource::Exec,
+                 Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -30,7 +36,6 @@ fn goal_supervisor_reconciliation_does_not_migrate_indexed_children() {
+                 crate::thread_manager::passthrough_image_store(),
+                 store,
+                 crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
+-                uuid::Uuid::new_v4().to_string(),
+                 /*attestation_provider*/ None,
+                 /*external_time_provider*/ None,
+             );
+diff --git a/codex-rs/core/src/agent/control_request_restoration_tests.rs b/codex-rs/core/src/agent/control_request_restoration_tests.rs
+index 022dfc6d6dd2a60c606b24cbc2145c2a16c70758..be533e986f4b56f3d9a553d52aeb7db98c684c5b 100644
+--- a/codex-rs/core/src/agent/control_request_restoration_tests.rs
++++ b/codex-rs/core/src/agent/control_request_restoration_tests.rs
+@@ -90,8 +90,14 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
+     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+     let manager = ThreadManager::new(
+         &config,
+-        Arc::clone(&auth_manager),
+-        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::build_startup_models(
++            &config,
++            auth_manager,
++            uuid::Uuid::new_v4().to_string(),
++            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                config.codex_home.to_path_buf(),
++            )),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -101,7 +107,6 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
+         crate::thread_manager::passthrough_image_store(),
+         crate::thread_manager::thread_store_from_config(&config, Some(state_db.clone())),
+         crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
+-        uuid::Uuid::new_v4().to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 9b2c8cf3af0fd6e444b9b7bb720c2a6df4ee7392..fc9e88823b471309ee0a076b6f48fd1f0108a6c0 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1341,15 +1341,15 @@ async fn selected_v2_agent_metadata_uses_indexed_identity_without_reading_rollou
+         agent_nickname: Some("source-name".to_string()),
+         agent_role: Some("source-role".to_string()),
+     });
+-    let mut builder = codex_state::ThreadMetadataBuilder::new(
++    let builder = codex_state::ThreadMetadataBuilder::new(
+         indexed_thread_id,
+         malformed_rollout.to_path_buf(),
+         chrono::Utc::now(),
+         source,
+-    );
+-    builder.agent_path = Some(indexed_path.to_string());
+-    builder.agent_nickname = Some("indexed-name".to_string());
+-    builder.agent_role = Some("indexed-role".to_string());
++    )
++    .with_agent_path(Some(indexed_path.to_string()))
++    .with_agent_nickname(Some("indexed-name".to_string()))
++    .with_agent_role(Some("indexed-role".to_string()));
+     state_db
+         .upsert_thread(&builder.build("openai"))
+         .await
+@@ -1705,6 +1705,7 @@ async fn on_event_updates_status_from_failed_task_complete() {
+             misalignment: None,
+             message: "boom".to_string(),
+             codex_error_info: None,
++            rejected_audio_file_ids: Vec::new(),
+         }),
+         completed_at: None,
+         duration_ms: None,
+@@ -2972,7 +2973,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
+         let hidden = path.with_extension("unavailable-during-sender-read");
+         std::fs::rename(&path, &hidden).expect("hide review transcript during sender inspection");
+         let delivery = ResponseItem::FunctionCallOutput {
+-            id: Some(ResponseItemId::new("delivery")),
++            id: Some(ResponseItemId::from_server("delivery".to_owned())),
+             call_id: None,
+             name: Some("send_message_to_thread".to_string()),
+             namespace: Some("codex_app".to_string()),
+@@ -3333,6 +3334,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
+             sort_direction: codex_thread_store::SortDirection::Asc,
+             sort_key: codex_thread_store::ItemSortKey::CreatedAtOrdinal,
+             after_updated_at_ordinal: None,
++            before_updated_at_ordinal: None,
+         })
+         .await
+         .expect("page repaired native history");
+@@ -4944,8 +4946,12 @@ async fn full_history_agent_fork_uses_nonlocal_thread_store() {
+     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+     let manager = ThreadManager::new(
+         &config,
+-        auth_manager.clone(),
+-        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::build_startup_models(
++            &config,
++            auth_manager,
++            uuid::Uuid::new_v4().to_string(),
++            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -4955,7 +4961,6 @@ async fn full_history_agent_fork_uses_nonlocal_thread_store() {
+         crate::thread_manager::passthrough_image_store(),
+         store.clone(),
+         /*agent_graph_store*/ None,
+-        uuid::Uuid::new_v4().to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+@@ -5179,7 +5184,7 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+             subagent_history_start_ordinal: None,
+             persistence_mode: ThreadPersistenceMode::Durable,
+             initial_rollout_ordinal: 0,
+-            initial_window_id: "window-history-base".to_string(),
++            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
+             runtime_workspace_roots: None,
+             metadata: ThreadPersistenceMetadata {
+                 cwd: Some(harness.config.cwd.to_path_buf()),
+@@ -5628,6 +5633,7 @@ async fn full_history_fork_persists_metadata_only_sanitization(compacted: bool)
+                 items.to_vec(),
+                 step.to_turn_context_item(),
+                 world_state.render_full().0,
++                Default::default(),
+                 crate::compact::CompactedHistoryMetadata {
+                     input_goal_ids: Default::default(),
+                     message: String::new(),
+@@ -10967,8 +10973,12 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
+     crate::thread_manager::set_thread_manager_test_mode_for_tests(true);
+     let manager = ThreadManager::new(
+         &config,
+-        Arc::clone(&auth_manager),
+-        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::build_startup_models(
++            &config,
++            auth_manager,
++            uuid::Uuid::new_v4().to_string(),
++            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -10978,7 +10988,6 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
+         crate::thread_manager::passthrough_image_store(),
+         crate::thread_manager::thread_store_from_config(&config, state_db.clone()),
+         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
+-        uuid::Uuid::new_v4().to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+@@ -11673,9 +11682,9 @@ async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inne
+                 compaction_response_id: None,
+                 latest_token_usage_record: None,
+                 window_number: Some(window_number),
+-                first_window_id: Some(window_id.to_string()),
++                first_window_id: Some(window_id.clone()),
+                 previous_window_id: None,
+-                window_id: Some(window_id.to_string()),
++                window_id: Some(window_id),
+                 segment_state_checkpoint: None,
+             },
+             Some(previous_turn_settings),
+@@ -12057,8 +12066,12 @@ while True:
+     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+     let manager = ThreadManager::new(
+         &config,
+-        auth_manager.clone(),
+-        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::build_startup_models(
++            &config,
++            auth_manager,
++            uuid::Uuid::new_v4().to_string(),
++            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -12068,7 +12081,6 @@ while True:
+         crate::thread_manager::passthrough_image_store(),
+         store,
+         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
+-        uuid::Uuid::new_v4().to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+@@ -12863,7 +12875,9 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+         TurnStartOptions {
+             turn_trigger: None,
+             final_output_json_schema: None,
++            direct_only_tool_namespaces: None,
+             service_tier: None,
++            prompt_cache_ttl: None,
+             parent_turn_id: None,
+             root_turn_id: None,
+             cyber_access_program: None,
+diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
+index 92362cd15b6f5bfe38699afc8bb6f0941eed503e..24c9446aa94ccaa1c619db3483465b399ec3e24c 100644
+--- a/codex-rs/core/src/agent/registry_tests.rs
++++ b/codex-rs/core/src/agent/registry_tests.rs
+@@ -423,14 +423,23 @@ fn repeated_resets_advance_the_ordinal_suffix() {
+     assert_eq!(active_agents.nickname_reset_count, 2);
+ }
+
+-#[test]
+-fn evicted_runtime_settings_retain_and_clear_ephemerality() {
++#[tokio::test]
++async fn evicted_runtime_settings_retain_and_clear_ephemerality() {
+     let registry = AgentRegistry::default();
+     let thread_id = ThreadId::new();
+     registry.register_root_thread(thread_id);
+     assert_eq!(registry.evicted_ephemeral(thread_id), None);
+
++    let home = tempfile::tempdir().expect("isolated config home");
++    let config = crate::config::ConfigBuilder::default()
++        .codex_home(home.path().to_path_buf())
++        .fallback_cwd(Some(home.path().to_path_buf()))
++        .build()
++        .await
++        .expect("test config");
+     let environments = EvictedEnvironments {
++        config: Arc::new(config),
++        has_independent_service_tier: false,
+         selections: Vec::new(),
+         bindings: TurnEnvironmentSnapshot::default(),
+     };
+diff --git a/codex-rs/core/src/agents_md_tests.rs b/codex-rs/core/src/agents_md_tests.rs
+index 1d4b9209f1f9dedebefc736193376c534d13b339..728cd1aeac6d63283cc59976540d8378d6a0de30 100644
+--- a/codex-rs/core/src/agents_md_tests.rs
++++ b/codex-rs/core/src/agents_md_tests.rs
+@@ -1221,7 +1221,11 @@ async fn stalled_remote_project_instructions_fail_closed_and_can_be_retried() {
+     let TurnEnvironmentState::Ready(remote) = &mut environments.environments[1] else {
+         panic!("expected a ready remote environment");
+     };
+-    remote.environment = Arc::new(Environment::create_for_tests(Some(url)).unwrap());
++    let (attachment, _guard, _) = crate::environment_selection::EnvironmentAttachment::new(
++        &remote.selection.environment_id,
++        Arc::new(Environment::create_for_tests(Some(url)).unwrap()),
++    );
++    remote.attachment = attachment;
+     let manager = AgentsMdManager::new(SessionInstructions::default());
+
+     let refresh = tokio::time::timeout(
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5717abe7f1621da7ade3506821cd5eeee965e3e6..24965051bd86cba00340f1c56a07c030df44660a 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1567,7 +1567,7 @@ fn developer_message_item(text: &str) -> ResponseItem {
+
+ fn reasoning_item(id: &str, text: &str) -> ResponseItem {
+     ResponseItem::Reasoning {
+-        id: Some(codex_protocol::ResponseItemId::new(id)),
++        id: Some(codex_protocol::ResponseItemId::from_server(id.to_owned())),
+         summary: vec![ReasoningItemReasoningSummary::SummaryText {
+             text: "summary".to_string(),
+         }],
+@@ -1608,6 +1608,7 @@ fn test_response_continuation() -> ResponseContinuation {
+             include: Vec::new(),
+             service_tier: None,
+             prompt_cache_key: Some(ThreadId::new().to_string()),
++            prompt_cache_options: None,
+             text: None,
+             client_metadata: None,
+             access_programs: None,
+@@ -1970,6 +1971,7 @@ fn ephemeral_root_fork_cache_key_survives_transitive_subagent_forks() {
+         sender,
+         /*codex_responses_headers*/ None,
+         crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
++        /*required_cyber_access_programs*/ None,
+     );
+     let child = fork_test_model_client(&ephemeral_root, spawned_session_source());
+     let grandchild = fork_test_model_client(&child, spawned_session_source());
+@@ -2024,6 +2026,7 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
+         sender,
+         /*codex_responses_headers*/ None,
+         crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
++        /*required_cyber_access_programs*/ None,
+     );
+     let child = fork_test_model_client(&guardian, spawned_session_source());
+     assert_eq!(child.fork_prompt_cache_key(), guardian.state.thread_id);
+@@ -2049,6 +2052,7 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
+         include: Vec::new(),
+         service_tier: Some("test-tier".to_string()),
+         prompt_cache_key: Some(ThreadId::new().to_string()),
++        prompt_cache_options: None,
+         text: None,
+         client_metadata: None,
+         access_programs: None,
+@@ -2072,7 +2076,8 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
+     let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+     session.websocket_session.last_response_rx = Some(last_response_rx);
+     session.websocket_session.last_response_from_untraced_warmup = true;
+-    session.websocket_session.auth_owner_generation = Some(7);
++    let owner = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")).auth_owner();
++    session.websocket_session.auth_owner = Some(owner.clone());
+     session
+         .websocket_session
+         .responses_headers
+@@ -2090,7 +2095,7 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
+     assert!(session.websocket_session.last_response_rx.is_none());
+     assert!(!session.websocket_session.last_response_from_untraced_warmup);
+     assert!(!session.websocket_session.connection_reused());
+-    assert_eq!(session.websocket_session.auth_owner_generation, Some(7));
++    assert_eq!(session.websocket_session.auth_owner, Some(owner));
+     assert!(session.websocket_session.responses_headers.is_empty());
+     assert_eq!(
+         session.websocket_session.continuation_reset_reason,
+diff --git a/codex-rs/core/src/compact_remote_history_tests.rs b/codex-rs/core/src/compact_remote_history_tests.rs
+index 21b1bf6aa17c2403f5488872cfe493b40b51aaaf..053e4186facbb1cc7947a75223afb739f8451047 100644
+--- a/codex-rs/core/src/compact_remote_history_tests.rs
++++ b/codex-rs/core/src/compact_remote_history_tests.rs
+@@ -4,7 +4,9 @@ use codex_history::CodexHarnessMetadata;
+ #[test]
+ fn independent_thread_input_is_not_replaced_by_truncated_tool_output() {
+     let envelope = ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
+-        id: Some(codex_protocol::ResponseItemId::new("delivery")),
++        id: Some(codex_protocol::ResponseItemId::from_server(
++            "delivery".to_owned(),
++        )),
+         call_id: None,
+         name: Some("send_message_to_thread".to_string()),
+         namespace: Some("frodex".to_string()),
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index a51353197770fc0e3a26a8b324574a999cad3025..88ce355728b44fab31cd3d96b4cab20b856192be 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -1065,6 +1065,7 @@ mod tests {
+             output.clone(),
+             &Features::with_defaults(),
+             RetainedImageBudget::Disabled,
++            &FileAudioDurations::default(),
+         );
+         assert!(!history.iter().any(|item| item == &assignment));
+
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index 032daf4bebe3c21d8d8a87596ec6711d845d6f43..0e201c5918ae7d7b282f00323e23864e6b370fa9 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -8932,8 +8932,6 @@ async fn auto_review_ultrafast_is_opt_in() -> std::io::Result<()> {
+                 timeout_ms: None,
+                 circuit_break_action: None,
+                 policy: None,
+-                extra_policy: None,
+-                experimental_policy_template: None,
+                 experimental_conversation_history_prompt: None,
+                 conversation_history_max_output_tokens: None,
+                 use_ultrafast: true,
+@@ -8967,10 +8965,6 @@ async fn load_config_uses_auto_review_guardian_policy_config(
+         features: Some(toml::from_str(features).unwrap()),
+         auto_review: Some(AutoReviewToml {
+             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+-            extra_policy: Some("  Use the user-configured additional policy.  ".to_string()),
+-            experimental_policy_template: Some(
+-                "  Configured template: {{ tenant_policy_config }}  ".to_string(),
+-            ),
+             ..Default::default()
+         }),
+         ..Default::default()
+@@ -9078,7 +9072,6 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
+         let cfg = ConfigToml {
+             auto_review: Some(AutoReviewToml {
+                 policy: Some("Use the user-configured guardian policy.".to_string()),
+-                extra_policy: Some("Use the user-configured additional policy.".to_string()),
+                 ..Default::default()
+             }),
+             ..Default::default()
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 4096f704c52b46373e22fbfd764bb419c2d052a7..d4be03c9c97900b1bedbf53015db788f810080eb 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -43,6 +43,7 @@ use codex_protocol::protocol::InterAgentCommunication;
+ use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
+ use codex_protocol::protocol::TurnContextItem;
+ use codex_protocol_test_support::ContentItemTestExt;
++use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_output_truncation::truncate_text;
+@@ -443,8 +444,12 @@ fn checkpoint_replayed_messages_keep_legacy_review_when_the_source_survives() {
+ fn replayed_guardian_history_preserves_independent_review(restore_transcript: bool) {
+     let mut features = codex_features::Features::with_defaults();
+     features.disable(Feature::GuardianReuseParentCompaction);
+-    let mut history =
+-        ContextManager::for_session(&SessionSource::Cli, &ManagedFeatures::from(features));
++    let mut history = ContextManager::for_session(
++        /*root_capabilities_restricted*/ false,
++        &ManagedFeatures::from(features),
++        codex_guardian_context::ContextBudgeting::Fixed,
++        uuid_v7_item_id_generator_for_test(),
++    );
+     let parent_items = vec![
+         assistant_msg("Stale parent evidence."),
+         serde_json::from_value(serde_json::json!({
+@@ -461,7 +466,10 @@ fn replayed_guardian_history_preserves_independent_review(restore_transcript: bo
+         }),
+     };
+     let replayed = restore_transcript.then(|| {
+-        let mut transcript = TranscriptHistory::new(/*generation*/ 3);
++        let mut transcript = TranscriptHistory::new(
++            /*generation*/ 3,
++            codex_guardian_context::ContextBudgeting::Fixed,
++        );
+         transcript.record(&restored);
+         transcript
+     });
+@@ -1291,11 +1299,11 @@ fn fork_copy_on_write_preserves_harness_metadata() {
+             ..Default::default()
+         }),
+     };
+-    let mut parent = ContextManager::new();
++    let mut parent = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     parent.replace_annotated(vec![inherited.clone()]);
+     let inherited = parent.annotated_items()[0].clone();
+     let shared = parent.shared_annotated_items();
+-    let mut child = ContextManager::new();
++    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     child.replace_shared_annotated(Arc::clone(&shared));
+
+     assert!(Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+@@ -1304,29 +1312,41 @@ fn fork_copy_on_write_preserves_harness_metadata() {
+     assert_eq!(parent.annotated_items(), std::slice::from_ref(&inherited));
+     assert_eq!(child.annotated_items()[0], inherited);
+     assert_eq!(child.annotated_items().len(), 2);
+-    assert!(child.annotated_items()[1].metadata.as_ref().and_then(|m| m.history_sequence) > inherited.metadata.as_ref().and_then(|m| m.history_sequence));
++    assert!(
++        child.annotated_items()[1]
++            .metadata
++            .as_ref()
++            .and_then(|m| m.history_sequence)
++            > inherited.metadata.as_ref().and_then(|m| m.history_sequence)
++    );
+     assert!(!Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+ }
+
+ #[test]
+ fn shared_legacy_fork_history_assigns_sequences_without_mutating_parent() {
+     let parent = Arc::new(vec![ResponseItemEnvelope::new(assistant_msg("legacy"))]);
+-    let mut child = ContextManager::new();
++    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     child.replace_shared_annotated(Arc::clone(&parent));
+
+     assert!(!Arc::ptr_eq(&parent, &child.shared_annotated_items()));
+     assert!(parent[0].metadata.is_none());
+-    assert!(child.annotated_items()[0].metadata.as_ref().and_then(|m| m.history_sequence).is_some());
++    assert!(
++        child.annotated_items()[0]
++            .metadata
++            .as_ref()
++            .and_then(|m| m.history_sequence)
++            .is_some()
++    );
+ }
+
+ #[test]
+ fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
+-    let mut parent = ContextManager::new();
++    let mut parent = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     parent.replace(vec![assistant_msg("first parent window")]);
+     parent.replace(vec![assistant_msg("second parent window")]);
+     assert_eq!(parent.reset_version, 2);
+
+-    let mut child = ContextManager::new();
++    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     child.replace_shared_snapshot(&parent);
+     let captured = child.clone();
+     assert_eq!(captured.history_version(), 1);
+@@ -1347,9 +1367,10 @@ fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
+
+ #[test]
+ fn fork_snapshot_detects_context_changes_without_response_item_changes() {
+-    let mut original = ContextManager::new();
++    let mut original = ContextManager::new(uuid_v7_item_id_generator_for_test());
+     original.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("parent"))]);
+-    let mut review_history = TranscriptHistory::new(1);
++    let mut review_history =
++        TranscriptHistory::new(1, codex_guardian_context::ContextBudgeting::Fixed);
+     review_history.record(&assistant_msg("review evidence").into());
+     original.review_history = Some(review_history);
+     original.guardian_review_mode = GuardianContextMode::Legacy;
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index b0ad4cf0e7439114e56d5ae970ed12b9226e8f4a..eeb7d9e92c52d3739a81e6122d69b76a79dac3f0 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -4105,13 +4105,7 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
+     .expect("config layer stack");
+     let mut parent_config = Config::load_config_with_layer_stack(
+         LOCAL_FS.as_ref(),
+-        ConfigToml {
+-            auto_review: Some(AutoReviewToml {
+-                extra_policy: Some("Use the user-configured additional policy.".to_string()),
+-                ..Default::default()
+-            }),
+-            ..Default::default()
+-        },
++        ConfigToml::default(),
+         ConfigOverrides {
+             cwd: Some(workspace.path().to_path_buf()),
+             ..Default::default()
+diff --git a/codex-rs/core/src/independent_thread/fork/tests.rs b/codex-rs/core/src/independent_thread/fork/tests.rs
+index 96b1079242a8cd7e9a8229cddedcb2b704333b5c..3f50cf38b5f05f05cc8fb592f5da62bf6a2bd1df 100644
+--- a/codex-rs/core/src/independent_thread/fork/tests.rs
++++ b/codex-rs/core/src/independent_thread/fork/tests.rs
+@@ -3,7 +3,6 @@
+ use super::*;
+ use crate::CodexAppsToolsCache;
+ use crate::ThreadManager;
+-use crate::build_models_manager;
+ use crate::init_state_db;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
+@@ -151,8 +150,14 @@ fn fork_runs_from_completed_history_without_a_goal(
+         let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+         let manager = Arc::new(ThreadManager::new(
+             &config,
+-            Arc::clone(&auth),
+-            build_models_manager(&config, auth),
++            crate::build_startup_models(
++                &config,
++                auth,
++                "fork-test".to_string(),
++                Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                    config.codex_home.to_path_buf(),
++                )),
++            ),
+             CodexAppsToolsCache::default(),
+             SessionSource::Exec,
+             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -162,7 +167,6 @@ fn fork_runs_from_completed_history_without_a_goal(
+             crate::passthrough_image_store(),
+             thread_store_from_config(&config, Some(Arc::clone(&state))),
+             None,
+-            "fork-test".to_string(),
+             None,
+             None,
+         ));
+@@ -366,8 +370,14 @@ fn rejected_start_returns_the_created_thread() -> anyhow::Result<()> {
+         let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+         let manager = Arc::new(ThreadManager::new(
+             &config,
+-            Arc::clone(&auth),
+-            build_models_manager(&config, auth),
++            crate::build_startup_models(
++                &config,
++                auth,
++                "fork-rejected-test".to_string(),
++                Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                    config.codex_home.to_path_buf(),
++                )),
++            ),
+             CodexAppsToolsCache::default(),
+             SessionSource::Exec,
+             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -377,7 +387,6 @@ fn rejected_start_returns_the_created_thread() -> anyhow::Result<()> {
+             crate::passthrough_image_store(),
+             thread_store_from_config(&config, Some(state)),
+             None,
+-            "fork-rejected-test".to_string(),
+             None,
+             None,
+         ));
+diff --git a/codex-rs/core/src/independent_thread/message_tests.rs b/codex-rs/core/src/independent_thread/message_tests.rs
+index 3f5c35dd47db7fdb2f51d6eb11670e34a2db8752..1e7cbc2e778a45e052cafcf6347fcf4a1519ac14 100644
+--- a/codex-rs/core/src/independent_thread/message_tests.rs
++++ b/codex-rs/core/src/independent_thread/message_tests.rs
+@@ -1,7 +1,6 @@
+ use super::*;
+ use crate::CodexAppsToolsCache;
+ use crate::ThreadManager;
+-use crate::build_models_manager;
+ use crate::init_state_db;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
+@@ -321,8 +320,14 @@ impl TestHost {
+             crate::independent_thread::install(&mut builder, manager.clone());
+             ThreadManager::new(
+                 &config,
+-                Arc::clone(&auth),
+-                build_models_manager(&config, Arc::clone(&auth)),
++                crate::build_startup_models(
++                    &config,
++                    Arc::clone(&auth),
++                    "message-test".to_string(),
++                    Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                        config.codex_home.to_path_buf(),
++                    )),
++                ),
+                 CodexAppsToolsCache::default(),
+                 SessionSource::Exec,
+                 Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -332,7 +337,6 @@ impl TestHost {
+                 crate::passthrough_image_store(),
+                 thread_store_from_config(&config, Some(state)),
+                 None,
+-                "message-test".to_string(),
+                 None,
+                 None,
+             )
+diff --git a/codex-rs/core/src/independent_thread/retention_tests.rs b/codex-rs/core/src/independent_thread/retention_tests.rs
+index ec21030fe941b331d166492ba9bc1c92e01dda5f..54e56293fcd9a8df363b281bedc1df6bf83fb614 100644
+--- a/codex-rs/core/src/independent_thread/retention_tests.rs
++++ b/codex-rs/core/src/independent_thread/retention_tests.rs
+@@ -73,7 +73,7 @@ fn compaction_retains_bounded_independent_messages_without_user_authority() {
+ fn compaction_keeps_independent_message_before_following_user_input() {
+     let delivery = independent_thread_input("send_message_to_thread", 1);
+     let user = ResponseItemEnvelope::new(ResponseItem::Message {
+-        id: Some(ResponseItemId::new("later-user")),
++        id: Some(ResponseItemId::from_server("later-user".to_owned())),
+         status: None,
+         encrypted_content: None,
+         role: "user".to_string(),
+diff --git a/codex-rs/core/src/session/compaction_replay_tests.rs b/codex-rs/core/src/session/compaction_replay_tests.rs
+index 0749e065d382ee41564398d1119976b60a010862..68ac64845b1a61d2f48b5caec29a2cdc8bba44bc 100644
+--- a/codex-rs/core/src/session/compaction_replay_tests.rs
++++ b/codex-rs/core/src/session/compaction_replay_tests.rs
+@@ -67,6 +67,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
+         message: String::new(),
+         replacement_history: Some(replacement_history.clone()),
+         retained_context: None,
++        retained_context_replay: None,
+         guardian_history: None,
+         mcp_resource_origins: None,
+         window_number: Some(42),
+@@ -76,6 +77,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
+         compaction_response_id: None,
+         latest_token_usage_record: None,
+         resume_metadata: None,
++        segment_state_checkpoint: None,
+     }))];
+
+     let reconstructed = session
+diff --git a/codex-rs/core/src/session/late_steer_tests.rs b/codex-rs/core/src/session/late_steer_tests.rs
+index 4f92f91d26222e500c2f20a8d79d75ce4fb4d000..97dce5cc25e25d429a9049da8a7fc748148ceae5 100644
+--- a/codex-rs/core/src/session/late_steer_tests.rs
++++ b/codex-rs/core/src/session/late_steer_tests.rs
+@@ -230,6 +230,7 @@ async fn late_steer_continues_before_thread_idle_lifecycle(outcome: TaskOutcome)
+         *turn_context.terminal_error.lock().await = Some(ErrorEvent {
+             message: "already-reported terminal failure".to_string(),
+             codex_error_info: None,
++            rejected_audio_file_ids: Vec::new(),
+             misalignment: None,
+         });
+     }
+diff --git a/codex-rs/core/src/session/model_routing.rs b/codex-rs/core/src/session/model_routing.rs
+index 52387910e37ed910a5f4eded00db9411e6f2162a..dadf5ccae718a73dd11b63bc5029ba4fe780a5a5 100644
+--- a/codex-rs/core/src/session/model_routing.rs
++++ b/codex-rs/core/src/session/model_routing.rs
+@@ -398,12 +398,13 @@ mod tests {
+             ..primary.clone()
+         };
+         turn.model_routing_candidate = Some(primary.clone());
++        let step = StepContext::for_test(Arc::new(turn));
+         let error = CodexErr::from(CodexErrorDetails::ServerOverloaded)
+             .with_retry_after(RetryAfter::from_delay(Duration::from_secs(120)).unwrap());
+         let failure = classify_model_routing_failure(&error).unwrap();
+         for elapsed in [20, 40] {
+             tokio::time::advance(Duration::from_secs(20)).await;
+-            session.record_model_routing_failure(&turn, &failure).await;
++            session.record_model_routing_failure(&step, &failure).await;
+             let mut state = session.state.lock().await;
+             let current = now + chrono::Duration::seconds(elapsed);
+             let candidates = [primary.clone(), fallback.clone()];
+@@ -430,7 +431,7 @@ mod tests {
+         let shorter = CodexErr::from(CodexErrorDetails::ServerOverloaded)
+             .with_retry_after(RetryAfter::from_delay(Duration::from_secs(1)).unwrap());
+         session
+-            .record_model_routing_failure(&turn, &classify_model_routing_failure(&shorter).unwrap())
++            .record_model_routing_failure(&step, &classify_model_routing_failure(&shorter).unwrap())
+             .await;
+         assert_eq!(
+             session.state.lock().await.model_routing.select_candidate(
+diff --git a/codex-rs/core/src/session/persistence_repair_tests.rs b/codex-rs/core/src/session/persistence_repair_tests.rs
+index 361041869f29ee6a994bc42c76b944422e2df6ee..421146bccebe064d8494daba895bcdde4aae2980 100644
+--- a/codex-rs/core/src/session/persistence_repair_tests.rs
++++ b/codex-rs/core/src/session/persistence_repair_tests.rs
+@@ -54,9 +54,13 @@ fn recovery_presentation_preserves_distinct_user_ids_and_assistant_revisions() {
+     });
+     assert_eq!(serde_json::to_value(item).unwrap(), expected);
+
+-    let hook = codex_protocol::items::build_hook_prompt_message(&[
+-        codex_protocol::items::HookPromptFragment::from_single_hook("Retained hook text", "hook-1"),
+-    ])
++    let hook = codex_protocol::items::build_hook_prompt_message(
++        &[codex_protocol::items::HookPromptFragment::from_single_hook(
++            "Retained hook text",
++            "hook-1",
++        )],
++        &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
++    )
+     .unwrap();
+     let first = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
+     let second = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index d6e62575f809086234886be76451cd81b36df39a..6121fc3c4caec14abc1f56008c31e62308216d03 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -39,6 +39,15 @@ use std::collections::BTreeMap;
+ use std::path::PathBuf;
+ use test_case::test_case;
+
++fn context_for_test(session: &Session, turn: &TurnContext) -> ContextManager {
++    ContextManager::for_session(
++        turn.root_capabilities_restricted,
++        &turn.config.features,
++        turn.config.guardian_context_budgeting(),
++        Arc::clone(&session.item_id_generator),
++    )
++}
++
+ #[tokio::test]
+ async fn recorded_questions_share_queued_input_order_across_resume() {
+     let (session, turn) = make_session_and_context().await;
+@@ -225,7 +234,8 @@ async fn recorded_local_input_order_preserves_checkpoint_evidence(
+                 phase: None,
+             },
+             acceptance_order: 0,
+-        }
++        },
++        &session.item_id_generator,
+     ));
+     retained.mark_user_messages_incomplete();
+     let mut saved_retained = serde_json::to_value(&retained).expect("saved retained evidence");
+@@ -597,6 +607,7 @@ fn complete_thread_settings() -> ThreadSettingsAppliedEvent {
+             service_tier: None,
+             approval_policy: AskForApproval::Never,
+             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
++            requested_approvals_reviewer: None,
+             permission_profile: PermissionProfile::workspace_write(),
+             active_permission_profile: None,
+             cwd: serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+@@ -838,8 +849,7 @@ async fn complete_history_rollback_does_not_restore_removed_checkpoint_authoriza
+         user_message("keep original"),
+         assistant_message("original answer"),
+     ]);
+-    let mut captured =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut captured = context_for_test(&session, &turn_context);
+     captured.record_annotated_items(
+         &mut retained,
+         turn_context.model_info().truncation_policy.into(),
+@@ -903,8 +913,7 @@ async fn checkpoint_only_rollback_preserves_retained_authorization(
+         assistant_message("kept").into(),
+     ];
+     let mut removed = retained_user_message("remove", "Publish the removed result.", 2);
+-    let mut captured =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut captured = context_for_test(&session, &turn_context);
+     captured.record_annotated_items(
+         &mut kept,
+         turn_context.model_info().truncation_policy.into(),
+@@ -981,8 +990,7 @@ async fn modern_certified_checkpoint_rollback_preserves_authoritative_metadata(
+         GuardianContextMode::Independent => unreachable!("checkpoint-based review fixture"),
+     };
+     let mut kept = vec![kept_user, assistant_message("kept").into()];
+-    let mut captured =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut captured = context_for_test(&session, &turn_context);
+     if guardian_mode == GuardianContextMode::ThreadOwned {
+         captured.record_annotated_items(
+             &mut kept,
+@@ -1117,7 +1125,7 @@ async fn modern_certified_checkpoint_rollback_preserves_authoritative_metadata(
+         })
+     );
+     assert_eq!(bounded.window_number, 8);
+-    assert_eq!(bounded.window_id.map(|id| id.to_string()), window_id);
++    assert_eq!(bounded.window_id, window_id);
+     assert_eq!(
+         bounded.reference_context_item,
+         rollback_newer_turn.then_some(reference)
+@@ -3217,6 +3225,7 @@ async fn completed_certified_companion_restores_its_settings(late_completion: bo
+     };
+     let mut compacted = checkpoint_compacted(vec![user_message("checkpoint")]);
+     compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: Some(attribution.turn_id.clone()),
+@@ -4554,7 +4563,12 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
+         },
+         assistant("reply-B", "B", "Temporary answer.", 6),
+     ];
+-    let mut captured = ContextManager::for_session(&worker_source, &turn_context.config.features);
++    let mut captured = ContextManager::for_session(
++        worker_source.is_non_root_agent(),
++        &turn_context.config.features,
++        turn_context.config.guardian_context_budgeting(),
++        Arc::clone(&session.item_id_generator),
++    );
+     let policy = turn_context.model_info().truncation_policy.into();
+     captured.record_annotated_items(&mut kept, policy);
+     captured.record_annotated_items(&mut queued, policy);
+@@ -4576,6 +4590,7 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
+     // Starting from this checkpoint checks their original revision as well as their order.
+     checkpoint.retained_context = Some(captured.retained_context().clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: Some("B".to_owned()),
+@@ -4656,6 +4671,7 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
+         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+     for source in [worker_source, SessionSource::Cli] {
+         let is_root = !source.is_non_root_agent();
++        turn_context.root_capabilities_restricted = source.is_non_root_agent();
+         turn_context.session_source = source;
+         let before = session
+             .reconstruct_history_from_rollout(&turn_context, &items)
+@@ -4768,9 +4784,9 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
+     let (session, mut turn_context) = make_session_and_context().await;
+     turn_context.history_mode = ThreadHistoryMode::Paginated;
+     let thread_id = session.thread_id;
+-    let initial_window_id = Uuid::now_v7();
+-    let previous_window_id = Uuid::now_v7();
+-    let checkpoint_window_id = Uuid::now_v7();
++    let initial_window_id = ContextWindowId::new_uuid_v7();
++    let previous_window_id = ContextWindowId::new_uuid_v7();
++    let checkpoint_window_id = ContextWindowId::new_uuid_v7();
+     let meta = SessionMetaLine {
+         meta: SessionMeta {
+             id: thread_id,
+@@ -4823,10 +4839,7 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
+     let mut checkpoint = checkpoint_compacted(Vec::new());
+     let mut expected_retained = codex_history::RetainedContext::default();
+     if identified_messages {
+-        let mut captured = ContextManager::for_session(
+-            &turn_context.session_source,
+-            &turn_context.config.features,
+-        );
++        let mut captured = context_for_test(&session, &turn_context);
+         captured.record_annotated_items(
+             &mut kept,
+             turn_context.model_info().truncation_policy.into(),
+@@ -4865,11 +4878,13 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
+                     phase: None,
+                 },
+                 codex_history::RetainedInputSource::Local(None),
++                &session.item_id_generator,
+             );
+         }
+     }
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: expected_runtime,
+         dynamic_tools: None,
+         last_started_turn_id: (!empty_resume_metadata).then(|| "B".to_string()),
+@@ -4877,9 +4892,9 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
+         previous_turn_settings: previous_settings.clone(),
+     });
+     checkpoint.window_number = Some(8);
+-    checkpoint.first_window_id = Some(initial_window_id.to_string());
+-    checkpoint.previous_window_id = Some(previous_window_id.to_string());
+-    checkpoint.window_id = Some(checkpoint_window_id.to_string());
++    checkpoint.first_window_id = Some(initial_window_id.clone());
++    checkpoint.previous_window_id = Some(previous_window_id.clone());
++    checkpoint.window_id = Some(checkpoint_window_id.clone());
+     let mut usage = codex_protocol::protocol::TokenUsageRecord {
+         thread_id,
+         session_id: thread_id.into(),
+@@ -5208,14 +5223,12 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
+     let mut replacement = (0..8)
+         .map(|index| retained_user_message(&format!("kept-{index}"), "Keep this private.", index))
+         .collect::<Vec<_>>();
+-    let mut captured =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut captured = context_for_test(&session, &turn_context);
+     captured.record_annotated_items(
+         &mut replacement,
+         turn_context.model_info().truncation_policy.into(),
+     );
+-    let mut surviving =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut surviving = context_for_test(&session, &turn_context);
+     for envelope in &replacement[2..] {
+         surviving
+             .replay_annotated_item(envelope, turn_context.model_info().truncation_policy.into());
+@@ -5240,6 +5253,7 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
+     });
+     checkpoint.guardian_history = guardian_baseline.clone();
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: Some("kept-7".to_string()),
+@@ -5300,6 +5314,7 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
+         });
+     for source in [turn_context.session_source.clone(), worker_source] {
+         let is_root = !source.is_non_root_agent();
++        turn_context.root_capabilities_restricted = source.is_non_root_agent();
+         turn_context.session_source = source;
+         let before = session
+             .reconstruct_history_from_rollout(&turn_context, &items)
+@@ -5376,6 +5391,7 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
+     checkpoint.retained_context = Some(Default::default());
+     checkpoint.window_number = Some(1);
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -5442,6 +5458,7 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
+     let (_, full, bounded) =
+         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+     for source in [worker_source, SessionSource::Cli] {
++        turn_context.root_capabilities_restricted = source.is_non_root_agent();
+         turn_context.session_source = source;
+         let original = session
+             .reconstruct_history_from_rollout(&turn_context, &items)
+@@ -5531,6 +5548,7 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.retained_context = Some(worker_retained);
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: Some("worker-task".to_string()),
+@@ -5591,6 +5609,7 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
+         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
+     for source in [worker_source.clone(), SessionSource::Cli] {
+         let root_thread_owned = !source.is_non_root_agent();
++        turn_context.root_capabilities_restricted = source.is_non_root_agent();
+         turn_context.session_source = source;
+         let before = session
+             .reconstruct_history_from_rollout(&turn_context, &items)
+@@ -5635,10 +5654,9 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
+             {
+                 let mut state = resumed_session.state.lock().await;
+                 state.session_configuration.session_source = turn_context.session_source.clone();
+-                state.history = ContextManager::for_session(
+-                    &turn_context.session_source,
+-                    &turn_context.config.features,
+-                );
++                state.session_configuration.root_capabilities_restricted =
++                    turn_context.root_capabilities_restricted;
++                state.history = context_for_test(&resumed_session, &turn_context);
+             }
+             resumed_session
+                 .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+@@ -5681,6 +5699,7 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash:
+     let mut checkpoint = checkpoint_compacted(Vec::new());
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -5777,10 +5796,7 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash:
+             assert_eq!(reconstructed, before);
+             let (installed, _) = make_session_and_context().await;
+             let mut state = installed.state.lock().await;
+-            state.history = ContextManager::for_session(
+-                &turn_context.session_source,
+-                &turn_context.config.features,
+-            );
++            state.history = context_for_test(&installed, &turn_context);
+             assert_eq!(
+                 Session::install_rollout_reconstruction_in_state(
+                     &mut state,
+@@ -5826,6 +5842,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+         baseline.clone().into(),
+     ]));
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -5934,8 +5951,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+         review_input: Some(position),
+         resolved_review_input: None,
+     });
+-    let mut inferred =
+-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
++    let mut inferred = context_for_test(&session, &turn_context);
+     inferred.replace_annotated(checkpoint.replacement_history.clone().unwrap());
+     inferred.restore_replayed_review_context(&thread_owned, Some(&expected_guardian), None);
+     // Without explicitly restoring None, the final opaque model activates this fallback.
+@@ -5977,6 +5993,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+         });
+     for source in [turn_context.session_source.clone(), worker_source] {
+         let is_root = !source.is_non_root_agent();
++        turn_context.root_capabilities_restricted = source.is_non_root_agent();
+         turn_context.session_source = source;
+         let original = session
+             .reconstruct_history_from_rollout(&turn_context, &items)
+@@ -6024,6 +6041,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+         unreachable!()
+     };
+     *root_retains_legacy_transcript = None;
++    turn_context.root_capabilities_restricted = false;
+     turn_context.session_source = SessionSource::Cli;
+     let predecessor = session
+         .reconstruct_history_from_rollout(&turn_context, &replayed_items)
+@@ -6055,6 +6073,7 @@ async fn migration_preserves_review_eviction_under_current_model_policy(has_guar
+     let mut checkpoint = checkpoint_compacted(baseline.clone());
+     checkpoint.guardian_history = has_guardian_backup.then(|| guardian_baseline.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -6147,6 +6166,7 @@ async fn review_input_resolution_follows_reconstruction_checkpoint() {
+     let mut selected = checkpoint_compacted(vec![user_message("A")]);
+     selected.segment_state_checkpoint = None;
+     selected.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -6242,6 +6262,7 @@ fn modern_state_only_checkpoint_is_invisible_without_hiding_real_compaction() {
+     checkpoint.message.clear();
+     checkpoint.segment_state_checkpoint = None;
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -6276,6 +6297,7 @@ fn nonempty_summary_compaction_remains_visible(modern: bool) {
+     checkpoint.segment_state_checkpoint = None;
+     checkpoint.compaction_response_id = None;
+     checkpoint.resume_metadata = modern.then_some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+@@ -6301,6 +6323,7 @@ fn incomplete_modern_checkpoint_without_window_remains_visible() {
+     checkpoint.window_number = None;
+     checkpoint.compaction_response_id = None;
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+         last_started_turn_id: None,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 404ccf766a4eae663470c3eec57b263ee5e12b7c..8b1f731d8b936dfa20d33b2d90cc8094a7e8c0eb 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -2921,7 +2921,9 @@ async fn reconstruct_history_matches_live_compactions() {
+     assert_eq!(
+         reconstructed
+             .window_id
+-            .map(|window_id| window_id.get_version_num()),
++            .map(|window_id| Uuid::parse_str(&window_id.to_string())
++                .expect("window ID is a UUID")
++                .get_version_num()),
+         Some(7)
+     );
+ }
+@@ -5078,18 +5080,22 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+                 phase: None,
+             },
+             codex_history::RetainedInputSource::Local(Some(3)),
++            &source.item_id_generator,
+         );
+-        retained_context.record(&codex_history::RetainedContextEvent::VerifiedAnswer {
+-            answer: codex_history::VerifiedAnswer {
+-                turn_id: "parent-authorization-turn".to_owned(),
+-                call_id: "parent-publication-question".to_owned(),
+-                questions: vec![codex_history::VerifiedQuestionAnswer {
+-                    question: "May I publish?".to_owned(),
+-                    answer: "Only privately.".to_owned(),
+-                }],
++        retained_context.record(
++            &codex_history::RetainedContextEvent::VerifiedAnswer {
++                answer: codex_history::VerifiedAnswer {
++                    turn_id: "parent-authorization-turn".to_owned(),
++                    call_id: "parent-publication-question".to_owned(),
++                    questions: vec![codex_history::VerifiedQuestionAnswer {
++                        question: "May I publish?".to_owned(),
++                        answer: "Only privately.".to_owned(),
++                    }],
++                },
++                acceptance_order: Some(4),
+             },
+-            acceptance_order: Some(4),
+-        });
++            &source.item_id_generator,
++        );
+     } else {
+         retained_context.mark_user_messages_incomplete();
+     }
+@@ -5221,15 +5227,19 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+         rate_limit_reached_type: None,
+     };
+     let window_ids = AutoCompactWindowIds {
+-        first_window_id: Uuid::now_v7(),
+-        previous_window_id: Some(Uuid::now_v7()),
+-        window_id: Uuid::now_v7(),
++        first_window_id: ContextWindowId::new_uuid_v7(),
++        previous_window_id: Some(ContextWindowId::new_uuid_v7()),
++        window_id: ContextWindowId::new_uuid_v7(),
+     };
+
+     {
+         let mut state = source.state.lock().await;
+-        state.history =
+-            ContextManager::for_session(&SessionSource::Exec, &source_turn.config.features);
++        state.history = ContextManager::for_session(
++            source_turn.root_capabilities_restricted,
++            &source_turn.config.features,
++            source_turn.config.guardian_context_budgeting(),
++            Arc::clone(&source.item_id_generator),
++        );
+         state.replace_shared_history(
+             Arc::clone(&source_response_items),
+             Some(reference_context_item.clone()),
+@@ -5253,7 +5263,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+             .history
+             .set_world_state_baseline(world_state.render_full().0);
+         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
+-        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
++        state.restore_auto_compact_window(/*window_number*/ 7, window_ids.clone());
+     }
+     // Pause between capture and recheck while changing only turn attribution.
+     let state_guard = source.state.lock().await;
+@@ -5358,7 +5368,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+             Some(authoritative_rate_limits.clone())
+         );
+         assert_eq!(child_state.auto_compact_window_number(), 7);
+-        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
++        assert_eq!(child_state.auto_compact_window_ids(), &window_ids);
+         assert_eq!(child_state.history.history_version(), 1);
+         assert_eq!(
+             child_state.history.guardian_history_checkpoint(),
+@@ -5368,8 +5378,8 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+         assert!(
+             child_state
+                 .history
+-                .update_world_state(&world_state)
+-                .1
++                .render_step_world_state(&world_state)
++                .2
+                 .is_none(),
+             "an unchanged parent world-state baseline must not be reintroduced"
+         );
+@@ -5599,8 +5609,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+     ));
+     let manager = crate::ThreadManager::new(
+         &config,
+-        Arc::clone(&auth_manager),
+-        crate::thread_manager::build_models_manager(&config, auth_manager),
++        crate::build_startup_models(
++            &config,
++            auth_manager,
++            "prepared-fork-test-installation".to_string(),
++            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                config.codex_home.to_path_buf(),
++            )),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -5610,7 +5626,6 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+         crate::thread_manager::passthrough_image_store(),
+         store.clone(),
+         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
+-        "prepared-fork-test-installation".to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+@@ -5667,9 +5682,9 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+         model_context_window: Some(8_192),
+     };
+     let window_ids = AutoCompactWindowIds {
+-        first_window_id: Uuid::now_v7(),
+-        previous_window_id: Some(Uuid::now_v7()),
+-        window_id: Uuid::now_v7(),
++        first_window_id: ContextWindowId::new_uuid_v7(),
++        previous_window_id: Some(ContextWindowId::new_uuid_v7()),
++        window_id: ContextWindowId::new_uuid_v7(),
+     };
+     {
+         let mut state = source.thread.session.state.lock().await;
+@@ -5678,7 +5693,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+             .set_world_state_baseline(world_state.render_full().0);
+         state.set_token_info(Some(token_info.clone()));
+         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
+-        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
++        state.restore_auto_compact_window(/*window_number*/ 7, window_ids.clone());
+     }
+
+     let expected_position = store
+@@ -5717,6 +5732,11 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+     let (child, response_history) = manager
+         .fork_prepared_thread(crate::StartThreadOptions::new(config), prepared)
+         .await?;
++    let crate::thread_manager::PreparedForkResponseHistory::Captured(response_history) =
++        response_history
++    else {
++        panic!("local frozen source must capture response history");
++    };
+
+     let child_items = child
+         .thread
+@@ -5769,12 +5789,12 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+         );
+         assert_eq!(child_state.token_info(), Some(token_info));
+         assert_eq!(child_state.auto_compact_window_number(), 7);
+-        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
++        assert_eq!(child_state.auto_compact_window_ids(), &window_ids);
+         assert!(
+             child_state
+                 .history
+-                .update_world_state(&world_state)
+-                .1
++                .render_step_world_state(&world_state)
++                .2
+                 .is_none(),
+             "an unchanged parent world-state baseline must not be reintroduced"
+         );
+@@ -5869,7 +5889,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+             subagent_history_start_ordinal: None,
+             persistence_mode: Default::default(),
+             initial_rollout_ordinal: 0,
+-            initial_window_id: Uuid::now_v7().to_string(),
++            initial_window_id: ContextWindowId::new_uuid_v7(),
+             runtime_workspace_roots: None,
+             metadata: codex_thread_store::ThreadPersistenceMetadata {
+                 cwd: Some(test.config.cwd.to_path_buf()),
+@@ -5901,6 +5921,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+                         collaboration_mode_kind: Default::default(),
+                     })),
+                     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
++                        content_token_count: None,
+                         thread_id: source_thread_id,
+                         turn_id: turn_id.clone(),
+                         item: TurnItem::UserMessage(UserMessageItem {
+@@ -5955,13 +5976,13 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+             .codex
+             .state_db()
+             .expect("paginated source state database");
+-        let mut metadata = codex_state::ThreadMetadataBuilder::new(
++        let metadata = codex_state::ThreadMetadataBuilder::new(
+             source_thread_id,
+             active_rollout_path,
+             chrono::Utc::now(),
+             SessionSource::Cli,
+-        );
+-        metadata.history_mode = ThreadHistoryMode::Paginated;
++        )
++        .with_history_mode(ThreadHistoryMode::Paginated);
+         state_db
+             .upsert_thread(&metadata.build(&test.config.model_provider_id))
+             .await?;
+@@ -7221,7 +7242,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+     let mut assistant_item = assistant_message("before compaction answer");
+     assistant_item.set_id(Some(assistant_item_id.clone()));
+     let mut expected_retained_context = codex_history::RetainedContext::default();
+-    expected_retained_context.record(&retained_answer);
++    expected_retained_context.record(&retained_answer, &session.item_id_generator);
+     expected_retained_context.record_user_message(
+         codex_history::RetainedUserMessage {
+             turn_id: turn_context.sub_id.clone(),
+@@ -7232,6 +7253,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+             phase: None,
+         },
+         codex_history::RetainedInputSource::Local(Some(2)),
++        &session.item_id_generator,
+     );
+     expected_retained_context.record_assistant_message(
+         codex_history::RetainedUserMessage {
+@@ -7243,6 +7265,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+             phase: None,
+         },
+         codex_history::RetainedInputSource::Local(Some(3)),
++        &session.item_id_generator,
+     );
+     session
+         .record_conversation_items(
+@@ -7305,6 +7328,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+             replacement_history.clone(),
+             turn_context.to_turn_context_item(),
+             expected_world_state.clone(),
++            /*rejected_audio_file_ids*/ Default::default(),
+             CompactedHistoryMetadata {
+                 input_goal_ids: Default::default(),
+                 message: "compacted summary".to_string(),
+@@ -7497,7 +7521,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
+     let captured_prefix = CompactionPrefix {
+         generation: captured.history_version(),
+         len: captured.annotated_items().len(),
+-        auth_owner_generation: session.services.model_client.auth_owner_generation(),
++        auth_owner: session.services.model_client.auth_owner(),
+     };
+     session
+         .record_user_goal_update(crate::context::UserGoalUpdate::Clear)
+@@ -7546,6 +7570,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
+             prefix: captured_prefix,
+             prefix_context: Vec::new(),
+             initial_context: Vec::new(),
++            reset_world_state_sections: Vec::new(),
+             model_info: turn_context.model_info(),
+             compaction_response_id: "failed-prefix".to_string(),
+             reviewer_compaction_hash: Some("test-compaction-model-hash".to_string()),
+@@ -7575,6 +7600,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
+             })],
+             turn_context.to_turn_context_item(),
+             WorldStateSnapshot::default(),
++            /*rejected_audio_file_ids*/ Default::default(),
+             installation,
+         )
+         .await
+@@ -7729,7 +7755,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
+     let captured_prefix = CompactionPrefix {
+         generation: captured.history_version(),
+         len: captured.annotated_items().len(),
+-        auth_owner_generation: session.services.model_client.auth_owner_generation(),
++        auth_owner: session.services.model_client.auth_owner(),
+     };
+     for _ in 0..2 {
+         session
+@@ -7749,6 +7775,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
+             prefix: captured_prefix,
+             prefix_context: Vec::new(),
+             initial_context: Vec::new(),
++            reset_world_state_sections: Vec::new(),
+             model_info: &model_info,
+             compaction_response_id: "compatible-prefix".to_string(),
+             reviewer_compaction_hash: model_info.comp_hash.clone(),
+@@ -7778,6 +7805,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
+             })],
+             turn_context.to_turn_context_item(),
+             WorldStateSnapshot::default(),
++            /*rejected_audio_file_ids*/ Default::default(),
+             installation,
+         ),
+     ));
+@@ -11420,6 +11448,7 @@ async fn queued_client_info_update_succeeds_after_compacted_checkpoint_commits()
+             replacement_history,
+             turn_context.to_turn_context_item(),
+             world_state_baseline,
++            /*rejected_audio_file_ids*/ Default::default(),
+             CompactedHistoryMetadata {
+                 input_goal_ids: Default::default(),
+                 compaction_response_id: None,
+diff --git a/codex-rs/core/src/thread_manager/model_catalog.rs b/codex-rs/core/src/thread_manager/model_catalog.rs
+index daeab736a4fcafd5b415140a8b9cc462cb48454a..44344efeb75d12e74889dd91ec1d3fb0a35f3919 100644
+--- a/codex-rs/core/src/thread_manager/model_catalog.rs
++++ b/codex-rs/core/src/thread_manager/model_catalog.rs
+@@ -231,6 +231,7 @@ mod tests {
+             "review-alias".to_string(),
+             CustomModelConfig {
+                 model: "gpt-5.5".to_string(),
++                trust_candidate_constraints: false,
+                 model_context_window: None,
+                 routing_profile: None,
+                 model_auto_compact_token_limit: None,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 9994a5084c48e5afb3d790066ba46ba9d7a6f6da..e51a7ee6de55a9cd80161705a46e000a3663a59a 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -234,7 +234,9 @@ async fn shared_service_tier_is_published_by_registered_startup() {
+                 ..StartThreadOptions::new(config.clone())
+             },
+             /*forked_from_thread_id*/ None,
++            /*inherited_agent_control*/ None,
+             Some(Arc::clone(&startup)),
++            /*fork_startup_items*/ Default::default(),
+         ));
+         let io = std::future::poll_fn(|cx| {
+             assert!(start.as_mut().poll(cx).is_pending());
+@@ -720,6 +722,7 @@ fn checkpoint_settings_item(
+                 service_tier: config.service_tier.clone(),
+                 approval_policy: AskForApproval::Never,
+                 approvals_reviewer: ApprovalsReviewer::User,
++                requested_approvals_reviewer: None,
+                 permission_profile: PermissionProfile::workspace_write(),
+                 active_permission_profile: None,
+                 cwd: cwd.clone(),
+@@ -1774,8 +1777,11 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
+                 crate::agent::host::PreparedChildInheritance {
+                     instructions: parent.thread.session.inherited_instructions().await,
+                     exec_policy: None,
++                    inherited_thread_state: Default::default(),
+                     originator: parent.thread.session.originator().await,
+                     attachment_source: None,
++                    fork_startup_items: Default::default(),
++                    fork_source_reservation: None,
+                 },
+             )
+             .await
+@@ -1786,7 +1792,11 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
+                 options,
+                 control,
+                 Some(parent.thread_id),
++                /*inherited_instructions*/ None,
+                 /*inherited_exec_policy*/ None,
++                /*inherited_thread_state*/ Default::default(),
++                /*fork_startup_items*/ Default::default(),
++                /*fork_source_reservation*/ None,
+             )
+             .await
+     }
+@@ -4522,7 +4532,11 @@ async fn new_uses_active_provider_for_model_refresh(with_cache: bool) {
+                     .local_agent_runtime
+                     .control(started.thread.session.session_id()),
+                 Some(started.thread_id),
++                /*inherited_instructions*/ None,
+                 /*inherited_exec_policy*/ None,
++                /*inherited_thread_state*/ Default::default(),
++                /*fork_startup_items*/ Default::default(),
++                /*fork_source_reservation*/ None,
+             )
+             .await
+             .expect("spawn child with the parent's provider headers");
+@@ -5005,6 +5019,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+         .await
+         .expect("fork context-only interrupted snapshot");
+     assert!(ephemeral_fork.thread.rollout_path().is_none());
++    let PreparedForkResponseHistory::Captured(ephemeral_response_history) =
++        ephemeral_response_history
++    else {
++        panic!("frozen source must capture response history");
++    };
+     // The response history must not append the prepared abort suffix twice.
+     assert_eq!(
+         ephemeral_response_history
+@@ -5172,8 +5191,14 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
+     let state_db = init_state_db(&config).await;
+     let manager = ThreadManager::new(
+         &config,
+-        auth_manager.clone(),
+-        build_models_manager(&config, auth_manager.clone()),
++        crate::build_startup_models(
++            &config,
++            auth_manager.clone(),
++            TEST_INSTALLATION_ID.to_string(),
++            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                config.codex_home.to_path_buf(),
++            )),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -5183,7 +5208,6 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
+         passthrough_image_store(),
+         thread_store_from_config(&config, state_db.clone()),
+         local_agent_graph_store_from_state_db(state_db.as_ref()),
+-        TEST_INSTALLATION_ID.to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     );
+@@ -5328,8 +5352,14 @@ async fn reference_backed_fork_reserves_source_until_child_reference_is_durable(
+     let state_db = init_state_db(&config).await;
+     let manager = Arc::new(ThreadManager::new(
+         &config,
+-        auth_manager.clone(),
+-        build_models_manager(&config, auth_manager.clone()),
++        crate::build_startup_models(
++            &config,
++            auth_manager.clone(),
++            TEST_INSTALLATION_ID.to_string(),
++            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
++                config.codex_home.to_path_buf(),
++            )),
++        ),
+         crate::CodexAppsToolsCache::default(),
+         SessionSource::Exec,
+         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+@@ -5339,7 +5369,6 @@ async fn reference_backed_fork_reserves_source_until_child_reference_is_durable(
+         passthrough_image_store(),
+         thread_store_from_config(&config, state_db.clone()),
+         local_agent_graph_store_from_state_db(state_db.as_ref()),
+-        TEST_INSTALLATION_ID.to_string(),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+     ));
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index d43a090331355684a8ba74cdc8879456a326f694..c6a7c29619aef49059ed8964382d642ef6156afd 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -5428,6 +5428,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+         .expect("test config should allow sqlite");
+     let state_db = init_state_db(&config).await;
+     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++    let thread_store = ThreadStoreBuilder::from_config(&config, state_db.clone()).build();
+     let manager = ThreadManager::new(
+         &config,
+         crate::build_startup_models(
+@@ -5443,7 +5444,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+         /*analytics_events_client*/ None,
+         crate::thread_manager::passthrough_image_store(),
+-        ThreadStoreBuilder::from_config(&config, state_db.clone()).build(),
++        Arc::clone(&thread_store),
+         local_agent_graph_store_from_state_db(state_db.as_ref()),
+         /*attestation_provider*/ None,
+         /*external_time_provider*/ None,
+diff --git a/codex-rs/core/src/tools/handlers/workspace.rs b/codex-rs/core/src/tools/handlers/workspace.rs
+index 57e23e7a37924e7cec5e6f7748c408325f0403b2..b58dd713b6003e16757c05521d52aee744e72abe 100644
+--- a/codex-rs/core/src/tools/handlers/workspace.rs
++++ b/codex-rs/core/src/tools/handlers/workspace.rs
+@@ -735,7 +735,7 @@ mod tests {
+                 history_base: None,
+                 persistence_mode: Default::default(),
+                 initial_rollout_ordinal: 0,
+-                initial_window_id: "workspace-test-window".to_string(),
++                initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
+                 runtime_workspace_roots: None,
+                 metadata: ThreadPersistenceMetadata {
+                     cwd: Some(fixture.primary.as_path().to_path_buf()),
