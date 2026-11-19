@@ -14,6 +14,7 @@ use tracing::debug_span;
 use tracing::info_span;
 
 use crate::session::session::Session;
+use crate::session::session::SessionConfiguration;
 use crate::session::thread_settings;
 use crate::session::turn_input;
 
@@ -321,6 +322,11 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
         let mut state = sess.state.lock().await;
         // Stop admission and take the current warmup together so resume cannot replace it.
         state.shutting_down = true;
+        // Unload must stop optional executor discovery even if session handles outlive shutdown.
+        SessionConfiguration::revoke_removed_initial_recoveries(
+            &state.session_configuration.default_secondary_environments,
+            &[],
+        );
         state.take_session_startup_prewarm()
     };
     if let Some(startup_prewarm) = startup_prewarm {
