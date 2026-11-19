@@ -9,6 +9,7 @@ use crate::terminal_hyperlinks::LogicalLineSource;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -58,7 +59,6 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
         })
     };
     let initial_lines = prompt_lines(/*width*/ 60);
-    let style = initial_lines[0].line.style;
     let mut layout = TextLayout::new(initial_lines, /*width*/ 60);
     let expected_copy = format!("\n{message}\n");
 
@@ -78,18 +78,22 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
         let mut actual = Buffer::empty(area);
         layout.render(area, &mut actual, /*start_row*/ 0);
         let mut expected = Buffer::empty(area);
-        HyperlinkParagraph::new(&fresh_lines, style).render(area, &mut expected);
+        HyperlinkParagraph::new(&fresh_lines, Style::default()).render(area, &mut expected);
 
         assert_eq!(
             (layout.text(), layout.row_count()),
             (expected_copy.as_str(), fresh_lines.len()),
         );
+        assert_eq!(layout.row_count(), usize::from(cell.desired_height(width)));
         assert_eq!(actual, expected);
         assert_eq!(
             (0..area.height)
-                .map(|row| actual[(width - 1, row)].symbol())
+                .map(|row| {
+                    let cell = &actual[(width - 1, row)];
+                    (cell.symbol(), cell.bg)
+                })
                 .collect::<Vec<_>>(),
-            vec![" "; fresh_lines.len()],
+            vec![(" ", Color::Reset); fresh_lines.len()],
         );
         if width == 20 {
             insta::assert_snapshot!(name, format!("{actual:?}"));
@@ -103,7 +107,7 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
             layout.position_at(/*row*/ 1, /*column*/ 59),
             layout.position_at(/*row*/ 2, /*column*/ 2),
         ),
-        (57, 58, 58),
+        (46, 47, 47),
     );
 }
 
