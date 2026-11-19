@@ -2307,13 +2307,10 @@ impl ThreadManager {
             interrupt_if_open,
             forked_from_ordinal_exclusive,
         ) = match &prepared.history {
-            codex_thread_store::PreparedForkHistory::FrozenRollout {
-                shared_model_response_items,
-                ..
-            } => (
+            codex_thread_store::PreparedForkHistory::FrozenRollout => (
                 &prepared.response_history,
                 prepared.copied_history.as_ref(),
-                shared_model_response_items.clone(),
+                prepared.shared_model_response_items.clone(),
                 prepared.interrupt_if_open,
                 prepared.source_end_ordinal_exclusive,
             ),
@@ -2401,7 +2398,9 @@ impl ThreadManager {
             unreachable!("prepared model context is forked history");
         };
         model_history_override.extend_from_slice(synthesized_suffix);
-        let mut shared_model_state = if let Some(items) = &shared_model_response_items {
+        let mut shared_model_state = if let Some(items) = &shared_model_response_items
+            && prepared.model_state_origin == codex_thread_store::ForkModelStateOrigin::LoadedSource
+        {
             if let Ok(source) = self.state.get_thread(source_thread_id).await {
                 Some(
                     source
@@ -3012,33 +3011,6 @@ impl ThreadManagerState {
                         "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                     ))
                 })?;
-            if let codex_thread_store::PreparedForkHistory::Copied {
-                forked_from_ordinal_exclusive,
-                ..
-            } = &prepared.history
-            {
-                let logical_history = prepared
-                    .copied_history
-                    .as_ref()
-                    .expect("copied fork history")
-                    .as_ref()
-                    .clone();
-                let ordinal = *forked_from_ordinal_exclusive;
-                return Ok((
-                    InitialHistory::Forked(logical_history.clone()),
-                    logical_history,
-                    FullHistorySourceReservation::Prepared {
-                        _prepared: Box::new(prepared),
-                    },
-                    ordinal,
-                ));
-            }
-            let codex_thread_store::PreparedForkHistory::FrozenRollout { .. } = &prepared.history
-            else {
-                return Err(CodexErr::Fatal(
-                    "local fork did not provide frozen rollout history".to_string(),
-                ));
-            };
             let forked_from_ordinal_exclusive = prepared.source_end_ordinal_exclusive;
             if let Some(copied_history) = &prepared.copied_history {
                 let logical_history = copied_history.as_ref().clone();
@@ -3194,7 +3166,7 @@ impl ThreadManagerState {
                         ))
                     })?;
                     let (frozen, source_items) = match &prepared.history {
-                        codex_thread_store::PreparedForkHistory::FrozenRollout { .. } => (
+                        codex_thread_store::PreparedForkHistory::FrozenRollout => (
                             prepared.frozen_segment.clone(),
                             prepared.response_history.as_ref().clone(),
                         ),
