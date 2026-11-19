@@ -35,12 +35,16 @@ use futures::future::BoxFuture;
 use futures::future::Shared;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::sync::DropGuard;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
 
+use crate::agents_md::REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
+use crate::agents_md::check_startup_project_instructions;
+use crate::config::Config;
 use crate::session::ThreadEnvironmentDefaults;
 use crate::session::turn_context::ShellSnapshotCache;
 use crate::session::turn_context::ShellSnapshotTask;
@@ -236,7 +240,8 @@ fn resolve_selection_config(
         ),
         config @ (EnvironmentConfigState::Ready(_)
         | EnvironmentConfigState::Pending
-        | EnvironmentConfigState::Failed(_)) => (config, EnvironmentConfigOrigin::Owner),
+        | EnvironmentConfigState::Failed(_)
+        | EnvironmentConfigState::StartupUnavailable) => (config, EnvironmentConfigOrigin::Owner),
     };
     selection.config = config;
     (selection, origin)
@@ -321,6 +326,7 @@ struct ThreadEnvironmentsState {
     thread_defaults: ThreadEnvironmentDefaults,
     environments: Vec<SelectedTurnEnvironment>,
     connection_events: Option<ConnectionEventStreams>,
+    startup_rejections: Vec<(usize, TurnEnvironmentSelection)>,
 }
 
 /// Forwards the active attachments' streams to their thread's event channel.
@@ -366,10 +372,7 @@ enum StartupRetry<'a> {
 
 impl StartupRetry<'_> {
     fn should_restart(self, environment: &SelectedTurnEnvironment) -> bool {
-        if matches!(
-            environment.selection.config,
-            EnvironmentConfigState::Failed(_)
-        ) {
+        if environment.selection.config.failure_reason().is_some() {
             return matches!(self, Self::AfterSelectionUpdate);
         }
         // Avoid cloning a resolved environment on every healthy turn.
@@ -392,6 +395,101 @@ impl StartupRetry<'_> {
 }
 
 impl ThreadEnvironments {
+    /// Resolves and checks project instructions without allowing remote startup work.
+    /// Only remote secondaries of an implicit, local-primary selection are optional.
+    pub(crate) async fn admit_startup_remotes(
+        environment_manager: Arc<EnvironmentManager>,
+        local_shell: Shell,
+        thread_defaults: ThreadEnvironmentDefaults,
+        config: &Config,
+        selections: &mut [TurnEnvironmentSelection],
+        implicit_selection: bool,
+    ) -> CodexResult<Option<TurnEnvironmentSnapshot>> {
+        let optional_secondaries = implicit_selection
+            && selections.first().is_some_and(|selection| {
+                environment_manager
+                    .get_environment(&selection.environment_id)
+                    .is_some_and(|environment| !environment.is_remote())
+            });
+        let remote_selections = selections
+            .iter()
+            .filter(|selection| {
+                environment_manager
+                    .get_environment(&selection.environment_id)
+                    .is_none_or(|environment| environment.is_remote())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if remote_selections.is_empty() {
+            return Ok(None);
+        }
+        let discovery = Self::new(
+            environment_manager,
+            local_shell,
+            thread_defaults,
+            ShellSnapshot::disabled(),
+            TurnEnvironmentSnapshot::default(),
+            /*non_blocking_snapshots*/ true,
+        );
+        discovery.update_selections(&remote_selections);
+        let deadline = Instant::now() + REMOTE_AGENTS_MD_DISCOVERY_BUDGET;
+        let ready = futures::stream::iter(discovery.snapshot_now().environments)
+            .map(|state| async move {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                tokio::time::timeout_at(deadline, async {
+                    let state = match state {
+                        TurnEnvironmentState::Starting(starting) => {
+                            let result = starting.resolution.clone().await;
+                            TurnEnvironmentState::from_resolution(starting, Some(result))
+                        }
+                        state => state,
+                    };
+                    let TurnEnvironmentState::Ready(environment) = state else {
+                        return None;
+                    };
+                    check_startup_project_instructions(config, &environment)
+                        .await
+                        .ok()?;
+                    Some(environment)
+                })
+                .await
+                .ok()
+                .flatten()
+            })
+            .buffer_unordered(16)
+            .filter_map(std::future::ready)
+            .map(|environment| (environment.selection.environment_id.clone(), environment))
+            .collect::<HashMap<_, _>>()
+            .await;
+        let requested = remote_selections
+            .iter()
+            .map(|selection| selection.environment_id.as_str())
+            .collect::<HashSet<_>>();
+        for selection in selections {
+            let id = &selection.environment_id;
+            if !requested.contains(id.as_str()) || ready.contains_key(id) {
+                continue;
+            }
+            let reason = format!(
+                "Environment `{id}` did not complete executor readiness and AGENTS.md discovery. Retry when it is responsive or select only the environments needed for this request."
+            );
+            if !optional_secondaries {
+                return Err(CodexErr::InvalidRequest(reason));
+            }
+            tracing::warn!(environment_id = %id, "default secondary executor unavailable at thread startup");
+            // Keep the failed selection so MCP cannot fall back to the global
+            // registry for this executor and the thread cannot promote it later.
+            selection.config = EnvironmentConfigState::StartupUnavailable;
+        }
+        let environments = ready
+            .into_values()
+            .map(TurnEnvironmentState::Ready)
+            .collect();
+        Ok(Some(TurnEnvironmentSnapshot { environments }))
+    }
+
     pub(crate) fn new(
         environment_manager: Arc<EnvironmentManager>,
         local_shell: Shell,
@@ -492,11 +590,13 @@ impl ThreadEnvironments {
                 thread_defaults: thread_defaults.clone(),
                 environments: Vec::new(),
                 connection_events: None,
+                startup_rejections: Vec::new(),
             }),
             configured: Mutex::new(ThreadEnvironmentsState {
                 thread_defaults,
                 environments,
                 connection_events: None,
+                startup_rejections: Vec::new(),
             }),
         }
     }
@@ -527,6 +627,9 @@ impl ThreadEnvironments {
                 )
             })
             .collect();
+        state
+            .startup_rejections
+            .clone_from(&configured.startup_rejections);
         state.connection_events = Some(connection_events);
     }
 
@@ -632,10 +735,12 @@ impl ThreadEnvironments {
             thread_defaults,
             environments: current,
             connection_events,
-        } = state;
+            startup_rejections,
+        } = &mut *state;
         let connection_events = connection_events.as_ref();
         let mut seen_environment_ids = HashSet::with_capacity(environments.len());
         let mut next = Vec::with_capacity(environments.len());
+        let mut rejections = Vec::new();
         let mut pending_completions = Vec::new();
         // Workspace and configuration changes preserve the attachment to the same executor.
         let attachment_for =
@@ -665,6 +770,11 @@ impl ThreadEnvironments {
             };
         for selected_environment in environments {
             if !seen_environment_ids.insert(selected_environment.environment_id.as_str()) {
+                continue;
+            }
+            if selected_environment.config == EnvironmentConfigState::StartupUnavailable {
+                // The registry may not yet know this executor after a cold resume.
+                rejections.push((next.len() + rejections.len(), selected_environment.clone()));
                 continue;
             }
             let current_environment = current.iter().find(|environment| {
@@ -710,8 +820,10 @@ impl ThreadEnvironments {
                         EnvironmentConfigState::Ready(config) => {
                             pending_completions.push((completion, Ok(config.clone())));
                         }
-                        EnvironmentConfigState::Failed(error) => {
-                            pending_completions.push((completion, Err(error.clone())));
+                        config @ (EnvironmentConfigState::Failed(_)
+                        | EnvironmentConfigState::StartupUnavailable) => {
+                            let reason = config.failure_reason().expect("unavailable environment");
+                            pending_completions.push((completion, Err(reason.to_owned())));
                         }
                         EnvironmentConfigState::FromThread | EnvironmentConfigState::Pending => {
                             environment.pending_completion = Some(completion);
@@ -764,6 +876,7 @@ impl ThreadEnvironments {
         }
         // Install the new selection before dropping the guards for removed attachments.
         drop(std::mem::replace(current, next));
+        *startup_rejections = rejections;
 
         // Publish after installing the new list, including pending bindings replaced by retries.
         for (completion, result) in pending_completions {
@@ -822,9 +935,8 @@ impl ThreadEnvironments {
 
     /// Projects canonical selections back to caller input form without losing config ownership.
     pub(crate) fn selections(&self) -> Vec<TurnEnvironmentSelection> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut selections: Vec<_> = state
             .environments
             .iter()
             .map(|environment| {
@@ -832,7 +944,11 @@ impl ThreadEnvironments {
                     .config_origin
                     .into_input_selection(environment.selection.clone())
             })
-            .collect()
+            .collect();
+        for (position, selection) in &state.startup_rejections {
+            selections.insert(*position, selection.clone());
+        }
+        selections
     }
 
     /// Returns installed owner configuration without treating pending attachments as ready.
@@ -843,7 +959,8 @@ impl ThreadEnvironments {
             EnvironmentConfigState::Ready(config) => Some(config),
             EnvironmentConfigState::FromThread
             | EnvironmentConfigState::Pending
-            | EnvironmentConfigState::Failed(_) => None,
+            | EnvironmentConfigState::Failed(_)
+            | EnvironmentConfigState::StartupUnavailable => None,
         }
     }
 
@@ -982,12 +1099,16 @@ impl ThreadEnvironments {
             .inspect_selected_capability_roots(&selected_capability_roots);
         status.ready_roots.retain(|root| {
             let CapabilityRootLocation::Environment { environment_id, .. } = &root.location;
-            environments
+            !state
+                .startup_rejections
                 .iter()
-                .find(|environment| &environment.selection.environment_id == environment_id)
-                .is_none_or(|environment| {
-                    matches!(environment.resolution.clone().now_or_never(), Some(Ok(_)))
-                })
+                .any(|(_, selection)| &selection.environment_id == environment_id)
+                && environments
+                    .iter()
+                    .find(|environment| &environment.selection.environment_id == environment_id)
+                    .is_none_or(|environment| {
+                        matches!(environment.resolution.clone().now_or_never(), Some(Ok(_)))
+                    })
         });
         status
     }
@@ -1009,8 +1130,8 @@ impl ThreadEnvironments {
         configuration_ready: Option<PendingConfiguration>,
     ) -> TurnEnvironmentResult {
         let environment_id = &selection.environment_id;
-        if let EnvironmentConfigState::Failed(error) = &selection.config {
-            return Err(Arc::new(ExecServerError::Protocol(error.clone())));
+        if let Some(error) = selection.config.failure_reason() {
+            return Err(Arc::new(ExecServerError::Protocol(error.to_owned())));
         }
 
         // Wait for the shared executor connection.
@@ -1120,9 +1241,8 @@ impl ThreadEnvironments {
 
     fn snapshot_state(state: &Mutex<ThreadEnvironmentsState>) -> TurnEnvironmentSnapshot {
         // Keep the startup results, but not the senders that would keep removed Pending work alive.
-        let environments = state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut environments: Vec<_> = state
             .environments
             .iter()
             .map(|environment| {
@@ -1140,6 +1260,20 @@ impl ThreadEnvironments {
                 })
             })
             .collect();
+        for (position, selection) in &state.startup_rejections {
+            let error = selection
+                .config
+                .failure_reason()
+                .expect("startup rejection");
+            environments.insert(
+                *position,
+                TurnEnvironmentState::Failed {
+                    selection: selection.clone(),
+                    required_skills: Vec::new(),
+                    error: error.to_owned(),
+                },
+            );
+        }
         TurnEnvironmentSnapshot { environments }
     }
 
@@ -1193,9 +1327,14 @@ impl TurnEnvironmentState {
         starting: StartingTurnEnvironment,
         resolved: Option<TurnEnvironmentResult>,
     ) -> Self {
-        let required_skills = starting.attachment.environment.required_skills().to_vec();
-        if let EnvironmentConfigState::Failed(error) = &starting.selection.config {
-            let error = error.clone();
+        let required_skills =
+            if starting.selection.config == EnvironmentConfigState::StartupUnavailable {
+                Vec::new()
+            } else {
+                starting.attachment.environment.required_skills().to_vec()
+            };
+        if let Some(error) = starting.selection.config.failure_reason() {
+            let error = error.to_owned();
             return Self::Failed {
                 required_skills,
                 selection: starting
@@ -1467,6 +1606,11 @@ impl TurnEnvironmentSnapshot {
                         .config_origin
                         .into_input_selection(environment.selection.clone()),
                 ),
+                TurnEnvironmentState::Failed { selection, .. }
+                    if selection.config == EnvironmentConfigState::StartupUnavailable =>
+                {
+                    Some(selection.clone())
+                }
                 TurnEnvironmentState::Failed { .. } => None,
             })
             .map(TurnEnvironmentSelection::into_request)
@@ -1487,8 +1631,8 @@ impl TurnEnvironmentSnapshot {
             .collect()
     }
 
-    /// Retains Starting environments and rejects Failed environments rather than silently
-    /// dropping a selected environment that still constrains the parent's permissions.
+    /// Retains starting environments and startup rejections without dropping their permissions
+    /// constraints. Other failed environments must reconnect before spawning a child.
     pub(crate) fn to_spawn_selections(
         &self,
     ) -> codex_protocol::error::Result<Vec<TurnEnvironmentSelection>> {
@@ -1501,6 +1645,11 @@ impl TurnEnvironmentSnapshot {
                         .config_origin
                         .into_input_selection(environment.selection.clone()),
                 ),
+                TurnEnvironmentState::Failed { selection, .. }
+                    if selection.config == EnvironmentConfigState::StartupUnavailable =>
+                {
+                    Ok(selection.clone())
+                }
                 TurnEnvironmentState::Failed { .. } => Err(codex_protocol::error::CodexErr::Fatal(
                     "cannot inherit a failed environment when spawning an agent; reconnect the environment before retrying".to_string(),
                 )),
@@ -1510,7 +1659,7 @@ impl TurnEnvironmentSnapshot {
 
     pub(crate) fn primary_filesystem(&self) -> Option<Arc<dyn ExecutorFileSystem>> {
         self.primary()
-            .map(|environment| environment.environment.get_filesystem())
+            .map(|environment| environment.environment().get_filesystem())
     }
 
     pub(crate) fn single_local_environment(&self) -> Option<&TurnEnvironment> {
@@ -1543,9 +1692,9 @@ mod connection_tests;
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn failed_environment_cannot_be_inherited_by_spawn_agent() {
-        let snapshot = super::TurnEnvironmentSnapshot {
+    #[tokio::test]
+    async fn failed_environment_cannot_be_inherited_by_spawn_agent() {
+        let mut snapshot = super::TurnEnvironmentSnapshot {
             environments: vec![super::TurnEnvironmentState::Failed {
                 required_skills: Vec::new(),
                 selection: TurnEnvironmentSelection {
@@ -1566,6 +1715,33 @@ mod tests {
                 .to_string()
                 .contains("cannot inherit a failed environment")
         );
+        let super::TurnEnvironmentState::Failed { selection, .. } = &mut snapshot.environments[0]
+        else {
+            panic!("expected unavailable environment");
+        };
+        selection.config = EnvironmentConfigState::StartupUnavailable;
+        let selection = selection.clone();
+        assert_eq!(
+            snapshot.to_spawn_selections().expect("startup rejection"),
+            vec![selection.clone()],
+        );
+        assert_eq!(
+            snapshot.inheritable_requests(),
+            vec![selection.clone().into_request()]
+        );
+        let manager = Arc::new(environment_manager_without_environments());
+        assert!(manager.get_environment(&selection.environment_id).is_none());
+        let environments =
+            resolve_turn_environments(manager, std::slice::from_ref(&selection)).await;
+        environments.update_configured_selections(std::slice::from_ref(&selection));
+        assert_eq!(environments.selections(), vec![selection.clone()]);
+        assert_eq!(
+            environments.configured_snapshot_now().all_selections(),
+            vec![selection.clone()],
+        );
+        let snapshot = environments.snapshot().await;
+        assert_eq!(snapshot.all_selections(), vec![selection]);
+        assert!(snapshot.primary().is_none());
     }
 
     use std::time::Duration;

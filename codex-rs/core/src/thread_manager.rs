@@ -586,6 +586,11 @@ pub struct StartThreadOptions {
     pub disabled_plugin_ids: Option<Vec<String>>,
 }
 
+/// Whether app-server thread/start selected its executors explicitly.
+pub(crate) struct StartupEnvironmentDiscovery {
+    pub(crate) implicit_selection: bool,
+}
+
 /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
 struct InheritedThreadInstructions(Instructions);
 
@@ -613,6 +618,12 @@ impl StartThreadOptions {
             self.session_source.clone().unwrap_or(resumed_source),
             self.thread_source.clone().or(resumed_thread_source),
         )
+    }
+
+    /// Bounds executor discovery for app-server thread/start before workspace startup work.
+    pub fn bound_startup_environment_discovery(&mut self, implicit_selection: bool) {
+        self.thread_extension_init
+            .insert(StartupEnvironmentDiscovery { implicit_selection });
     }
 
     /// Use the spawning thread's applied text in place of the destination's live thread provider.
