@@ -248,6 +248,8 @@
         "agent::api::tests::host_list_canonical_preserves_metadata_and_order",
         "agent::control::residency::tests::pathless_v2_interrupted_watcher_does_not_block_residency_eviction",
         "agent::control::tests::cancelled_spawn_after_input_admission_discards_child",
+        "agent::control::tests::cancelled_v2_send_finishes_reload_registration",
+        "agent::control::tests::ensure_agent_loaded_preserves_evicted_parent_instructions",
         "agent::control::tests::failed_goal_supervisor_waits_for_one_persisted_retry",
         "agent::control::tests::fork_previous_response_id_env_value_parses_truthy_values",
         "agent::control::tests::forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot",
