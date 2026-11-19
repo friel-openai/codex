@@ -107,6 +107,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 history_page_visible: true,
                 history_page_start: None,
                 end_ordinal_exclusive: Some(root_end.end_ordinal_exclusive),
+                jsonl_end_byte_offset: Some(root_end.end_byte_offset),
                 end_byte_offset: Some(root_end.end_byte_offset),
                 byte_boundary_recorded: true,
                 physical_size: Some(fs::metadata(&root_path).unwrap().len()),
@@ -122,6 +123,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 history_page_visible: true,
                 history_page_start: None,
                 end_ordinal_exclusive: Some(middle_end.end_ordinal_exclusive),
+                jsonl_end_byte_offset: Some(middle_end.end_byte_offset),
                 end_byte_offset: Some(middle_end.end_byte_offset),
                 byte_boundary_recorded: true,
                 physical_size: Some(fs::metadata(&middle_path).unwrap().len()),
@@ -137,6 +139,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 history_page_visible: true,
                 history_page_start: None,
                 end_ordinal_exclusive: None,
+                jsonl_end_byte_offset: Some(child_len),
                 end_byte_offset: Some(child_len),
                 byte_boundary_recorded: false,
                 physical_size: Some(child_len),
@@ -369,6 +372,31 @@ async fn successful_ancestor_projection_prevents_a_later_retry() {
     assert!(lineage.retry_exclusion(error).is_none());
 }
 
+#[tokio::test]
+async fn history_repair_rejects_unbound_distinct_path_retry() {
+    let temp = TempDir::new().expect("temp dir");
+    let home = temp.path().canonicalize().expect("canonical home");
+    let store = store_with_state(&home).await;
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let active = write_rollout(&home, root, None, 4);
+    let child_path = write_rollout(&home, child, Some(history_position(&active, root, 3)), 2);
+    let archived = home.join("archived_sessions").join(active.file_name().unwrap());
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&archived, b"different archived bytes").unwrap();
+    let before_active = fs::read(&active).unwrap();
+    let before_archived = fs::read(&archived).unwrap();
+    let lineage = store.resolve_rollout_lineage(child).await.expect("resolve original");
+    lineage.reads.record_failure(&active);
+    let exclusion = lineage.retry_exclusion(crate::ThreadStoreError::Internal { message: "synthetic failure".to_string() }).expect("tracked ancestor");
+    let result = super::super::goal_supervisor_runtime_repair::repair_compatibility_history_before_retry(
+        &store, child, &child_path, &lineage, &[exclusion],
+    ).await;
+    assert!(matches!(result, Err(crate::ThreadStoreError::Conflict { .. })));
+    assert_eq!(fs::read(&active).unwrap(), before_active);
+    assert_eq!(fs::read(&archived).unwrap(), before_archived);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn fork_retry_rejects_same_path_source_replacement() {
@@ -386,6 +414,18 @@ async fn fork_retry_rejects_same_path_source_replacement() {
     fs::rename(&replacement, &source).expect("replace source at the same path");
     let result = store.resolve_rollout_lineage_for_reference_retry(thread_id, None, &[], Some(&original)).await;
     assert!(matches!(result, Err(crate::ThreadStoreError::Conflict { .. })));
+}
+
+#[tokio::test]
+async fn fork_retry_source_stamp_hashes_same_length_rewrites() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("source.jsonl");
+    fs::write(&path, b"first source").unwrap();
+    let before = super::RetrySourceStamp::read(&path).await.unwrap();
+    fs::write(&path, b"other source").unwrap();
+    let after = super::RetrySourceStamp::read(&path).await.unwrap();
+    assert_eq!(before.len, after.len);
+    assert_ne!(before.sha256, after.sha256);
 }
 
 #[tokio::test]
@@ -426,7 +466,7 @@ async fn fallback_rejects_an_existing_unattributed_projection() {
     fs::write(&active, header).unwrap();
     let error = store.prepare_fork(PrepareForkParams { thread_id: child, boundary: ForkBoundary::Latest })
         .await.expect_err("fallback must not resume an unattributed SQLite prefix");
-    assert!(matches!(error, crate::ThreadStoreError::Conflict { message } if message.contains("verified prefix equality")));
+    assert!(matches!(error, crate::ThreadStoreError::Conflict { message } if message.contains("alternate fork lineage") || message.contains("verified prefix equality")));
 }
 
 #[tokio::test]
@@ -719,6 +759,68 @@ async fn indexed_ancestor_must_be_managed_and_owned_by_the_indexed_thread() {
 }
 
 #[tokio::test]
+async fn preserves_history_position_byte_boundary_for_compressed_ancestor() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let parent = ThreadId::default();
+    let child = ThreadId::default();
+    let parent_path = write_rollout(
+        home.path(),
+        parent,
+        /*history_base*/ None,
+        /*next_ordinal*/ 6,
+    );
+    let parent_end = history_position(
+        parent_path.as_path(),
+        parent,
+        /*end_ordinal_exclusive*/ 4,
+    );
+    let compressed_parent = compress_rollout(parent_path.as_path());
+    write_rollout(
+        home.path(),
+        child,
+        Some(parent_end),
+        /*next_ordinal*/ 2,
+    );
+
+    let lineage = store
+        .resolve_rollout_lineage(child)
+        .await
+        .expect("resolve compressed ancestor");
+    let parent_segment = lineage.segments.first().expect("parent segment");
+
+    assert_eq!(parent_segment.rollout_path(), compressed_parent);
+    assert_eq!(parent_segment.end_byte_offset(), None);
+    assert_eq!(
+        parent_segment.jsonl_end_byte_offset(),
+        Some(parent_end.end_byte_offset)
+    );
+}
+
+#[tokio::test]
+async fn unbounded_compressed_segment_has_no_decoded_byte_boundary() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    let rollout_path = write_rollout(
+        home.path(),
+        thread_id,
+        /*history_base*/ None,
+        /*next_ordinal*/ 3,
+    );
+    let compressed_path = compress_rollout(rollout_path.as_path());
+
+    let lineage = store
+        .resolve_rollout_lineage(thread_id)
+        .await
+        .expect("resolve compressed rollout");
+    let segment = lineage.segments.first().expect("root segment");
+
+    assert_eq!(segment.rollout_path(), compressed_path);
+    assert_eq!(segment.jsonl_end_byte_offset(), None);
+}
+
+#[tokio::test]
 async fn nested_reference_filters_compose_oldest_first() {
     let home = TempDir::new().expect("temp dir");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -812,6 +914,7 @@ async fn resolves_lineage_at_explicit_history_position() {
                 history_page_visible: true,
                 history_page_start: None,
                 end_ordinal_exclusive: Some(root_end.end_ordinal_exclusive),
+                jsonl_end_byte_offset: Some(root_end.end_byte_offset),
                 end_byte_offset: Some(root_end.end_byte_offset),
                 byte_boundary_recorded: true,
                 physical_size: Some(fs::metadata(&root_path).unwrap().len()),
@@ -827,6 +930,7 @@ async fn resolves_lineage_at_explicit_history_position() {
                 history_page_visible: true,
                 history_page_start: None,
                 end_ordinal_exclusive: Some(end.end_ordinal_exclusive),
+                jsonl_end_byte_offset: Some(end.end_byte_offset),
                 end_byte_offset: Some(end.end_byte_offset),
                 byte_boundary_recorded: true,
                 physical_size: Some(fs::metadata(&child_path).unwrap().len()),
@@ -994,7 +1098,7 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
         /*reference_ordinal*/ 4,
         /*next_ordinal*/ 6,
     );
-    let rotated = store.resolve_rollout_lineage_from_path(parent, stable_path.clone())
+    let rotated = store.resolve_rollout_lineage_from_path(parent, &stable_path)
         .await.expect("resolve same-thread rotation");
     assert_eq!(rotated.segments.len(), 2);
     assert_eq!(rotated.segments[0].thread_id, parent);
@@ -1077,6 +1181,11 @@ fn expected_segment(
         rollout_id: thread_id,
         segment_id: None,
         end_ordinal_exclusive: end.map(|position| position.end_ordinal_exclusive),
+        jsonl_end_byte_offset: end.map(|position| position.end_byte_offset).or_else(|| {
+            fs::metadata(rollout_path.as_path())
+                .ok()
+                .map(|metadata| metadata.len())
+        }),
         end_byte_offset: end.map(|position| position.end_byte_offset).or_else(|| {
             fs::metadata(rollout_path.as_path())
                 .ok()
@@ -1644,6 +1753,16 @@ fn rollout_end_byte_offset(path: &Path, end_ordinal_exclusive: u64) -> u64 {
         .map(<[u8]>::len)
         .sum::<usize>();
     u64::try_from(end_byte_offset).expect("rollout byte offset fits u64")
+}
+
+fn compress_rollout(path: &Path) -> std::path::PathBuf {
+    let compressed_path = path.with_extension("jsonl.zst");
+    let source = fs::read(path).expect("read rollout for compression");
+    let compressed =
+        zstd::stream::encode_all(source.as_slice(), /*level*/ 0).expect("compress rollout");
+    fs::write(compressed_path.as_path(), compressed).expect("write compressed rollout");
+    fs::remove_file(path).expect("remove plain rollout");
+    compressed_path
 }
 
 fn unchecked_history_position(thread_id: ThreadId, end_ordinal_exclusive: u64) -> HistoryPosition {

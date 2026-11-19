@@ -19,6 +19,7 @@ use tokio::sync::Notify;
 use tokio::sync::OwnedRwLockReadGuard;
 
 use super::LocalThreadStore;
+use super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess;
 use super::live_writer;
 use super::model_context;
 use super::rollout_lineage::RolloutLineage;
@@ -43,6 +44,17 @@ use crate::ThreadStoreResult;
 enum ForkResponseHistory {
     Full,
     ModelContext,
+}
+
+#[derive(Debug)]
+struct ForkHistoryReservation {
+    _lifecycle: OwnedRwLockReadGuard<()>,
+    history_access: GoalSupervisorHistoryAccess,
+}
+
+enum IndexedForkAttempt {
+    Prepared(Box<PreparedFork>),
+    Fallback(ForkHistoryReservation),
 }
 
 #[cfg(test)]
@@ -202,6 +214,10 @@ async fn prepare_with_response_history(
     supplied_context: Option<(Arc<Vec<ResponseItemEnvelope>>, HistoryPosition)>,
     expected_rollout_id: Option<RolloutId>,
 ) -> ThreadStoreResult<PreparedFork> {
+    if let Some((items, _)) = supplied_context.as_ref() {
+        let supplied = items.iter().cloned().map(RolloutItem::ResponseItem).collect::<Vec<_>>();
+        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(&supplied)?;
+    }
     let mut excluded = Vec::<ExcludedAncestor>::new();
     let mut original: Option<RolloutLineage> = None;
     let mut first_error = None;
@@ -242,44 +258,77 @@ async fn prepare_with_response_history_once(
         ref boundary,
     } = params;
     let interrupt_if_open = matches!(&boundary, ForkBoundary::Latest);
-    let mut source_reservation = Some(store.live_writer_locks.reserve_lifecycle(thread_id).await);
     if matches!(boundary, ForkBoundary::Latest) && excluded.is_empty() {
-        let indexed_store = store.clone();
-        let indexed_reservation = source_reservation
-            .take()
+        let source = resolve_fork_source(store, thread_id).await?;
+        let mut history_access =
+            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+                store,
+                thread_id,
+                source.path.as_path(),
+            )
+            .await?;
+        let lifecycle = history_access
+            .take_lifecycle(thread_id)
             .ok_or_else(missing_source_reservation)?;
-        let (prepared, remaining_reservation) = tokio::spawn(async move {
-            let mut reservation = Some(indexed_reservation);
-            let prepared = try_prepare_indexed_latest_fork(
+        let repair_reservation = ForkHistoryReservation {
+            _lifecycle: lifecycle,
+            history_access,
+        };
+        let indexed_store = store.clone();
+        let attempt = tokio::spawn(async move {
+            try_prepare_indexed_latest_fork(
                 &indexed_store,
                 thread_id,
                 response_history,
                 supplied_context,
                 expected_rollout_id,
-                &mut reservation,
+                repair_reservation,
             )
-            .await?;
-            Ok::<_, ThreadStoreError>((prepared, reservation))
+            .await
         })
         .await
         .map_err(|error| ThreadStoreError::Internal {
             message: format!("failed to prepare indexed fork: {error}"),
         })??;
-        if let Some(prepared) = prepared {
-            return Ok(prepared);
+        match attempt {
+            IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
+            IndexedForkAttempt::Fallback(reservation) => {
+                drop(reservation);
+            }
         }
-        source_reservation = remaining_reservation;
     }
-    let source_reservation = source_reservation
-        .take()
+    let source = resolve_fork_source(store, thread_id).await?;
+    let mut history_access = if let Some(original) = original.as_ref() {
+        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_retry(
+            store, thread_id, source.path.as_path(), original, &excluded,
+        ).await?
+    } else {
+        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+            store, thread_id, source.path.as_path(),
+        ).await?
+    };
+    let source_reservation = history_access
+        .take_lifecycle(thread_id)
         .ok_or_else(missing_source_reservation)?;
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();
-    let (lineage, writer_reservation, source_reservation, source_projection_was_missing) =
+    let (lineage, history_access, source_reservation, source_projection_was_missing) =
         tokio::spawn(async move {
-            let (lineage, writer_reservation, source_projection_was_missing) = lineage_store
-                .resolve_rollout_lineage_for_reference_retry(thread_id, expected_rollout_id, &excluded, original.as_ref())
+            let writer_reservation =
+                history_access
+                    .writer_reservation()
+                    .ok_or_else(|| ThreadStoreError::Internal {
+                        message: "history repair did not retain fork writer ownership".to_string(),
+                    })?;
+            let (lineage, source_projection_was_missing) = lineage_store
+                .resolve_rollout_lineage_for_reference_reserved(
+                    thread_id,
+                    expected_rollout_id,
+                    writer_reservation,
+                    &excluded,
+                    original.as_ref(),
+                )
                 .await?;
             #[cfg(test)]
             let pause = {
@@ -295,7 +344,7 @@ async fn prepare_with_response_history_once(
             }
             Ok::<_, ThreadStoreError>((
                 lineage,
-                writer_reservation,
+                history_access,
                 source_reservation,
                 source_projection_was_missing,
             ))
@@ -305,6 +354,11 @@ async fn prepare_with_response_history_once(
             message: format!("failed to resolve fork lineage: {err}"),
         })??;
     *observed.lock().expect("fork retry observer") = Some(lineage.clone());
+    if lineage.has_exclusions() {
+        return Err(ThreadStoreError::Conflict {
+            message: "history repair cannot bind an alternate fork lineage to its selected graph".to_string(),
+        });
+    }
     let source_segment = lineage
         .segments()
         .last()
@@ -427,7 +481,7 @@ async fn prepare_with_response_history_once(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -440,7 +494,7 @@ async fn prepare_with_response_history_once(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         })
     } else {
@@ -465,7 +519,7 @@ async fn prepare_with_response_history_once(
     let prefix_rollout_path = prefix_segment.rollout_path.clone();
     let end_byte_offset =
         prefix_segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
@@ -514,7 +568,7 @@ async fn prepare_with_response_history_once(
     };
     if has_fallback && let Some(copied_history) = copied_history.as_ref() {
         // The copied child does not depend on a reference that stabilization might re-resolve.
-        drop(writer_reservation);
+        drop(history_access);
         let mut prepared = PreparedFork::new_copied(
             thread_id, history_base, model_context, latest_model_context,
             Arc::clone(copied_history), Some(prefix_end.end_ordinal_exclusive),
@@ -526,25 +580,26 @@ async fn prepare_with_response_history_once(
     // Keep writer reservations through publication even if the caller is cancelled.
     // All fallible history reads precede publication so a retry cannot publish twice.
     let publication_store = store.clone();
-    let (frozen_segment, writer_reservation) = tokio::spawn(async move {
+    let (frozen_segment, history_access) = tokio::spawn(async move {
+        let writer_reservation = history_access.writer_reservation().ok_or_else(|| ThreadStoreError::Internal {
+            message: "history repair did not retain fork writer ownership".to_string(),
+        })?;
         let frozen_segment = if indexed_root_latest {
             super::segment::freeze_thread_segment_reserved(
                 &publication_store, thread_id, FreezeRolloutSegmentParams::snapshot(),
-                expected_rollout_id, &writer_reservation,
+                expected_rollout_id, writer_reservation,
             ).await?
         } else {
             super::segment::freeze_paginated_prefix_reserved(
                 &publication_store, thread_id, source_rollout_path.as_path(), prefix_thread_id,
                 prefix_rollout_id, prefix_rollout_path.as_path(), prefix_end.end_ordinal_exclusive,
-                end_byte_offset, has_fallback, &writer_reservation,
+                end_byte_offset, has_fallback, writer_reservation,
             ).await?
         };
-        Ok::<_, ThreadStoreError>((frozen_segment, writer_reservation))
+        Ok::<_, ThreadStoreError>((frozen_segment, history_access))
     }).await.map_err(|error| ThreadStoreError::Internal {
         message: format!("failed to publish fork segment: {error}"),
     })??;
-    drop(writer_reservation);
-
     let mut prepared = PreparedFork::new(
         thread_id,
         history_base,
@@ -553,7 +608,14 @@ async fn prepare_with_response_history_once(
         latest_model_context,
         response_history,
         interrupt_if_open,
-        source_reservation,
+        {
+            // Once the immutable prefix is durable, later child persistence no longer consumes
+            // the mutable source. Retain only the lifecycle lease that blocks source deletion;
+            // keeping repair maintenance and writer ownership here would block valid source
+            // appends and unrelated fork preparation for the lifetime of PreparedFork.
+            drop(history_access);
+            crate::ThreadLifecycleReservation::new(source_reservation)
+        },
     );
     let crate::PreparedForkHistory::FrozenRollout {
         copied_history: prepared_copy,
@@ -564,6 +626,33 @@ async fn prepare_with_response_history_once(
     *prepared_turns = projected_response_turns;
     prepared.preview_before_compaction = preview_before_compaction;
     Ok(prepared)
+}
+
+/// Resolves a source that can be safely referenced by a child rollout.
+///
+/// Deferred live threads have no file until fork preparation explicitly persists them. Existing
+/// explicit-path APIs can read external rollouts, but a child reference must remain confined to
+/// the store's `CODEX_HOME`.
+async fn resolve_fork_source(
+    store: &LocalThreadStore,
+    thread_id: codex_protocol::ThreadId,
+) -> ThreadStoreResult<super::thread_rollout_resolver::ResolvedThreadRollout> {
+    let mut source =
+        super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+            .await?;
+    if source.is_none() {
+        live_writer::persist_thread(store, thread_id).await?;
+        source =
+            super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+                .await?;
+    }
+    let mut source = source.ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    source.path = super::helpers::scoped_rollout_path(
+        store.config.codex_home.clone(),
+        source.path.as_path(),
+        "Codex home",
+    )?;
+    Ok(source)
 }
 
 /// Confirms that a completely validated lineage can reuse its source-owned indexed projection.
@@ -682,15 +771,14 @@ async fn try_prepare_indexed_latest_fork(
     response_history: ForkResponseHistory,
     supplied_context: Option<(Arc<Vec<ResponseItemEnvelope>>, HistoryPosition)>,
     expected_rollout_id: Option<RolloutId>,
-    source_reservation: &mut Option<OwnedRwLockReadGuard<()>>,
-) -> ThreadStoreResult<Option<PreparedFork>> {
-    let writer_reservation = store.reserve_rollout_writers(&[thread_id]).await?;
+    repair_reservation: ForkHistoryReservation,
+) -> ThreadStoreResult<IndexedForkAttempt> {
     if store.state_db.is_none() {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     let Some(resolved) = super::thread_rollout_resolver::resolve_current(store, thread_id).await?
     else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     if expected_rollout_id.is_some_and(|expected| expected != resolved.rollout_id) {
         return Err(ThreadStoreError::InvalidRequest {
@@ -703,14 +791,14 @@ async fn try_prepare_indexed_latest_fork(
         .await?
         .is_none()
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     match live_writer::persist_thread_reserved(store, thread_id).await {
         Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
         Err(error) => return Err(error),
     }
     let Some(state_db) = store.state_db().await else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     let Some(metadata) =
         state_db
@@ -720,7 +808,7 @@ async fn try_prepare_indexed_latest_fork(
                 message: format!("failed to read indexed fork source metadata: {error}"),
             })?
     else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     if metadata.archived_at.is_some()
         || metadata
@@ -729,21 +817,21 @@ async fn try_prepare_indexed_latest_fork(
             .and_then(|extension| extension.to_str())
             != Some("jsonl")
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
 
     let Some(position) = store.projected_history_position(thread_id).await? else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     let Ok(file_metadata) = tokio::fs::metadata(metadata.rollout_path.as_path()).await else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     if file_metadata.len() != position.end_byte_offset
         || supplied_context
             .as_ref()
             .is_some_and(|(_, expected)| expected != &position)
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     if super::helpers::scoped_rollout_path(
         store.config.codex_home.clone(),
@@ -752,16 +840,16 @@ async fn try_prepare_indexed_latest_fork(
     )
     .is_err()
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
 
     let Ok((active_lines, loaded_thread_id, parse_errors)) =
         codex_rollout::RolloutRecorder::load_rollout_lines(metadata.rollout_path.as_path()).await
     else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     if loaded_thread_id != Some(thread_id) || parse_errors != 0 {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     if active_lines
         .last()
@@ -769,11 +857,11 @@ async fn try_prepare_indexed_latest_fork(
         .and_then(|ordinal| ordinal.checked_add(1))
         != Some(position.end_ordinal_exclusive)
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     let Some(RolloutItem::SessionMeta(session_meta)) = active_lines.first().map(|line| &line.item)
     else {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     };
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
@@ -781,7 +869,7 @@ async fn try_prepare_indexed_latest_fork(
         || session_meta.meta.history_base.is_some()
         || session_meta.meta.subagent_history_start_ordinal.is_some()
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
 
     let references = active_lines
@@ -805,13 +893,13 @@ async fn try_prepare_indexed_latest_fork(
                 )
         })
     {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
     if let Some((_, reference)) = references.first() {
         if codex_rollout::existing_rollout_path(reference.rollout_path.as_path()).await
             != Some(reference.rollout_path.clone())
         {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
         if super::helpers::scoped_rollout_path(
             store.config.codex_home.clone(),
@@ -820,12 +908,12 @@ async fn try_prepare_indexed_latest_fork(
         )
         .is_err()
         {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
         let Ok(reference_meta) =
             codex_rollout::read_session_meta_line(reference.rollout_path.as_path()).await
         else {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         };
         if reference_meta.meta.id != thread_id
             || reference_meta.meta.segment_id != reference.segment_id
@@ -834,12 +922,12 @@ async fn try_prepare_indexed_latest_fork(
             || reference_meta.meta.history_base.is_some()
             || reference_meta.meta.subagent_history_start_ordinal.is_some()
         {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
     }
 
     if !store.has_history_projection(thread_id).await? {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
 
     let (model_context, shared_model_response_items) = if let Some((items, _)) = supplied_context {
@@ -852,7 +940,7 @@ async fn try_prepare_indexed_latest_fork(
                     ))
             )
         }) {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
         (
             authoritative_model_metadata(session_meta, active_lines.as_slice()),
@@ -867,7 +955,7 @@ async fn try_prepare_indexed_latest_fork(
         )
         .await?
         else {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         };
         (Arc::new(items), None)
     };
@@ -877,7 +965,7 @@ async fn try_prepare_indexed_latest_fork(
             .last()
             .is_some_and(|turn| matches!(turn.status, StoredTurnStatus::InProgress))
         {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
         Some(Arc::new(turns))
     } else {
@@ -898,26 +986,35 @@ async fn try_prepare_indexed_latest_fork(
             .first()
             .is_some_and(|turn| matches!(turn.status, StoredTurnStatus::InProgress))
         {
-            return Ok(None);
+            return Ok(IndexedForkAttempt::Fallback(repair_reservation));
         }
         None
     };
 
+    let writer_reservation = repair_reservation
+        .history_access
+        .writer_reservation()
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: "history repair did not retain indexed-fork writer ownership".to_string(),
+        })?;
     let frozen_segment = super::segment::freeze_thread_segment_reserved(
         store,
         thread_id,
         FreezeRolloutSegmentParams::snapshot(),
         expected_rollout_id,
-        &writer_reservation,
+        writer_reservation,
     )
     .await?;
     if frozen_segment.next_rollout_ordinal != Some(position.end_ordinal_exclusive) {
-        return Ok(None);
+        return Ok(IndexedForkAttempt::Fallback(repair_reservation));
     }
-    drop(writer_reservation);
-    let reservation = source_reservation
-        .take()
-        .ok_or_else(missing_source_reservation)?;
+    let ForkHistoryReservation {
+        _lifecycle: source_reservation,
+        history_access,
+    } = repair_reservation;
+    // The durable immutable snapshot no longer depends on the mutable source. Keep only the
+    // lifecycle lease required to prevent deletion until the child reference is persisted.
+    drop(history_access);
     let mut prepared = PreparedFork::new(
         thread_id,
         Some(position),
@@ -926,7 +1023,7 @@ async fn try_prepare_indexed_latest_fork(
         Arc::clone(&model_context),
         Arc::clone(&model_context),
         /*interrupt_if_open*/ true,
-        reservation,
+        crate::ThreadLifecycleReservation::new(source_reservation),
     );
     let crate::PreparedForkHistory::FrozenRollout {
         projected_response_turns: prepared_turns,
@@ -935,7 +1032,7 @@ async fn try_prepare_indexed_latest_fork(
     } = &mut prepared.history else { unreachable!("local frozen fork") };
     *prepared_turns = projected_response_turns;
     *prepared_items = shared_model_response_items;
-    Ok(Some(prepared))
+    Ok(IndexedForkAttempt::Prepared(Box::new(prepared)))
 }
 
 fn canonical_same_thread_reference(
@@ -1143,7 +1240,7 @@ pub(super) async fn history_base_at_boundary(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -1156,7 +1253,7 @@ pub(super) async fn history_base_at_boundary(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         }))
     } else {

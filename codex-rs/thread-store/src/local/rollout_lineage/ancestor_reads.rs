@@ -93,7 +93,7 @@ impl AncestorReads {
     fn with_signals(segments: &[RolloutLineageSegment], references: HashMap<PathBuf, RolloutReferenceItem>, signals: Arc<RetrySignals>) -> Self {
         let entries = segments.iter().filter_map(|segment| {
             let reference = references.get(&segment.rollout_path)?.clone();
-            let cutoff = segment.byte_boundary_recorded.then_some(segment.end_ordinal_exclusive.zip(segment.end_byte_offset)).flatten().map(|(end_ordinal_exclusive, end_byte_offset)| HistoryPosition {
+            let cutoff = segment.byte_boundary_recorded.then_some(segment.end_ordinal_exclusive.zip(segment.jsonl_end_byte_offset)).flatten().map(|(end_ordinal_exclusive, end_byte_offset)| HistoryPosition {
                 thread_id: segment.rollout_id, end_ordinal_exclusive, end_byte_offset,
             });
             Some((segment.rollout_path.clone(), TrackedAncestor { reference, cutoff }))
@@ -183,6 +183,7 @@ impl RolloutLineage {
                     && original.history_page_start == current.history_page_start
                     && original.end_ordinal_exclusive == current.end_ordinal_exclusive
                     && original.byte_boundary_recorded == current.byte_boundary_recorded
+                    && (!original.byte_boundary_recorded || original.jsonl_end_byte_offset == current.jsonl_end_byte_offset)
                     && (!(original.byte_boundary_recorded || original.end_ordinal_exclusive.is_none()) || original.end_byte_offset == current.end_byte_offset)
                     && (original.end_ordinal_exclusive.is_some() || original.physical_size == current.physical_size)
                     && original.filter_texts == current.filter_texts
@@ -218,6 +219,7 @@ impl RolloutLineage {
                     || original.history_page_start != current.history_page_start
                     || original.end_ordinal_exclusive != current.end_ordinal_exclusive
                     || original.byte_boundary_recorded != current.byte_boundary_recorded
+                    || (original.byte_boundary_recorded && original.jsonl_end_byte_offset != current.jsonl_end_byte_offset)
                     || ((original.byte_boundary_recorded || original.end_ordinal_exclusive.is_none()) && original.end_byte_offset != current.end_byte_offset)
                     || (original.end_ordinal_exclusive.is_none() && original.physical_size != current.physical_size)
                     || original.filter_texts != current.filter_texts
