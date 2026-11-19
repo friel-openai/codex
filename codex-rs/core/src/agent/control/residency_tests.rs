@@ -221,7 +221,7 @@ async fn assert_residency_slot_unloads_oldest_idle_agent(multi_agent_version: Mu
     // Accepted mail holds this guard until dispatch, even though its sender has finished.
     let delivery_guard = control
         .runtime
-        .pin_v2_residency(&state, &first.thread)
+        .pin_v2_residency(&first.thread)
         .await
         .expect("pin registered worker")
         .expect("both V1 and V2 workers must be pinned");

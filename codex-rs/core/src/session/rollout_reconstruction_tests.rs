@@ -6379,6 +6379,7 @@ fn independent_review_input_preserves_original_envelopes(
         TruncationPolicy::Tokens(1_000),
         source_is_non_root_agent,
         GuardianContextMode::Independent,
+        codex_guardian_context::ContextBudgeting::Fixed,
     )
     .expect("independent replay always has its own transcript");
     assert_eq!(

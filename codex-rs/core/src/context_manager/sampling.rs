@@ -4,7 +4,7 @@
 use codex_history::ResponseItemEnvelope;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct SamplingProgress {
     pub(super) last_sequence: u64,
     sampled_through: u64,
@@ -36,7 +36,7 @@ impl SamplingProgress {
         if items.iter().all(|item| item.metadata.as_ref().and_then(|m| m.history_sequence).is_some()) {
             Self::from_assigned_items(items)
         } else {
-            Self::restore(Arc::make_mut(items))
+            Self::restore(Arc::make_mut(items).as_mut_slice())
         }
     }
 

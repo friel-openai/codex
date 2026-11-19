@@ -524,7 +524,7 @@ impl DefaultSecondaryAdmission {
         !attempt.revoked.is_cancelled()
             && state.environments.first().is_some_and(|primary| {
                 primary.selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
-                    && !primary.environment().is_remote()
+                    && !primary.attachment.environment.is_remote()
                     && primary.config_origin == EnvironmentConfigOrigin::Thread
             })
             && state

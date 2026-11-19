@@ -1153,7 +1153,7 @@ impl TurnContext {
                 #[allow(deprecated)]
                 &self.cwd,
             );
-        let file_system_sandbox_policy = self.file_system_sandbox_policy();
+        let file_system_sandbox_policy = self.permission_profile().file_system_sandbox_policy();
         // `permission_profile` below is authoritative and serializes the same
         // runtime entries, so this compatibility field may omit an unrenderable policy.
         (file_system_sandbox_policy != legacy_file_system_sandbox_policy)

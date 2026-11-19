@@ -669,9 +669,10 @@ pub(super) fn replay_review_input(
     policy: TruncationPolicy,
     source_is_non_root_agent: bool,
     guardian_context_mode: GuardianContextMode,
+    budgeting: codex_guardian_context::ContextBudgeting,
 ) -> Option<TranscriptHistory> {
     let independent = guardian_context_mode == GuardianContextMode::Independent;
-    let mut history = independent.then(TranscriptHistory::default);
+    let mut history = independent.then(|| TranscriptHistory::new(0, budgeting));
     for record in records {
         match record {
             ReviewInputRecord::Baseline {
@@ -679,7 +680,7 @@ pub(super) fn replay_review_input(
                 root_retains_legacy_transcript,
                 history: baseline,
             } => {
-                let mut baseline_history = TranscriptHistory::new(0);
+                let mut baseline_history = TranscriptHistory::new(0, budgeting);
                 baseline_history.reset(baseline.0.iter());
                 let applies = independent
                     || match applicability {
@@ -832,6 +833,7 @@ impl ContextManager {
                         GuardianContextMode::from_history(
                             history.conversation_history_snapshot().as_ref(),
                         ),
+                        history.review_budgeting(),
                     );
                     history.restore_replayed_guardian_history(review_history);
                 }

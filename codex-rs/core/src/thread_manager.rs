@@ -22,6 +22,8 @@ use crate::agents_md_manager::SessionInstructions;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
+#[cfg(test)]
+use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_requests;
@@ -1000,6 +1002,7 @@ pub use model_catalog::StartupModels;
 pub use model_catalog::build_models_manager;
 pub use model_catalog::build_startup_models;
 
+#[cfg(test)]
 pub fn thread_store_from_config(
     config: &Config,
     state_db: Option<StateDbHandle>,
@@ -1019,20 +1022,11 @@ pub fn thread_store_from_config(
                     .with_thread_data_cleanup(move |thread_ids| {
                         let sqlite = sqlite.clone();
                         Box::pin(async move {
-                            let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-                            LocalAgentMessageBoard::delete_boards(
+                            codex_agent_message_board_host::delete_agent_message_boards(
                                 &sqlite,
-                                &local_board_options(),
-                                &boards,
+                                &thread_ids,
                             )
                             .await
-                            .map_err(|err| {
-                                ThreadStoreError::Internal {
-                                    message: format!(
-                                        "failed to delete agent message boards: {err}"
-                                    ),
-                                }
-                            })
                         })
                     }),
             );
@@ -2795,8 +2789,9 @@ impl ThreadManager {
         }
         let settings_history = settings_history_override
             .as_deref()
+            .map(Vec::as_slice)
             .or(model_history_override.as_deref())
-            .unwrap_or(response_history.as_ref());
+            .unwrap_or(response_history.as_slice());
         let implicit_saved_selection = settings_history
             .iter()
             .rev()
@@ -4332,15 +4327,8 @@ impl ThreadManagerState {
             && !session_source.is_non_root_agent()
             && let AgentControlInit::Local(control) = &agent_control
         {
-            control
-                .restore_v2_agent_metadata(&config, resumed.conversation_id)
-                .await;
+            control.register_session_root(resumed.conversation_id, /*current_parent_thread_id*/ None);
         }
-        // Host controllers can already be shared with live threads. Publish root settings
-        // only after registration succeeds, so a failed start cannot update their tree.
-        let initial_host_config = (self.agent_control_factory.is_some()
-            && parent_thread_id.is_none())
-        .then(|| AgentConfigUpdate::ServiceTier(config.service_tier.clone()));
         let mut instructions = match inherited_instructions {
             Some(instructions) => instructions,
             None if isolation == SessionIsolation::Isolated => SessionInstructions::default(),
@@ -4692,12 +4680,6 @@ impl ThreadManagerState {
             };
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
-                if let Some(update) = initial_host_config {
-                    session
-                        .services
-                        .agent_control
-                        .propagate_config_update(update);
-                }
                 // A later reload must not replace the target's intent with its sender's config.
                 self.thread_ephemeral_intent
                     .lock()
