@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use super::COORDINATION_LOCK_FILE;
 use super::WRITER_LOCK_DIR;
 use super::WriterLockCoordinator;
+use super::WriterLockState;
 use pretty_assertions::assert_eq;
 use std::io::ErrorKind;
 
@@ -20,7 +21,7 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
     let thread_id = ThreadId::default();
     let other_thread_id = ThreadId::default();
 
-    let owner = primary.acquire(thread_id).expect("acquire writer lock");
+    let owner = Arc::new(primary.acquire(thread_id).expect("acquire writer lock"));
     let lock_path = home
         .path()
         .join(WRITER_LOCK_DIR)
@@ -71,6 +72,112 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
         .map(|entry| entry.expect("lock directory entry").file_name())
         .collect::<Vec<_>>();
     assert_eq!(entries, vec![COORDINATION_LOCK_FILE]);
+}
+
+#[test]
+fn imported_reader_outlives_source_writer() {
+    let home = TempDir::new().expect("temp dir");
+    let primary = Arc::new(WriterLockCoordinator::new(home.path()));
+    let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
+    let thread_id = ThreadId::default();
+    let owner = primary.acquire(thread_id).expect("writer");
+    let lock_path = home
+        .path()
+        .join(WRITER_LOCK_DIR)
+        .join(format!("{thread_id}.lock"));
+    owner.share_for_fork().expect("export");
+    let reader = secondary.acquire_fork_reader(thread_id).expect("import");
+    assert!(
+        primary
+            .try_acquire_for_publication(thread_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(owner);
+    assert!(lock_path.exists());
+    assert_eq!(
+        primary
+            .acquire(thread_id)
+            .expect_err("reader excludes writer")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    drop(reader);
+    assert!(!lock_path.exists());
+    drop(primary.acquire(thread_id).expect("writer after reader"));
+}
+
+#[test]
+fn fork_reader_release_restores_exclusive_deletion() {
+    let home = TempDir::new().expect("temp dir");
+    let primary = Arc::new(WriterLockCoordinator::new(home.path()));
+    let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
+    let thread_id = ThreadId::default();
+    let owner = Arc::new(primary.acquire(thread_id).expect("writer"));
+    assert_eq!(
+        secondary
+            .acquire_fork_reader(thread_id)
+            .expect_err("writer is exclusive")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    let recorder_owner = Arc::clone(&owner);
+    owner.share_for_fork().expect("export");
+    let reader = secondary.acquire_fork_reader(thread_id).expect("import");
+    assert_eq!(
+        recorder_owner
+            .require_exclusive()
+            .expect_err("reader is active")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    assert!(owner.is_reserved());
+    drop(reader);
+    recorder_owner
+        .require_exclusive()
+        .expect("delete after import finishes");
+    assert_eq!(
+        secondary
+            .acquire_fork_reader(thread_id)
+            .expect_err("writer is exclusive again")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn final_guard_drop_unlocks_inherited_descriptors() {
+    for shared in [false, true] {
+        let home = TempDir::new().expect("temp dir");
+        let primary = Arc::new(WriterLockCoordinator::new(home.path()));
+        let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
+        let thread_id = ThreadId::default();
+        let owner = Arc::new(primary.acquire(thread_id).expect("writer"));
+        if shared {
+            owner.share_for_fork().expect("export");
+        }
+        let inherited = match &*owner.state.lock().expect("writer state") {
+            WriterLockState::Exclusive(file) | WriterLockState::Shared(file) => {
+                file.try_clone().expect("inherited descriptor")
+            }
+            WriterLockState::Unreserved => panic!("writer must own a reservation"),
+        };
+        let recorder_owner = Arc::clone(&owner);
+        drop(owner);
+        assert_eq!(
+            secondary
+                .acquire(thread_id)
+                .expect_err("recorder still owns writer")
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        drop(recorder_owner);
+        let next = secondary
+            .acquire(thread_id)
+            .expect("released despite inherited descriptor");
+        drop(inherited);
+        drop(next);
+    }
 }
 
 #[test]
