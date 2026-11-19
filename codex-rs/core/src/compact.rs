@@ -25,7 +25,8 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
-use crate::state::AutoCompactWindowIds;
+use crate::state::PreparedAutoCompactWindowAdvance;
+use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -104,11 +105,11 @@ pub struct AutoCompactionDisabled;
 pub(crate) struct CompactedHistoryMetadata {
     pub(crate) input_goal_ids: HashSet<ResponseItemId>,
     pub(crate) message: String,
-    pub(crate) window_number: u64,
-    pub(crate) window_ids: AutoCompactWindowIds,
     pub(crate) compaction_response_id: Option<String>,
     pub(crate) compaction_model_hash: Option<String>,
     pub(crate) reviewer_compaction_hash: Option<String>,
+    /// The nonmutating window transition used while rendering the replacement history.
+    pub(crate) prepared_window_advance: PreparedAutoCompactWindowAdvance,
 }
 
 /// Renders the window prefix and ordinary context with their comparison baseline.
@@ -117,15 +118,20 @@ pub(crate) async fn build_compaction_replacement_history(
     step_context: &StepContext,
     world_state: &WorldState,
     compacted_history: Vec<ResponseItemEnvelope>,
-) -> (Vec<ResponseItemEnvelope>, WorldStateSnapshot) {
-    let (updates, snapshot) = sess
-        .build_initial_context_with_world_state(step_context, world_state)
+) -> (
+    Vec<ResponseItemEnvelope>,
+    WorldStateSnapshot,
+    PreparedAutoCompactWindowAdvance,
+) {
+    let (updates, snapshot, prepared_window_advance) = sess
+        .build_initial_context_with_new_auto_compact_window(step_context, world_state)
         .await;
     let (prefix, context) = split_prefix_updates(updates);
     let context = merge_world_state_updates(context);
     (
         assemble_compaction_history(compacted_history, prefix, context),
         snapshot,
+        prepared_window_advance,
     )
 }
 
@@ -473,7 +479,11 @@ async fn run_compact_task_inner_impl(
         let summary = new_history
             .pop()
             .ok_or_else(|| CodexErr::Fatal("local compaction summary is missing".to_string()))?;
-        for envelope in history.annotated_items().iter().filter(|envelope| is_retained_pending_mail(envelope, first)) {
+        for envelope in history
+            .annotated_items()
+            .iter()
+            .filter(|envelope| is_retained_pending_mail(envelope, first))
+        {
             if !new_history.contains(envelope) {
                 new_history.push(envelope.clone());
             }
@@ -490,22 +500,32 @@ async fn run_compact_task_inner_impl(
             &history.file_audio_durations,
         );
         if let Some(agent_path) = agent_path.as_ref() {
-            retain_subagent_assignment_with_pending_mail(history.annotated_items(), &mut new_history, agent_path, first);
+            retain_subagent_assignment_with_pending_mail(
+                history.annotated_items(),
+                &mut new_history,
+                agent_path,
+                first,
+            );
         }
         new_history =
             crate::compact_pending_input::insert_summary(new_history, summary, pending_sequence);
     } else if let Some(agent_path) = agent_path.as_ref() {
-        retain_subagent_assignment_and_recent_messages(history.annotated_items(), &mut new_history, agent_path);
+        retain_subagent_assignment_and_recent_messages(
+            history.annotated_items(),
+            &mut new_history,
+            agent_path,
+        );
     }
-    let rendered = world_state.render_full_with_host_roster().await;
-    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
-    let (updates, world_state_baseline) = sess
-        .assemble_initial_context(&replacement_step_context, rendered)
+    let (new_history, world_state_baseline, prepared_window_advance) =
+        build_compaction_replacement_history(
+            sess.as_ref(),
+            &replacement_step_context,
+            &world_state,
+            new_history,
+        )
         .await;
-    let (prefix, context) = split_prefix_updates(updates);
-    let new_history =
-        assemble_compaction_history(new_history, prefix, merge_world_state_updates(context));
     sess.replace_compacted_history(
+        &replacement_step_context.turn,
         new_history,
         replacement_step_context.to_turn_context_item(),
         world_state_baseline,
@@ -513,16 +533,13 @@ async fn run_compact_task_inner_impl(
         CompactedHistoryMetadata {
             input_goal_ids,
             message: summary_text,
-            window_number,
-            window_ids,
             compaction_response_id: Some(compaction_response.response_id),
             compaction_model_hash: turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash: None,
+            prepared_window_advance,
         },
     )
     .await?;
-    sess.recompute_token_usage(&replacement_step_context.turn)
-        .await;
 
     if reporting.defers_lifecycle() {
         sess.emit_turn_item_started(&turn_context, &compaction_item)
@@ -751,14 +768,23 @@ fn retain_subagent_assignment_with_pending_mail(
     agent_path: &AgentPath,
     pending_sequence: u64,
 ) {
-    let retained_pending = compacted_history.iter()
+    let retained_pending = compacted_history
+        .iter()
         .filter(|envelope| is_retained_pending_mail(envelope, pending_sequence))
-        .cloned().collect::<Vec<_>>();
+        .cloned()
+        .collect::<Vec<_>>();
     retain_subagent_assignment_and_recent_messages(previous_history, compacted_history, agent_path);
     for envelope in retained_pending {
-        if !compacted_history.contains(&envelope) { compacted_history.push(envelope); }
+        if !compacted_history.contains(&envelope) {
+            compacted_history.push(envelope);
+        }
     }
-    compacted_history.sort_by_key(|envelope| envelope.metadata.as_ref().and_then(|metadata| metadata.history_sequence));
+    compacted_history.sort_by_key(|envelope| {
+        envelope
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.history_sequence)
+    });
 }
 
 pub(crate) fn is_compaction_filtered_history_item(item: &ResponseItem) -> bool {
