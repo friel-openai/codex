@@ -390,7 +390,9 @@ impl LocalAgentControl {
                             continue;
                         }
                         EnvironmentConfigState::Ready(config) => config,
-                        EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => {
+                        EnvironmentConfigState::Pending
+                        | EnvironmentConfigState::Failed(_)
+                        | EnvironmentConfigState::StartupUnavailable => {
                             return Err(invalid_environment("configuration is not ready"));
                         }
                     };
