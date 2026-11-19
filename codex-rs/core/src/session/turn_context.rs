@@ -414,6 +414,7 @@ pub struct TurnContext {
     // TODO(anp): Reconcile this parallel turn snapshot with TurnEnvironment::sandbox_context
     // so owner-provided environment settings govern the remaining sandbox decisions.
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
+    /// Remote model presets rendered in upstream-owned tool contracts.
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
@@ -894,7 +895,7 @@ impl TurnContext {
         };
         config.model_reasoning_effort = reasoning_effort.clone();
 
-        let available_models = models_manager
+        let _ = models_manager
             .list_models(
                 RefreshStrategy::OnlineIfUncached,
                 config.http_client_factory(),
@@ -914,6 +915,9 @@ impl TurnContext {
         ));
         config.service_tier = step_settings.service_tier.clone();
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
+        let available_models = models_manager
+            .try_list_upstream_models()
+            .unwrap_or_default();
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -1295,7 +1299,9 @@ impl Session {
         let model_info = &step_settings.model_info;
         let session_telemetry_for_context = step_settings.telemetry(session_telemetry);
         let session_source = session_configuration.session_source.clone();
-        let available_models = models_manager.try_list_models().unwrap_or_default();
+        let available_models = models_manager
+            .try_list_upstream_models()
+            .unwrap_or_default();
 
         let mut per_turn_config = per_turn_config;
         let configured_token_budget = per_turn_config.token_budget.clone();
