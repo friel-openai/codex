@@ -20,6 +20,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -34,6 +35,79 @@ use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;
+
+#[tokio::test]
+async fn unresolved_reference_stops_capture_without_advancing_cursor() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let owner = ThreadId::new();
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: dir.path().to_path_buf(),
+            sqlite: SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into()?),
+            default_model_provider_id: "test-provider".into(),
+        },
+        /*state_db*/ None,
+    );
+    store
+        .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
+            session_id: owner.into(),
+            thread_id: owner,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            originator: "test-originator".into(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Paginated,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
+            runtime_workspace_roots: None,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(dir.path().to_path_buf()),
+                model_provider: "test-provider".into(),
+                memory_mode: ThreadMemoryMode::Disabled,
+            },
+        })
+        .await?;
+    store
+        .persist_thread(owner, PersistContext::Standard)
+        .await?;
+    store.flush_thread(owner).await?;
+    let cursor = EvidenceCursor::from_now(&store, owner).await?;
+    let before = cursor.clone();
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: owner,
+            items: vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+                rollout_path: "old-rollout.jsonl".into(),
+                thread_id: None,
+                rollout_id: None,
+                rollout_timestamp: None,
+                segment_id: None,
+                max_depth: 1,
+                nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
+            })],
+        })
+        .await?;
+    store.flush_thread(owner).await?;
+    let error = match cursor.capture(&store).await {
+        Ok(_) => panic!("unresolved reference must stop evidence capture"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("evidence history was replaced"));
+    assert_eq!(cursor, before);
+    store.shutdown_thread(owner).await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn captures_originals_without_generated_context_or_later_appends() -> anyhow::Result<()> {

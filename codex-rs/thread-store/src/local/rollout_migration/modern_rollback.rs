@@ -324,7 +324,7 @@ impl RetainedReplay {
                 || thread_owned_fallback
                 || root_may_retain_legacy
             {
-                let mut history = TranscriptHistory::new(0);
+                let mut history = TranscriptHistory::new(0, codex_guardian_context::ContextBudgeting::Fixed);
                 if let Some(checkpoint) = &compacted.guardian_history {
                     history.reset(checkpoint.0.iter());
                 } else {
@@ -362,7 +362,7 @@ impl RetainedReplay {
             }
         }
         if retained.review_inputs.is_none() {
-            let mut history = TranscriptHistory::new(0);
+            let mut history = TranscriptHistory::new(0, codex_guardian_context::ContextBudgeting::Fixed);
             history.reset(
                 items
                     .iter()
