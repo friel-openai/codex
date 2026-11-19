@@ -1249,6 +1249,9 @@
       "tests": [
         "app::standalone_side::tests::standalone_side_starts_real_fork_and_returns_blank_replay",
         "app::standalone_side::tests::standalone_side_starts_real_legacy_fork_and_returns_blank_replay",
+        "app::tests::key_chords::sidebar_chooser_preserves_the_parent_draft_and_starts_a_side_chat",
+        "app::tests::side_chat_policy_tests::temporary_side_chat_sends_policy_on_its_first_request",
+        "app::tests::side_fork_config_is_ephemeral_and_appends_developer_guardrails",
         "app::tests::approval_routing::agent_message_delta_does_not_wait_for_unrelated_approval_store",
         "app::tests::approval_routing::delayed_synthetic_warning_does_not_reach_recreated_thread",
         "app::tests::approval_routing::evicted_approval_disappears_after_feedback_submission",
