@@ -538,6 +538,8 @@ WHERE thread_id = ?
             }
             | ThreadItemPayload::HookPrompt { .. }
             | ThreadItemPayload::FunctionCallOutput { .. }
+            | ThreadItemPayload::InterAgentCommunication { .. }
+            | ThreadItemPayload::RawResponseItem { .. }
             | ThreadItemPayload::Plan { .. }
             | ThreadItemPayload::Reasoning { .. }
             | ThreadItemPayload::CommandExecution { .. }
