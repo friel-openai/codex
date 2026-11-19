@@ -1,0 +1,264 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 75e2f27134f346ca7072040e6dc5295ec8e5d8ba..4dad82b40644f70f557262b76cc7e66447c200af 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -1498,8 +1498,16 @@ impl ThreadRequestProcessor {
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
+     ) -> Result<(), JSONRPCErrorError> {
++        let mcp_elicitations_auto_deny = xcode_26_4_mcp_elicitations_auto_deny(
++            app_server_client_name.as_deref(),
++            app_server_client_version.as_deref(),
++        );
+         thread
+-            .set_app_server_client_info(app_server_client_name, app_server_client_version)
++            .set_app_server_client_info(
++                app_server_client_name,
++                app_server_client_version,
++                mcp_elicitations_auto_deny,
++            )
+             .await
+             .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
+     }
+@@ -8827,7 +8835,7 @@ fn legacy_page_next_turn_id(
+         .map(|turn| turn.id.clone())
+ }
+
+-fn xcode_26_4_mcp_elicitations_auto_deny(
++pub(super) fn xcode_26_4_mcp_elicitations_auto_deny(
+     client_name: Option<&str>,
+     client_version: Option<&str>,
+ ) -> bool {
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index c737e49eb6896ba344879623826f4f7405c62f9f..ba608dd2d44d0459e2205909f9a80c4989f2c660 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -1295,8 +1295,17 @@ impl TurnRequestProcessor {
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
+     ) -> Result<(), JSONRPCErrorError> {
++        let mcp_elicitations_auto_deny =
++            super::thread_processor::xcode_26_4_mcp_elicitations_auto_deny(
++                app_server_client_name.as_deref(),
++                app_server_client_version.as_deref(),
++            );
+         thread
+-            .set_app_server_client_info(app_server_client_name, app_server_client_version)
++            .set_app_server_client_info(
++                app_server_client_name,
++                app_server_client_version,
++                mcp_elicitations_auto_deny,
++            )
+             .await
+             .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
+     }
+diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+index cfb5747fdce230f4a4dc0a6ffa463eb74f860a81..e97d4d1de414d140c9fb0129681240ea4404c0c1 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+@@ -594,8 +594,7 @@ impl McpConnectionSet {
+             .servers
+             .iter()
+             .filter(|(_, view)| {
+-                view.connection.startup_is_dormant()
+-                    && !view.connection.client.cancel_token.is_cancelled()
++                view.startup_is_dormant() && !view.connection.is_connection_cancelled()
+             })
+             .map(|(name, _)| name.clone())
+             .collect();
+diff --git a/codex-rs/codex-mcp/src/elicitation.rs b/codex-rs/codex-mcp/src/elicitation.rs
+index 3e23359f6df2456363d30608b7916e4fddf502ca..04840a922d1bde8d0f413f7e255114f7f88d686d 100644
+--- a/codex-rs/codex-mcp/src/elicitation.rs
++++ b/codex-rs/codex-mcp/src/elicitation.rs
+@@ -138,6 +138,7 @@ struct ActiveElicitation {
+ pub(crate) struct ElicitationRequestRouter {
+     requests: Arc<StdMutex<PendingResponders>>,
+     terminal_actions_finished: Arc<tokio::sync::Notify>,
++    auto_deny: Arc<AtomicBool>,
+     full_access_form_input_enabled: Arc<AtomicBool>,
+ }
+
+@@ -277,6 +278,14 @@ impl ElicitationRequestRouter {
+         }
+     }
+
++    pub(crate) fn auto_deny(&self) -> bool {
++        self.auto_deny.load(Ordering::Relaxed)
++    }
++
++    pub(crate) fn set_auto_deny(&self, auto_deny: bool) {
++        self.auto_deny.store(auto_deny, Ordering::Relaxed);
++    }
++
+     pub(crate) fn full_access_form_input_enabled(&self) -> bool {
+         self.full_access_form_input_enabled.load(Ordering::Acquire)
+     }
+@@ -536,6 +545,13 @@ impl ElicitationRequestManager {
+                     )
+                     .await;
+                 }
++                if router.auto_deny() {
++                    return Ok(ElicitationResponse {
++                        action: ElicitationAction::Decline,
++                        content: None,
++                        meta: None,
++                    });
++                }
+                 if elicitation
+                     .meta()
+                     .and_then(|meta| meta.get(APPROVAL_KIND_KEY))
+diff --git a/codex-rs/codex-mcp/src/elicitation_tests.rs b/codex-rs/codex-mcp/src/elicitation_tests.rs
+index a71b4dfe0fdb9306f8f0846d70db47c99852718c..21023cf1e04357531e7cec5a5645983572a94f6b 100644
+--- a/codex-rs/codex-mcp/src/elicitation_tests.rs
++++ b/codex-rs/codex-mcp/src/elicitation_tests.rs
+@@ -1011,6 +1011,54 @@ fn verification_fixture(
+     (manager, events, sender)
+ }
+
++#[tokio::test]
++async fn auto_deny_rejects_elicitations_until_client_compatibility_clears() {
++    let (manager, events, sender) =
++        verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
++    let router = manager.router.clone();
++    router.set_auto_deny(true);
++    assert!(manager.router.auto_deny());
++
++    assert_eq!(
++        send_elicitation(&sender, /*marker*/ None).await.action,
++        ElicitationAction::Decline
++    );
++    let verification = || Elicitation::UserVerification {
++        meta: None,
++        title: "Verify".into(),
++        description: "Verify the request".into(),
++        challenge: "AQID".into(),
++    };
++    let result = sender(RequestId::Number(8), verification()).await.unwrap();
++    assert_eq!(result.action, ElicitationAction::Cancel);
++    assert!(events.try_recv().is_err());
++
++    router.set_auto_deny(false);
++    assert!(!manager.router.auto_deny());
++    let pending = tokio::spawn(sender(RequestId::Number(9), verification()));
++    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
++        .await
++        .expect("verification request should be routed")
++        .unwrap();
++    let EventMsg::ElicitationRequest(request) = event.msg else {
++        panic!("expected verification request");
++    };
++    let ProtocolRequestId::String(id) = request.id else {
++        panic!("expected routed request id");
++    };
++    let response = approved_response();
++    manager
++        .router
++        .resolve(
++            request.server_name,
++            RequestId::String(id.into()),
++            response.clone(),
++        )
++        .await
++        .unwrap();
++    assert_eq!(pending.await.unwrap().unwrap(), response);
++}
++
+ #[tokio::test]
+ async fn user_verification_requires_the_app_even_when_policy_would_approve_or_decline() {
+     for approval_policy in [AskForApproval::Never, AskForApproval::OnRequest] {
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index ed2638e81547ecbd3cb71c8578a2fcd53cfd1944..4ec2c7080676cf1fa05bb786c0b4464a9f235d56 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -926,6 +926,14 @@ impl McpRuntime {
+             })
+     }
+
++    pub fn elicitations_auto_deny(&self) -> bool {
++        self.elicitation_router.auto_deny()
++    }
++
++    pub fn set_elicitations_auto_deny(&self, auto_deny: bool) {
++        self.elicitation_router.set_auto_deny(auto_deny);
++    }
++
+     pub fn enable_full_access_form_input(&self) {
+         self.elicitation_router.enable_full_access_form_input();
+     }
+diff --git a/codex-rs/core/src/codex_delegate_tests.rs b/codex-rs/core/src/codex_delegate_tests.rs
+index ab7e698585b8f0ccc88affbbd693160be56fcce7..26e780e3eb50e0d71945cca47d4a24b2c6d1d6f6 100644
+--- a/codex-rs/core/src/codex_delegate_tests.rs
++++ b/codex-rs/core/src/codex_delegate_tests.rs
+@@ -262,7 +262,11 @@ async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
+         .services
+         .analytics_events_client = client.clone();
+     parent_session
+-        .set_app_server_client_info(Some("codex-test".to_string()), Some("1.0.0".to_string()))
++        .set_app_server_client_info(
++            Some("codex-test".to_string()),
++            Some("1.0.0".to_string()),
++            /*mcp_elicitations_auto_deny*/ false,
++        )
+         .await
+         .expect("set parent client metadata");
+
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 37960e5849379066ddb08ee2eeed99d9ea725f33..63f395f2f53f0ffc9f8a4c6a0fe2e0b7712af319 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -880,9 +880,14 @@ impl CodexThread {
+         &self,
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
++        mcp_elicitations_auto_deny: bool,
+     ) -> ConstraintResult<()> {
+         self.session
+-            .set_app_server_client_info(app_server_client_name, app_server_client_version)
++            .set_app_server_client_info(
++                app_server_client_name,
++                app_server_client_version,
++                mcp_elicitations_auto_deny,
++            )
+             .await
+     }
+
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index c8c0f2e603fa091793269f2f58aeefd62e79adc6..3c3dfb8521d395131e39d20ea5b27a892aeea21e 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -809,6 +809,13 @@ impl Session {
+         request_id: RequestId,
+         request: ElicitationRequest,
+     ) -> Option<ElicitationResponse> {
++        if self.services.mcp_runtime.elicitations_auto_deny() {
++            return Some(ElicitationResponse {
++                action: ElicitationAction::Accept,
++                content: Some(serde_json::json!({})),
++                meta: None,
++            });
++        }
+         // This callback carries a request ID, not a reliable tool invocation owner.
+         // Do not report its human wait as ordinary tool execution.
+         if turn_context
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index a0aca92a5951dfbe251eafdf557265adc38d092c..5666de49663bf4b4d9fbcc5efc3f27ffe2ffdf57 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3378,6 +3378,7 @@ impl Session {
+         &self,
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
++        mcp_elicitations_auto_deny: bool,
+     ) -> ConstraintResult<()> {
+         self.update_settings(SessionSettingsUpdate {
+             app_server_client_name,
+@@ -3385,6 +3386,9 @@ impl Session {
+             ..Default::default()
+         })
+         .await?;
++        self.services
++            .mcp_runtime
++            .set_elicitations_auto_deny(mcp_elicitations_auto_deny);
+         Ok(())
+     }
+
