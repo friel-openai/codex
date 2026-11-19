@@ -678,12 +678,13 @@ pub(super) async fn submission_loop(
                     thread_settings,
                     reply,
                 } => {
-                    let _settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
+                    let settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
                     let thread_settings = WithTurnExtensionData {
                         request: thread_settings,
                         turn_extension_init: sub.turn_extension_init,
                     };
-                    match thread_settings::update(&sess, thread_settings, reply.is_some()).await {
+                    let previous_execution_settings = thread_settings::execution_settings(&sess).await;
+                    let execution_settings_changed = match thread_settings::update(&sess, thread_settings, reply.is_some()).await {
                         Ok(commit) => {
                             match (reply, commit.host_acceptance) {
                                 (Some(mut reply), Some(acceptance)) => {
@@ -710,6 +711,7 @@ pub(super) async fn submission_loop(
                             }
                             thread_settings::emit_applied(&sess, sub.id.clone(), commit.snapshot)
                                 .await;
+                            thread_settings::execution_settings(&sess).await != previous_execution_settings
                         }
                         Err(error) => {
                             let message = format!("invalid thread settings override: {error}");
@@ -727,7 +729,13 @@ pub(super) async fn submission_loop(
                                 })
                                 .await;
                             }
+                            false
                         }
+                    };
+                    // Helper startup persists settings and cannot retain this permit.
+                    drop(settings_guard);
+                    if execution_settings_changed {
+                        crate::goal_supervisor::restart_active_helper_for_execution_settings_change(&sess).await;
                     }
                     false
                 }
