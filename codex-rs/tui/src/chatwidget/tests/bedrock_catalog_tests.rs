@@ -24,7 +24,7 @@ async fn bedrock_astra_model_and_reasoning_pickers() {
         ),
     ] {
         let presets = create_model_provider(provider_info, /*auth_manager*/ None)
-            .models_manager_without_cache(/*config_model_catalog*/ None)
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default())
             .list_models(
                 RefreshStrategy::Offline,
                 HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -97,7 +97,7 @@ async fn bedrock_govcloud_model_pickers() {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
         provider_info.base_url = Some(format!("https://bedrock-mantle.{region}.api.aws/openai/v1"));
         let presets = create_model_provider(provider_info, /*auth_manager*/ None)
-            .models_manager_without_cache(/*config_model_catalog*/ None)
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default())
             .list_models(
                 RefreshStrategy::Offline,
                 HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -159,7 +159,7 @@ async fn bedrock_ultrafast_slash_command_selects_and_clears_tier() {
         ),
     ] {
         let presets = create_model_provider(provider_info.clone(), /*auth_manager*/ None)
-            .models_manager_without_cache(/*config_model_catalog*/ None)
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default())
             .list_models(
                 RefreshStrategy::Offline,
                 HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -205,9 +205,12 @@ async fn bedrock_ultrafast_slash_command_selects_and_clears_tier() {
         }];
         custom_model.default_service_tier = Some("ultrafast".to_string());
         let presets = create_model_provider(provider_info, /*auth_manager*/ None)
-            .models_manager_without_cache(Some(codex_protocol::openai_models::ModelsResponse {
-                models: vec![custom_model],
-            }))
+            .models_manager_without_cache(
+                Some(codex_protocol::openai_models::ModelsResponse {
+                    models: vec![custom_model],
+                }),
+                Default::default(),
+            )
             .list_models(
                 RefreshStrategy::Offline,
                 HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),

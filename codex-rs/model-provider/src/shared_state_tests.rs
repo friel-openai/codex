@@ -32,6 +32,7 @@ use http::HeaderName;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::collections::HashMap;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -111,7 +112,8 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
                 .unwrap(),
             &manager,
         ));
-        let models = provider.models_manager_without_cache(/*config_model_catalog*/ None);
+        let models = provider
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
         models.set_api_key_model_discovery_enabled(/*enabled*/ true);
         models
             .raw_model_catalog(RefreshStrategy::Online, factory.clone())
@@ -468,6 +470,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
             let models = provider.models_manager(
                 home.path().to_path_buf(),
                 /*config_model_catalog*/ None,
+                Default::default(),
             );
             models.set_api_key_model_discovery_enabled(/*enabled*/ true);
             let catalog = models
@@ -524,7 +527,8 @@ async fn models_observe_gateway_rotation(instance: ProviderInstance) {
         json!({"access_token": "first", "refresh_token": "refresh-secret", "expires_at": i64::MAX}),
     );
     let provider = create_model_provider(info.clone(), Some(primary.clone()));
-    let models = provider.models_manager_without_cache(/*config_model_catalog*/ None);
+    let models = provider
+        .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
     models.set_api_key_model_discovery_enabled(/*enabled*/ true);
     let requests_provider = match instance {
         ProviderInstance::Same => provider,
@@ -716,6 +720,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
     let models = provider.models_manager(
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     // Only the gateway token should enable this fetch; the saved API key is unrelated.
     models.set_api_key_model_discovery_enabled(/*enabled*/ false);
@@ -758,6 +763,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
     let restarted = provider.models_manager(
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
+        /*custom_models*/ HashMap::new(),
     );
     restarted.set_api_key_model_discovery_enabled(/*enabled*/ false);
     assert_eq!(
