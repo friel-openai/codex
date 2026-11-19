@@ -1,0 +1,713 @@
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 1a2b27e5030bd6ebf8c46b191d30679e0e90efd0..6fa7b462d023eb262a304f32e5327af28d32cf2e 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -287,6 +287,7 @@ impl LocalAgentControl {
+             .await
+         {
+             Ok(TurnInputSubmission::Started { turn_id, .. }) => Ok(turn_id),
++            Ok(TurnInputSubmission::Accepted) => unreachable!("user input returns a turn outcome"),
+             Ok(TurnInputSubmission::Steered { .. }) => Ok(Uuid::now_v7().to_string()),
+             Ok(TurnInputSubmission::NotSubmitted { reason }) => Err(CodexErr::InvalidRequest(
+                 format!("turn input was not submitted: {reason:?}"),
+diff --git a/codex-rs/core/src/agent/control/residency.rs b/codex-rs/core/src/agent/control/residency.rs
+index 04236debfb2a643d9b24be5532d2bb8c1e2b5c6a..759d43547faf769e2c41a1dec11788a3f467641f 100644
+--- a/codex-rs/core/src/agent/control/residency.rs
++++ b/codex-rs/core/src/agent/control/residency.rs
+@@ -207,7 +207,7 @@ impl LocalAgentControl {
+         thread_id: ThreadId,
+     ) {
+         if let Ok(thread) = state.get_thread(thread_id).await {
+-            let _ = self.runtime.pin_v2_residency(state, &thread).await;
++            let _ = self.runtime.pin_v2_residency(&thread).await;
+         }
+     }
+
+@@ -430,7 +430,13 @@ impl LocalAgentControl {
+         };
+         thread.ensure_rollout_materialized().await;
+         thread.flush_rollout().await?;
++        let (config, ..) = thread.session.fork_config().await;
+         let environments = EvictedEnvironments {
++            config: Arc::new(config),
++            has_independent_service_tier: matches!(
++                &thread.session.agent_runtime,
++                AgentRuntimeServices::Host(services) if services.service_tier.is_none()
++            ),
+             selections: thread.environment_selections().await,
+             bindings: thread
+                 .session
+diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
+index 99c623f0ca50bca14625120fd127986ab59b000e..79cb73c6a782c9f42b2c9c21d0f48156a04042a3 100644
+--- a/codex-rs/core/src/agent/control/residency_tests.rs
++++ b/codex-rs/core/src/agent/control/residency_tests.rs
+@@ -221,7 +221,7 @@ async fn assert_residency_slot_unloads_oldest_idle_agent(multi_agent_version: Mu
+     // Accepted mail holds this guard until dispatch, even though its sender has finished.
+     let delivery_guard = control
+         .runtime
+-        .pin_v2_residency(&state, &first.thread)
++        .pin_v2_residency(&first.thread)
+         .await
+         .expect("pin registered worker")
+         .expect("both V1 and V2 workers must be pinned");
+diff --git a/codex-rs/core/src/agent/control/resume.rs b/codex-rs/core/src/agent/control/resume.rs
+index 4909d5e0f2c96747fb08d59c898eb4f7d308b377..d002b099764a8a7255681cd13da7abe178889f77 100644
+--- a/codex-rs/core/src/agent/control/resume.rs
++++ b/codex-rs/core/src/agent/control/resume.rs
+@@ -113,7 +113,7 @@ impl LocalAgentControl {
+         let membership = self.runtime.admit_start()?;
+         if let Ok(thread) = state.get_thread(thread_id).await {
+             self.runtime.registry.clear_evicted_instructions(thread_id);
+-            let residency_pin = self.runtime.pin_v2_residency(state, &thread).await?;
++            let residency_pin = self.runtime.pin_v2_residency(&thread).await?;
+             return Ok((
+                 thread
+                     .multi_agent_version()
+@@ -191,6 +191,7 @@ impl LocalAgentControl {
+                 &config,
+             )
+             .await;
++        let evicted_environments = self.runtime.registry.evicted_environments(thread_id);
+         let mut config = config;
+         let runtime_approvals_reviewer = config.approvals_reviewer;
+         if let Some(role) = stored_thread
+@@ -225,27 +226,42 @@ impl LocalAgentControl {
+             config.model = Some(model.clone());
+         }
+         config.model_reasoning_effort = stored_thread.reasoning_effort.clone();
+-        config
+-            .permissions
+-            .approval_policy
+-            .set(stored_thread.approval_mode)
+-            .map_err(|err| {
+-                CodexErr::InvalidRequest(format!(
+-                    "cannot restore the stored agent approval policy: {err}"
+-                ))
+-            })?;
+-        config
+-            .permissions
+-            .set_permission_profile_from_session_snapshot(
+-                crate::config::PermissionProfileSnapshot::legacy(
+-                    stored_thread.permission_profile.clone(),
+-                ),
+-            )
+-            .map_err(|err| {
+-                CodexErr::InvalidRequest(format!(
+-                    "cannot restore the stored agent permission profile: {err}"
+-                ))
+-            })?;
++        if multi_agent_version == MultiAgentVersion::V2
++            && let Some(evicted) = &evicted_environments
++        {
++            config.permissions = evicted.config.permissions.clone();
++            config.approvals_reviewer = evicted.config.approvals_reviewer;
++            config.requested_approvals_reviewer = evicted.config.requested_approvals_reviewer;
++        } else {
++            config
++                .permissions
++                .approval_policy
++                .set(stored_thread.approval_mode)
++                .map_err(|err| {
++                    CodexErr::InvalidRequest(format!(
++                        "cannot restore the stored agent approval policy: {err}"
++                    ))
++                })?;
++            config
++                .permissions
++                .set_permission_profile_from_session_snapshot(
++                    crate::config::PermissionProfileSnapshot::legacy(
++                        stored_thread.permission_profile.clone(),
++                    ),
++                )
++                .map_err(|err| {
++                    CodexErr::InvalidRequest(format!(
++                        "cannot restore the stored agent permission profile: {err}"
++                    ))
++                })?;
++        }
++        if multi_agent_version == MultiAgentVersion::V2 {
++            config.service_tier = evicted_environments
++                .as_ref()
++                .filter(|evicted| evicted.has_independent_service_tier)
++                .map(|evicted| evicted.config.service_tier.clone())
++                .unwrap_or_else(|| self.root_service_tier());
++        }
+         // Reserving a resident can unload a nested parent. Capture its applied instructions
+         // and attachments before a later live lookup can lose them.
+         let parent_thread_id = initial_history
+@@ -271,7 +287,6 @@ impl LocalAgentControl {
+         } else {
+             (None, None)
+         };
+-        let evicted_environments = self.runtime.registry.evicted_environments(thread_id);
+         let environment_selections = evicted_environments
+             .as_ref()
+             .map(|environments| environments.selections.clone());
+@@ -322,7 +337,7 @@ impl LocalAgentControl {
+                 tokio::spawn(async move {
+                     let _membership = membership;
+                     let residency_pin = runtime
+-                        .pin_v2_residency(&state, &reloaded_thread.thread)
++                        .pin_v2_residency(&reloaded_thread.thread)
+                         .await?;
+                     runtime.registry.clear_evicted_runtime_settings(thread_id);
+                     runtime.registry.clear_evicted_instructions(thread_id);
+@@ -343,7 +358,7 @@ impl LocalAgentControl {
+                     self.runtime.registry.clear_evicted_instructions(thread_id);
+                     lifecycle.clear_cold_terminal_status();
+                     drop(residency_slot);
+-                    let residency_pin = self.runtime.pin_v2_residency(state, &thread).await?;
++                    let residency_pin = self.runtime.pin_v2_residency(&thread).await?;
+                     return Ok((
+                         thread
+                             .multi_agent_version()
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 4071572744044ed6fc9cd334409f1c1a8a5bd1f1..cb9617c87d1d42138a69e05a36d73d7e7a5714dd 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -543,10 +543,9 @@ impl LocalAgentControl {
+                 tokio::spawn(async move {
+                     let _membership = membership;
+                     let residency_pin = runtime
+-                        .pin_v2_residency(&state, &reloaded_thread.thread)
++                        .pin_v2_residency(&reloaded_thread.thread)
+                         .await?;
+                     runtime.registry.clear_evicted_runtime_settings(thread_id);
+-                    runtime.registry.clear_evicted_environments(thread_id);
+                     runtime.registry.clear_evicted_instructions(thread_id);
+                     lifecycle.clear_cold_terminal_status();
+                     residency_slot.commit(reloaded_thread.thread_id);
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index e8b2faee1a1b70a896a76cdb81fe53323c6c2f71..9b2c8cf3af0fd6e444b9b7bb720c2a6df4ee7392 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2252,6 +2252,7 @@ async fn cancelled_v2_send_finishes_reload_registration() {
+     let (home, mut config) = test_config().await;
+     config.features.enable(Feature::MultiAgentV2).unwrap();
+     config.features.enable(Feature::Sqlite).unwrap();
++    config.service_tier = None;
+     // The root leaves exactly one resident child slot available.
+     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+     let harness = AgentControlHarness::new_with_config(home, config).await;
+@@ -2290,6 +2291,7 @@ async fn cancelled_v2_send_finishes_reload_registration() {
+     let mut sender_config = harness.config.clone();
+     sender_config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+     sender_config.requested_approvals_reviewer = Some(ApprovalsReviewer::AutoReview);
++    sender_config.service_tier = Some("priority".to_string());
+     let followup_request = |message: &str| SendRequest {
+         caller: parent_id,
+         target: AgentTarget::Id(child_id),
+@@ -2346,6 +2348,11 @@ async fn cancelled_v2_send_finishes_reload_registration() {
+         ApprovalsReviewer::User,
+         "reload must preserve the worker's reviewer instead of inheriting its sender's request",
+     );
++    assert_eq!(
++        reloaded.config_snapshot().await.service_tier,
++        None,
++        "reload must use the root tier instead of the sender's tier",
++    );
+     // Evict and reload again with the single child slot. This also catches a leaked
+     // pin or pending residency reservation left behind by the cancelled sender.
+     assert_eq!(
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 1fc4310028821410c7fc5aba17edd76f111ad3ac..1d50e500fcfccaadffce44bcbb10ff8bed5f5fca 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -665,7 +665,7 @@ impl ContextManager {
+                 .and_then(|metadata| metadata.history_truncation_token_limit)
+                 .map(TruncationPolicy::Tokens)
+                 .unwrap_or_else(|| with_serialization_allowance(policy));
+-            truncate_function_output_payload(output, policy, estimate_audio_token_count);
++            truncate_function_output_payload(output, policy, estimate_tool_audio_tokens);
+         }
+         processed
+     }
+@@ -1011,15 +1011,26 @@ impl ContextManager {
+         self.reset_version = history_version;
+     }
+
++    pub(crate) fn review_budgeting(&self) -> ContextBudgeting {
++        self.review_budgeting
++    }
++
+     /// Detects any parent model-state change between optimistic fork snapshot checks.
+     pub(crate) fn has_same_fork_metadata(&self, other: &Self) -> bool {
+         // Keep this exhaustive so new state must participate in fork validation. Shared
+         // payload identities avoid comparing the full transcript at every fork checkpoint.
+         let Self {
++            item_id_generator,
++            sampling,
++            restored_through_sequence,
+             items,
+             review_history,
++            review_budgeting,
+             retained_context,
++            rejected_audio_file_ids,
++            file_audio_durations,
+             guardian_review_mode,
++            guardian_include_additional_context,
+             retain_inherited_user_messages,
+             history_version,
+             reset_version,
+@@ -1031,8 +1042,14 @@ impl ContextManager {
+             reference_context_item,
+             world_state_baseline,
+         } = self;
+-        Arc::ptr_eq(items, &other.items)
++        Arc::ptr_eq(item_id_generator, &other.item_id_generator)
++            && sampling == &other.sampling
++            && restored_through_sequence == &other.restored_through_sequence
++            && Arc::ptr_eq(items, &other.items)
++            && review_budgeting == &other.review_budgeting
+             && Arc::ptr_eq(retained_context, &other.retained_context)
++            && Arc::ptr_eq(rejected_audio_file_ids, &other.rejected_audio_file_ids)
++            && Arc::ptr_eq(file_audio_durations, &other.file_audio_durations)
+             && match (review_history, &other.review_history) {
+                 (None, None) => true,
+                 (Some(left), Some(right)) => {
+@@ -1045,6 +1062,7 @@ impl ContextManager {
+                 _ => false,
+             }
+             && guardian_review_mode == &other.guardian_review_mode
++            && guardian_include_additional_context == &other.guardian_include_additional_context
+             && retain_inherited_user_messages == &other.retain_inherited_user_messages
+             && history_version == &other.history_version
+             && reset_version == &other.reset_version
+diff --git a/codex-rs/core/src/context_manager/history_user_authorization.rs b/codex-rs/core/src/context_manager/history_user_authorization.rs
+index 48341a172c3e172725cf28d04f9f903b51da57cf..ecee65f000a536b9d95ff6a7e11519964e4595f3 100644
+--- a/codex-rs/core/src/context_manager/history_user_authorization.rs
++++ b/codex-rs/core/src/context_manager/history_user_authorization.rs
+@@ -7,6 +7,7 @@ use std::sync::Arc;
+
+ use super::ContextManager;
+ use crate::compact::is_summary_message;
++use crate::context::UserGoalUpdate;
+ use crate::context::is_contextual_user_fragment;
+ use crate::event_mapping::parse_turn_item;
+ use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
+diff --git a/codex-rs/core/src/context_manager/sampling.rs b/codex-rs/core/src/context_manager/sampling.rs
+index 76608e40be204b60ea3af0fde7ad9bd8e248461f..53efcdd986eb224ef478919e39d7b0f7236a1826 100644
+--- a/codex-rs/core/src/context_manager/sampling.rs
++++ b/codex-rs/core/src/context_manager/sampling.rs
+@@ -4,7 +4,7 @@
+ use codex_history::ResponseItemEnvelope;
+ use std::sync::Arc;
+
+-#[derive(Debug, Clone, Default)]
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub(super) struct SamplingProgress {
+     pub(super) last_sequence: u64,
+     sampled_through: u64,
+@@ -36,7 +36,7 @@ impl SamplingProgress {
+         if items.iter().all(|item| item.metadata.as_ref().and_then(|m| m.history_sequence).is_some()) {
+             Self::from_assigned_items(items)
+         } else {
+-            Self::restore(Arc::make_mut(items))
++            Self::restore(Arc::make_mut(items).as_mut_slice())
+         }
+     }
+
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index fbf062dde219871b5111370c00ef342e3ff48ed4..c56a825c6487db2f02ce5d0e99ca5e7e107e5e8e 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -524,7 +524,7 @@ impl DefaultSecondaryAdmission {
+         !attempt.revoked.is_cancelled()
+             && state.environments.first().is_some_and(|primary| {
+                 primary.selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+-                    && !primary.environment().is_remote()
++                    && !primary.attachment.environment.is_remote()
+                     && primary.config_origin == EnvironmentConfigOrigin::Thread
+             })
+             && state
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 05cd9746d3f52bb858fc9fa1d695af4f861bbc26..4175877364773eb1fac5fe37de66d1479315e944 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -12,8 +12,6 @@ use codex_protocol::models::ReasoningItemContent;
+ use codex_protocol::models::ReasoningItemReasoningSummary;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::models::WebSearchAction;
+-use codex_protocol::models::is_closing_media_label;
+-use codex_protocol::models::is_opening_media_label;
+ use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
+ use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
+ use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
+@@ -87,30 +85,6 @@ fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
+     })
+ }
+
+-/// User-input parts with their original indices. Media wrapper labels are not
+-/// user text; retain the indices so history edits can carry the right annotations.
+-pub(crate) fn user_input_parts(
+-    message: &[ContentItem],
+-) -> impl Iterator<Item = (usize, &ContentItem)> {
+-    message
+-        .iter()
+-        .enumerate()
+-        .filter(|(idx, content_item)| match content_item {
+-            ContentItem::InputText { text } => {
+-                let opens_media = message
+-                    .get(idx + 1)
+-                    .is_some_and(|part| is_opening_media_label(text, part));
+-                let closes_media = idx
+-                    .checked_sub(1)
+-                    .is_some_and(|i| is_closing_media_label(text, &message[i]));
+-                !opens_media && !closes_media
+-            }
+-            ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. }
+-            | ContentItem::OutputText { .. } => true,
+-        })
+-}
+-
+ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
+     if is_contextual_user_message_content(message) {
+         return None;
+diff --git a/codex-rs/core/src/independent_thread/fork.rs b/codex-rs/core/src/independent_thread/fork.rs
+index c3bd3c0beb639b090a43f92a264dfb1a6b8869ce..391f21415462a0585033c7bf89b8c474c342bd50 100644
+--- a/codex-rs/core/src/independent_thread/fork.rs
++++ b/codex-rs/core/src/independent_thread/fork.rs
+@@ -283,6 +283,7 @@ impl Handler {
+             match submitted {
+                 TurnInputSubmission::Started { turn_id, .. } => Ok(Execution::Started { turn_id }),
+                 TurnInputSubmission::Steered { turn_id, .. } => Ok(Execution::Steered { turn_id }),
++                TurnInputSubmission::Accepted => unreachable!("response item input returns a turn outcome"),
+                 TurnInputSubmission::NotSubmitted { reason } => {
+                     Err(format!("initial assignment was not submitted: {reason:?}"))
+                 }
+diff --git a/codex-rs/core/src/independent_thread/message.rs b/codex-rs/core/src/independent_thread/message.rs
+index 9074db181b876312df8e7fc24821298aec7132aa..7396ec90a4f65884a73416212db7fdd7a7e3aa97 100644
+--- a/codex-rs/core/src/independent_thread/message.rs
++++ b/codex-rs/core/src/independent_thread/message.rs
+@@ -155,6 +155,7 @@ impl Handler {
+         let (status, turn_id) = match submitted {
+             TurnInputSubmission::Started { turn_id, .. } => (Delivery::Started, turn_id),
+             TurnInputSubmission::Steered { turn_id, .. } => (Delivery::Steered, turn_id),
++            TurnInputSubmission::Accepted => unreachable!("response item input returns a turn outcome"),
+             TurnInputSubmission::NotSubmitted { reason } => {
+                 return Err(invalid(format!("message was not submitted: {reason:?}")));
+             }
+diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
+index 874264e16304888391ba735a5864a4417bdb2c57..ade14937a2acb0261c48b1de4e785bf644f88b4d 100644
+--- a/codex-rs/core/src/session/environment.rs
++++ b/codex-rs/core/src/session/environment.rs
+@@ -218,7 +218,7 @@ enum ConfigUpdateSource {
+ impl Session {
+     pub(crate) fn revoke_turn_initial_recovery(&self, turn_context: &TurnContext) {
+         if turn_context.initial_environments.revoke_initial_recovery() {
+-            self.mark_mcp_runtime_dirty();
++            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
+         }
+     }
+
+@@ -315,14 +315,14 @@ impl Session {
+             (self.services.turn_environments.snapshot_now(), admissions)
+         };
+         if let Some(admissions) = admissions {
+-            self.mark_mcp_runtime_dirty();
++            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
+             let config = self.build_effective_session_config(configuration);
+             let snapshot = self
+                 .services
+                 .turn_environments
+                 .verify_default_secondaries(&config, admissions, snapshot)
+                 .await;
+-            self.mark_mcp_runtime_dirty();
++            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
+             snapshot
+         } else {
+             self.services
+@@ -359,7 +359,7 @@ impl Session {
+                     "workspace settings changed while preparing the transition".to_string(),
+                 ));
+             }
+-            self.mark_mcp_runtime_dirty();
++            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
+             self.services
+                 .turn_environments
+                 .set_active_thread_defaults(configuration.inferred_environment_config());
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 2816d8470e700b0bae04c7f649a9c5a74e80bd25..078055a08bf64808dfb4be076e476a50e151e623 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -702,6 +702,7 @@ pub(super) async fn submission_loop(
+                                         misalignment: None,
+                                         message,
+                                         codex_error_info: Some(CodexErrorInfo::Other),
++                                        rejected_audio_file_ids: Vec::new(),
+                                     }),
+                                 })
+                                 .await;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 5666de49663bf4b4d9fbcc5efc3f27ffe2ffdf57..d2722f7a6efbb11a0addd0b204690f60157ec770 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -516,7 +516,6 @@ use codex_protocol::config_types::Settings;
+ use codex_protocol::config_types::WindowsSandboxLevel;
+ use codex_protocol::mcp::ClientMcpExtensions;
+ use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
+-use codex_protocol::models::ContentItem;
+ use codex_protocol::models::LocalImagePreparation;
+ use codex_protocol::models::ResponseInputItem;
+ use codex_protocol::models::ResponseItem;
+@@ -1487,7 +1486,7 @@ impl Session {
+                         .filter(|selection| {
+                             selection.config == EnvironmentConfigState::FromThread
+                                 && environments.turn_environments().any(|admitted| {
+-                                    admitted.environment.is_remote()
++                                    admitted.environment().is_remote()
+                                         && admitted.selection.has_same_workspace(selection)
+                                 })
+                         })
+@@ -2917,7 +2916,7 @@ impl Session {
+                 state.history.set_world_state_baseline(world_state);
+             }
+             let fallback_ids = state.auto_compact_window_ids();
+-            let window_id = window_id.unwrap_or(fallback_ids.window_id);
++            let window_id = window_id.unwrap_or_else(|| fallback_ids.window_id.clone());
+             state.restore_auto_compact_window(
+                 window_number,
+                 AutoCompactWindowIds {
+@@ -3004,9 +3003,9 @@ impl Session {
+                 compaction_response_id: None,
+                 latest_token_usage_record: state.latest_token_usage_record.clone(),
+                 window_number: Some(state.auto_compact_window_number()),
+-                first_window_id: Some(window_ids.first_window_id),
+-                previous_window_id: window_ids.previous_window_id,
+-                window_id: Some(window_ids.window_id),
++                first_window_id: Some(window_ids.first_window_id.clone()),
++                previous_window_id: window_ids.previous_window_id.clone(),
++                window_id: Some(window_ids.window_id.clone()),
+                 segment_state_checkpoint: None,
+                 resume_metadata: Some(CompactionResumeMetadata {
+                     rejected_audio_file_ids: state.history.rejected_audio_file_ids(),
+@@ -6348,7 +6347,7 @@ impl Session {
+         let (session_source, auto_compact_window_ids, history) = {
+             let state = self.state.lock().await;
+             let auto_compact_window_ids = match auto_compact_window {
+-                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids(),
++                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids().clone(),
+                 InitialContextAutoCompactWindow::Prepared(ids) => ids,
+             };
+             (
+@@ -6716,7 +6715,7 @@ impl Session {
+                 latest_token_usage_record: state.latest_token_usage_record.clone(),
+                 latest_rate_limits: state.token_info_and_rate_limits().1,
+                 window_number: state.auto_compact_window_number(),
+-                window_ids: state.auto_compact_window_ids(),
++                window_ids: state.auto_compact_window_ids().clone(),
+             }
+         };
+         if self.active_turn.lock().await.is_some() {
+@@ -6733,7 +6732,7 @@ impl Session {
+             || state.latest_token_usage_record != source_model_state.latest_token_usage_record
+             || state.token_info_and_rate_limits().1 != source_model_state.latest_rate_limits
+             || state.auto_compact_window_number() != source_model_state.window_number
+-            || state.auto_compact_window_ids() != source_model_state.window_ids
++            || state.auto_compact_window_ids() != &source_model_state.window_ids
+         {
+             return None;
+         }
+diff --git a/codex-rs/core/src/session/persistence_repair.rs b/codex-rs/core/src/session/persistence_repair.rs
+index aab594b50727cbd15f683b6a697786baa9f61e8a..e8aa537ad8c4269fa04ca8b2fba62061e727cd3d 100644
+--- a/codex-rs/core/src/session/persistence_repair.rs
++++ b/codex-rs/core/src/session/persistence_repair.rs
+@@ -239,6 +239,7 @@ impl Session {
+                         thread_id: self.thread_id,
+                         turn_id,
+                         item,
++                        content_token_count: None,
+                         started_at_ms: None,
+                         completed_at_ms: recovered_at_ms,
+                     },
+diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
+index 08a8b655b7d1b3d94ee0af003a3e5380e2069897..0ce45f511d6fa1bc1c56033505beb87864ecf08b 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction.rs
+@@ -669,9 +669,10 @@ pub(super) fn replay_review_input(
+     policy: TruncationPolicy,
+     source_is_non_root_agent: bool,
+     guardian_context_mode: GuardianContextMode,
++    budgeting: codex_guardian_context::ContextBudgeting,
+ ) -> Option<TranscriptHistory> {
+     let independent = guardian_context_mode == GuardianContextMode::Independent;
+-    let mut history = independent.then(TranscriptHistory::default);
++    let mut history = independent.then(|| TranscriptHistory::new(0, budgeting));
+     for record in records {
+         match record {
+             ReviewInputRecord::Baseline {
+@@ -679,7 +680,7 @@ pub(super) fn replay_review_input(
+                 root_retains_legacy_transcript,
+                 history: baseline,
+             } => {
+-                let mut baseline_history = TranscriptHistory::new(0);
++                let mut baseline_history = TranscriptHistory::new(0, budgeting);
+                 baseline_history.reset(baseline.0.iter());
+                 let applies = independent
+                     || match applicability {
+@@ -832,6 +833,7 @@ impl ContextManager {
+                         GuardianContextMode::from_history(
+                             history.conversation_history_snapshot().as_ref(),
+                         ),
++                        history.review_budgeting(),
+                     );
+                     history.restore_replayed_guardian_history(review_history);
+                 }
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index a5c79dbb6731dd226878aaa1d12169323b3daf2d..d6e62575f809086234886be76451cd81b36df39a 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -6379,6 +6379,7 @@ fn independent_review_input_preserves_original_envelopes(
+         TruncationPolicy::Tokens(1_000),
+         source_is_non_root_agent,
+         GuardianContextMode::Independent,
++        codex_guardian_context::ContextBudgeting::Fixed,
+     )
+     .expect("independent replay always has its own transcript");
+     assert_eq!(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 050c0ab2f421f47bda9e74a40b07992acfd30e0b..89deb29ed02c4050807edd7bf337e09ad6c62c49 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3454,6 +3454,7 @@ async fn finalize_interrupted_assistant_item(
+             sess,
+             turn_context,
+             finalized_turn_item.turn_item,
++            finalized_turn_item.content_token_count,
+             previously_streamed_item,
+             plan_mode_state,
+         )
+@@ -3600,21 +3601,6 @@ async fn drain_in_flight(
+     Ok(terminal_no_response)
+ }
+
+-fn assign_missing_streamed_response_item_id(
+-    item: &mut ResponseItem,
+-    active_item: Option<&TurnItem>,
+-) {
+-    if item.id().is_some_and(|id| !id.is_empty()) {
+-        return;
+-    }
+-
+-    let active_item_id = active_item
+-        .map(|item| ResponseItemId::from_server(item.id()))
+-        .filter(|item_id| !item_id.is_empty());
+-    item.set_id(active_item_id);
+-    Session::assign_missing_response_item_id(item);
+-}
+-
+ /// Extends the active assistant message with text already sent to the client.
+ ///
+ /// If the provider fails before `OutputItemDone`, this accumulated item is finalized into local
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 88dd3c13d09e8665ccb30cc0281eb2a978d453e9..e17b22d44600e5bc9604adda656144bdfd55defa 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1153,7 +1153,7 @@ impl TurnContext {
+                 #[allow(deprecated)]
+                 &self.cwd,
+             );
+-        let file_system_sandbox_policy = self.file_system_sandbox_policy();
++        let file_system_sandbox_policy = self.permission_profile().file_system_sandbox_policy();
+         // `permission_profile` below is authoritative and serializes the same
+         // runtime entries, so this compatibility field may omit an unrenderable policy.
+         (file_system_sandbox_policy != legacy_file_system_sandbox_policy)
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index d221bd3bf295d1437a43a08645f9de0351f36134..07a3c77444134dc1dcb9a20a5de6116a64ae57b1 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -229,7 +229,7 @@ impl SessionState {
+             latest_rate_limits: self.latest_rate_limits.clone(),
+             previous_turn_settings: self.previous_turn_settings.clone(),
+             turn_attribution: self.turn_attribution.clone(),
+-            auto_compact_window: self.auto_compact_window,
++            auto_compact_window: self.auto_compact_window.clone(),
+         }
+     }
+
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 9599318fdc235da3d6d3d2cdfcec99cc77fe394e..86dd599b3446b443e94c6fa5e5f5d6061055368d 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -22,6 +22,8 @@ use crate::agents_md_manager::SessionInstructions;
+ use crate::attestation::AttestationProvider;
+ use crate::codex_thread::CodexThread;
+ use crate::config::Config;
++#[cfg(test)]
++use crate::config::ThreadStoreConfig;
+ use crate::current_time::TimeProvider;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::environment_selection::default_thread_environment_requests;
+@@ -1000,6 +1002,7 @@ pub use model_catalog::StartupModels;
+ pub use model_catalog::build_models_manager;
+ pub use model_catalog::build_startup_models;
+
++#[cfg(test)]
+ pub fn thread_store_from_config(
+     config: &Config,
+     state_db: Option<StateDbHandle>,
+@@ -1019,20 +1022,11 @@ pub fn thread_store_from_config(
+                     .with_thread_data_cleanup(move |thread_ids| {
+                         let sqlite = sqlite.clone();
+                         Box::pin(async move {
+-                            let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
+-                            LocalAgentMessageBoard::delete_boards(
++                            codex_agent_message_board_host::delete_agent_message_boards(
+                                 &sqlite,
+-                                &local_board_options(),
+-                                &boards,
++                                &thread_ids,
+                             )
+                             .await
+-                            .map_err(|err| {
+-                                ThreadStoreError::Internal {
+-                                    message: format!(
+-                                        "failed to delete agent message boards: {err}"
+-                                    ),
+-                                }
+-                            })
+                         })
+                     }),
+             );
+@@ -2795,8 +2789,9 @@ impl ThreadManager {
+         }
+         let settings_history = settings_history_override
+             .as_deref()
++            .map(Vec::as_slice)
+             .or(model_history_override.as_deref())
+-            .unwrap_or(response_history.as_ref());
++            .unwrap_or(response_history.as_slice());
+         let implicit_saved_selection = settings_history
+             .iter()
+             .rev()
+@@ -4332,15 +4327,8 @@ impl ThreadManagerState {
+             && !session_source.is_non_root_agent()
+             && let AgentControlInit::Local(control) = &agent_control
+         {
+-            control
+-                .restore_v2_agent_metadata(&config, resumed.conversation_id)
+-                .await;
++            control.register_session_root(resumed.conversation_id, /*current_parent_thread_id*/ None);
+         }
+-        // Host controllers can already be shared with live threads. Publish root settings
+-        // only after registration succeeds, so a failed start cannot update their tree.
+-        let initial_host_config = (self.agent_control_factory.is_some()
+-            && parent_thread_id.is_none())
+-        .then(|| AgentConfigUpdate::ServiceTier(config.service_tier.clone()));
+         let mut instructions = match inherited_instructions {
+             Some(instructions) => instructions,
+             None if isolation == SessionIsolation::Isolated => SessionInstructions::default(),
+@@ -4692,12 +4680,6 @@ impl ThreadManagerState {
+             };
+             let mut threads = self.threads.write().await;
+             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
+-                if let Some(update) = initial_host_config {
+-                    session
+-                        .services
+-                        .agent_control
+-                        .propagate_config_update(update);
+-                }
+                 // A later reload must not replace the target's intent with its sender's config.
+                 self.thread_ephemeral_intent
+                     .lock()
