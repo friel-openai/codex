@@ -1148,6 +1148,7 @@ impl MessageProcessor {
             _ => None,
         };
         let serialization_scope = codex_request.serialization_scope();
+        let method = codex_request.method_name();
         let error_request_id = connection_request_id.clone();
         let rpc_gate = Arc::clone(&session.rpc_gate);
         let processor = Arc::clone(self);
@@ -1183,7 +1184,8 @@ impl MessageProcessor {
                 }
             }
             .instrument(span),
-        );
+        )
+        .with_method(method);
 
         if let Some(scope) = serialization_scope {
             let (key, access) = RequestSerializationQueueKey::from_scope(connection_id, scope);

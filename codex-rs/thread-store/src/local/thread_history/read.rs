@@ -143,6 +143,49 @@ pub(in crate::local) async fn list_turns(
     list_turns_from_lineage(store, params, &lineage).await
 }
 
+pub(in crate::local) async fn resume_backwards_cursors(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<(Option<String>, Option<String>)> {
+    validate_thread_for_paginated_reads(store, thread_id, true, "list_turns").await?;
+    let lineage = match indexed_same_thread_lineage(store, thread_id).await? {
+        Some(lineage) => lineage,
+        None => {
+            store
+                .resolve_rollout_lineage_for_history_page(thread_id)
+                .await?
+        }
+    };
+    let pool = store.thread_history_db().await?;
+    let turns = page_turn_rows(
+        pool,
+        thread_id,
+        &lineage,
+        None,
+        1,
+        crate::SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    )
+    .await?;
+    let items = page_item_rows(
+        pool,
+        &lineage,
+        &ListItemsParams {
+            item_ids: None,
+            thread_id,
+            turn_id: None,
+            include_archived: true,
+            position: None,
+            page_size: 1,
+            sort_direction: crate::SortDirection::Desc,
+            sort_key: crate::ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
+        },
+    )
+    .await?;
+    Ok((turns.backwards_cursor, items.backwards_cursor))
+}
+
 async fn list_turns_from_lineage(
     store: &LocalThreadStore,
     params: ListTurnsParams,
