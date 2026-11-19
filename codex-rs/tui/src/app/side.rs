@@ -15,7 +15,7 @@ use crate::chatwidget::InterruptedTurnNoticeMode;
 const SIDE_RENAME_BLOCK_MESSAGE: &str = "Side conversations cannot be renamed.";
 const SIDE_MAIN_THREAD_UNAVAILABLE_MESSAGE: &str =
     "'/side' is unavailable until the main thread is ready.";
-const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
+pub(super) const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
     "'/side' is unavailable until the current conversation has started. ",
     "Send a message first, then try /side again."
 );
@@ -211,6 +211,10 @@ impl App {
     pub(super) fn sync_side_thread_ui(&mut self) {
         if self.zoomed_thread.is_some() && self.zoomed_thread != self.open_pane_focus() {
             self.zoomed_thread = None;
+        }
+        if self.standalone_side_active {
+            self.activate_standalone_side_ui();
+            return;
         }
         let clear_side_ui = |chat_widget: &mut crate::chatwidget::ChatWidget| {
             chat_widget.set_side_conversation_context_label(/*label*/ None);
@@ -595,6 +599,9 @@ impl App {
         self.abort_thread_event_listener(thread_id);
         self.thread_event_channels.remove(&thread_id);
         self.pending_server_profiles.remove(&thread_id);
+        self.agents_overview
+            .requested_permission_profiles
+            .remove(&thread_id);
         self.agents_overview.activity.remove(&thread_id);
         self.sidebars.remove(&Some(thread_id));
         if let Some(side) = self.side_threads.remove(&thread_id)
