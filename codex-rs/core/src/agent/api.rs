@@ -4,6 +4,10 @@
 //! and turn contexts stay in the runtime. Implementations own membership, loading,
 //! delivery and shared resources. These Rust contracts do not define a wire protocol.
 
+use crate::agent::control::ListedAgent;
+use crate::agent::control::ListedAgentsPage;
+use crate::agent::control::bounded_list_agents_preview;
+use crate::agent::control::paginate_listed_agents;
 use crate::agent::types::AgentExecutionGuard;
 use crate::agent::types::AgentMessage;
 use crate::agent::types::AgentMetadata;
@@ -100,6 +104,24 @@ pub trait AgentControl: Send + Sync {
         path_prefix: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<LiveAgent>>>;
 
+    /// Page the backend's agent listing without substituting another backend's membership.
+    /// Local control overrides this to include known unloaded agents; other backends retain
+    /// their existing loaded listing with the same cursor, preview, and response byte limits.
+    fn list_page<'a>(
+        &'a self,
+        caller: ThreadId,
+        parent: Option<ThreadId>,
+        source: &'a SessionSource,
+        path_prefix: Option<&'a str>,
+        cursor: Option<&'a str>,
+        limit: Option<usize>,
+    ) -> BoxFuture<'a, Result<ListedAgentsPage>> {
+        Box::pin(async move {
+            let agents = self.list(caller, parent, source, path_prefix).await?;
+            paginate_live_agents(agents, cursor, limit)
+        })
+    }
+
     /// Known direct children for V2 model context, including unloaded agents. Loaded
     /// children come first, alphabetically within each group; an unknown parent yields none.
     /// This reads existing membership without registering the parent or loading children.
@@ -159,6 +181,42 @@ pub trait AgentControl: Send + Sync {
         reminder: RolloutBudgetReminder,
     ) -> BoxFuture<'a, ()>;
 }
+
+fn paginate_live_agents(
+    agents: Vec<LiveAgent>,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+) -> Result<ListedAgentsPage> {
+    let mut agents = agents
+        .into_iter()
+        .map(|agent| ListedAgent {
+            agent_id: agent.thread_id,
+            parent_agent_id: agent.metadata.parent_thread_id,
+            agent_name: agent
+                .metadata
+                .agent_path
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| agent.thread_id.to_string()),
+            agent_status: agent.status,
+            last_task_message: agent
+                .metadata
+                .last_task_message
+                .as_deref()
+                .map(bounded_list_agents_preview),
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        left.agent_name
+            .cmp(&right.agent_name)
+            .then_with(|| left.agent_id.to_string().cmp(&right.agent_id.to_string()))
+    });
+    paginate_listed_agents(agents, cursor, limit)
+}
+
+#[cfg(test)]
+#[path = "api_tests.rs"]
+mod tests;
 
 /// References resolve relative to the registered caller. IDs retain each operation's
 /// existing lookup policy, including legacy access to unregistered loaded threads.
