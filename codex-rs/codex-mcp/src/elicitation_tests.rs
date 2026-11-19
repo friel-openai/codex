@@ -1012,6 +1012,54 @@ fn verification_fixture(
 }
 
 #[tokio::test]
+async fn auto_deny_rejects_elicitations_until_client_compatibility_clears() {
+    let (manager, events, sender) =
+        verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let router = manager.router.clone();
+    router.set_auto_deny(true);
+    assert!(manager.router.auto_deny());
+
+    assert_eq!(
+        send_elicitation(&sender, /*marker*/ None).await.action,
+        ElicitationAction::Decline
+    );
+    let verification = || Elicitation::UserVerification {
+        meta: None,
+        title: "Verify".into(),
+        description: "Verify the request".into(),
+        challenge: "AQID".into(),
+    };
+    let result = sender(RequestId::Number(8), verification()).await.unwrap();
+    assert_eq!(result.action, ElicitationAction::Cancel);
+    assert!(events.try_recv().is_err());
+
+    router.set_auto_deny(false);
+    assert!(!manager.router.auto_deny());
+    let pending = tokio::spawn(sender(RequestId::Number(9), verification()));
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("verification request should be routed")
+        .unwrap();
+    let EventMsg::ElicitationRequest(request) = event.msg else {
+        panic!("expected verification request");
+    };
+    let ProtocolRequestId::String(id) = request.id else {
+        panic!("expected routed request id");
+    };
+    let response = approved_response();
+    manager
+        .router
+        .resolve(
+            request.server_name,
+            RequestId::String(id.into()),
+            response.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.await.unwrap().unwrap(), response);
+}
+
+#[tokio::test]
 async fn user_verification_requires_the_app_even_when_policy_would_approve_or_decline() {
     for approval_policy in [AskForApproval::Never, AskForApproval::OnRequest] {
         let reviewer = RecordingReviewer::new(Ok(Some(approved_response())));
