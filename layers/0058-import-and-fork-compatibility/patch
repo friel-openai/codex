@@ -1,0 +1,157 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 71fe0bc223353f6aedfd07b796fe56ff3c3d719d..e2f7dc14ffb20675736ddd56104dc211d00dec16 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -1574,6 +1574,7 @@ fn raw_response_item_completed_notification(
+             thread_id: conversation_id.to_string(),
+             turn_id: turn_id.to_string(),
+             item: thread_item,
++            content_token_count: None,
+             completed_at_ms: now_unix_timestamp_ms(),
+         };
+         return ServerNotification::ItemCompleted(notification);
+@@ -1600,6 +1601,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
+             .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
+         text,
+         phase: Some(MessagePhase::Commentary),
++        moderation: None,
+         delivery: None,
+         questions: None,
+         memory_citation: None,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 83af859b6a7a6f5e24083032f48a27333acf8553..5c298a11419cbb174d517d37e2f435e4d83a66b4 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -52,7 +52,6 @@ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::mcp::ClientMcpExtensions;
+ use codex_protocol::mcp::plain_output_text;
+ use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+-use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_rollout::ReverseJsonlScanner;
+@@ -4562,6 +4561,7 @@ impl ThreadRequestProcessor {
+                     ThreadItemEntry {
+                         turn_id: turn.id.clone(),
+                         item,
++                        output_deferred: false,
+                         started_at_ms: timestamps.started_at_ms,
+                         completed_at_ms: timestamps.completed_at_ms,
+                     }
+@@ -8235,8 +8235,10 @@ impl ThreadRequestProcessor {
+             .and_then(|fork| fork.preview_before_compaction.take())
+         {
+             preview
+-        } else if paginated_source || ephemeral {
+-            preview_from_rollout_items(&history_items)
++        } else if prepared_fork.is_some()
++            || (ephemeral && last_turn_id.is_none() && before_turn_id.is_none())
++        {
++            preview_from_rollout_items(&source_history_items)
+         } else {
+             String::new()
+         };
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs b/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
+index 82411e239a22e73c6165db7f94437d176e30050e..18ca2da0fd3c2112b635584b15c6fc01e96a41db 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
+@@ -410,6 +410,7 @@ fn minimal_current_agent_thread(
+             extra: None,
+             session_id: thread_id,
+             forked_from_id: None,
++            attached_to_thread_id: None,
+             parent_thread_id: Some(member.parent_thread_id.to_string()),
+             preview: String::new(),
+             ephemeral: true,
+diff --git a/codex-rs/external-agent-migration/src/sessions/append.rs b/codex-rs/external-agent-migration/src/sessions/append.rs
+index 42b9870545f80327997538fc7f40f3b8c9909205..64ce8685985709d223a958bf3ae28d687e6e3326 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append.rs
+@@ -203,7 +203,13 @@ fn native_import_items(thread_id: ThreadId, source: &[RolloutItem]) -> Option<Ve
+             }
+             RolloutItem::EventMsg(EventMsg::AgentMessage(event)) => {
+                 Some(TurnItem::AgentMessage(AgentMessageItem {
+-                    id,
++                    id: event.moderation.as_ref().map_or(id, |moderation| moderation.item_id.clone()),
++                    moderation: event.moderation.as_ref().map(|moderation| {
++                        codex_protocol::items::AgentMessageModeration {
++                            moderated: moderation.moderated,
++                            display: moderation.display.clone(),
++                        }
++                    }),
+                     content: vec![AgentMessageContent::Text {
+                         text: event.message.clone(),
+                     }],
+@@ -220,6 +226,7 @@ fn native_import_items(thread_id: ThreadId, source: &[RolloutItem]) -> Option<Ve
+                 thread_id,
+                 turn_id: turn_id.clone()?,
+                 item,
++                content_token_count: None,
+                 started_at_ms,
+                 completed_at_ms: started_at_ms.unwrap_or_default(),
+             })),
+diff --git a/codex-rs/external-agent-migration/src/sessions/append_tests.rs b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+index aa0fd7e834a497b58c6ab0a0579e8d84d95d8cac..3c19bc91252d9bf69c8c20cedf97f3692cd2c191 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append_tests.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+@@ -8,6 +8,7 @@ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::ContextCompactedEvent;
+ use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+ use codex_protocol::protocol::RolloutReferenceItem;
++use codex_protocol::protocol::TargetedAnswerModeration;
+ use codex_protocol::protocol::ThreadRolledBackEvent;
+ use codex_protocol::security_risk::SecurityRiskScore;
+ use pretty_assertions::assert_eq;
+@@ -79,6 +80,52 @@ fn native_append_retains_display_items_and_exact_model_prefix() {
+     assert!(plan_append(&native, &appended).is_none());
+ }
+
++#[test]
++fn native_append_preserves_moderated_message_identity() {
++    let thread_id = ThreadId::new();
++    let mut source = rollout(&[
++        (MessageRole::User, "request"),
++        (MessageRole::Assistant, "answer"),
++    ]);
++    let message = source
++        .iter_mut()
++        .find_map(|item| match item {
++            RolloutItem::EventMsg(EventMsg::AgentMessage(message))
++                if message.message == "answer" =>
++            {
++                Some(message)
++            }
++            _ => None,
++        })
++        .expect("assistant event exists");
++    message.moderation = Some(TargetedAnswerModeration {
++        item_id: "moderated-item".to_string(),
++        moderated: true,
++        display: None,
++    });
++
++    let native = native_import_items(thread_id, &source).expect("native imported messages");
++    let (event, message) = native
++        .iter()
++        .find_map(|item| match item {
++            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match &event.item {
++                TurnItem::AgentMessage(message) if message.id == "moderated-item" => {
++                    Some((event, message))
++                }
++                _ => None,
++            },
++            _ => None,
++        })
++        .expect("moderated native item exists");
++    let moderation = message
++        .moderation
++        .as_ref()
++        .expect("moderation is preserved");
++    assert!(moderation.moderated);
++    assert!(moderation.display.is_none());
++    assert!(event.content_token_count.is_none());
++}
++
+ #[test]
+ fn requires_a_strict_nonempty_model_prefix() {
+     let history = rollout(&[(MessageRole::User, "first request")]);
