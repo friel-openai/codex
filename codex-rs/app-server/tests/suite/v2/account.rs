@@ -2533,6 +2533,7 @@ async fn login_survives_same_owner_token_refresh(
                 .send_get_auth_status_request(GetAuthStatusParams {
                     include_token: Some(true),
                     refresh_token: Some(true),
+                    allow_retryable_error: false,
                 })
                 .await?;
             // getAuthStatus reloads config before replying, which can wait for
@@ -3473,6 +3474,7 @@ region = "us-west-2"
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(false),
             refresh_token: Some(false),
+            allow_retryable_error: false,
         })
         .await?;
     let response = timeout(
@@ -3746,6 +3748,7 @@ async fn get_account_omits_chatgpt_after_permanent_refresh_failure() -> Result<(
         .send_get_auth_status_request(GetAuthStatusParams {
             include_token: Some(true),
             refresh_token: Some(true),
+            allow_retryable_error: false,
         })
         .await?;
     let _: GetAuthStatusResponse = timeout(
