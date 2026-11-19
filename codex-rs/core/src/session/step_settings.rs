@@ -211,6 +211,7 @@ impl ModelInfoOverrides {
             // The models manager already owns its catalog.
             model_catalog: None,
             custom_models: self.custom_models.clone(),
+            custom_models_authoritative: true,
         }
     }
 }

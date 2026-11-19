@@ -1203,6 +1203,17 @@ impl ThreadManager {
             .set_api_key_model_discovery_enabled(enabled);
     }
 
+    /// Publishes the latest validated custom-model aliases used by model discovery.
+    pub fn replace_custom_models(
+        &self,
+        custom_models: HashMap<String, codex_models_manager::CustomModelConfig>,
+    ) {
+        self.state
+            .model_catalog
+            .manager
+            .replace_custom_models(custom_models);
+    }
+
     pub async fn list_models(
         &self,
         refresh_strategy: RefreshStrategy,

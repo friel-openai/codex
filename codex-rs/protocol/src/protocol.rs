@@ -3697,6 +3697,14 @@ pub struct TurnContextItem {
     pub cyber_access_program: Option<CyberAccessProgram>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
+    /// Concrete service tier used for this turn, if one was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service_tier: Option<String>,
+    /// Stable custom-model routing profile selected for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_profile: Option<String>,
     /// Legacy placeholder written as `Some(ReasoningSummaryConfig::None)` for older readers.
     /// Optional so newer readers also accept its future removal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6693,6 +6701,8 @@ mod tests {
                 .expect("serializable split policy"),
             "model": "gpt-5",
             "summary": "none",
+            "service_tier": "priority",
+            "model_profile": "balanced",
         });
         let item: TurnContextItem = serde_json::from_value(legacy.clone())?;
         let profile = PermissionProfile::from_runtime_permissions(
@@ -6709,6 +6719,8 @@ mod tests {
                 "permission_profile": profile,
                 "model": "gpt-5",
                 "summary": "none",
+                "service_tier": "priority",
+                "model_profile": "balanced",
             })
         );
         assert_eq!(
@@ -6733,6 +6745,7 @@ mod tests {
             .expect("context object")
             .remove("permission_profile");
         assert!(serde_json::from_value::<TurnContextItem>(missing_permissions).is_err());
+        assert_eq!(item.summary, Some(ReasoningSummaryConfig::None));
         Ok(())
     }
 
