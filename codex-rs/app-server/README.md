@@ -28,6 +28,10 @@ unreadable, or blank. It never falls back to the other memory version.
 Pass `currentAccountOnly: true` on `thread/list` or `thread/search` to scope local
 discovery to the current ChatGPT login. Newly created threads record that discovery
 is account-scoped, and each recorded creator user or account ID must match.
+`thread/search` requires a complete local state database to select rollout files;
+if the database is unavailable or its metadata backfill is incomplete, it returns
+an error rather than searching the filesystem. Set `includeAttachedThreads` to
+include eligible persistent attached threads in content results.
 Threads created before this change and threads without creator IDs stay visible
 across account switches. Resume and revert preserve that distinction; forks are new threads.
 Scoped requests skip candidates whose rollout header cannot be read. API-key
