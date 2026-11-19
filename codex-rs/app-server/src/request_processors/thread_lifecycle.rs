@@ -983,6 +983,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     pending_thread_unloads: &PendingThreadUnloads,
     mut pending: crate::thread_state::PendingThreadResumeRequest,
 ) {
+    pending.timings.listener_started();
     let (active_turn_metadata, mut active_turn, active_page_params) = {
         let state = thread_state.lock().await;
         let active_page_params = pending.initial_turns_page.as_ref().filter(|params| {
@@ -1022,10 +1023,13 @@ pub(super) async fn handle_pending_thread_resume_request(
                 .flat_map(|page| &mut page.data),
         );
         if let Err(error) = restore_evicted_agent_text(store, conversation_id, turn, stored).await {
+            pending.timings.listener_composing();
+            pending.timings.report(/*response_prepared*/ false);
             outgoing.send_error(pending.request_id, error).await;
             return;
         }
     }
+    pending.timings.listener_composing();
     tracing::debug!(
         thread_id = %conversation_id,
         request_id = ?pending.request_id,
@@ -1098,6 +1102,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         ) {
             Ok(page) => Some(page),
             Err(error) => {
+                pending.timings.report(/*response_prepared*/ false);
                 outgoing.send_error(request_id, error).await;
                 return;
             }
@@ -1126,6 +1131,7 @@ pub(super) async fn handle_pending_thread_resume_request(
             || matches!(conversation.agent_status().await, AgentStatus::Shutdown)
         {
             drop(pending_thread_unloads);
+            pending.timings.report(/*response_prepared*/ false);
             outgoing
                 .send_error(request_id, thread_closing_for_resume(conversation_id))
                 .await;
@@ -1135,6 +1141,7 @@ pub(super) async fn handle_pending_thread_resume_request(
             .try_add_connection_to_thread(conversation_id, connection_id)
             .await
         {
+            pending.timings.report(/*response_prepared*/ false);
             tracing::debug!(
                 thread_id = %conversation_id,
                 connection_id = ?connection_id,
@@ -1155,6 +1162,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         {
             Ok(cursors) => cursors,
             Err(error) => {
+                pending.timings.report(/*response_prepared*/ false);
                 outgoing.send_error(request_id, error).await;
                 return;
             }
@@ -1206,9 +1214,12 @@ pub(super) async fn handle_pending_thread_resume_request(
         turns_backwards_cursor,
         items_backwards_cursor,
     };
-    outgoing
-        .send_response_with_thread_originator(request_id, response, originator)
-        .await;
+    crate::thread_state::ThreadResumeTimings::measure(
+        &mut pending.timings.response_send,
+        outgoing.send_response_with_thread_originator(request_id, response, originator),
+    )
+    .await;
+    pending.timings.report(/*response_prepared*/ true);
     // Warm metadata-only resumes skip history reconstruction. Cold paginated children can
     // replay usage using attribution captured before the listener was attached.
     if let Some(token_usage_turn_id) = token_usage_turn_id {

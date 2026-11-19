@@ -19,10 +19,13 @@ impl ThreadRequestProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         let thread_id = schedule.thread_id;
         let thread_list_state_permit = self
-            .acquire_thread_resume_permit(&ThreadResumeParams {
-                thread_id: thread_id.to_string(),
-                ..Default::default()
-            })
+            .acquire_thread_resume_permit(
+                &ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    ..Default::default()
+                },
+                /*permit_duration*/ None,
+            )
             .await?;
         if self
             .pending_thread_unloads
