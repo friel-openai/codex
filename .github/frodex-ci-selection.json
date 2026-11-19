@@ -389,6 +389,8 @@
         "independent_thread::retention::tests::nested_independent_fork_retains_current_assignment_not_ancestor",
         "independent_thread::tests::encoded_message_limit_includes_attribution_and_json_escaping",
         "independent_thread::tests::prompt_limit_counts_utf8_bytes_and_rejects_blank_input",
+        "session::auto_compaction_guard::tests::detects_unchanged_overhead_but_allows_sufficient_new_history",
+        "session::auto_compaction_guard::tests::model_window_and_tool_changes_invalidate_baseline",
         "session::rollout_reconstruction_tests::bounded_replay_matches_full_replay_after_empty_turn_compactions::current_compactions",
         "session::rollout_reconstruction_tests::bounded_replay_matches_full_replay_after_empty_turn_compactions::legacy_compactions",
         "session::rollout_reconstruction_tests::checkpoint_only_rollback_preserves_model_history_without_removed_authorization::matching_guardian_boundary",
