@@ -18,6 +18,7 @@ use anyhow::Result;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
@@ -30,8 +31,113 @@ use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
 use test_case::test_case;
-use tokio::sync::Semaphore;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
+
+#[tokio::test]
+async fn loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state() -> Result<()>
+{
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    let config = Arc::new(test.config.clone());
+    let auth =
+        AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false)
+            .await?;
+    let config_manager =
+        ConfigManager::without_managed_config_for_tests(config.codex_home.to_path_buf());
+    let (outgoing_tx, _outgoing_rx) = mpsc::channel(/*buffer*/ 64);
+    let outgoing = Arc::new(OutgoingMessageSender::new(
+        outgoing_tx,
+        AnalyticsEventsClient::disabled(),
+    ));
+    let thread_state_manager = ThreadStateManager::new();
+    let thread_watch_manager = ThreadWatchManager::new_with_outgoing(outgoing.clone());
+    let skills_watcher = SkillsWatcher::new(
+        test.thread_manager.skills_service(),
+        &config.codex_home,
+        outgoing.clone(),
+    );
+    let thread_goal_processor = ThreadGoalRequestProcessor::new(
+        test.thread_manager.clone(),
+        outgoing.clone(),
+        config.clone(),
+        thread_state_manager.clone(),
+        /*state_db*/ None,
+        Arc::new(GoalService::new()),
+        config_manager.clone(),
+    );
+    let processor = ThreadRequestProcessor::new(
+        auth,
+        test.thread_manager.clone(),
+        outgoing,
+        Arg0DispatchPaths::default(),
+        config,
+        config_manager,
+        test.thread_store.clone(),
+        Default::default(),
+        thread_state_manager,
+        thread_watch_manager,
+        Arc::new(RwLock::new(())),
+        thread_goal_processor,
+        /*state_db*/ None,
+        /*log_db*/ None,
+        skills_watcher,
+        /*turn_cost_worker*/ None,
+        Vec::new(),
+        Arc::new(SampleResponseRegistry::default()),
+    );
+    let connection_id = ConnectionId(1);
+    processor
+        .connection_initialized(connection_id, ConnectionCapabilities::default())
+        .await;
+    let held = processor.thread_list_state_permit.read().await;
+    let resume_id = ConnectionRequestId {
+        connection_id,
+        request_id: RequestId::Integer(1),
+    };
+    let resume = tokio::time::timeout(
+        Duration::from_secs(10),
+        processor.thread_resume(
+            ThreadResumeTarget::Client(resume_id),
+            ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            /*app_server_client_name*/ None,
+            /*app_server_client_version*/ None,
+            /*client_mcp_extensions*/ Default::default(),
+        ),
+    )
+    .await
+    .context("loaded resume blocked by an unrelated held list-state permit")?
+    .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
+    assert!(resume.is_none());
+    let read_id = ConnectionRequestId {
+        connection_id,
+        request_id: RequestId::Integer(2),
+    };
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        processor.thread_read(
+            &read_id,
+            ThreadReadParams {
+                thread_id: thread_id.to_string(),
+                include_turns: false,
+            },
+        ),
+    )
+    .await
+    .context("thread read blocked by an unrelated held list-state permit")?
+    .map_err(|error| anyhow::anyhow!("read failed: {}", error.message))?;
+    assert!(read.is_some());
+    drop(held);
+    Ok(())
+}
 
 #[test_case(true; "listener attached before shutdown")]
 #[test_case(false; "listener attached after shutdown")]
@@ -85,7 +191,7 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
         Default::default(),
         thread_state_manager.clone(),
         thread_watch_manager.clone(),
-        Arc::new(Semaphore::new(/*permits*/ 1)),
+        Arc::new(RwLock::new(())),
         thread_goal_processor,
         /*state_db*/ None,
         /*log_db*/ None,
