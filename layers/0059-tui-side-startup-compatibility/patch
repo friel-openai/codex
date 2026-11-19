@@ -1,0 +1,76 @@
+diff --git a/codex-rs/tui/src/app/placed_side.rs b/codex-rs/tui/src/app/placed_side.rs
+index 3db1e9e7db922e79a12bad981ad5dc8358312bb6..05edd667216b904346f98a952da33839c142b3a0 100644
+--- a/codex-rs/tui/src/app/placed_side.rs
++++ b/codex-rs/tui/src/app/placed_side.rs
+@@ -3,6 +3,7 @@
+ use super::side::SIDE_NO_STARTED_CONVERSATION_MESSAGE;
+ use super::*;
+ use crate::app_event::ForkPanePlacement;
++use crate::app_event::SideStartMode;
+ use crate::ghostty_fork::ghostty_placement;
+ use crate::ghostty_fork::spawn_standalone_side_in_ghostty_split;
+ use crate::terminal_multiplexer::ForkPaneSpawnResult;
+@@ -156,6 +157,7 @@ impl App {
+                         app_server,
+                         parent_thread_id,
+                         /*user_message*/ None,
++                        SideStartMode::Reuse,
+                     )
+                     .await;
+             }
+diff --git a/codex-rs/tui/src/app/standalone_side.rs b/codex-rs/tui/src/app/standalone_side.rs
+index 6a5d6545e6c482357381ab29283bd2bc20220764..7e6dbb77027ac532b1adae8f188e381d21ec15f6 100644
+--- a/codex-rs/tui/src/app/standalone_side.rs
++++ b/codex-rs/tui/src/app/standalone_side.rs
+@@ -4,6 +4,7 @@
+ //! inherited history from the child UI. It never attaches to or controls the parent runtime.
+
+ use super::*;
++use crate::app_server_session::SideChatStorage;
+ use crate::chatwidget::InterruptedTurnNoticeMode;
+ use codex_context_fragments::ContextualUserFragment;
+ use codex_context_fragments::StandaloneSideBoundary;
+@@ -50,6 +51,7 @@ impl App {
+                         config,
+                         target_session.thread_id,
+                         /*selected_profile*/ None,
++                        SideChatStorage::Temporary,
+                     )
+                     .await
+             }
+diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
+index 7999daf929efd9166a848363cc2b8fa75253a8d3..5fa3ecefd9de15057295c487a2b2ebcf450e6fc6 100644
+--- a/codex-rs/tui/src/app_server_session.rs
++++ b/codex-rs/tui/src/app_server_session.rs
+@@ -1467,7 +1467,7 @@ impl AppServerSession {
+                 bootstrap_request_error("thread/fork/import failed during TUI bootstrap", err)
+             })?;
+         let presentation = if config.ephemeral {
+-            ForkPresentation::SideConversation
++            ForkPresentation::SideConversation(SideChatStorage::Temporary)
+         } else {
+             ForkPresentation::Regular
+         };
+@@ -1668,9 +1668,6 @@ impl AppServerSession {
+             self.thread_params_mode(),
+         )
+         .await?;
+-        if let Some(permissions) = selected_permissions {
+-            started.session.permission_profile = permissions;
+-        }
+         if presentation != ForkPresentation::Regular {
+             started.session.daybreak_enabled = false;
+         }
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index b7bdc02eef112c4eb364ebd60e35d6fcfab858dd..504c4b8d82676f386a7ebbabc3c97a01880fb8a3 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -1589,7 +1589,7 @@ async fn run_ratatui_app(
+                 .await??;
+             let mut server =
+                 AppServerSession::new(backend_id, client, app_server_target.thread_params_mode())
+-                    .with_local_codex_home(&selected.codex_home)
++                    .with_startup_config(&selected)
+                     .with_remote_cwd_override(remote_cwd_override.clone());
+             if let Err(err) = boxed_future!(onboarding::authenticate_gateway(
+                 &mut tui,
