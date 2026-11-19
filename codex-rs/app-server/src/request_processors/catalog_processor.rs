@@ -16,6 +16,20 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
     model_catalog: Arc<ModelCatalog>,
+    // Serialize config loading and alias publication across concurrent model/list requests.
+    alias_refresh: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    pub(crate) alias_refresh_test_pause: Arc<AliasRefreshTestPause>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct AliasRefreshTestPause {
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+    pub(crate) observe_pre_lock: std::sync::atomic::AtomicBool,
+    pub(crate) pre_lock: tokio::sync::Notify,
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -121,6 +135,15 @@ fn errors_to_info(
 }
 
 impl CatalogRequestProcessor {
+    #[cfg(test)]
+    pub(crate) fn custom_model_aliases_for_test(
+        &self,
+    ) -> Arc<HashMap<String, codex_models_manager::CustomModelConfig>> {
+        self.thread_manager
+            .get_models_manager()
+            .custom_models_snapshot()
+    }
+
     pub(crate) fn new(
         outgoing: Arc<OutgoingMessageSender>,
         skills_watcher: Arc<SkillsWatcher>,
@@ -136,6 +159,9 @@ impl CatalogRequestProcessor {
             config,
             config_manager,
             model_catalog,
+            alias_refresh: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            alias_refresh_test_pause: Arc::new(AliasRefreshTestPause::default()),
         }
     }
 
@@ -235,6 +261,36 @@ impl CatalogRequestProcessor {
                 return Err(invalid_request(error.to_string()));
             }
         }
+        #[cfg(test)]
+        if self
+            .alias_refresh_test_pause
+            .observe_pre_lock
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.alias_refresh_test_pause.pre_lock.notify_one();
+        }
+        let alias_refresh = self.alias_refresh.lock().await;
+        match self.load_latest_config(/*fallback_cwd*/ None).await {
+            Ok(config) => {
+                #[cfg(test)]
+                if self
+                    .alias_refresh_test_pause
+                    .armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.alias_refresh_test_pause.reached.notify_one();
+                    self.alias_refresh_test_pause.resume.notified().await;
+                }
+                models_manager.replace_custom_models(config.custom_models.clone());
+                self.thread_manager
+                    .replace_custom_models(config.custom_models);
+            }
+            Err(err) => tracing::warn!(
+                error = %err.message,
+                "failed to refresh custom models before model/list; retaining the last valid snapshot"
+            ),
+        }
+        drop(alias_refresh);
         self.list_models(params, config, models_manager)
             .await
             .map(|response| Some(response.into()))

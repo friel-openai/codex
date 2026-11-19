@@ -2234,6 +2234,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 realtime_active: None,
                 cyber_access_program: None,
                 effort: None,
+                service_tier: None,
+                model_profile: None,
                 summary: Some(ReasoningSummary::Auto),
             }),
             user_message("child question"),

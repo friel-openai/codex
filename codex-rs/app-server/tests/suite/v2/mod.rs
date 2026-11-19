@@ -109,6 +109,7 @@ mod model_provider_config_tests;
 #[path = "model_provider_enforcement_tests.rs"]
 mod model_provider_enforcement;
 mod model_provider_list_tests;
+mod model_routing_profiles;
 mod multi_agent_v2_developer_instructions;
 mod otel;
 mod output_schema;

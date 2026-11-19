@@ -452,6 +452,7 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
         "thread-alias".to_string(),
         CustomModelConfig {
             model: "model-b".to_string(),
+            routing_profile: None,
             model_context_window: Some(64_000),
             model_auto_compact_token_limit: Some(48_000),
         },
