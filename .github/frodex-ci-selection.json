@@ -175,6 +175,7 @@
         "suite::v2::thread_read::frodex_thread_turns_list_stays_bounded_with_513_segments",
         "suite::v2::thread_read::paginated_resume_without_index_does_not_open_obsolete_predecessor",
         "suite::v2::thread_read::paginated_segmented_history_without_index_returns_latest_five_turns",
+        "suite::v2::thread_read::paginated_stored_thread_reads_unprojected_turns_through_read_apis",
         "suite::v2::thread_read::segmented_legacy_index_preserves_full_items_cursors_and_restart",
         "suite::v2::thread_read::thread_resume_initial_turns_page_matches_requested_turns_list_page",
         "suite::v2::thread_resume::app_server_restart_recovers_overdue_goal_with_default_supervisor",

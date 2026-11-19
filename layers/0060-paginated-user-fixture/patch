@@ -1,0 +1,12 @@
+diff --git a/codex-rs/app-server/tests/common/rollout.rs b/codex-rs/app-server/tests/common/rollout.rs
+index f7ddb4f16f99d5002b0e266cb47eef5ddadec77a..16b1327d07258d5a7960a162eeebab507ca710f8 100644
+--- a/codex-rs/app-server/tests/common/rollout.rs
++++ b/codex-rs/app-server/tests/common/rollout.rs
+@@ -130,6 +130,7 @@ pub async fn append_fake_paginated_user_message(
+                     text_elements: Vec::new(),
+                 }],
+             }),
++            content_token_count: None,
+             started_at_ms: Some(0),
+             completed_at_ms: 1,
+         })),
