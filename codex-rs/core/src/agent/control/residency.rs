@@ -75,6 +75,23 @@ impl ThreadManagerState {
             let _transition = transition;
             let _residency_guard = residency_guard;
             thread.ensure_rollout_materialized().await;
+            // Retain configured bindings before shutdown can cancel pending initialization.
+            let (config, ..) = thread.session.fork_config().await;
+            let environments = EvictedEnvironments {
+                config: Arc::new(config),
+                has_independent_service_tier: matches!(
+                    &thread.session.agent_runtime,
+                    AgentRuntimeServices::Host(services) if services.service_tier.is_none()
+                ),
+                selections: thread.environment_selections().await,
+                bindings: thread
+                    .session
+                    .services
+                    .turn_environments
+                    .configured_snapshot_now(),
+            };
+            let ephemeral = thread.config_snapshot().await.ephemeral;
+            let status = thread.agent_status().await;
             if let Err(err) = thread.shutdown_and_wait().await {
                 teardown.record_shutdown_failure("stop_resident", CodexErrKind::from(&err).into());
                 teardown.complete();
@@ -92,24 +109,6 @@ impl ThreadManagerState {
                 .collect();
             let runtime = &thread.session.services.local_agent_runtime;
             let _ = runtime.mailboxes.enqueue(thread_id, /*id*/ None, mail);
-            // Reuse the same effective configuration snapshot as a fork. This includes live
-            // permissions and network restrictions that a profile name cannot reconstruct.
-            let (config, ..) = thread.session.fork_config().await;
-            // Preserve configured bindings across eviction without retaining turn-only attachments.
-            // Raw bindings keep the original pending owner configuration alive.
-            let environments = EvictedEnvironments {
-                config: Arc::new(config),
-                has_independent_service_tier: matches!(
-                    &thread.session.agent_runtime,
-                    AgentRuntimeServices::Host(services) if services.service_tier.is_none()
-                ),
-                selections: thread.environment_selections().await,
-                bindings: thread
-                    .session
-                    .services
-                    .turn_environments
-                    .configured_snapshot_now(),
-            };
             let mut threads = manager.threads.write().await;
             if threads
                 .get(&thread_id)
@@ -118,9 +117,21 @@ impl ThreadManagerState {
                 teardown.complete();
                 return Ok(ThreadEvictionOutcome::NotCurrent);
             }
+            if matches!(
+                status,
+                AgentStatus::Completed(_)
+                    | AgentStatus::Errored(_)
+                    | AgentStatus::Interrupted
+                    | AgentStatus::Shutdown
+            ) {
+                lifecycle.remember_cold_terminal_status(
+                    status,
+                    thread.multi_agent_version() == Some(MultiAgentVersion::V2),
+                );
+            }
             runtime
                 .registry
-                .save_evicted_environments(thread_id, environments);
+                .save_evicted_runtime_settings(thread_id, environments, ephemeral);
             let removed = threads.remove(&thread_id).is_some();
             runtime.agent_residency.remove(thread_id);
             teardown.complete();
@@ -200,7 +211,7 @@ impl LocalAgentControl {
         }
     }
 
-    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+    pub(crate) fn forget_agent_residency(&self, thread_id: ThreadId) {
         self.runtime.agent_residency.remove(thread_id);
     }
 }
@@ -427,13 +438,14 @@ impl LocalAgentControl {
                 .turn_environments
                 .configured_snapshot_now(),
         };
+        let ephemeral = thread.config_snapshot().await.ephemeral;
         thread.shutdown_and_wait().await?;
         thread
             .session
             .services
             .local_agent_runtime
             .registry
-            .save_evicted_environments(thread_id, environments);
+            .save_evicted_runtime_settings(thread_id, environments, ephemeral);
         Ok(manager.remove_thread(&thread_id).await.is_some())
     }
 }
