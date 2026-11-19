@@ -323,10 +323,11 @@ async fn prepare_with_response_history_once(
     {
         let source = resolve_fork_source(store, thread_id).await?;
         let mut history_access =
-            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 thread_id,
                 source.path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
             )
             .await?;
         let lifecycle = history_access
@@ -385,10 +386,11 @@ async fn prepare_with_response_history_once(
         let source = resolve_fork_source(store, thread_id).await?;
         trace_fork_stage("resolved_source_for_indexed_attempt");
         let mut history_access =
-            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 thread_id,
                 source.path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
             )
             .await?;
         trace_fork_stage("repaired_active_history");
@@ -464,94 +466,97 @@ async fn prepare_with_response_history_once(
     } else {
         None
     };
-    let (lineage, history_access, source_reservation, source_projection_was_missing) =
-        if let Some((reservation, prepared)) = fast_lineage {
-            let ForkHistoryReservation {
-                _lifecycle: source_reservation,
-                history_access,
-            } = *reservation;
-            prepared_same_thread_model_context = Some(Arc::new(prepared.model_context));
-            prepared_same_thread_full_history = prepared.full_history.map(Arc::new);
-            prepared_same_thread_session_meta = Some(prepared.session_meta);
-            (
-                prepared.lineage,
-                history_access,
-                source_reservation,
-                prepared.source_projection_was_missing,
+    let (
+        mut lineage,
+        mut history_access,
+        mut source_reservation,
+        mut source_projection_was_missing,
+    ) = if let Some((reservation, prepared)) = fast_lineage {
+        let ForkHistoryReservation {
+            _lifecycle: source_reservation,
+            history_access,
+        } = *reservation;
+        prepared_same_thread_model_context = Some(Arc::new(prepared.model_context));
+        prepared_same_thread_full_history = prepared.full_history.map(Arc::new);
+        prepared_same_thread_session_meta = Some(prepared.session_meta);
+        (
+            prepared.lineage,
+            history_access,
+            source_reservation,
+            prepared.source_projection_was_missing,
+        )
+    } else {
+        let source = resolve_fork_source(store, thread_id).await?;
+        let mut history_access = if let Some(original) = original.as_ref() {
+            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_retry(
+                store,
+                thread_id,
+                source.path.as_path(),
+                original,
+                &excluded,
             )
+            .await?
         } else {
-            let source = resolve_fork_source(store, thread_id).await?;
-            let mut history_access = if let Some(original) = original.as_ref() {
-                super::goal_supervisor_runtime_repair::repair_compatibility_history_before_retry(
-                    store,
-                    thread_id,
-                    source.path.as_path(),
-                    original,
-                    &excluded,
-                )
-                .await?
-            } else {
-                super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
-                    store,
-                    thread_id,
-                    source.path.as_path(),
-                )
-                .await?
-            };
-            let source_reservation = history_access
-                .take_lifecycle(thread_id)
-                .ok_or_else(missing_source_reservation)?;
-            // Keep the source reserved until persistence and lineage materialization finish, even if the
-            // caller cancels fork preparation.
-            let lineage_store = store.clone();
-            let (lineage, history_access, source_reservation, source_projection_was_missing) =
-                tokio::spawn(async move {
-                    let writer_reservation =
-                        history_access.writer_reservation().ok_or_else(|| {
-                            ThreadStoreError::Internal {
-                                message: "history repair did not retain fork writer ownership"
-                                    .to_string(),
-                            }
-                        })?;
-                    let (lineage, source_projection_was_missing) = lineage_store
-                        .resolve_rollout_lineage_for_reference_reserved(
-                            thread_id,
-                            expected_rollout_id,
-                            writer_reservation,
-                            &excluded,
-                            original.as_ref(),
-                        )
-                        .await?;
-                    #[cfg(test)]
-                    let pause = {
-                        LINEAGE_PERSISTENCE_PAUSES
-                            .lock()
-                            .expect("lineage persistence pause mutex")
-                            .remove(&thread_id)
-                    };
-                    #[cfg(test)]
-                    if let Some(pause) = pause {
-                        pause.entered.notify_one();
-                        pause.release.notified().await;
-                    }
-                    Ok::<_, ThreadStoreError>((
-                        lineage,
-                        history_access,
-                        source_reservation,
-                        source_projection_was_missing,
-                    ))
-                })
-                .await
-                .map_err(|err| ThreadStoreError::Internal {
-                    message: format!("failed to resolve fork lineage: {err}"),
-                })??;
-            (
-                lineage,
-                history_access,
-                source_reservation,
-                source_projection_was_missing,
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
+                store,
+                thread_id,
+                source.path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
             )
+            .await?
         };
+        let source_reservation = history_access
+            .take_lifecycle(thread_id)
+            .ok_or_else(missing_source_reservation)?;
+        // Keep the source reserved until persistence and lineage materialization finish, even if the
+        // caller cancels fork preparation.
+        let lineage_store = store.clone();
+        let (lineage, history_access, source_reservation, source_projection_was_missing) =
+            tokio::spawn(async move {
+                let writer_reservation = history_access.writer_reservation().ok_or_else(|| {
+                    ThreadStoreError::Internal {
+                        message: "history repair did not retain fork writer ownership".to_string(),
+                    }
+                })?;
+                let (lineage, source_projection_was_missing) = lineage_store
+                    .resolve_rollout_lineage_for_reference_reserved(
+                        thread_id,
+                        expected_rollout_id,
+                        writer_reservation,
+                        &excluded,
+                        original.as_ref(),
+                    )
+                    .await?;
+                #[cfg(test)]
+                let pause = {
+                    LINEAGE_PERSISTENCE_PAUSES
+                        .lock()
+                        .expect("lineage persistence pause mutex")
+                        .remove(&thread_id)
+                };
+                #[cfg(test)]
+                if let Some(pause) = pause {
+                    pause.entered.notify_one();
+                    pause.release.notified().await;
+                }
+                Ok::<_, ThreadStoreError>((
+                    lineage,
+                    history_access,
+                    source_reservation,
+                    source_projection_was_missing,
+                ))
+            })
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to resolve fork lineage: {err}"),
+            })??;
+        (
+            lineage,
+            history_access,
+            source_reservation,
+            source_projection_was_missing,
+        )
+    };
     *observed.lock().expect("fork retry observer") = Some(lineage.clone());
     if lineage.has_exclusions() {
         return Err(ThreadStoreError::Conflict {
@@ -559,7 +564,60 @@ async fn prepare_with_response_history_once(
                 .to_string(),
         });
     }
+    super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage)
+        .await?;
     trace_fork_stage("resolved_reference_lineage");
+    let mut frozen_before_projection = None;
+    if matches!(boundary, ForkBoundary::Latest) && persistence == ForkPersistence::ReferenceBacked {
+        // No retry may republish after this point, including if a later read fails.
+        *observed.lock().expect("fork retry observer") = None;
+        let publication_store = store.clone();
+        let (frozen, returned_access, returned_reservation) = tokio::spawn(async move {
+            let writer_reservation =
+                history_access
+                    .writer_reservation()
+                    .ok_or_else(|| ThreadStoreError::Internal {
+                        message: "history repair did not retain fork writer ownership".to_string(),
+                    })?;
+            let frozen = super::segment::freeze_thread_segment_reserved(
+                &publication_store,
+                thread_id,
+                FreezeRolloutSegmentParams::snapshot(),
+                expected_rollout_id,
+                writer_reservation,
+            )
+            .await?;
+            Ok::<_, ThreadStoreError>((frozen, history_access, source_reservation))
+        })
+        .await
+        .map_err(|error| ThreadStoreError::Internal {
+            message: format!("failed to publish fork segment: {error}"),
+        })??;
+        history_access = returned_access;
+        source_reservation = returned_reservation;
+        if let Some(history_base) = frozen.history_base {
+            lineage = store
+                .resolve_rollout_lineage_from_path(
+                    thread_id,
+                    frozen.reference.rollout_path.as_path(),
+                )
+                .await?;
+            source_projection_was_missing = true;
+            debug_assert_eq!(
+                lineage
+                    .segments()
+                    .last()
+                    .map(super::rollout_lineage::RolloutLineageSegment::rollout_id),
+                Some(history_base.thread_id)
+            );
+        }
+        frozen_before_projection = Some(frozen);
+        trace_fork_stage("froze_latest_prefix_before_projection");
+        super::thread_history_materialization::ensure_fallback_projection_compatible(
+            store, &lineage,
+        )
+        .await?;
+    }
     let source_segment = lineage
         .segments()
         .last()
@@ -571,9 +629,7 @@ async fn prepare_with_response_history_once(
             operation: "prepare_fork",
         });
     }
-    super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage)
-        .await?;
-    if !matches!(boundary, ForkBoundary::Latest) {
+    if !matches!(boundary, ForkBoundary::Latest) || frozen_before_projection.is_some() {
         if source_projection_was_missing {
             super::thread_history::clear_projection_cursor(store, source_segment.rollout_id())
                 .await?;
@@ -810,48 +866,51 @@ async fn prepare_with_response_history_once(
     // Keep writer reservations through publication even if the caller is cancelled.
     // All fallible history reads precede publication so a retry cannot publish twice.
     let publication_store = store.clone();
-    let (frozen_segment, history_access) = if persistence == ForkPersistence::ReferenceBacked {
-        let (frozen_segment, history_access) = tokio::spawn(async move {
-            let writer_reservation =
-                history_access
-                    .writer_reservation()
-                    .ok_or_else(|| ThreadStoreError::Internal {
+    let (frozen_segment, history_access, source_reservation) =
+        if let Some(frozen) = frozen_before_projection {
+            (Some(frozen), history_access, source_reservation)
+        } else if persistence == ForkPersistence::ReferenceBacked {
+            *observed.lock().expect("fork retry observer") = None;
+            let (frozen_segment, history_access, source_reservation) = tokio::spawn(async move {
+                let writer_reservation = history_access.writer_reservation().ok_or_else(|| {
+                    ThreadStoreError::Internal {
                         message: "history repair did not retain fork writer ownership".to_string(),
-                    })?;
-            let frozen_segment = if indexed_root_latest {
-                super::segment::freeze_thread_segment_reserved(
-                    &publication_store,
-                    thread_id,
-                    FreezeRolloutSegmentParams::snapshot(),
-                    expected_rollout_id,
-                    writer_reservation,
-                )
-                .await?
-            } else {
-                super::segment::freeze_paginated_prefix_reserved(
-                    &publication_store,
-                    thread_id,
-                    source_rollout_path.as_path(),
-                    prefix_thread_id,
-                    prefix_rollout_id,
-                    prefix_rollout_path.as_path(),
-                    prefix_end.end_ordinal_exclusive,
-                    end_byte_offset,
-                    has_fallback,
-                    writer_reservation,
-                )
-                .await?
-            };
-            Ok::<_, ThreadStoreError>((frozen_segment, history_access))
-        })
-        .await
-        .map_err(|error| ThreadStoreError::Internal {
-            message: format!("failed to publish fork segment: {error}"),
-        })??;
-        (Some(frozen_segment), history_access)
-    } else {
-        (None, history_access)
-    };
+                    }
+                })?;
+                let frozen_segment = if indexed_root_latest {
+                    super::segment::freeze_thread_segment_reserved(
+                        &publication_store,
+                        thread_id,
+                        FreezeRolloutSegmentParams::snapshot(),
+                        expected_rollout_id,
+                        writer_reservation,
+                    )
+                    .await?
+                } else {
+                    super::segment::freeze_paginated_prefix_reserved(
+                        &publication_store,
+                        thread_id,
+                        source_rollout_path.as_path(),
+                        prefix_thread_id,
+                        prefix_rollout_id,
+                        prefix_rollout_path.as_path(),
+                        prefix_end.end_ordinal_exclusive,
+                        end_byte_offset,
+                        has_fallback,
+                        writer_reservation,
+                    )
+                    .await?
+                };
+                Ok::<_, ThreadStoreError>((frozen_segment, history_access, source_reservation))
+            })
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!("failed to publish fork segment: {error}"),
+            })??;
+            (Some(frozen_segment), history_access, source_reservation)
+        } else {
+            (None, history_access, source_reservation)
+        };
     trace_fork_stage("loaded_response_history");
     let mut prepared = PreparedFork::new(
         thread_id,
@@ -1015,7 +1074,7 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     }
     if !active_scan.segment_checkpoint
         || !store
-            .has_complete_history_projection_at(thread_id, resolved.rollout_id, file_metadata.len())
+            .has_complete_history_projection_at(resolved.rollout_id, file_metadata.len())
             .await?
     {
         fallback!("certified_context_or_complete_projection_missing");
@@ -1156,10 +1215,11 @@ async fn resolve_compatibility_fork_lineage(
     let source = resolve_fork_source(store, thread_id).await?;
     trace_fork_stage("resolved_source_for_compatibility");
     let mut history_access =
-        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+        super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
             store,
             thread_id,
             source.path.as_path(),
+            super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
         )
         .await?;
     trace_fork_stage("repaired_compatibility_history");

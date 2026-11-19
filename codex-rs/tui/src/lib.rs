@@ -682,7 +682,7 @@ pub(crate) async fn start_app_server_for_picker(
     .await?;
     Ok(
         AppServerSession::new(backend_id, app_server, target.thread_params_mode())
-            .with_local_codex_home(&config.codex_home),
+            .with_startup_config(config),
     )
 }
 
@@ -713,7 +713,7 @@ pub(crate) async fn start_embedded_app_server_for_picker(
         app_server,
         target.thread_params_mode(),
     )
-    .with_local_codex_home(&config.codex_home))
+    .with_startup_config(config))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1411,7 +1411,7 @@ async fn run_ratatui_app(
                 app_server,
                 app_server_target.thread_params_mode(),
             )
-            .with_local_codex_home(&initial_config.codex_home)
+            .with_startup_config(&initial_config)
         }
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
@@ -2078,7 +2078,7 @@ async fn run_ratatui_app(
                     app_server,
                     app_server_target.thread_params_mode(),
                 )
-                .with_local_codex_home(&config.codex_home)
+                .with_startup_config(&config)
                 .with_remote_cwd_override(remote_cwd_override.clone())
             }
             Ok(Err(err)) => {
@@ -2192,7 +2192,7 @@ async fn run_ratatui_app(
                     client,
                     app_server_target.thread_params_mode(),
                 )
-                .with_local_codex_home(&config.codex_home);
+                .with_startup_config(&config);
             }
             #[cfg(target_os = "windows")]
             {

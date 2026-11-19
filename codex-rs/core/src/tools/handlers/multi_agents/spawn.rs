@@ -78,6 +78,10 @@ async fn handle_spawn_agent(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+    step_context
+        .environments
+        .to_spawn_selections()
+        .map_err(collab_spawn_error)?;
     session
         .emit_turn_item_started(
             turn,

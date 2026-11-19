@@ -11,16 +11,10 @@
 use std::collections::HashSet;
 use std::fs::Permissions;
 use std::io;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 use codex_protocol::ThreadId;
 use codex_rollout::RolloutItem;
@@ -32,6 +26,9 @@ use tokio::io::BufWriter;
 
 use super::MigrationLocks;
 use super::migration_error;
+use super::physical_io;
+use super::physical_io::IoOwner;
+use super::physical_io::OutputFile;
 use crate::ThreadStoreResult;
 
 const MIGRATION_JOURNAL_DIRECTORY: &str = "rollout-migrations";
@@ -94,26 +91,10 @@ pub(super) async fn decompress_rollout_to_path(
     plain_path: &Path,
     locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
-    let compressed_path = compressed_path.to_path_buf();
-    let plain_path = plain_path.to_path_buf();
-    let locks = Arc::clone(locks);
-    tokio::task::spawn_blocking(move || -> io::Result<()> {
-        let _locks = locks;
-        let input = std::fs::File::open(compressed_path)?;
-        let mut decoder = zstd::stream::read::Decoder::new(input)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut output = options.open(plain_path)?;
-        #[cfg(unix)]
-        output.set_permissions(Permissions::from_mode(0o600))?;
-        io::copy(&mut decoder, &mut output)?;
-        output.flush()
-    })
-    .await
-    .map_err(migration_error)?
-    .map_err(migration_error)
+    IoOwner::Migration(Arc::clone(locks))
+        .decompress_rollout_to_path(compressed_path, plain_path)
+        .await
+        .map_err(migration_error)
 }
 
 pub(super) async fn compress_rollout_to_path(
@@ -125,9 +106,7 @@ pub(super) async fn compress_rollout_to_path(
 ) -> ThreadStoreResult<()> {
     let plain_path = plain_path.to_path_buf();
     let compressed_path = compressed_path.to_path_buf();
-    let locks = Arc::clone(locks);
-    tokio::task::spawn_blocking(move || -> io::Result<()> {
-        let _locks = locks;
+    physical_io::run(locks, move || -> io::Result<()> {
         let mut input = std::fs::File::open(plain_path)?;
         let output = std::fs::OpenOptions::new()
             .create(true)
@@ -149,7 +128,6 @@ pub(super) async fn compress_rollout_to_path(
         Ok(())
     })
     .await
-    .map_err(migration_error)?
     .map_err(migration_error)
 }
 
@@ -164,6 +142,7 @@ pub(super) fn rewritten_staged_rollout_path(staged_path: &Path) -> ThreadStoreRe
 pub(super) async fn rewrite_subagent_history_boundary(
     staged_path: &Path,
     boundary: u64,
+    locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
     let rewritten_path = rewritten_staged_rollout_path(staged_path)?;
     let permissions = tokio::fs::metadata(staged_path)
@@ -185,17 +164,13 @@ pub(super) async fn rewrite_subagent_history_boundary(
     };
     session_meta.meta.subagent_history_start_ordinal = Some(boundary);
 
-    let rewritten = tokio::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&rewritten_path)
-        .await
-        .map_err(migration_error)?;
-    rewritten
-        .set_permissions(permissions)
-        .await
-        .map_err(migration_error)?;
+    let rewritten = OutputFile::create(
+        &rewritten_path,
+        permissions,
+        &IoOwner::Migration(Arc::clone(locks)),
+    )
+    .await
+    .map_err(migration_error)?;
     let mut rewritten = BufWriter::new(rewritten);
     rewritten
         .write_all(
@@ -211,65 +186,64 @@ pub(super) async fn rewrite_subagent_history_boundary(
         .map_err(migration_error)?;
     rewritten.flush().await.map_err(migration_error)?;
     rewritten
-        .get_ref()
+        .get_mut()
         .sync_all()
         .await
         .map_err(migration_error)?;
     drop(rewritten);
-    tokio::fs::rename(rewritten_path, staged_path)
+    physical_io::rename(&rewritten_path, staged_path, locks)
         .await
         .map_err(migration_error)
 }
 
-pub(super) async fn remove_file_if_present(path: &Path) -> ThreadStoreResult<()> {
-    if tokio::fs::try_exists(path).await.map_err(migration_error)? {
-        tokio::fs::remove_file(path)
-            .await
-            .map_err(migration_error)?;
-    }
-    Ok(())
+pub(super) async fn remove_file_if_present(
+    path: &Path,
+    locks: &Arc<MigrationLocks>,
+) -> ThreadStoreResult<()> {
+    let path = path.to_path_buf();
+    physical_io::run(locks, move || {
+        if path.try_exists()? {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(migration_error)
 }
 
-pub(super) async fn write_migration_journal(path: &Path) -> ThreadStoreResult<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| migration_error("rollout migration journal has no parent directory"))?;
-    let parent_already_exists = tokio::fs::try_exists(parent)
-        .await
-        .map_err(migration_error)?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(migration_error)?;
-    if !parent_already_exists {
-        sync_parent_directory(parent).await?;
-    }
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .await
-        .map_err(migration_error)?;
-    file.sync_all().await.map_err(migration_error)?;
-    drop(file);
-    sync_parent_directory(path).await
-}
-
-pub(super) async fn sync_parent_directory(path: &Path) -> ThreadStoreResult<()> {
-    #[cfg(unix)]
-    {
+pub(super) async fn write_migration_journal(
+    path: &Path,
+    locks: &Arc<MigrationLocks>,
+) -> ThreadStoreResult<()> {
+    let path = path.to_path_buf();
+    physical_io::run(locks, move || {
         let parent = path
             .parent()
-            .ok_or_else(|| migration_error("rollout path has no parent directory"))?
-            .to_path_buf();
-        tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
-            .await
-            .map_err(migration_error)?
-            .map_err(migration_error)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
+            .ok_or_else(|| io::Error::other("rollout migration journal has no parent directory"))?;
+        let parent_already_exists = parent.try_exists()?;
+        std::fs::create_dir_all(parent)?;
+        if !parent_already_exists {
+            physical_io::sync_parent_directory_blocking(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)?;
+        file.sync_all()?;
+        drop(file);
+        physical_io::sync_parent_directory_blocking(&path)
+    })
+    .await
+    .map_err(migration_error)
+}
+
+pub(super) async fn sync_parent_directory(
+    path: &Path,
+    locks: &Arc<MigrationLocks>,
+) -> ThreadStoreResult<()> {
+    IoOwner::Migration(Arc::clone(locks))
+        .sync_parent_directory(path)
+        .await
+        .map_err(migration_error)
 }
