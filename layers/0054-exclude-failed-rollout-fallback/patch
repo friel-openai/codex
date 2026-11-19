@@ -1,0 +1,90 @@
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index a259d59008f9f78d57568c376bb61a6c1a00b470..6e51c34e8e560a315adb7f4c9af96637d5b71599 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -2115,6 +2115,7 @@ pub async fn index_rollout_paths_by_rollout_id(
+     for subdir in [SESSIONS_SUBDIR, ARCHIVED_SESSIONS_SUBDIR] {
+         visit_rollout_filenames::<()>(
+             codex_home.join(subdir).as_path(),
++            /*excluded_path*/ None,
+             |_file_name| true,
+             |file_name, path| {
+                 paths.entry(file_name.rollout_id()).or_insert(path);
+diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
+index 4b91b4e6fd3be57151afa7f682f5f97cf30f7b77..7fbe9fd2b0ceda41619446db42940751ea4cd2b3 100644
+--- a/codex-rs/rollout/src/reference.rs
++++ b/codex-rs/rollout/src/reference.rs
+@@ -476,8 +476,11 @@ pub async fn resolve_rollout_reference_path_excluding(
+     if let Some(rollout_id) = identity
+         .rollout_id()
+         .or_else(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
+-        && let Some(path) = crate::find_rollout_path_by_rollout_id(codex_home, rollout_id).await?
+-        && let Some(path) = validated_candidate(codex_home, path.as_path(), identity).await?
++        && let Some(path) =
++            crate::find_rollout_path_by_rollout_id_excluding(codex_home, rollout_id, excluded)
++                .await?
++        && let Some(path) =
++            validated_candidate(codex_home, path.as_path(), identity, excluded).await?
+     {
+         return Ok(path);
+     }
+diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
+index 1f07487f447e1d9850e34bbcee5ae92c09fb1af1..dfe5f6ab0c6d6331f9e8c8ebaf37f7630c0012d9 100644
+--- a/codex-rs/rollout/src/reference_tests.rs
++++ b/codex-rs/rollout/src/reference_tests.rs
+@@ -2760,6 +2760,55 @@ async fn resolver_excludes_failed_copy_without_changing_segment_identity() -> io
+     Ok(())
+ }
+
++#[tokio::test]
++async fn resolver_relocated_fallback_excludes_failed_plain_copy() -> io::Result<()> {
++    let home = TempDir::new()?;
++    let old_home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let segment_id = SegmentId::new();
++    let timestamp = "2026-07-13T00-00-00";
++    let failed = active_rollout_path(home.path(), thread_id, timestamp);
++    write_rollout(&failed, &[meta_line(thread_id, segment_id, 0)])?;
++    let compressed = failed.with_extension("jsonl.zst");
++    fs::write(
++        &compressed,
++        zstd::stream::encode_all(fs::File::open(&failed)?, 1)?,
++    )?;
++    let reference = RolloutReferenceItem {
++        rollout_id: Some(thread_id),
++        rollout_path: active_rollout_path(old_home.path(), thread_id, timestamp),
++        thread_id: Some(thread_id),
++        rollout_timestamp: None,
++        segment_id: Some(segment_id),
++        max_depth: 2,
++        nth_user_message: None,
++        compacted_replacement_history_filter_texts: None,
++    };
++    let failed = fs::canonicalize(failed)?;
++    assert_eq!(
++        resolve_rollout_reference_path(home.path(), &reference).await?,
++        failed
++    );
++    assert_eq!(
++        resolve_rollout_reference_path_excluding(home.path(), &reference, Some(&failed)).await?,
++        fs::canonicalize(&compressed)?
++    );
++
++    let wrong = home.path().join("wrong.jsonl");
++    write_rollout(&wrong, &[meta_line(thread_id, SegmentId::new(), 0)])?;
++    fs::write(
++        &compressed,
++        zstd::stream::encode_all(fs::File::open(&wrong)?, 1)?,
++    )?;
++    assert!(
++        resolve_rollout_reference_path_excluding(home.path(), &reference, Some(&failed))
++            .await
++            .is_err(),
++        "a failed plain copy or a different compressed segment must not be selected"
++    );
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn resolver_ignores_old_home_path_and_finds_current_home_identity() -> io::Result<()> {
+     let home = TempDir::new()?;
