@@ -98,6 +98,11 @@ impl LazyRemoteExecServerClient {
         reason = "serialize explicit refreshes, not ordinary connection or recovery attempts"
     )]
     pub(crate) async fn refresh_connection(&self) -> Result<(), ExecServerError> {
+        if self.is_attachment_bound() {
+            return Err(ExecServerError::Protocol(
+                "cannot refresh the transport through an attachment-bound environment".to_string(),
+            ));
+        }
         let _refresh = self.refresh_lock.lock().await;
         let (previous, attempt) = loop {
             let observed = self.cached_client();
@@ -265,6 +270,9 @@ impl LazyRemoteExecServerClient {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !attempt.cancelled.is_cancelled() {
+                    if current.is_some() {
+                        self.retire_initial_recovery();
+                    }
                     client.attach_environment_connection_state(
                         self.environment_connection_state_tx.clone(),
                     );
