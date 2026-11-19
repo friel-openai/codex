@@ -925,15 +925,128 @@ async fn later_turn_denies_stdin_for_terminal_in_quarantined_default_secondary()
 
 #[tokio::test]
 async fn initially_unavailable_default_secondary_joins_an_ordinary_later_turn() -> Result<()> {
-    check_initial_default_secondary_admission(/*replace_registration*/ false).await
+    check_initial_default_secondary_admission(
+        /*replace_registration*/ false, /*expire_verification*/ false,
+        /*first_turn_after_recovery*/ false,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn initially_unavailable_default_secondary_rejects_replaced_registration() -> Result<()> {
-    check_initial_default_secondary_admission(/*replace_registration*/ true).await
+    check_initial_default_secondary_admission(
+        /*replace_registration*/ true, /*expire_verification*/ false,
+        /*first_turn_after_recovery*/ false,
+    )
+    .await
 }
 
-async fn check_initial_default_secondary_admission(replace_registration: bool) -> Result<()> {
+#[tokio::test]
+async fn healthy_default_secondary_is_reverified_after_idle() -> Result<()> {
+    check_initial_default_secondary_admission(
+        /*replace_registration*/ false, /*expire_verification*/ true,
+        /*first_turn_after_recovery*/ false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recovered_default_secondary_is_used_without_a_priming_turn() -> Result<()> {
+    check_initial_default_secondary_admission(
+        /*replace_registration*/ false, /*expire_verification*/ false,
+        /*first_turn_after_recovery*/ true,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unloading_thread_stops_optional_secondary_retries() -> Result<()> {
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
+    use tokio_tungstenite::tungstenite::handshake::server::Request;
+    use tokio_tungstenite::tungstenite::handshake::server::Response;
+    use tokio_tungstenite::tungstenite::http::StatusCode;
+
+    const REMOTE_ID: &str = "unload-offline-worker";
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "[[environments]]\nid = \"{REMOTE_ID}\"\nurl = \"ws://{}\"\n",
+            listener.local_addr()?
+        ),
+    )?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config("thread_unload_delay_secs = 0")
+        .with_provider_config("supports_websockets = false")
+        .write(codex_home.path())?;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (stop, mut stopped) = oneshot::channel();
+    let rejected = {
+        let attempts = Arc::clone(&attempts);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = tokio::select! {
+                    _ = &mut stopped => return Ok::<_, anyhow::Error>(()),
+                    connection = listener.accept() => connection?,
+                };
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let _ = accept_hdr_async(stream, |_: &Request, _: Response| {
+                    let mut response = ErrorResponse::new(None);
+                    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                    Err(response)
+                })
+                .await;
+            }
+        })
+    };
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+        .build_initialized()
+        .await?;
+    let request_id = app
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(workspace.to_string_lossy().into_owned()),
+            ephemeral: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadStartResponse =
+        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request_id)).await??;
+    wait_for_optional_secondary_verification(&app, REMOTE_ID, &[], /*verified*/ false).await?;
+    let request_id = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: started.thread.id.clone(),
+        })
+        .await?;
+    let unsubscribe: ThreadUnsubscribeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
+    assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
+    let closed: ThreadClosedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+    assert_eq!(closed.thread_id, started.thread.id);
+    // Allow any connection already accepted at shutdown to finish before measuring retries.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let after_unload = attempts.load(Ordering::SeqCst);
+    assert!(after_unload > 0);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), after_unload);
+    stop.send(()).expect("listener is running");
+    timeout(DEFAULT_READ_TIMEOUT, rejected).await???;
+    Ok(())
+}
+
+async fn check_initial_default_secondary_admission(
+    replace_registration: bool,
+    expire_verification: bool,
+    first_turn_after_recovery: bool,
+) -> Result<()> {
     use codex_app_server_protocol::EnvironmentAddResponse;
     use codex_app_server_protocol::EnvironmentInfoResponse;
     use codex_app_server_protocol::EnvironmentStatusKind;
@@ -970,21 +1083,30 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
             responses::ev_completed(id),
         ])
     };
-    let mock = responses::mount_sse_sequence(
-        &server,
-        vec![
-            call(EARLY_CALL),
-            create_final_assistant_message_sse_response("continued locally")?,
-            create_final_assistant_message_sse_response("checking the registered executor")?,
+    let mut replies = vec![
+        call(EARLY_CALL),
+        create_final_assistant_message_sse_response("continued locally")?,
+    ];
+    if !first_turn_after_recovery {
+        replies.push(create_final_assistant_message_sse_response(
+            "checking the registered executor",
+        )?);
+    }
+    replies.extend([
+        call(LATER_CALL),
+        create_final_assistant_message_sse_response(if replace_registration {
+            "continued locally after replacement"
+        } else {
+            "remote terminal opened"
+        })?,
+    ]);
+    if first_turn_after_recovery {
+        replies.extend([
             call(LATER_CALL),
-            create_final_assistant_message_sse_response(if replace_registration {
-                "continued locally after replacement"
-            } else {
-                "remote terminal opened"
-            })?,
-        ],
-    )
-    .await;
+            create_final_assistant_message_sse_response("explicit remote terminal opened")?,
+        ]);
+    }
+    let mock = responses::mount_sse_sequence(&server, replies).await;
     let codex_home = TempDir::new()?;
     let workspace_dir = TempDir::new()?;
     let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
@@ -1142,29 +1264,38 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
     } else {
         assert_eq!(ready_addr, original_addr);
     }
-    // Connect without sending any thread setting or selection update.
-    let request_id = app
-        .send_raw_request(
-            "environment/info",
-            Some(json!({"environmentId": REMOTE_ID})),
-        )
-        .await?;
-    let info: EnvironmentInfoResponse =
-        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
-    assert_eq!(info.shell.name, "bash");
-    assert_eq!(info.shell.path, "/bin/bash");
+    if first_turn_after_recovery {
+        // The listener is healthy now, but no environment/info or priming turn reconnects it.
+        tokio::time::sleep(Duration::from_secs(18)).await;
+    } else {
+        // Connect without sending any thread setting or selection update.
+        let request_id = app
+            .send_raw_request(
+                "environment/info",
+                Some(json!({"environmentId": REMOTE_ID})),
+            )
+            .await?;
+        let info: EnvironmentInfoResponse =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
+        assert_eq!(info.shell.name, "bash");
+        assert_eq!(info.shell.path, "/bin/bash");
 
-    let primed = timeout(
-        DEFAULT_READ_TIMEOUT,
-        app.start_turn_and_wait_for_completion(text_turn_params(
-            thread_id.clone(),
-            "Check the default executor without using it yet.",
-        )),
-    )
-    .await??;
-    assert_eq!(primed.turn.status, TurnStatus::Completed);
-    if !replace_registration {
-        wait_for_optional_secondary_verification(&app, REMOTE_ID, &[], /*verified*/ true).await?;
+        let primed = timeout(
+            DEFAULT_READ_TIMEOUT,
+            app.start_turn_and_wait_for_completion(text_turn_params(
+                thread_id.clone(),
+                "Check the default executor without using it yet.",
+            )),
+        )
+        .await??;
+        assert_eq!(primed.turn.status, TurnStatus::Completed);
+        if !replace_registration {
+            wait_for_optional_secondary_verification(&app, REMOTE_ID, &[], /*verified*/ true)
+                .await?;
+        }
+    }
+    if expire_verification {
+        tokio::time::sleep(Duration::from_secs(11)).await;
     }
 
     let later = timeout(
@@ -1177,15 +1308,87 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
     .await??;
     assert_eq!(later.turn.status, TurnStatus::Completed);
     assert_ne!(first.turn.id, later.turn.id);
+    let explicit_thread_id = if first_turn_after_recovery {
+        let cwd = LegacyAppPathString::from_abs_path(&workspace);
+        let environments = [LOCAL_ENVIRONMENT_ID, REMOTE_ID]
+            .into_iter()
+            .map(|id| TurnEnvironmentParams {
+                environment_id: id.to_string(),
+                cwd: cwd.clone(),
+                runtime_workspace_roots: None,
+            })
+            .collect();
+        let request_id = app
+            .send_thread_start_request(ThreadStartParams {
+                cwd: Some(workspace.to_string_lossy().into_owned()),
+                environments: Some(environments),
+                ephemeral: Some(true),
+                ..Default::default()
+            })
+            .await?;
+        let explicit: ThreadStartResponse =
+            timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request_id)).await??;
+        let thread_id = explicit.thread.id;
+        let completed = timeout(
+            BOUNDED_RESUME_TIMEOUT,
+            app.start_turn_and_wait_for_completion(text_turn_params(
+                thread_id.clone(),
+                "Use the explicitly selected secondary in the same workspace.",
+            )),
+        )
+        .await??;
+        assert_eq!(completed.turn.status, TurnStatus::Completed);
+        Some(thread_id)
+    } else {
+        None
+    };
     let requests = mock.requests();
-    assert_eq!(requests.len(), 5);
-    let priming_input = requests[2].message_input_texts("user");
-    assert!(
-        !priming_input
-            .iter()
-            .any(|text| text.contains(REMOTE_INSTRUCTIONS))
+    let later_index = if first_turn_after_recovery { 2 } else { 3 };
+    assert_eq!(
+        requests.len(),
+        later_index + if explicit_thread_id.is_some() { 4 } else { 2 }
     );
-    let input = requests[3].message_input_texts("user");
+    let mut default_command = None;
+    if let Some(explicit_thread_id) = &explicit_thread_id {
+        let explicit_input = requests[later_index + 2].message_input_texts("user");
+        assert!(
+            explicit_input
+                .iter()
+                .any(|text| text.contains(REMOTE_INSTRUCTIONS))
+        );
+        let (output, success) = requests[later_index + 3]
+            .function_call_output_content_and_success(LATER_CALL)
+            .context("exec output from the explicitly selected executor")?;
+        assert_ne!(success, Some(false));
+        assert!(
+            output
+                .as_deref()
+                .is_some_and(|output| output.contains("Process running with session ID "))
+        );
+        let mut command = timeout(DEFAULT_READ_TIMEOUT, terminal_requests.recv())
+            .await?
+            .context("explicit or default process/start RPC")?;
+        if command["params"]["metadata"]["threadId"].as_str() != Some(explicit_thread_id.as_str()) {
+            default_command = Some(command);
+            command = timeout(DEFAULT_READ_TIMEOUT, terminal_requests.recv())
+                .await?
+                .context("explicit process/start RPC")?;
+        }
+        assert_eq!(
+            command["params"]["metadata"]["threadId"].as_str(),
+            Some(explicit_thread_id.as_str())
+        );
+        assert_eq!(command["params"]["cwd"], json!(workspace_uri));
+    }
+    if replace_registration {
+        let priming_input = requests[2].message_input_texts("user");
+        assert!(
+            !priming_input
+                .iter()
+                .any(|text| text.contains(REMOTE_INSTRUCTIONS))
+        );
+    }
+    let input = requests[later_index].message_input_texts("user");
     let instructions = input
         .iter()
         .rfind(|text| text.starts_with("# AGENTS.md instructions"))
@@ -1199,7 +1402,7 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
                 .all(|text| !text.contains(REMOTE_INSTRUCTIONS)),
             "the replacement's instructions must not reach this thread"
         );
-        let (output, success) = requests[4]
+        let (output, success) = requests[later_index + 1]
             .function_call_output_content_and_success(LATER_CALL)
             .context("denial of exec on the replacement registration")?;
         assert_ne!(success, Some(true));
@@ -1216,7 +1419,7 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
         return Ok(());
     }
     assert!(instructions.contains(REMOTE_INSTRUCTIONS), "{instructions}");
-    let (output, success) = requests[4]
+    let (output, success) = requests[later_index + 1]
         .function_call_output_content_and_success(LATER_CALL)
         .context("exec output from the newly attached executor")?;
     assert_ne!(success, Some(false));
@@ -1226,9 +1429,12 @@ async fn check_initial_default_secondary_admission(replace_registration: bool) -
         .find_map(|line| line.strip_prefix("Process running with session ID "))
         .context("expected an open terminal on the newly attached executor")?
         .parse()?;
-    let command = timeout(DEFAULT_READ_TIMEOUT, terminal_requests.recv())
-        .await?
-        .context("remote process/start RPC")?;
+    let command = match default_command {
+        Some(command) => command,
+        None => timeout(DEFAULT_READ_TIMEOUT, terminal_requests.recv())
+            .await?
+            .context("remote process/start RPC")?,
+    };
     assert_eq!(command["method"], "process/start");
     assert_eq!(command["params"]["metadata"]["threadId"], thread_id);
     assert_eq!(command["params"]["metadata"]["toolCallId"], LATER_CALL);
