@@ -37,6 +37,7 @@ impl EnvironmentManager {
         Ok(Self {
             default_environment: Some(environment_id.clone()),
             environments: RwLock::new(HashMap::from([(environment_id, environment)])),
+            first_registration_watches: Default::default(),
             local_environment: None,
             local_runtime_paths: None,
             http_client_factory,
