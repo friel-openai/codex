@@ -1556,6 +1556,7 @@ impl ThreadManager {
         Box::pin(self.start_thread_inner(
             options,
             /*forked_from_thread_id*/ None,
+            /*inherited_agent_control*/ None,
             /*startup*/ None,
             ForkStartupItems::default(),
         ))
@@ -1632,12 +1633,21 @@ impl ThreadManager {
         &self,
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+        inherited_agent_control: Option<AgentControlInit>,
         startup: Option<Arc<crate::session::startup::SessionStartup>>,
         fork_startup_items: ForkStartupItems,
     ) -> CodexResult<NewThread> {
-        let (agent_control, _lifecycle_mutation) = self
-            .agent_control_for_initial_history(&options.config, &options.initial_history)
-            .await?;
+        // An explicit subagent spawn supplies its parent's MCP pool and agent registry.
+        // Other startup callers retain root selection under the lifecycle mutation guard.
+        let (agent_control, _lifecycle_mutation) = match inherited_agent_control {
+            Some(agent_control) => (agent_control, None),
+            None => {
+                let (local, lifecycle_mutation) = self
+                    .agent_control_for_initial_history(&options.config, &options.initial_history)
+                    .await?;
+                (AgentControlInit::Local(local), lifecycle_mutation)
+            }
+        };
         let (session_source, thread_source) = options.effective_sources(&self.state.session_source);
         options.session_source = Some(session_source);
         options.thread_source = thread_source;
@@ -1683,6 +1693,10 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
+        let agent_control = AgentControlInit::Provided {
+            control: Arc::clone(&fork_source.session.services.agent_control),
+            runtime: fork_source.session.services.local_agent_runtime.clone(),
+        };
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
@@ -1713,6 +1727,7 @@ impl ThreadManager {
                 .start_thread_inner(
                     options,
                     Some(forked_from_thread_id),
+                    Some(agent_control),
                     /*startup*/ None,
                     ForkStartupItems::default(),
                 )
@@ -1744,6 +1759,7 @@ impl ThreadManager {
             .start_thread_inner(
                 options,
                 Some(forked_from_thread_id),
+                Some(agent_control),
                 Some(Arc::clone(&startup)),
                 ForkStartupItems::default()
                     .with_dynamic_tools(
