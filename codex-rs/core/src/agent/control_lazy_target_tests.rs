@@ -23,15 +23,15 @@ async fn inspect_restores_indexed_identity_without_loading_rollout(target_kind: 
         agent_nickname: Some("Worker".to_string()),
         agent_role: Some("worker".to_string()),
     });
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         child_id,
         rollout_path.to_path_buf(),
         chrono::Utc::now(),
         source,
-    );
-    builder.agent_path = Some(child_path.to_string());
-    builder.agent_nickname = Some("Worker".to_string());
-    builder.agent_role = Some("worker".to_string());
+    )
+    .with_agent_path(Some(child_path.to_string()))
+    .with_agent_nickname(Some("Worker".to_string()))
+    .with_agent_role(Some("worker".to_string()));
     let state_db = harness.state_db.as_ref().expect("state database");
     state_db
         .upsert_thread(&builder.build("openai"))
