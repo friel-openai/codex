@@ -239,6 +239,7 @@ impl Session {
                         thread_id: self.thread_id,
                         turn_id,
                         item,
+                        content_token_count: None,
                         started_at_ms: None,
                         completed_at_ms: recovered_at_ms,
                     },
