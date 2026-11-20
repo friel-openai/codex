@@ -468,6 +468,7 @@ impl ContextManager {
                 }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::RetainedContext(_)
@@ -572,6 +573,7 @@ impl ContextManager {
                     history.drop_last_n_user_turns(rollback.num_turns);
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::WorldState(_)
@@ -613,6 +615,7 @@ impl ContextManager {
                 }
                 RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }

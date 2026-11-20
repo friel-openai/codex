@@ -6,13 +6,18 @@ use crate::RolloutItem;
 use crate::RolloutLine;
 use crate::config::RolloutConfig;
 use chrono::TimeZone;
+use codex_extension_items::ExtensionItem;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandBeginEvent;
+use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
@@ -221,6 +226,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             creator_account_id: None,
             session_id: thread_id.into(),
             id: thread_id,
+            segment_id: None,
             forked_from_id: None,
             forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
@@ -372,6 +378,139 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
 }
 
 #[tokio::test]
+async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -> std::io::Result<()>
+{
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let mut file = File::create(&rollout_path)?;
+    let thread_id = ThreadId::new();
+    let ts = "2025-01-03T12:00:00Z";
+    let legacy_sleep = serde_json::json!({
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "thread_id": thread_id,
+            "turn_id": "turn-1",
+            "item": {
+                "type": "Sleep",
+                "id": "sleep-1",
+                "duration_ms": 1_000,
+            },
+            "completed_at_ms": 0,
+        },
+    });
+    // RolloutLine deliberately does not implement Deserialize. Canonical decoding below is the
+    // only supported path because it preserves arbitrary-precision token counts.
+
+    for record in [
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": ts,
+                "cwd": ".",
+                "originator": "test_originator",
+                "cli_version": "test_version",
+                "source": "cli",
+                "model_provider": "test-provider",
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+        }),
+        legacy_sleep,
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "after"}],
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-2",
+                "item": {
+                    "type": "FutureItem",
+                    "id": "future-1",
+                },
+                "completed_at_ms": 0,
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-3",
+                "item": {
+                    "type": "Sleep",
+                    "id": "sleep-2",
+                    "duration_ms": "not-a-number",
+                },
+                "completed_at_ms": 0,
+            },
+        }),
+    ] {
+        writeln!(file, "{record}")?;
+    }
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 2);
+    assert_eq!(items.len(), 4);
+    assert!(matches!(
+        &items[1],
+        RolloutItem::ResponseItem(ResponseItemEnvelope {
+            item: ResponseItem::Message { content, .. },
+            ..
+        })
+            if content.iter().any(|item| matches!(
+                item,
+                ContentItem::OutputText { text } if text == "before"
+            ))
+    ));
+    assert!(matches!(
+        &items[2],
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+            if matches!(
+                &event.item,
+                TurnItem::Extension(ExtensionItem::Sleep(item))
+                    if item.id == "sleep-1" && item.duration_ms == 1_000
+            )
+    ));
+    assert!(matches!(
+        &items[3],
+        RolloutItem::ResponseItem(ResponseItemEnvelope {
+            item: ResponseItem::Message { content, .. },
+            ..
+        })
+            if content.iter().any(|item| matches!(
+                item,
+                ContentItem::OutputText { text } if text == "after"
+            ))
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::new_v4();
@@ -517,6 +656,262 @@ async fn load_rollout_items_preserves_security_risk_scores() -> std::io::Result<
         panic!("expected security risk score rollout item");
     };
     assert_eq!(persisted_security_risk, &security_risk);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_accepts_legacy_command_event_cwds() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let ts = "2025-01-03T12:00:00Z";
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let rollout_path = write_session_file(home.path(), ts, uuid)?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    let legacy_cwd = if cfg!(windows) {
+        r"C:\legacy\workspace"
+    } else {
+        "/legacy/workspace"
+    };
+
+    for record in [
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_begin",
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "command": ["true"],
+                "cwd": legacy_cwd,
+                "parsed_cmd": [],
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "command": ["true"],
+                "cwd": legacy_cwd,
+                "parsed_cmd": [],
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+                "duration": {"secs": 0, "nanos": 1},
+                "formatted_output": "",
+                "status": "completed",
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "after legacy command events",
+            },
+        }),
+    ] {
+        writeln!(file, "{record}")?;
+    }
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    let expected_cwd = if cfg!(windows) {
+        "file:///C:/legacy/workspace"
+    } else {
+        "file:///legacy/workspace"
+    };
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    assert_eq!(items.len(), 5);
+    let RolloutItem::EventMsg(EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+        cwd: begin_cwd,
+        ..
+    })) = &items[2]
+    else {
+        panic!("expected command begin");
+    };
+    assert_eq!(begin_cwd.to_string(), expected_cwd);
+    let RolloutItem::EventMsg(EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+        cwd: end_cwd, ..
+    })) = &items[3]
+    else {
+        panic!("expected command end");
+    };
+    assert_eq!(end_cwd.to_string(), expected_cwd);
+    assert!(matches!(
+        &items[4],
+        RolloutItem::EventMsg(EventMsg::AgentMessage(_))
+    ));
+
+    let serialized_end = serde_json::to_value(&items[3]).expect("serialize command end");
+    assert_eq!(serialized_end["payload"]["cwd"], expected_cwd);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_accepts_legacy_paths_in_view_image_and_turn_items()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let ts = "2025-01-03T12:00:00Z";
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let rollout_path = write_session_file(home.path(), ts, uuid)?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+
+    for (legacy_path, expected_path) in [
+        ("/legacy/workspace", "file:///legacy/workspace"),
+        (r"C:\legacy\workspace", "file:///C:/legacy/workspace"),
+    ] {
+        let records = [
+            serde_json::json!({
+                "timestamp": ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "view_image_tool_call",
+                    "call_id": "view-1",
+                    "path": legacy_path,
+                },
+            }),
+            serde_json::json!({
+                "timestamp": ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": thread_id,
+                    "turn_id": "turn-command",
+                    "item": {
+                        "type": "CommandExecution",
+                        "id": "command-1",
+                        "command": ["true"],
+                        "cwd": legacy_path,
+                        "parsed_cmd": [],
+                        "source": "agent",
+                        "status": "completed",
+                    },
+                    "completed_at_ms": 0,
+                },
+            }),
+            serde_json::json!({
+                "timestamp": ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": thread_id,
+                    "turn_id": "turn-image",
+                    "item": {
+                        "type": "ImageView",
+                        "id": "image-1",
+                        "path": legacy_path,
+                    },
+                    "completed_at_ms": 0,
+                },
+            }),
+        ];
+
+        for record in records {
+            writeln!(file, "{record}")?;
+        }
+
+        let expected = expected_path;
+        let (items, loaded_thread_id, parse_errors) =
+            RolloutRecorder::load_rollout_items(&rollout_path).await?;
+        assert_eq!(loaded_thread_id, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        let count = items.len();
+        assert!(matches!(
+            &items[count - 3],
+            RolloutItem::EventMsg(EventMsg::ViewImageToolCall(event))
+                if event.path.to_string() == expected
+        ));
+        assert!(matches!(
+            &items[count - 2],
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                if matches!(
+                    &event.item,
+                    TurnItem::CommandExecution(item) if item.cwd.to_string() == expected
+                )
+        ));
+        assert!(matches!(
+            &items[count - 1],
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                if matches!(
+                    &event.item,
+                    TurnItem::ImageView(item) if item.path.to_string() == expected
+                )
+        ));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_rejects_invalid_paths_in_view_image_and_turn_items()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let ts = "2025-01-03T12:00:00Z";
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let rollout_path = write_session_file(home.path(), ts, uuid)?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+
+    for invalid_path in ["relative/workspace", "artifact://workspace"] {
+        for payload in [
+            serde_json::json!({
+                "type": "view_image_tool_call",
+                "call_id": "view-1",
+                "path": invalid_path,
+            }),
+            serde_json::json!({
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-command",
+                "item": {
+                    "type": "CommandExecution",
+                    "id": "command-1",
+                    "command": ["true"],
+                    "cwd": invalid_path,
+                    "parsed_cmd": [],
+                    "source": "agent",
+                    "status": "completed",
+                },
+                "completed_at_ms": 0,
+            }),
+            serde_json::json!({
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-image",
+                "item": {
+                    "type": "ImageView",
+                    "id": "image-1",
+                    "path": invalid_path,
+                },
+                "completed_at_ms": 0,
+            }),
+        ] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": ts,
+                    "type": "event_msg",
+                    "payload": payload,
+                })
+            )?;
+        }
+    }
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 6);
+    assert_eq!(items.len(), 2);
 
     Ok(())
 }
@@ -1372,7 +1767,14 @@ async fn discovery_without_database_skips_attached_threads_before_pagination() -
         crate::append_thread_name(home.path(), child, "shared title").await?;
         // Hiding discovery must not prevent opening an explicitly selected attached thread.
         assert_eq!(
-            crate::read_thread_item_from_rollout(path)
+            crate::read_thread_item_from_rollout(path.clone())
+                .await
+                .unwrap()
+                .thread_id,
+            Some(child)
+        );
+        assert_eq!(
+            crate::read_thread_item_from_rollout_with_indexed_preview(path)
                 .await
                 .unwrap()
                 .thread_id,
@@ -1424,6 +1826,33 @@ async fn discovery_without_database_skips_attached_threads_before_pagination() -
     .await?;
     assert_eq!(page2.items.len(), 1);
     assert_eq!(page2.items[0].path, middle);
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_rejects_attached_thread_without_parent() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let path = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9010))?;
+    let mut lines = read_rollout_lines(&path)?;
+    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
+        panic!("fixture must start with session metadata");
+    };
+    meta.meta.attached_thread = true;
+    meta.meta.forked_from_id = None;
+    let mut file = File::create(&path)?;
+    for line in lines {
+        writeln!(file, "{}", serde_json::to_string(&line)?)?;
+    }
+    assert!(crate::read_thread_item_from_rollout(path.clone()).await.is_none());
+    assert!(crate::read_thread_item_from_rollout_with_indexed_preview(path).await.is_none());
+    for include_attached_threads in [false, true] {
+        let page = RolloutRecorder::list_threads(
+            None, &config, 10, None, ThreadSortKey::CreatedAt, SortDirection::Desc,
+            &[], None, None, &config.model_provider_id, None, include_attached_threads,
+        ).await?;
+        assert!(page.items.is_empty());
+    }
     Ok(())
 }
 
@@ -1706,6 +2135,71 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
     .await
     .expect_err("a failed database query must not look like an exhausted listing");
     assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_bounded_rollout_read_excludes_the_later_unordinaled_suffix() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let plain = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9104))?;
+    let original = fs::read(&plain)?;
+    let byte_limit = original.len() as u64;
+    let mut file = fs::OpenOptions::new().append(true).open(&plain)?;
+    writeln!(file, "{}", serde_json::json!({"timestamp":"2025-01-03T12-00-01", "type":"event_msg", "payload":{"type":"user_message", "message":"later", "kind":"plain"}}))?;
+    let (lines, _, errors) = RolloutRecorder::load_rollout_lines_exact_bounded(&plain, byte_limit).await?;
+    assert_eq!(errors, 0);
+    assert_eq!(lines.len(), 2);
+    assert!(RolloutRecorder::load_rollout_lines_exact_bounded(&plain, byte_limit - 1).await.is_err());
+    assert!(RolloutRecorder::load_rollout_lines_exact_bounded(&plain, fs::metadata(&plain)?.len() + 1).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollout_id_lookup_can_exclude_plain_and_select_compressed_sibling() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let id = Uuid::from_u128(9103);
+    let plain = write_session_file(home.path(), "2025-01-03T12-00-00", id)?;
+    let compressed = plain.with_extension("jsonl.zst");
+    fs::write(&compressed, zstd::encode_all(fs::read(&plain)?.as_slice(), 0)?)?;
+    let thread_id = ThreadId::from_string(&id.to_string()).unwrap();
+    let selected = crate::find_rollout_path_by_rollout_id_excluding(home.path(), thread_id, Some(&fs::canonicalize(&plain)?)).await?;
+    assert_eq!(selected, Some(compressed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn filesystem_search_cursor_preserves_selected_noncanonical_position() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let newest_id = ThreadId::from_string(&Uuid::from_u128(9101).to_string()).unwrap();
+    let older_id = ThreadId::from_string(&Uuid::from_u128(9102).to_string()).unwrap();
+    let original = write_session_file(home.path(), "2025-01-03T13-00-00", Uuid::from_u128(9101))?;
+    let selected = original.with_file_name("selected.jsonl");
+    fs::rename(original, &selected)?;
+    let older = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9102))?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        config.model_provider_id.clone(),
+    ).await.expect("state db should initialize");
+    let created_at = chrono::Utc.with_ymd_and_hms(2025, 1, 3, 13, 0, 0).single().unwrap();
+    let metadata = codex_state::ThreadMetadataBuilder::new(newest_id, selected.clone(), created_at, SessionSource::Cli)
+        .build(config.model_provider_id.as_str());
+    runtime.upsert_thread(&metadata).await.expect("select noncanonical rollout");
+    crate::append_thread_name(home.path(), newest_id, "matching title").await?;
+    crate::append_thread_name(home.path(), older_id, "matching title").await?;
+    let file_config = ThreadListConfig {
+        allowed_sources: &[], model_providers: None, cwd_filters: None,
+        default_provider: &config.model_provider_id, layout: ThreadListLayout::NestedByDate,
+        include_attached_threads: false,
+    };
+    let page = list_threads_from_files_desc(home.path(), 2, None, ThreadSortKey::CreatedAt,
+        file_config, Some("matching"), Some(&runtime)).await?;
+    let page = page_from_filesystem_scan(page, SortDirection::Desc, 1, ThreadSortKey::CreatedAt);
+    assert_eq!(page.items[0].path, selected);
+    let cursor = page.next_cursor.expect("noncanonical page must have a cursor");
+    let page = list_threads_from_files_desc(home.path(), 1, Some(&cursor), ThreadSortKey::CreatedAt,
+        file_config, Some("matching"), Some(&runtime)).await?;
+    assert_eq!(page.page.items[0].path, older);
     Ok(())
 }
 
@@ -2115,5 +2609,46 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         )
         .await
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_at_path_starts_at_explicit_paginated_ordinal() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let rollout_path = home.path().join("replacement.jsonl");
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::CreateAtPath {
+            path: rollout_path.clone(),
+            session_meta: Box::new(SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                history_mode: ThreadHistoryMode::Paginated,
+                ..SessionMeta::default()
+            }),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            initial_rollout_ordinal: 41,
+        },
+    )
+    .await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("continued")])
+        .await?;
+    recorder.flush().await?;
+    recorder.shutdown().await?;
+
+    let lines = read_rollout_lines(rollout_path.as_path())?;
+    assert_eq!(
+        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        vec![Some(41), Some(42)]
+    );
+    let RolloutItem::SessionMeta(meta) = &lines[0].item else {
+        panic!("expected session metadata");
+    };
+    assert_eq!(meta.meta.id, thread_id);
+    assert!(meta.meta.segment_id.is_some());
     Ok(())
 }
