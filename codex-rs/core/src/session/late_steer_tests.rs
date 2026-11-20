@@ -55,7 +55,7 @@ impl SessionTask for OrderingTask {
         assert_eq!(input.len(), 1);
         assert!(
             matches!(&input[0], TurnInput::UserInput { content, .. }
-            if matches!(content.as_slice(), [UserInput::Text { text, .. }]
+            if matches!(content.as_slice(), [ResolvedUserInput::Text { text, .. }]
                 if text == "late steer before supervisor"))
                 || matches!(&input[0], TurnInput::InterAgentCommunication(mail)
                 if mail.content == "late mailbox update")
@@ -216,10 +216,9 @@ async fn late_steer_continues_before_thread_idle_lifecycle(outcome: TaskOutcome)
     } else {
         let submission = submit_steer_only(
             &session,
-            vec![UserInput::Text {
-                text: "late steer before supervisor".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text(
+                "late steer before supervisor".to_string(),
+            )],
             &turn_context.sub_id,
         )
         .await;

@@ -1431,7 +1431,11 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
                 .expect("build captured settings for the new context window"),
         );
         session
-            .start_new_context_window(step, world_state)
+            .start_new_context_window(
+                step,
+                world_state,
+                &codex_rollout_trace::CompactionTraceContext::disabled(),
+            )
             .await
             .expect("persist captured settings in the new context window");
         assert_eq!(
