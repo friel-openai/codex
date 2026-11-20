@@ -22,6 +22,7 @@ use super::goal_supervisor_history_repair::SELECTED_MISSING_MESSAGE_ID;
 use super::goal_supervisor_history_repair::reject_malformed_goal_supervisor_supplied_history;
 use super::goal_supervisor_history_repair::repair_legacy_goal_supervisor_jsonl_lines_selected_with_provenance;
 use super::goal_supervisor_history_repair::repair_legacy_goal_supervisor_jsonl_lines_with_provenance;
+use super::goal_supervisor_history_repair::repair_legacy_goal_supervisor_lines_with_provenance;
 use super::goal_supervisor_history_repair::rewrite_rollout_jsonl_same_length;
 use super::goal_supervisor_history_repair::selected_goal_supervisor_candidate_ids_from_jsonl;
 use super::segment::history_repair_publication::HistoryRepairLifecycleLease;
@@ -77,6 +78,14 @@ pub(super) struct GoalSupervisorHistoryAccess {
     lifecycle: Vec<HistoryRepairLifecycleLease>,
     maintenance: Option<HistoryRepairMaintenanceLease>,
     reservation: Option<RolloutWriterReservation>,
+    certified_active_snapshot: Option<CertifiedActiveHistorySnapshot>,
+}
+
+pub(super) struct CertifiedActiveHistorySnapshot {
+    pub(super) rollout_path: PathBuf,
+    pub(super) end_byte_offset: u64,
+    pub(super) head: super::rollout_lineage::RolloutHead,
+    pub(super) scan: super::model_context::ActiveModelContextScan,
 }
 
 impl std::fmt::Debug for GoalSupervisorHistoryAccess {
@@ -86,6 +95,10 @@ impl std::fmt::Debug for GoalSupervisorHistoryAccess {
             .field("lifecycle_thread_count", &self.lifecycle.len())
             .field("holds_maintenance", &self.maintenance.is_some())
             .field("holds_writer_reservation", &self.reservation.is_some())
+            .field(
+                "has_certified_active_snapshot",
+                &self.certified_active_snapshot.is_some(),
+            )
             .finish()
     }
 }
@@ -96,11 +109,24 @@ impl GoalSupervisorHistoryAccess {
             lifecycle: Vec::new(),
             maintenance: None,
             reservation: None,
+            certified_active_snapshot: None,
         }
     }
 
     pub(super) fn writer_reservation(&self) -> Option<&RolloutWriterReservation> {
         self.reservation.as_ref()
+    }
+
+    pub(super) fn take_certified_active_snapshot(
+        &mut self,
+    ) -> Option<CertifiedActiveHistorySnapshot> {
+        self.certified_active_snapshot.take()
+    }
+
+    pub(super) fn has_certified_active_snapshot(&self, path: &Path) -> bool {
+        self.certified_active_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.rollout_path == path)
     }
 
     pub(super) fn take_writer_lock(&mut self, thread_id: ThreadId) -> Option<WriterLockGuard> {
@@ -176,9 +202,9 @@ struct RepairRoot {
 }
 
 /// The mutable roots and writer owners that must remain stable during compatibility repair.
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct RepairScope {
     roots: Vec<RepairRoot>,
+    certified_active_snapshot: Option<CertifiedActiveHistorySnapshot>,
 }
 
 impl RepairScope {
@@ -242,7 +268,15 @@ pub(super) async fn repair_compatibility_history_before_access(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<GoalSupervisorHistoryAccess> {
-    repair_before_access(store, thread_id, rollout_path, RepairAccess::Compatibility, None, &[]).await
+    repair_before_access(
+        store,
+        thread_id,
+        rollout_path,
+        RepairAccess::Compatibility,
+        None,
+        &[],
+    )
+    .await
 }
 
 pub(super) async fn repair_compatibility_history_before_retry(
@@ -252,7 +286,15 @@ pub(super) async fn repair_compatibility_history_before_retry(
     original: &super::rollout_lineage::RolloutLineage,
     excluded: &[super::rollout_lineage::ExcludedAncestor],
 ) -> ThreadStoreResult<GoalSupervisorHistoryAccess> {
-    repair_before_access(store, thread_id, rollout_path, RepairAccess::Compatibility, Some(original), excluded).await
+    repair_before_access(
+        store,
+        thread_id,
+        rollout_path,
+        RepairAccess::Compatibility,
+        Some(original),
+        excluded,
+    )
+    .await
 }
 
 /// Repairs only the bounded reference window used by ordinary thread history reads.
@@ -261,7 +303,15 @@ pub(super) async fn repair_recent_history_before_access(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<GoalSupervisorHistoryAccess> {
-    repair_before_access(store, thread_id, rollout_path, RepairAccess::Recent, None, &[]).await
+    repair_before_access(
+        store,
+        thread_id,
+        rollout_path,
+        RepairAccess::Recent,
+        None,
+        &[],
+    )
+    .await
 }
 
 /// Repairs only the active root for an authoritative active checkpoint.
@@ -270,7 +320,15 @@ pub(super) async fn repair_active_history_before_access(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<GoalSupervisorHistoryAccess> {
-    repair_before_access(store, thread_id, rollout_path, RepairAccess::ActiveOnly, None, &[]).await
+    repair_before_access(
+        store,
+        thread_id,
+        rollout_path,
+        RepairAccess::ActiveOnly,
+        None,
+        &[],
+    )
+    .await
 }
 
 #[derive(Clone, Copy)]
@@ -298,7 +356,8 @@ async fn repair_before_access(
     // It must not recover or publish an independently selected ancestor on that retry.
     if original.is_some() && !excluded.is_empty() {
         return Err(ThreadStoreError::Conflict {
-            message: "history repair cannot bind an alternate fork retry to its selected graph".to_string(),
+            message: "history repair cannot bind an alternate fork retry to its selected graph"
+                .to_string(),
         });
     }
     reject_ambiguous_compressed_path(rollout_path).await?;
@@ -312,12 +371,35 @@ async fn repair_before_access(
         }
         return clean_unconfined_access_or_error(thread_id, rollout_path, confinement_error).await;
     }
-    let mut scope = discover_scope(store, thread_id, rollout_path, access).await?;
+    let preflight_reference_policy = if matches!(access, RepairAccess::Recent) {
+        ReferencePolicy::Recent
+    } else {
+        ReferencePolicy::Complete
+    };
+    if !matches!(access, RepairAccess::ActiveOnly) {
+        let (preflight, _) = scan_root_for_access(
+            store,
+            thread_id,
+            rollout_path,
+            access,
+            preflight_reference_policy,
+        )
+        .await?;
+        if preflight.needs_repair && is_immutable_segment(store, rollout_path).await? {
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "immutable rollout root {} requires repair through its mutable parent",
+                    rollout_path.display()
+                ),
+            });
+        }
+    }
+    let mut lock_ids = vec![thread_id];
 
-    // Lifecycle ownership precedes maintenance. Discovery is repeated after both lifecycle and
-    // writer ownership so a concurrent archive, rotation, or append cannot change the repair set.
+    // Lifecycle ownership precedes maintenance. The first discovery runs while the selected
+    // thread is stable. A cross-thread lineage expands the lock set and is then rediscovered with
+    // every owner stable; a same-thread rotation lineage needs only the one locked scan.
     for _ in 0..3 {
-        let lock_ids = scope.lock_thread_ids();
         let mut lifecycle = Vec::with_capacity(lock_ids.len());
         for &id in &lock_ids {
             lifecycle.push(reserve_history_repair_lifecycle(store, id).await);
@@ -325,34 +407,56 @@ async fn repair_before_access(
         let maintenance = Some(acquire_maintenance(store).await?);
         let reservation = store.reserve_rollout_writers(lock_ids.as_slice()).await?;
         reject_quarantined_scope(home_key.as_path(), lock_ids.as_slice())?;
-        let access_token = GoalSupervisorHistoryAccess {
+        let mut access_token = GoalSupervisorHistoryAccess {
             lifecycle,
             maintenance,
             reservation: Some(reservation),
+            certified_active_snapshot: None,
         };
         if let Some(original) = original {
             original.validate_retry_source(rollout_path).await?;
-            let reservation = access_token.writer_reservation().ok_or_else(|| ThreadStoreError::Internal {
-                message: "history repair did not retain retry writer ownership".to_string(),
-            })?;
-            store.validate_fork_retry_graph(thread_id, rollout_path, original, excluded, reservation).await?;
+            let reservation =
+                access_token
+                    .writer_reservation()
+                    .ok_or_else(|| ThreadStoreError::Internal {
+                        message: "history repair did not retain retry writer ownership".to_string(),
+                    })?;
+            store
+                .validate_fork_retry_graph(thread_id, rollout_path, original, excluded, reservation)
+                .await?;
         }
-        recover_interrupted_publications(store, &scope, &access_token).await?;
-        if scope.needs_repair() {
-            for &id in &lock_ids {
-                store.ensure_live_recorder_absent(id).await?;
-            }
-        }
-
-        let locked_scope = discover_scope(store, thread_id, rollout_path, access).await?;
-        if locked_scope.lock_thread_ids() != lock_ids || locked_scope != scope {
+        let locked_rollout_path = if tokio::fs::symlink_metadata(rollout_path)
+            .await
+            .is_ok_and(|meta| meta.is_file())
+        {
+            rollout_path.to_path_buf()
+        } else if original.is_some() {
+            return Err(ThreadStoreError::Conflict {
+                message: "retry source disappeared while acquiring repair ownership".to_string(),
+            });
+        } else {
+            super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+                .await?
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
+                .path
+        };
+        let locked_scope =
+            discover_scope(store, thread_id, locked_rollout_path.as_path(), access).await?;
+        let discovered_lock_ids = locked_scope.lock_thread_ids();
+        if discovered_lock_ids != lock_ids {
             drop(access_token);
-            scope = locked_scope;
+            lock_ids = discovered_lock_ids;
             continue;
         }
+        reject_quarantined_scope(home_key.as_path(), lock_ids.as_slice())?;
+        recover_interrupted_publications(store, &locked_scope, &access_token).await?;
 
         if !locked_scope.needs_repair() {
+            access_token.certified_active_snapshot = locked_scope.certified_active_snapshot;
             return Ok(access_token);
+        }
+        for &id in &lock_ids {
+            store.ensure_live_recorder_absent(id).await?;
         }
 
         // Publication uses blocking descriptor operations. A detached owner retains every lock
@@ -464,18 +568,16 @@ async fn discover_scope(
     access: RepairAccess,
 ) -> ThreadStoreResult<RepairScope> {
     let rollout_path = confined_rollout_path(store, rollout_path).await?;
-    let include_references = !matches!(access, RepairAccess::ActiveOnly);
     let reference_policy = if matches!(access, RepairAccess::Recent) {
         ReferencePolicy::Recent
     } else {
         ReferencePolicy::Complete
     };
-    let root = scan_root(
+    let (root, certified_active_snapshot) = scan_root_for_access(
         store,
         thread_id,
         rollout_path.as_path(),
-        None,
-        include_references,
+        access,
         reference_policy,
     )
     .await?;
@@ -488,17 +590,26 @@ async fn discover_scope(
         });
     }
     if matches!(access, RepairAccess::ActiveOnly) {
-        return Ok(RepairScope { roots: vec![root] });
+        return Ok(RepairScope {
+            roots: vec![root],
+            certified_active_snapshot,
+        });
     }
 
     if matches!(access, RepairAccess::Recent) {
-        return Ok(RepairScope { roots: vec![root] });
+        return Ok(RepairScope {
+            roots: vec![root],
+            certified_active_snapshot: None,
+        });
     }
     let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
         .await
         .map_err(thread_store_io_error)?;
     if session_meta.meta.history_mode != codex_protocol::protocol::ThreadHistoryMode::Paginated {
-        return Ok(RepairScope { roots: vec![root] });
+        return Ok(RepairScope {
+            roots: vec![root],
+            certified_active_snapshot: None,
+        });
     }
     let lineage = store
         .resolve_rollout_lineage_from_path(thread_id, rollout_path.as_path())
@@ -544,7 +655,113 @@ async fn discover_scope(
         .lock_thread_ids
         .sort_unstable_by_key(ThreadId::to_string);
     roots[0].lock_thread_ids.dedup();
-    Ok(RepairScope { roots })
+    Ok(RepairScope {
+        roots,
+        certified_active_snapshot: None,
+    })
+}
+
+async fn scan_root_for_access(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    access: RepairAccess,
+    reference_policy: ReferencePolicy,
+) -> ThreadStoreResult<(RepairRoot, Option<CertifiedActiveHistorySnapshot>)> {
+    if matches!(access, RepairAccess::ActiveOnly)
+        && let Some((root, snapshot)) =
+            scan_clean_certified_active_root(thread_id, rollout_path, reference_policy).await?
+    {
+        return Ok((root, Some(snapshot)));
+    }
+    let root = scan_root(
+        store,
+        thread_id,
+        rollout_path,
+        /*end_byte_offset*/ None,
+        /*include_references*/ !matches!(access, RepairAccess::ActiveOnly),
+        reference_policy,
+    )
+    .await?;
+    Ok((root, None))
+}
+
+/// Proves that the model-visible active suffix contains no affected Goal-supervisor envelope.
+///
+/// A certified segment checkpoint makes older active-file records irrelevant to latest-state
+/// reconstruction. Inspecting only that suffix avoids buffering a multi-gigabyte active JSONL on
+/// every resume or latest fork. An invalid or absent checkpoint, a parse rejection, or detected
+/// legacy damage falls back to the complete physical repair scan.
+async fn scan_clean_certified_active_root(
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    reference_policy: ReferencePolicy,
+) -> ThreadStoreResult<Option<(RepairRoot, CertifiedActiveHistorySnapshot)>> {
+    let physical_path = codex_rollout::existing_rollout_path(rollout_path)
+        .await
+        .ok_or_else(|| ThreadStoreError::InvalidRequest {
+            message: format!("rollout {} does not exist", rollout_path.display()),
+        })?;
+    if physical_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+        return Ok(None);
+    }
+    let head = super::rollout_lineage::read_rollout_head(physical_path.as_path()).await?;
+    let session_meta = head.session_meta.clone();
+    let Some(scan) = super::model_context::scan_plain_active_model_context_snapshot(
+        physical_path.as_path(),
+        session_meta.clone(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !scan.segment_checkpoint {
+        return Ok(None);
+    }
+    let end_byte_offset = tokio::fs::metadata(physical_path.as_path())
+        .await
+        .map_err(thread_store_io_error)?
+        .len();
+    let mut bounded_lines = scan.suffix_lines.clone();
+    if session_meta.meta.id != thread_id {
+        return Ok(None);
+    }
+    bounded_lines.insert(
+        0,
+        RolloutLine {
+            timestamp: String::new(),
+            ordinal: None,
+            item: RolloutItem::SessionMeta(Box::new(session_meta)),
+        },
+    );
+    let repair_count = repair_legacy_goal_supervisor_lines_with_provenance(
+        bounded_lines.as_mut_slice(),
+        GoalSupervisorLineageProvenance::Untrusted,
+    )
+    .map_err(|error| annotate_path(error, rollout_path))?;
+    if repair_count.total() != 0 {
+        return Ok(None);
+    }
+    let root = RepairRoot {
+        thread_id,
+        path: codex_rollout::plain_rollout_path(rollout_path),
+        end_byte_offset: None,
+        source_sha256: String::new(),
+        source_was_compressed: false,
+        include_references: false,
+        reference_policy,
+        needs_repair: false,
+        lock_thread_ids: vec![thread_id],
+    };
+    Ok(Some((
+        root,
+        CertifiedActiveHistorySnapshot {
+            rollout_path: physical_path,
+            end_byte_offset,
+            head,
+            scan,
+        },
+    )))
 }
 
 async fn scan_root(
@@ -597,7 +814,7 @@ async fn scan_root(
                         lines.as_slice(),
                         reference,
                         reference_policy,
-                        None,
+                        /*inherited_selection*/ None,
                     )
                     .await?,
                 )
@@ -682,6 +899,9 @@ async fn scan_reference(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(thread_store_io_error(error)),
         };
+        // Immutable bytes can be authenticated without blocking the owner's live writer. If this
+        // scan finds a repair, completion adds `thread_id` and the outer discovery loop repeats
+        // with that writer reserved before publishing any replacement.
         let lock_thread_ids = if is_immutable_segment(store, path.as_path()).await? {
             Vec::new()
         } else {
@@ -956,7 +1176,7 @@ async fn repair_root_locked(
                     selection_parent_lines.as_slice(),
                     reference,
                     root.reference_policy,
-                    None,
+                    /*inherited_selection*/ None,
                 )
                 .await?,
                 access,
@@ -1262,7 +1482,8 @@ async fn repair_reference(
             let old_segment_id = completed.reference.segment_id.ok_or_else(|| {
                 repair_error("mutable reference fallback is missing its segment identity")
             })?;
-            let identity_cleared = replacement_with_segment_id(&completed, None)?;
+            let identity_cleared =
+                replacement_with_segment_id(&completed, /*segment_id*/ None)?;
             let segment_id = history_repair_segment_id(identity_cleared.as_slice());
             let replacement = replacement_with_segment_id(&completed, Some(segment_id))?;
             install_existing_identity_history_repair_backup(
@@ -1310,7 +1531,8 @@ async fn repair_reference(
             }
         } else {
             let writer = access.writer_token(store, completed.thread_id).await?;
-            let identity_cleared = replacement_with_segment_id(&completed, None)?;
+            let identity_cleared =
+                replacement_with_segment_id(&completed, /*segment_id*/ None)?;
             let segment_id = history_repair_segment_id(identity_cleared.as_slice());
             let replacement = replacement_with_segment_id(&completed, Some(segment_id))?;
             let installed_path = install_history_repair_segment(
@@ -1472,12 +1694,17 @@ fn preserve_session_meta_record(source: &[u8], replacement: &mut [u8]) -> Thread
 }
 
 async fn read_plain_source(path: &Path) -> ThreadStoreResult<Vec<u8>> {
-    let physical = if tokio::fs::symlink_metadata(path).await.is_ok_and(|metadata| metadata.is_file()) {
+    let physical = if tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
         path.to_path_buf()
     } else {
-        codex_rollout::existing_rollout_path(path).await.ok_or_else(|| ThreadStoreError::InvalidRequest {
-            message: format!("rollout {} does not exist", path.display()),
-        })?
+        codex_rollout::existing_rollout_path(path)
+            .await
+            .ok_or_else(|| ThreadStoreError::InvalidRequest {
+                message: format!("rollout {} does not exist", path.display()),
+            })?
     };
     if is_compressed_path(physical.as_path()) {
         let physical = physical.clone();
@@ -1496,10 +1723,19 @@ async fn read_plain_source(path: &Path) -> ThreadStoreResult<Vec<u8>> {
 
 async fn reject_ambiguous_compressed_path(path: &Path) -> ThreadStoreResult<()> {
     if is_compressed_path(path)
-        && tokio::fs::try_exists(path).await.map_err(thread_store_io_error)?
-        && tokio::fs::try_exists(codex_rollout::plain_rollout_path(path)).await.map_err(thread_store_io_error)?
+        && tokio::fs::try_exists(path)
+            .await
+            .map_err(thread_store_io_error)?
+        && tokio::fs::try_exists(codex_rollout::plain_rollout_path(path))
+            .await
+            .map_err(thread_store_io_error)?
     {
-        return Err(ThreadStoreError::Conflict { message: format!("history repair cannot select {} while its plain sibling exists", path.display()) });
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "history repair cannot select {} while its plain sibling exists",
+                path.display()
+            ),
+        });
     }
     Ok(())
 }
