@@ -1,0 +1,4989 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 50514c5874c60d5639bbe5fe4bfdd970f883c16e..cadff975d0cd05e6b497ce3802d5416aebbbdb74 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -4315,6 +4315,21 @@ impl ThreadRequestProcessor {
+             SortDirection::Asc => StoreSortDirection::Asc,
+             SortDirection::Desc => StoreSortDirection::Desc,
+         };
++        // `Full` is only a temporary compatibility path. Keep it out of ThreadStore's API:
++        // load turn shells here, then hydrate their items below.
++        let stored_items_view = match items_view {
++            TurnItemsView::NotLoaded => StoredTurnItemsView::NotLoaded,
++            TurnItemsView::Summary => StoredTurnItemsView::Summary,
++            TurnItemsView::Full => StoredTurnItemsView::NotLoaded,
++        };
++        let store_params = StoreListTurnsParams {
++            thread_id,
++            include_archived: true,
++            cursor: cursor.clone(),
++            page_size,
++            sort_direction,
++            items_view: stored_items_view,
++        };
+         let use_unprojected_history = match cursor.as_deref() {
+             Some(cursor) => parse_thread_turns_cursor(cursor).is_ok(),
+             None => {
+@@ -4327,8 +4342,26 @@ impl ThreadRequestProcessor {
+                         || self.has_paginated_history_projection(thread_id).await?)
+             }
+         };
+-        if use_unprojected_history
+-            && let Some((response, _)) = self
++        let source_page = if use_unprojected_history
++            && cursor.is_none()
++            && matches!(sort_direction, StoreSortDirection::Desc)
++            && let Some(store) = self
++                .thread_store
++                .as_any()
++                .downcast_ref::<codex_thread_store::LocalThreadStore>()
++        {
++            // A root append makes the checkpoint stale without invalidating its predecessor
++            // lineage. The source reader checks that lineage and can return a complete page;
++            // the bounded compatibility reader may stop before collecting enough turns.
++            store
++                .try_list_projected_source_turns(&store_params)
++                .await
++                .map_err(paginated_history_list_error)?
++        } else {
++            None
++        };
++        if use_unprojected_history && source_page.is_none() {
++            if let Some((response, _)) = self
+                 .unprojected_paginated_thread_turns_list_response(
+                     thread_id,
+                     cursor.as_deref(),
+@@ -4337,37 +4370,27 @@ impl ThreadRequestProcessor {
+                     items_view,
+                 )
+                 .await?
+-        {
+-            return Ok(response);
++            {
++                return Ok(response);
++            }
+         }
+-        // `Full` is only a temporary compatibility path. Keep it out of ThreadStore's API:
+-        // load turn shells here, then hydrate their items below.
+-        let stored_items_view = match items_view {
+-            TurnItemsView::NotLoaded => StoredTurnItemsView::NotLoaded,
+-            TurnItemsView::Summary => StoredTurnItemsView::Summary,
+-            TurnItemsView::Full => StoredTurnItemsView::NotLoaded,
++        let page = if let Some(page) = source_page {
++            page
++        } else {
++            self.thread_store
++                .list_turns(store_params)
++                .await
++                .map_err(|err| match err {
++                    ThreadStoreError::InvalidRequest { message } => invalid_request(message),
++                    ThreadStoreError::Unsupported { operation } => {
++                        unsupported_thread_store_operation(operation)
++                    }
++                    ThreadStoreError::ThreadNotFound { thread_id } => {
++                        invalid_request(format!("no rollout found for thread id {thread_id}"))
++                    }
++                    err => internal_error(format!("failed to list thread history: {err}")),
++                })?
+         };
+-        let page = self
+-            .thread_store
+-            .list_turns(StoreListTurnsParams {
+-                thread_id,
+-                include_archived: true,
+-                cursor: cursor.clone(),
+-                page_size,
+-                sort_direction,
+-                items_view: stored_items_view,
+-            })
+-            .await
+-            .map_err(|err| match err {
+-                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+-                ThreadStoreError::Unsupported { operation } => {
+-                    unsupported_thread_store_operation(operation)
+-                }
+-                ThreadStoreError::ThreadNotFound { thread_id } => {
+-                    invalid_request(format!("no rollout found for thread id {thread_id}"))
+-                }
+-                err => internal_error(format!("failed to list thread history: {err}")),
+-            })?;
+         let mut turns = Vec::with_capacity(page.turns.len());
+         for turn in page.turns {
+             let mut turn = stored_turn_to_api_turn(turn, items_view)?;
+@@ -5049,7 +5072,18 @@ impl ThreadRequestProcessor {
+         &self,
+         thread_id: ThreadId,
+     ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
+-        let (turns_page, _) = self
++        if let Some(store) = self
++            .thread_store
++            .as_any()
++            .downcast_ref::<codex_thread_store::LocalThreadStore>()
++            && let Some(cursors) = store
++                .try_projected_source_resume_backwards_cursors(thread_id)
++                .await
++                .map_err(paginated_history_list_error)?
++        {
++            return Ok(cursors);
++        }
++        let Some((turns_page, _)) = self
+             .unprojected_paginated_thread_turns_list_response(
+                 thread_id,
+                 /*cursor*/ None,
+@@ -5058,11 +5092,10 @@ impl ThreadRequestProcessor {
+                 TurnItemsView::NotLoaded,
+             )
+             .await?
+-            .ok_or_else(|| {
+-                internal_error(format!(
+-                    "failed to read unprojected turn head for thread {thread_id}"
+-                ))
+-            })?;
++        else {
++            return Self::paginated_resume_backwards_cursors(self.thread_store.as_ref(), thread_id)
++                .await;
++        };
+         let items_page = self
+             .unprojected_paginated_thread_items_list_response(
+                 thread_id,
+@@ -5170,25 +5203,30 @@ impl ThreadRequestProcessor {
+             after_updated_at_ordinal: None,
+             before_updated_at_ordinal: None,
+         };
+-        let fast_page = if !has_anchor
+-            && !self
+-                .unprojected_paginated_history_threads
+-                .lock()
+-                .await
+-                .contains(&thread_id)
+-            && !self.has_current_history_certificate(thread_id).await?
+-        {
++        let unprojected = self
++            .unprojected_paginated_history_threads
++            .lock()
++            .await
++            .contains(&thread_id);
++        let fast_page = if !has_anchor {
+             match self
+                 .thread_store
+                 .as_any()
+                 .downcast_ref::<codex_thread_store::LocalThreadStore>()
+             {
+-                Some(store) => store
++                Some(store) if unprojected => store
++                    .try_list_projected_source_items(&store_params)
++                    .await
++                    .map_err(|err| {
++                        internal_error(format!("failed to check thread item sources: {err}"))
++                    })?,
++                Some(store) if !self.has_current_history_certificate(thread_id).await? => store
+                     .try_list_uncertified_turn_items(&store_params)
+                     .await
+                     .map_err(|err| {
+                         internal_error(format!("failed to check thread item sources: {err}"))
+                     })?,
++                Some(_) => None,
+                 None => None,
+             }
+         } else {
+diff --git a/codex-rs/app-server/tests/suite/v2/attached_thread_tests.rs b/codex-rs/app-server/tests/suite/v2/attached_thread_tests.rs
+index dba370070291fba09aefd7eb30728c09852f9280..7749df32812789473225f4d1c7e19c75b2e1a42a 100644
+--- a/codex-rs/app-server/tests/suite/v2/attached_thread_tests.rs
++++ b/codex-rs/app-server/tests/suite/v2/attached_thread_tests.rs
+@@ -2,24 +2,38 @@
+ use anyhow::Result;
+ use app_test_support::MockResponsesConfig;
+ use app_test_support::TestAppServer;
++use app_test_support::append_fake_paginated_user_message;
+ use app_test_support::create_fake_paginated_rollout;
+ use app_test_support::create_fake_rollout;
+ use app_test_support::create_mock_responses_server_repeating_assistant;
+ use codex_app_server_protocol::RequestId;
++use codex_app_server_protocol::SortDirection;
+ use codex_app_server_protocol::ThreadDeleteParams;
+ use codex_app_server_protocol::ThreadDeleteResponse;
+ use codex_app_server_protocol::ThreadForkParams;
+ use codex_app_server_protocol::ThreadForkResponse;
++use codex_app_server_protocol::ThreadItemsListCursor;
++use codex_app_server_protocol::ThreadItemsListParams;
++use codex_app_server_protocol::ThreadItemsListResponse;
+ use codex_app_server_protocol::ThreadListResponse;
+ use codex_app_server_protocol::ThreadLoadedListParams;
+ use codex_app_server_protocol::ThreadLoadedListResponse;
+ use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadResumeInitialTurnsPageParams;
++use codex_app_server_protocol::ThreadResumeParams;
+ use codex_app_server_protocol::ThreadResumeResponse;
+ use codex_app_server_protocol::ThreadSearchResponse;
++use codex_app_server_protocol::ThreadTurnsListParams;
++use codex_app_server_protocol::ThreadTurnsListResponse;
++use codex_app_server_protocol::TurnItemsView;
+ use codex_app_server_protocol::TurnStartParams;
+ use codex_app_server_protocol::TurnStartResponse;
+ use codex_app_server_protocol::UserInput;
++use codex_features::Feature;
+ use codex_state::SqliteConfig;
++use codex_thread_store::FreezeRolloutSegmentParams;
++use codex_thread_store::LocalThreadStore;
++use codex_thread_store::LocalThreadStoreConfig;
+ use codex_utils_absolute_path::test_support::PathExt;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+@@ -33,6 +47,253 @@ enum Recovery {
+     Corrupt,
+ }
+
++#[test_case(false; "migration disabled")]
++#[test_case(true; "default migration")]
++#[tokio::test]
++async fn cold_attached_resume_repairs_incomplete_projection_without_exposing_parent(
++    background_migration: bool,
++) -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let home = TempDir::new()?;
++    let config = MockResponsesConfig::new(&server.uri());
++    if background_migration {
++        config.write(home.path())?;
++    } else {
++        config
++            .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
++            .write(home.path())?;
++    }
++    let parent = create_fake_paginated_rollout(
++        home.path(),
++        "2025-01-05T12-00-00",
++        "2025-01-05T12:00:00Z",
++        "parent-only context",
++        Some("mock_provider"),
++        None,
++    )?;
++    let parent_path = app_test_support::rollout_path(home.path(), "2025-01-05T12-00-00", &parent);
++    append_fake_paginated_user_message(&parent_path, &parent, "parent-only context").await?;
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let mut children = Vec::new();
++    for _ in 0..2 {
++        let id = mcp
++            .send_thread_fork_request(ThreadForkParams {
++                thread_id: parent.clone(),
++                attach_to_source: true,
++                exclude_turns: true,
++                ..Default::default()
++            })
++            .await?;
++        let fork: ThreadForkResponse = mcp.read_response(id).await?;
++        let path = fork.thread.path.expect("attached rollout");
++        let meta = codex_rollout::read_session_meta_line_exact(&path)
++            .await?
++            .meta;
++        assert!(meta.attached_thread);
++        assert_eq!(
++            meta.forked_from_id.map(|id| id.to_string()),
++            Some(parent.clone())
++        );
++        assert!(
++            meta.history_base
++                .is_some_and(|base| base.thread_id != meta.id)
++        );
++        children.push((fork.thread.id, path));
++    }
++    let mut turn_ids = Vec::new();
++    for text in ["first child turn"] {
++        let id = mcp
++            .send_turn_start_request(TurnStartParams {
++                thread_id: children[0].0.clone(),
++                input: vec![UserInput::Text {
++                    text: text.to_string(),
++                    text_elements: Vec::new(),
++                }],
++                ..Default::default()
++            })
++            .await?;
++        let started: TurnStartResponse = mcp.read_response(id).await?;
++        turn_ids.push(started.turn.id);
++        mcp.read_stream_until_notification_message("turn/completed")
++            .await?;
++    }
++    assert!(mcp.shutdown_gracefully().await?.success());
++
++    let sqlite = SqliteConfig::new_for_testing(home.path().abs());
++    let state =
++        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig {
++            codex_home: home.path().to_path_buf(),
++            sqlite: sqlite.clone(),
++            default_model_provider_id: "mock_provider".to_string(),
++        },
++        Some(state),
++    );
++    let child_id = codex_protocol::ThreadId::from_string(&children[0].0)?;
++    let frozen = store
++        .freeze_thread_segment(child_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
++        .await?;
++    let frozen_id = frozen.reference.rollout_id.expect("physical predecessor");
++    assert_ne!(frozen_id, child_id);
++    let root_meta = codex_rollout::read_session_meta_line_exact(&children[0].1)
++        .await?
++        .meta;
++    assert_eq!(
++        root_meta.history_base.map(|base| base.thread_id),
++        Some(frozen_id)
++    );
++    drop(store);
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let id = mcp
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: children[0].0.clone(),
++            exclude_turns: true,
++            ..Default::default()
++        })
++        .await?;
++    let _: ThreadResumeResponse = mcp.read_response(id).await?;
++    let id = mcp
++        .send_turn_start_request(TurnStartParams {
++            thread_id: children[0].0.clone(),
++            input: vec![UserInput::Text {
++                text: "second child turn".to_string(),
++                text_elements: Vec::new(),
++            }],
++            ..Default::default()
++        })
++        .await?;
++    let started: TurnStartResponse = mcp.read_response(id).await?;
++    turn_ids.push(started.turn.id);
++    mcp.read_stream_until_notification_message("turn/completed")
++        .await?;
++    assert!(mcp.shutdown_gracefully().await?.success());
++
++    let pool = sqlite
++        .open_read_write_pool(&sqlite.thread_history_db_path())
++        .await?;
++    for (id, path) in &children {
++        sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
++            .bind(id)
++            .execute(&pool)
++            .await?;
++        sqlx::query("DELETE FROM thread_turns WHERE thread_id = ?")
++            .bind(id)
++            .execute(&pool)
++            .await?;
++        let offset = i64::try_from(std::fs::metadata(path)?.len())?;
++        sqlx::query(
++            "INSERT INTO thread_history_projection_state \
++             (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 0) \
++             ON CONFLICT(thread_id) DO UPDATE SET next_rollout_byte_offset = excluded.next_rollout_byte_offset",
++        )
++        .bind(id)
++        .bind(-1 - offset)
++        .execute(&pool)
++        .await?;
++    }
++    sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
++        .bind(frozen_id.to_string())
++        .execute(&pool)
++        .await?;
++    sqlx::query("DELETE FROM thread_turns WHERE thread_id = ?")
++        .bind(frozen_id.to_string())
++        .execute(&pool)
++        .await?;
++    pool.close().await;
++
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let id = mcp
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: children[0].0.clone(),
++            exclude_turns: true,
++            ..Default::default()
++        })
++        .await?;
++    let resumed: ThreadResumeResponse = mcp.read_response(id).await?;
++    assert!(resumed.thread.turns.is_empty());
++    let mut cursor = resumed.turns_backwards_cursor;
++    assert!(cursor.is_some());
++    let mut item_cursor = resumed.items_backwards_cursor;
++    assert!(item_cursor.is_some());
++    for expected in turn_ids.iter().rev() {
++        let id = mcp
++            .send_thread_turns_list_request(ThreadTurnsListParams {
++                thread_id: children[0].0.clone(),
++                cursor,
++                limit: Some(1),
++                sort_direction: Some(SortDirection::Desc),
++                items_view: Some(TurnItemsView::NotLoaded),
++            })
++            .await?;
++        let page: ThreadTurnsListResponse = mcp.read_response(id).await?;
++        assert_eq!(page.data.len(), 1);
++        assert_eq!(&page.data[0].id, expected);
++        cursor = page.next_cursor;
++    }
++    assert!(cursor.is_none());
++    let mut item_turns = Vec::new();
++    loop {
++        let id = mcp
++            .send_thread_items_list_request(ThreadItemsListParams {
++                thread_id: children[0].0.clone(),
++                turn_id: None,
++                cursor: item_cursor.map(ThreadItemsListCursor::Opaque),
++                limit: Some(1),
++                sort_direction: Some(SortDirection::Desc),
++                defer_output: None,
++            })
++            .await?;
++        let page: ThreadItemsListResponse = mcp.read_response(id).await?;
++        item_turns.extend(page.data.into_iter().map(|item| item.turn_id));
++        item_cursor = page.next_cursor;
++        if item_cursor.is_none() {
++            break;
++        }
++        assert!(item_turns.len() < 20, "item cursor must advance");
++    }
++    assert!(item_turns.len() >= 4);
++    assert_eq!(item_turns.first(), turn_ids.last());
++    assert!(item_turns.iter().all(|id| turn_ids.contains(id)));
++    assert!(turn_ids.iter().all(|id| item_turns.contains(id)));
++
++    let id = mcp
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: children[1].0.clone(),
++            exclude_turns: true,
++            initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
++                limit: Some(1),
++                sort_direction: Some(SortDirection::Desc),
++                items_view: Some(TurnItemsView::NotLoaded),
++            }),
++            ..Default::default()
++        })
++        .await?;
++    let empty: ThreadResumeResponse = mcp.read_response(id).await?;
++    assert!(
++        empty
++            .initial_turns_page
++            .expect("initial page")
++            .data
++            .is_empty()
++    );
++    assert!(empty.turns_backwards_cursor.is_none());
++    assert!(empty.items_backwards_cursor.is_none());
++    Ok(())
++}
++
+ #[test_case(Recovery::Restart; "paginated restart")]
+ #[test_case(Recovery::Missing; "paginated missing database")]
+ #[test_case(Recovery::Corrupt; "paginated corrupt database")]
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+index cbd487ab175d740f01a9e216e02db11c5939d1a1..f8bcd24732fdbe2427c547c7c72991cd3644243e 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+@@ -677,6 +677,379 @@ async fn direct_items_page_reads_compressed_leaf_at_recorded_plain_path() -> Res
+     Ok(())
+ }
+
++#[tokio::test]
++async fn paginated_stale_root_checkpoint_keeps_cursorless_turn_pages_complete() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let codex_home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri())
++        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
++        .write(codex_home.path())?;
++    let thread_id = codex_protocol::ThreadId::new();
++    let store = create_paginated_thread(codex_home.path(), thread_id).await?;
++
++    let mut turn_index = 0;
++    let mut required_segment = None;
++    for segment in 0..24 {
++        let count = if segment < 14 {
++            5
++        } else if segment < 20 {
++            4
++        } else {
++            1
++        };
++        let mut items = Vec::new();
++        for _ in 0..count {
++            let turn_id = format!("turn-{turn_index:02}");
++            items.push(paginated_turn_started(&turn_id));
++            if turn_index == 91 {
++                items.push(paginated_completed_item(
++                    thread_id,
++                    &turn_id,
++                    CoreTurnItem::UserMessage(UserMessageItem {
++                        id: "late-user".to_string(),
++                        client_id: None,
++                        content: vec![codex_protocol::user_input::UserInput::Text {
++                            text: "original".to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                    }),
++                ));
++                items.push(paginated_completed_item(
++                    thread_id,
++                    &turn_id,
++                    CoreTurnItem::UserMessage(UserMessageItem {
++                        id: "older-user".to_string(),
++                        client_id: None,
++                        content: vec![codex_protocol::user_input::UserInput::Text {
++                            text: "older item".to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                    }),
++                ));
++            }
++            items.push(paginated_turn_completed(&turn_id));
++            turn_index += 1;
++        }
++        store
++            .append_items(AppendThreadItemsParams { thread_id, items })
++            .await?;
++        let frozen = store
++            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
++            .await?;
++        if segment == 19 {
++            required_segment = Some(frozen.reference.rollout_path);
++        }
++    }
++    assert_eq!(turn_index, 98);
++    let mut root_items = certified_recent_history_checkpoint(codex_home.path()).into_items();
++    root_items.push(paginated_completed_item(
++        thread_id,
++        "turn-91",
++        CoreTurnItem::UserMessage(UserMessageItem {
++            id: "late-user".to_string(),
++            client_id: None,
++            content: vec![codex_protocol::user_input::UserInput::Text {
++                text: "updated after rotation".to_string(),
++                text_elements: Vec::new(),
++            }],
++        }),
++    ));
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: root_items,
++        })
++        .await?;
++    let root = store
++        .read_thread(StoreReadThreadParams {
++            thread_id,
++            include_archived: true,
++            include_history: false,
++        })
++        .await?
++        .rollout_path
++        .expect("active rollout");
++    store.shutdown_thread(thread_id).await?;
++    assert!(store.rebuild_history_projection(thread_id).await?);
++    assert!(store.has_bounded_history_root_projection(thread_id).await?);
++
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let first = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    assert_eq!(first.data.len(), 7);
++    assert_eq!(
++        first
++            .data
++            .iter()
++            .map(|turn| turn.id.as_str())
++            .collect::<Vec<_>>(),
++        vec![
++            "turn-97", "turn-96", "turn-95", "turn-94", "turn-93", "turn-92", "turn-91"
++        ]
++    );
++    assert!(first.next_cursor.is_some());
++    let backwards = first.backwards_cursor.clone().expect("head cursor");
++
++    append_neutral_token_count(&root).await?;
++    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
++
++    let cursorless = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    let from_backwards = read_turns_page(
++        &mut mcp,
++        thread_id,
++        Some(backwards),
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    assert_eq!(cursorless.data, first.data);
++    assert_eq!(cursorless.data, from_backwards.data);
++    assert_eq!(cursorless.next_cursor, from_backwards.next_cursor);
++    assert!(cursorless.next_cursor.is_some());
++
++    let default_view = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        None,
++    )
++    .await?;
++    assert_eq!(default_view.data.len(), 7);
++    assert_eq!(
++        default_view
++            .data
++            .iter()
++            .map(|turn| &turn.id)
++            .collect::<Vec<_>>(),
++        first.data.iter().map(|turn| &turn.id).collect::<Vec<_>>()
++    );
++    assert_eq!(default_view.next_cursor, from_backwards.next_cursor);
++    assert_eq!(
++        turn_user_texts(&default_view.data),
++        vec!["updated after rotation"]
++    );
++
++    let required_segment = required_segment.expect("segment needed by the first page");
++    let unavailable = required_segment.with_extension("jsonl.unavailable");
++    std::fs::rename(&required_segment, &unavailable)?;
++    let missing_request = mcp
++        .send_thread_turns_list_request(ThreadTurnsListParams {
++            thread_id: thread_id.to_string(),
++            cursor: None,
++            limit: Some(7),
++            sort_direction: Some(SortDirection::Desc),
++            items_view: Some(TurnItemsView::NotLoaded),
++        })
++        .await?;
++    let missing = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_error_message(RequestId::Integer(missing_request)),
++    )
++    .await??;
++    assert_eq!(missing.error.code, -32603);
++    std::fs::rename(&unavailable, &required_segment)?;
++
++    let invalid_cursor_request = mcp
++        .send_thread_turns_list_request(ThreadTurnsListParams {
++            thread_id: thread_id.to_string(),
++            cursor: Some("invalid-cursor".to_string()),
++            limit: Some(7),
++            sort_direction: Some(SortDirection::Desc),
++            items_view: Some(TurnItemsView::NotLoaded),
++        })
++        .await?;
++    let invalid_cursor = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_error_message(RequestId::Integer(invalid_cursor_request)),
++    )
++    .await??;
++    assert_eq!(invalid_cursor.error.code, -32600);
++
++    // Simulate an earlier request that had no complete checkpoint and selected the compatibility
++    // reader. Its per-process marker must not keep selecting that reader after a rebuild.
++    let history_db = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs())
++        .thread_history_db_path();
++    let pool = sqlx::SqlitePool::connect_with(
++        sqlx::sqlite::SqliteConnectOptions::new().filename(history_db),
++    )
++    .await?;
++    sqlx::query("DELETE FROM thread_history_projection_state")
++        .execute(&pool)
++        .await?;
++    pool.close().await;
++    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
++    let unprojected = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    let unprojected_cursor: Value = serde_json::from_str(
++        unprojected
++            .backwards_cursor
++            .as_deref()
++            .expect("compatibility head cursor"),
++    )?;
++    assert_eq!(unprojected_cursor["turnId"], "turn-97");
++    assert!(store.rebuild_history_projection(thread_id).await?);
++    assert!(store.has_bounded_history_root_projection(thread_id).await?);
++    let after_catchup = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    assert_eq!(after_catchup.data, first.data);
++    assert_eq!(after_catchup.next_cursor, from_backwards.next_cursor);
++    let inherited_items = read_items_page(
++        &mut mcp,
++        thread_id,
++        Some("turn-91"),
++        None,
++        Some(1),
++        SortDirection::Asc,
++    )
++    .await?;
++    assert_eq!(inherited_items.data.len(), 1);
++    assert_eq!(inherited_items.data[0].item.id(), "late-user");
++    assert!(matches!(
++        &inherited_items.data[0].item.payload,
++        ThreadItemPayload::UserMessage { content, .. }
++            if matches!(&content[..], [UserInput::Text { text, .. }] if text == "updated after rotation")
++    ));
++    let older_items = read_items_page(
++        &mut mcp,
++        thread_id,
++        Some("turn-91"),
++        Some(inherited_items.next_cursor.expect("older item cursor")),
++        Some(1),
++        SortDirection::Asc,
++    )
++    .await?;
++    assert_eq!(older_items.data.len(), 1);
++    assert_eq!(older_items.data[0].item.id(), "older-user");
++    assert!(older_items.next_cursor.is_none());
++
++    append_neutral_token_count(&root).await?;
++    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
++    let stale_items = read_items_page(
++        &mut mcp,
++        thread_id,
++        Some("turn-91"),
++        None,
++        Some(10),
++        SortDirection::Asc,
++    )
++    .await?;
++    assert_eq!(
++        stale_items
++            .data
++            .iter()
++            .map(|entry| entry.item.id())
++            .collect::<Vec<_>>(),
++        vec!["late-user", "older-user"]
++    );
++    let resume_id = mcp
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: thread_id.to_string(),
++            exclude_turns: true,
++            initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
++                limit: Some(7),
++                sort_direction: Some(SortDirection::Desc),
++                items_view: Some(TurnItemsView::NotLoaded),
++            }),
++            ..Default::default()
++        })
++        .await?;
++    let resumed: ThreadResumeResponse =
++        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
++    let initial = resumed.initial_turns_page.expect("initial page");
++    assert_eq!(initial.data, first.data);
++    assert_eq!(initial.next_cursor, from_backwards.next_cursor);
++    let resumed_head = read_turns_page(
++        &mut mcp,
++        thread_id,
++        Some(resumed.turns_backwards_cursor.expect("resume head cursor")),
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    assert_eq!(resumed_head.data, first.data);
++    assert_eq!(resumed_head.next_cursor, from_backwards.next_cursor);
++    append_neutral_token_count(&root).await?;
++    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
++    let active_page = read_turns_page(
++        &mut mcp,
++        thread_id,
++        None,
++        Some(7),
++        SortDirection::Desc,
++        Some(TurnItemsView::NotLoaded),
++    )
++    .await?;
++    assert_eq!(active_page.data, first.data);
++    assert_eq!(active_page.next_cursor, from_backwards.next_cursor);
++
++    Ok(())
++}
++
++async fn append_neutral_token_count(root: &Path) -> Result<()> {
++    let (lines, _, _) = RolloutRecorder::load_rollout_lines(root).await?;
++    let inherited_end = codex_rollout::read_session_meta_line_exact(root)
++        .await?
++        .meta
++        .history_base
++        .expect("rotated root has a history base")
++        .end_ordinal_exclusive;
++    let ordinal = lines
++        .iter()
++        .filter_map(|line| line.ordinal)
++        .max()
++        .map_or(inherited_end, |ordinal| (ordinal + 1).max(inherited_end));
++    writeln!(
++        OpenOptions::new().append(true).open(root)?,
++        "{}",
++        serde_json::to_string(&RolloutLine {
++            timestamp: "2026-11-20T00:00:00Z".to_string(),
++            ordinal: Some(ordinal),
++            item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++                info: None,
++                rate_limits: None,
++            })),
++        })?
++    )?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -> Result<()> {
+     let server = create_mock_responses_server_repeating_assistant("Done").await;
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 032d6b422d6abb045c711b0184756feb299cfab7..f3ae8b19180c9a53ba8d66e782762dbcef8ba7ab 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -157,6 +157,7 @@ pub use config::RolloutConfigView;
+ pub use legacy_jsonl::RecoveredLegacyJsonlSuffix;
+ pub use legacy_jsonl::recover_legacy_jsonl_suffix;
+ pub use list::Cursor;
++pub use list::RolloutPathSnapshot;
+ pub use list::SortDirection;
+ pub use list::ThreadItem;
+ pub use list::ThreadListConfig;
+@@ -182,6 +183,7 @@ pub use list::read_session_meta_line_exact;
+ pub use list::read_thread_item_from_rollout;
+ pub use list::read_thread_item_from_rollout_with_indexed_preview;
+ pub use list::rollout_date_parts;
++pub use list::snapshot_rollout_paths_by_rollout_id;
+ pub use maintenance::MAX_CONCURRENT_ROLLOUT_MIGRATIONS;
+ pub use maintenance::RolloutMaintenanceGuard;
+ pub use maintenance::RolloutMaintenanceIntentGuard;
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index 965bdd3358e3f07f3875e1e29fdb1e104d9e39d4..8207c18cf4d7a96ee8ec62ea5a3de7de7c31e4ef 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -3,6 +3,7 @@
+ use codex_utils_path as path_utils;
+ use std::cmp::Reverse;
+ use std::collections::HashMap;
++use std::collections::HashSet;
+ use std::ffi::OsStr;
+ use std::fmt;
+ use std::io;
+@@ -2023,13 +2024,26 @@ async fn find_thread_path_by_id_from_filenames(
+ }
+
+ async fn visit_rollout_filenames<T>(
++    root: &Path,
++    excluded_path: Option<&Path>,
++    matches: impl Fn(&RolloutFileName) -> bool,
++    visitor: impl FnMut(RolloutFileName, PathBuf) -> ControlFlow<T>,
++) -> io::Result<Option<T>> {
++    visit_rollout_filenames_recording(root, excluded_path, matches, visitor, None).await
++}
++
++async fn visit_rollout_filenames_recording<T>(
+     root: &Path,
+     excluded_path: Option<&Path>,
+     matches: impl Fn(&RolloutFileName) -> bool,
+     mut visitor: impl FnMut(RolloutFileName, PathBuf) -> ControlFlow<T>,
++    mut directories: Option<&mut DirectorySnapshot>,
+ ) -> io::Result<Option<T>> {
+     let mut stack = vec![root.to_path_buf()];
+     while let Some(dir) = stack.pop() {
++        if let Some(snapshot) = directories.as_deref_mut() {
++            snapshot.record(&dir).await;
++        }
+         let mut read_dir = match tokio::fs::read_dir(dir.as_path()).await {
+             Ok(read_dir) => read_dir,
+             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+@@ -2089,6 +2103,99 @@ async fn visit_rollout_filenames<T>(
+     Ok(None)
+ }
+
++/// Directory identities that make a filename index reusable without reading each directory again.
++struct DirectorySnapshot {
++    directories: Vec<(PathBuf, DirectoryState)>,
++    valid: bool,
++}
++
++#[derive(Clone, PartialEq, Eq)]
++enum DirectoryState {
++    Missing,
++    Present(DirectoryIdentity),
++}
++
++#[derive(Clone, PartialEq, Eq)]
++struct DirectoryIdentity {
++    device: u64,
++    inode: u64,
++    size: u64,
++    mtime: i64,
++    mtime_nsec: i64,
++    ctime: i64,
++    ctime_nsec: i64,
++}
++
++#[cfg(unix)]
++fn directory_identity(metadata: &std::fs::Metadata) -> Option<DirectoryIdentity> {
++    use std::os::unix::fs::MetadataExt;
++
++    metadata.is_dir().then_some(DirectoryIdentity {
++        device: metadata.dev(),
++        inode: metadata.ino(),
++        size: metadata.len(),
++        mtime: metadata.mtime(),
++        mtime_nsec: metadata.mtime_nsec(),
++        ctime: metadata.ctime(),
++        ctime_nsec: metadata.ctime_nsec(),
++    })
++}
++
++#[cfg(not(unix))]
++fn directory_identity(_metadata: &std::fs::Metadata) -> Option<DirectoryIdentity> {
++    None
++}
++
++async fn directory_state(path: &Path) -> Option<DirectoryState> {
++    match tokio::fs::symlink_metadata(path).await {
++        Ok(metadata) => directory_identity(&metadata).map(DirectoryState::Present),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(DirectoryState::Missing),
++        Err(_) => None,
++    }
++}
++
++impl DirectorySnapshot {
++    async fn record(&mut self, path: &Path) {
++        if let Some(state) = directory_state(path).await {
++            self.directories.push((path.to_path_buf(), state));
++        } else {
++            self.valid = false;
++        }
++    }
++
++    async fn is_current(&self) -> bool {
++        use futures::StreamExt;
++
++        let directories = self.directories.clone();
++        self.valid
++            && futures::stream::iter(directories)
++                .map(|(path, expected)| async move {
++                    directory_state(&path).await.as_ref() == Some(&expected)
++                })
++                .buffer_unordered(16)
++                .all(|same| async move { same })
++                .await
++    }
++}
++
++/// Selected rollout paths and the directories whose entries determined their selection.
++pub struct RolloutPathSnapshot {
++    paths: HashMap<RolloutId, PathBuf>,
++    directories: DirectorySnapshot,
++}
++
++impl RolloutPathSnapshot {
++    /// Returns the path selected for an ID when the snapshot was captured.
++    pub fn get(&self, rollout_id: &RolloutId) -> Option<&PathBuf> {
++        self.paths.get(rollout_id)
++    }
++
++    /// Rejects directory replacement, entry changes, and newly created storage roots.
++    pub async fn is_current(&self) -> bool {
++        self.directories.is_current().await
++    }
++}
++
+ /// Returns every canonical active or archived rollout file owned by `thread_id`.
+ ///
+ /// A reverted thread can retain several physical rollout IDs. This returns every physical file
+@@ -2165,6 +2272,45 @@ pub async fn index_rollout_paths_by_rollout_id(
+     Ok(paths)
+ }
+
++/// Captures the filename selection for `rollout_ids` and its directory identities.
++///
++/// A directory identity is captured before its entries are read and checked again after the
++/// traversal. A caller must recheck the snapshot before relying on the selected paths. Symlinked
++/// directories and platforms without stable directory identities return `None`.
++pub async fn snapshot_rollout_paths_by_rollout_id(
++    codex_home: &Path,
++    rollout_ids: &HashSet<RolloutId>,
++) -> io::Result<Option<RolloutPathSnapshot>> {
++    let mut paths = HashMap::new();
++    let mut directories = DirectorySnapshot {
++        directories: Vec::new(),
++        valid: true,
++    };
++    for subdir in [SESSIONS_SUBDIR, ARCHIVED_SESSIONS_SUBDIR] {
++        visit_rollout_filenames_recording::<()>(
++            codex_home.join(subdir).as_path(),
++            /*excluded_path*/ None,
++            |file_name| rollout_ids.contains(&file_name.rollout_id()),
++            |file_name, path| {
++                paths.entry(file_name.rollout_id()).or_insert(path);
++                ControlFlow::Continue(())
++            },
++            Some(&mut directories),
++        )
++        .await?;
++    }
++    if !directories.valid {
++        return Ok(None);
++    }
++    if !directories.is_current().await {
++        return Err(io::Error::new(
++            io::ErrorKind::Interrupted,
++            "rollout directories changed while indexing",
++        ));
++    }
++    Ok(Some(RolloutPathSnapshot { paths, directories }))
++}
++
+ /// Locate the newest rollout file owned by a thread ID.
+ ///
+ /// A thread normally has one rollout file. `thread/revert` keeps the thread ID stable while
+diff --git a/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
+index 63edd0f1b4e3d0d3044801860cade6f7fdacfb2c..83f25055e8bb19a1a5e75b313b07191a4f19ce56 100644
+--- a/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
++++ b/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
+@@ -24,7 +24,9 @@ const AFFECTED_CLI_VERSION: &str = "0.148.0-alpha.6+frodex.0";
+ /// The thread ID prevents alpha6 evidence from crossing a fork, `history_base`, or filtered
+ /// reference. A physical rollout must also persist the `openai` provider before inherited evidence
+ /// can authorize its legacy representation.
+-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
++#[derive(
++    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize,
++)]
+ pub(super) enum GoalSupervisorLineageProvenance {
+     #[default]
+     Untrusted,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 7dab51eed7d9b82da4b425afea6755bd71e233d7..7c0bea2ee7d15a904648d102fb959976652ef20b 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -584,14 +584,73 @@ impl LocalThreadStore {
+         &self,
+         thread_id: ThreadId,
+     ) -> ThreadStoreResult<bool> {
++        Ok(self
++            .paginated_root_projection_sizes(thread_id)
++            .await?
++            .is_some_and(|(actual, projected)| actual == projected))
++    }
++
++    /// Attempts a source-backed page when a complete root projection checkpoint exists.
++    ///
++    /// The source reader validates the referenced lineage rather than trusting the checkpoint.
++    /// `None` leaves compatibility histories and roots without a checkpoint to their existing
++    /// readers.
++    pub async fn try_list_projected_source_turns(
++        &self,
++        params: &crate::ListTurnsParams,
++    ) -> ThreadStoreResult<Option<crate::TurnPage>> {
++        if self
++            .paginated_root_projection_sizes(params.thread_id)
++            .await?
++            .is_none()
++        {
++            return Ok(None);
++        }
++        thread_history::try_list_source_backed_turns(self, params).await
++    }
++
++    /// Attempts a source-verified item page when a complete root checkpoint exists.
++    pub async fn try_list_projected_source_items(
++        &self,
++        params: &crate::ListItemsParams,
++    ) -> ThreadStoreResult<Option<crate::ItemPage>> {
++        if self
++            .paginated_root_projection_sizes(params.thread_id)
++            .await?
++            .is_none()
++        {
++            return Ok(None);
++        }
++        thread_history::try_list_uncertified_turn_items(self, params).await
++    }
++
++    /// Attempts to derive both resume cursors from the same verified source lineage.
++    pub async fn try_projected_source_resume_backwards_cursors(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
++        if self
++            .paginated_root_projection_sizes(thread_id)
++            .await?
++            .is_none()
++        {
++            return Ok(None);
++        }
++        thread_history::try_source_resume_backwards_cursors(self, thread_id).await
++    }
++
++    async fn paginated_root_projection_sizes(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<Option<(u64, u64)>> {
+         let Some(resolved) =
+             thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+         else {
+-            return Ok(false);
++            return Ok(None);
+         };
+         let Some(projection) = thread_history::projection_state(self, resolved.rollout_id).await?
+         else {
+-            return Ok(false);
++            return Ok(None);
+         };
+         if !projection.lineage_complete
+             || resolved
+@@ -600,7 +659,7 @@ impl LocalThreadStore {
+                 .and_then(|extension| extension.to_str())
+                 != Some("jsonl")
+         {
+-            return Ok(false);
++            return Ok(None);
+         }
+         let session_meta = match resolved.authenticated_session_meta {
+             Some(meta) => meta,
+@@ -617,11 +676,12 @@ impl LocalThreadStore {
+             || session_meta.history_mode != ThreadHistoryMode::Paginated
+             || session_meta.attached_thread
+         {
+-            return Ok(false);
++            return Ok(None);
+         }
+         Ok(tokio::fs::metadata(&resolved.path)
+             .await
+-            .is_ok_and(|metadata| metadata.len() == projection.next_byte_offset))
++            .ok()
++            .map(|metadata| (metadata.len(), projection.next_byte_offset)))
+     }
+
+     /// Attempts a source-verified, turn-specific page without rebuilding history projections.
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index a144c1b9ab5a83a2d257bb913d85407a844fdf31..26664809c75ba709155f3b28c37d874207da858d 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -43,7 +43,7 @@ use crate::ThreadStoreResult;
+ ///
+ /// A thread may contribute multiple ranges after rollout rotation. Their ordinal ranges do not
+ /// overlap, so the existing `(physical_thread_id, rollout_ordinal)` cursor remains unambiguous.
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+ pub(super) struct RolloutLineageSegment {
+     /// Stable thread identity from the segment's `SessionMeta`.
+     pub(super) thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs b/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
+index 91c06910411ed45975e233cb1d7cdda7a18cc057..c9a5818a25aaddcd30cc588a0c38806534a4fc4d 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
+@@ -11,6 +11,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
+
+ use super::super::thread_history::ProjectionLeafIdentity;
+ use super::super::thread_history::projection_leaf_identity;
++use super::super::thread_history::read_deferred_compacted_head;
+ use super::GoalSupervisorLineageProvenance;
+ use super::LineageOffsetMode;
+ use super::LineageResolutionMode;
+@@ -197,9 +198,18 @@ impl<'a> HistoryPageWalk<'a> {
+         } else {
+             None
+         };
+-        let head = match read_rollout_head(&path).await {
+-            Ok(head) => head,
+-            Err(_) => return Ok(WalkStep::FullResolution),
++        // Deferred callers validate the entire selected predecessor before using this head.
++        let deferred_head = if offset_mode == LineageOffsetMode::Deferred && end.is_some() {
++            read_deferred_compacted_head(&path).await?
++        } else {
++            None
++        };
++        let head = match deferred_head {
++            Some(head) => head,
++            None => match read_rollout_head(&path).await {
++                Ok(head) => head,
++                Err(_) => return Ok(WalkStep::FullResolution),
++            },
+         };
+         let meta = &head.session_meta.meta;
+         if meta.history_mode != ThreadHistoryMode::Paginated
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 1066ad741c5bfa664f0e2ada3ecb23982ead26b2..f0b7853e8dbcfe3c03ff18912423f3c733074707 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -19,6 +19,7 @@ mod search;
+ mod segment_paging;
+ mod turn_lookup;
+ mod uncertified_items;
++mod uncertified_root_head;
+
+ pub(super) use bulk_projection::BulkProjection;
+ pub(super) use projection_certificate::FileIdentity as ProjectionLeafIdentity;
+@@ -34,6 +35,8 @@ pub(super) use read::list_segmented_legacy_items;
+ pub(super) use read::list_segmented_legacy_turns;
+ pub(super) use read::list_turns;
+ pub(super) use read::resume_backwards_cursors;
++pub(super) use read::try_list_source_backed_turns;
++pub(super) use read::try_source_resume_backwards_cursors;
+ pub(super) use read::validate_thread_for_paginated_reads;
+ pub(super) use realtime::list_timeline;
+ pub(super) use realtime_stream::list_realtime;
+@@ -44,6 +47,7 @@ pub(super) use turn_lookup::find_visible_turn;
+ pub(super) use turn_lookup::first_user_preview;
+ pub(super) use uncertified_items::UncertifiedItemScan;
+ pub(super) use uncertified_items::try_list_uncertified_turn_items;
++pub(super) use uncertified_root_head::read_deferred_compacted_head;
+
+ #[cfg(test)]
+ static LEAF_TRANSACTION_TIMINGS: std::sync::LazyLock<
+diff --git a/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs b/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
+index 696d1e172ffc4bb04db38adbcda9c62e969d6e3c..3e0dce02fde3c8ca05e9eed91dd18dccae23e592 100644
+--- a/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
++++ b/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
+@@ -54,10 +54,21 @@ pub(in crate::local) struct FileIdentity {
+     ctime_nsec: i64,
+ }
+
++impl FileIdentity {
++    pub(super) fn size(&self) -> u64 {
++        self.size
++    }
++
++    /// Appends may change timestamps and size, but not the selected physical file.
++    pub(super) fn same_file_with_at_least(&self, current: &Self) -> bool {
++        self.device == current.device && self.inode == current.inode && current.size >= self.size
++    }
++}
++
+ const MAX_APPEND_PROOF_BYTES: u64 = 64 * 1024 * 1024;
+
+ #[cfg(unix)]
+-fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
++pub(super) fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+     use std::os::unix::fs::MetadataExt;
+
+     metadata.file_type().is_file().then_some(FileIdentity {
+@@ -72,7 +83,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+ }
+
+ #[cfg(not(unix))]
+-fn file_identity(_metadata: &std::fs::Metadata) -> Option<FileIdentity> {
++pub(super) fn file_identity(_metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+     None
+ }
+
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index 676e1a026f256c3682d2a985cf94091a9c8e2570..925a5405dc69ff7894cca22878182d3a97cb9475 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -51,6 +51,40 @@ use crate::TurnPage;
+ #[path = "read_tests.rs"]
+ mod tests;
+
++#[cfg(test)]
++static SOURCE_ITEM_PAUSES: std::sync::LazyLock<
++    std::sync::Mutex<HashMap<ThreadId, std::sync::Arc<SourceItemPause>>>,
++> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
++
++/// A one-shot barrier before validating the sources used for an item page.
++#[cfg(test)]
++struct SourceItemPause {
++    entered: tokio::sync::Notify,
++    release: tokio::sync::Notify,
++}
++
++#[cfg(test)]
++fn inject_source_item_pause(thread_id: ThreadId) -> std::sync::Arc<SourceItemPause> {
++    let pause = std::sync::Arc::new(SourceItemPause {
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    SOURCE_ITEM_PAUSES
++        .lock()
++        .unwrap()
++        .insert(thread_id, pause.clone());
++    pause
++}
++
++#[cfg(test)]
++async fn pause_source_item_before_revalidation(thread_id: ThreadId) {
++    let pause = SOURCE_ITEM_PAUSES.lock().unwrap().remove(&thread_id);
++    if let Some(pause) = pause {
++        pause.entered.notify_one();
++        pause.release.notified().await;
++    }
++}
++
+ #[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+ #[serde(tag = "kind", rename_all = "camelCase")]
+ pub(super) enum CursorScope {
+@@ -369,7 +403,7 @@ async fn source_backed_turns(
+     events.extend(root.turns);
+     events.sort_by_key(SourceTurnEvent::ordinal);
+     let (initial, _) = reduce_aggregate_sources(events.clone())?;
+-    if initial.is_empty() {
++    if initial.is_empty() && !scan.attached {
+         if graph.lineage.segments().len() > 900 {
+             return Ok(None);
+         }
+@@ -473,7 +507,9 @@ async fn source_backed_turns(
+             }
+         }
+         let ids = selected.iter().map(|(id, _)| id.clone()).collect();
+-        let Some(item_events) = uncertified_items::scan_selected_items(&graph, &scan, ids).await?
++        let Some(item_events) =
++            uncertified_items::scan_selected_items(&graph, &scan, ids, root.root_snapshot.as_ref())
++                .await?
+         else {
+             return Err(ThreadStoreError::Conflict {
+                 message: "could not read selected turn items".to_string(),
+@@ -485,7 +521,15 @@ async fn source_backed_turns(
+     } else {
+         (initial, HashMap::new())
+     };
+-    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
++    if !uncertified_items::sources_still_current(
++        store,
++        params.thread_id,
++        &graph,
++        &scan,
++        root.root_snapshot.as_ref(),
++    )
++    .await?
++    {
+         return Err(ThreadStoreError::Conflict {
+             message: "rotated thread sources changed while listing turns".to_string(),
+         });
+@@ -539,6 +583,21 @@ async fn source_backed_turns(
+     }))
+ }
+
++pub(in crate::local) async fn try_list_source_backed_turns(
++    store: &LocalThreadStore,
++    params: &ListTurnsParams,
++) -> ThreadStoreResult<Option<TurnPage>> {
++    validate_thread_for_paginated_reads(
++        store,
++        params.thread_id,
++        params.include_archived,
++        "list_turns",
++    )
++    .await?;
++    validate_page_size(params.page_size)?;
++    source_backed_turns(store, params).await
++}
++
+ pub(in crate::local) async fn resume_backwards_cursors(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+@@ -651,7 +710,7 @@ async fn source_resume_cursors(
+             .or_insert(anchor.ordinal);
+     }
+     let newest_item = creations.values().copied().max();
+-    if newest_turn.is_none() && newest_item.is_none() {
++    if newest_turn.is_none() && newest_item.is_none() && !scan.attached {
+         return Ok(None);
+     }
+     let turn_cursor = newest_turn
+@@ -676,7 +735,15 @@ async fn source_resume_cursors(
+             )
+         })
+         .transpose()?;
+-    if !uncertified_items::sources_still_current(store, thread_id, &graph, &scan).await? {
++    if !uncertified_items::sources_still_current(
++        store,
++        thread_id,
++        &graph,
++        &scan,
++        root.root_snapshot.as_ref(),
++    )
++    .await?
++    {
+         return Err(ThreadStoreError::Conflict {
+             message: "rotated thread sources changed while preparing resume cursors".to_string(),
+         });
+@@ -684,6 +751,14 @@ async fn source_resume_cursors(
+     Ok(Some((turn_cursor, item_cursor)))
+ }
+
++pub(in crate::local) async fn try_source_resume_backwards_cursors(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
++    validate_thread_for_paginated_reads(store, thread_id, true, "list_turns").await?;
++    source_resume_cursors(store, thread_id).await
++}
++
+ fn same_walked_prefix(left: &RolloutLineage, right: &RolloutLineage) -> bool {
+     left.root_rollout_id() == right.root_rollout_id()
+         && left.leaf_path() == right.leaf_path()
+@@ -931,10 +1006,17 @@ pub(super) async fn source_backed_items(
+             .collect()
+     };
+     if selected_turns.is_empty() {
+-        if scan.anchors.is_empty() && root.anchors.is_empty() {
++        if scan.anchors.is_empty() && root.anchors.is_empty() && !scan.attached {
+             return Ok(None);
+         }
+-        if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await?
++        if !uncertified_items::sources_still_current(
++            store,
++            params.thread_id,
++            &graph,
++            &scan,
++            root.root_snapshot.as_ref(),
++        )
++        .await?
+         {
+             return Err(ThreadStoreError::Conflict {
+                 message: "rotated thread sources changed while listing items".to_string(),
+@@ -956,8 +1038,13 @@ pub(super) async fn source_backed_items(
+             return Ok(None);
+         }
+     }
+-    let Some(events) =
+-        uncertified_items::scan_selected_items(&graph, &scan, selected_turns.clone()).await?
++    let Some(events) = uncertified_items::scan_selected_items(
++        &graph,
++        &scan,
++        selected_turns.clone(),
++        root.root_snapshot.as_ref(),
++    )
++    .await?
+     else {
+         return Err(ThreadStoreError::Conflict {
+             message: "could not read selected turn items".to_string(),
+@@ -968,7 +1055,7 @@ pub(super) async fn source_backed_items(
+         .into_iter()
+         .flat_map(|(_, items)| items.into_values())
+         .collect::<Vec<_>>();
+-    if all.is_empty() {
++    if all.is_empty() && !scan.attached {
+         // No canonical items were found; the compatibility reader does not certify SQLite.
+         return Ok(None);
+     }
+@@ -1092,7 +1179,17 @@ pub(super) async fn source_backed_items(
+     } else {
+         None
+     };
+-    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
++    #[cfg(test)]
++    pause_source_item_before_revalidation(params.thread_id).await;
++    if !uncertified_items::sources_still_current(
++        store,
++        params.thread_id,
++        &graph,
++        &scan,
++        root.root_snapshot.as_ref(),
++    )
++    .await?
++    {
+         return Err(ThreadStoreError::Conflict {
+             message: "rotated thread sources changed while listing items".to_string(),
+         });
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 1c1071b87cd49afd6e459a9b8df3b5f912650b42..80338855022b9bd392b457ac22e7702818a39a94 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -44,6 +44,1562 @@ use crate::local::test_support::test_config;
+ use crate::local::thread_history::projection_state;
+ use crate::local::thread_history::realtime;
+
++async fn source_item_race_fixture() -> (
++    TempDir,
++    LocalThreadStore,
++    ThreadId,
++    std::path::PathBuf,
++    String,
++) {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
++    write_rollout_with_end(&predecessor, thread_id, None, 6);
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(
++        &root,
++        thread_id,
++        Some(history_position(&predecessor, predecessor_id, 6)),
++    );
++    append_timeline_record(
++        &root,
++        7,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "turn".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &root,
++        8,
++        timeline_user_item(thread_id, "turn", "existing", "old"),
++    );
++    append_timeline_record(
++        &root,
++        9,
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: "turn".to_string(),
++            root_turn_id: None,
++            last_agent_message: None,
++            error: None,
++            started_at: Some(10),
++            completed_at: Some(20),
++            duration_ms: Some(10_000),
++            time_to_first_token_ms: None,
++        })),
++    );
++    let (_, item_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
++    (
++        home,
++        store,
++        thread_id,
++        root,
++        item_cursor.expect("existing item cursor"),
++    )
++}
++
++#[tokio::test]
++async fn resume_item_cursor_depends_on_ancestor_creation_not_root_checkpoint() {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
++    write_rollout(&predecessor, thread_id, None);
++    append_timeline_record(
++        &predecessor,
++        1,
++        timeline_user_item(thread_id, "turn", "shared", "same"),
++    );
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(
++        &root,
++        thread_id,
++        Some(history_position(&predecessor, predecessor_id, 2)),
++    );
++    append_timeline_record(
++        &root,
++        3,
++        timeline_user_item(thread_id, "turn", "shared", "same"),
++    );
++    let root_before = fs::read(&root).unwrap();
++    let db = history_db(&store).await;
++    sqlx::query(
++        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 4)",
++    )
++    .bind(thread_id.to_string())
++    .bind(i64::try_from(root_before.len()).unwrap())
++    .execute(db)
++    .await
++    .unwrap();
++
++    let item_ordinal = |cursor: Option<String>| {
++        parse_cursor(
++            cursor.as_deref(),
++            thread_id,
++            thread_id,
++            CursorScope::ItemsByCreatedAtOrdinal,
++        )
++        .unwrap()
++        .unwrap()
++        .rollout_ordinal
++    };
++    let (_, first) = store.resume_backwards_cursors(thread_id).await.unwrap();
++    assert_eq!(item_ordinal(first), 1);
++
++    // Keep the root, checkpoint and predecessor boundary unchanged. Only the predecessor's
++    // item identity differs, so its record can no longer be the root item's creation.
++    let before = fs::read_to_string(&predecessor).unwrap();
++    let after = before.replace("shared", "otherx");
++    assert_ne!(before, after);
++    assert_eq!(before.len(), after.len());
++    fs::write(&predecessor, after).unwrap();
++    assert_eq!(fs::read(&root).unwrap(), root_before);
++
++    let (_, second) = store.resume_backwards_cursors(thread_id).await.unwrap();
++    assert_eq!(item_ordinal(second), 3);
++}
++
++#[tokio::test]
++async fn descending_turn_page_depends_on_ancestor_start_not_root_checkpoint() {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
++    let started = |id: &str| {
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: id.to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        }))
++    };
++    write_rollout(&predecessor, thread_id, None);
++    append_timeline_record(&predecessor, 1, started("shared"));
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(
++        &root,
++        thread_id,
++        Some(history_position(&predecessor, predecessor_id, 2)),
++    );
++    append_timeline_record(&root, 3, started("newest"));
++    append_timeline_record(&root, 4, started("shared"));
++    let root_before = fs::read(&root).unwrap();
++    let db = history_db(&store).await;
++    sqlx::query(
++        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 5)",
++    )
++    .bind(thread_id.to_string())
++    .bind(i64::try_from(root_before.len()).unwrap())
++    .execute(db)
++    .await
++    .unwrap();
++    let params = turn_params(
++        thread_id,
++        None,
++        1,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    let first = store.list_turns(params.clone()).await.unwrap();
++    assert_eq!(turn_ids(&first), ["newest"]);
++
++    let before = fs::read_to_string(&predecessor).unwrap();
++    let after = before.replace("shared", "otherx");
++    assert_ne!(before, after);
++    assert_eq!(before.len(), after.len());
++    fs::write(&predecessor, after).unwrap();
++    assert_eq!(fs::read(&root).unwrap(), root_before);
++
++    let second = store.list_turns(params).await.unwrap();
++    assert_eq!(turn_ids(&second), ["shared"]);
++}
++
++async fn persistent_source_scan_fixture(
++    count: usize,
++) -> (
++    TempDir,
++    LocalThreadStore,
++    ThreadId,
++    std::path::PathBuf,
++    Vec<std::path::PathBuf>,
++) {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let inherited_owner = ThreadId::new();
++    let started = |turn_id: String| {
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id,
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        }))
++    };
++    let mut base: Option<HistoryPosition> = None;
++    let mut ancestors = Vec::new();
++    for index in 0..count {
++        let owner = if index < count / 2 {
++            inherited_owner
++        } else {
++            thread_id
++        };
++        let rollout_id = ThreadId::new();
++        let path = selected_rollout_path(home.path(), owner, rollout_id);
++        let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
++        write_rollout(&path, owner, base);
++        let turn = format!("turn-{index}");
++        append_timeline_record(&path, ordinal + 1, started(turn.clone()));
++        append_timeline_record(
++            &path,
++            ordinal + 2,
++            timeline_user_item(owner, &turn, &format!("item-{index}"), "old"),
++        );
++        base = Some(history_position(&path, rollout_id, ordinal + 3));
++        ancestors.push(path);
++    }
++    let root = rollout_path(home.path(), thread_id);
++    let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
++    write_rollout(&root, thread_id, base);
++    append_timeline_record(&root, ordinal + 1, started("local".to_string()));
++    append_timeline_record(
++        &root,
++        ordinal + 2,
++        timeline_user_item(thread_id, "local", "local-item", "local"),
++    );
++    let db = history_db(&store).await;
++    sqlx::query(
++        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
++    )
++    .bind(thread_id.to_string())
++    .bind(i64::try_from(fs::metadata(&root).unwrap().len()).unwrap())
++    .bind(i64::try_from(ordinal + 3).unwrap())
++    .execute(db)
++    .await
++    .unwrap();
++    (home, store, thread_id, root, ancestors)
++}
++
++async fn reopen_history_store(home: &std::path::Path) -> LocalThreadStore {
++    let config = test_config(home);
++    let runtime = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .expect("reopen state runtime");
++    LocalThreadStore::new(config, Some(runtime))
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn rollout_path_snapshot_tracks_collisions_compression_and_directory_replacement()
++-> std::io::Result<()> {
++    use std::collections::HashSet;
++
++    let home = TempDir::new()?;
++    let rollout_id = ThreadId::new();
++    let ids = HashSet::from([rollout_id]);
++    let filename = format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl");
++    let archive = home.path().join("archived_sessions/2025/01/03");
++    let active = home.path().join("sessions/2025/01/03");
++    fs::create_dir_all(&archive)?;
++    let archived = archive.join(&filename);
++    fs::write(&archived, b"archived")?;
++
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&archived));
++    assert!(snapshot.is_current().await);
++
++    // An active copy wins over the archived copy even when the archived file is unchanged.
++    fs::create_dir_all(&active)?;
++    let plain = active.join(&filename);
++    fs::write(&plain, b"active")?;
++    assert!(!snapshot.is_current().await);
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
++
++    let compressed = active.join(format!("{filename}.zst"));
++    fs::write(&compressed, b"compressed")?;
++    assert!(!snapshot.is_current().await);
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
++    fs::remove_file(&plain)?;
++    assert!(!snapshot.is_current().await);
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&compressed));
++
++    fs::write(&plain, b"active again")?;
++    assert!(!snapshot.is_current().await);
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
++
++    // Replacing a directory with another directory must invalidate the old index.
++    let old = home.path().join("old-directory");
++    fs::rename(&active, &old)?;
++    fs::create_dir(&active)?;
++    assert!(!snapshot.is_current().await);
++    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
++        .await?
++        .unwrap();
++    assert_eq!(snapshot.get(&rollout_id), Some(&archived));
++    Ok(())
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn rollout_path_snapshot_falls_back_for_symlinked_storage_root() -> std::io::Result<()> {
++    use std::collections::HashSet;
++    use std::os::unix::fs::symlink;
++
++    let home = TempDir::new()?;
++    let actual = home.path().join("actual");
++    fs::create_dir(&actual)?;
++    symlink(&actual, home.path().join("sessions"))?;
++    let rollout_id = ThreadId::new();
++    let path = actual.join(format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl"));
++    fs::write(&path, b"")?;
++
++    assert!(
++        codex_rollout::snapshot_rollout_paths_by_rollout_id(
++            home.path(),
++            &HashSet::from([rollout_id])
++        )
++        .await?
++        .is_none()
++    );
++    assert!(
++        codex_rollout::index_rollout_paths_by_rollout_id(home.path())
++            .await?
++            .contains_key(&rollout_id)
++    );
++    Ok(())
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn verified_source_scan_survives_store_restart_and_root_append() {
++    use std::io::Read;
++
++    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(348).await;
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let params = turn_params(
++        thread_id,
++        None,
++        5,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    let first = store.list_turns(params.clone()).await.unwrap();
++    assert_eq!(
++        turn_ids(&first),
++        ["local", "turn-347", "turn-346", "turn-345", "turn-344"]
++    );
++    let mut events = [0_u8; 256];
++    assert!(
++        watch.read(&mut events).unwrap() > 0,
++        "bootstrap scans ancestors"
++    );
++    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frodex_source_scan_cache")
++        .fetch_one(history_db(&store).await)
++        .await
++        .unwrap();
++    assert_eq!(rows, 1);
++
++    let last_ordinal = 348 * 3 + 3;
++    append_timeline_record(
++        &root,
++        last_ordinal,
++        timeline_user_item(thread_id, "turn-347", "late", "late"),
++    );
++    drop(store);
++    let store = reopen_history_store(home.path()).await;
++    let restarted = store.list_turns(params).await.unwrap();
++    assert_eq!(turn_ids(&restarted), turn_ids(&first));
++    let (_, cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
++    assert_eq!(
++        parse_cursor(
++            cursor.as_deref(),
++            thread_id,
++            thread_id,
++            CursorScope::ItemsByCreatedAtOrdinal,
++        )
++        .unwrap()
++        .unwrap()
++        .rollout_ordinal,
++        last_ordinal
++    );
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock,
++        "a process restart must not reopen verified predecessor contents"
++    );
++    let page = store
++        .list_items(item_params(
++            thread_id,
++            Some("turn-347"),
++            cursor,
++            10,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&page), ["late", "item-347"]);
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn persisted_source_scan_rejects_replaced_ancestor() {
++    use std::io::Read;
++
++    let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(4).await;
++    let params = turn_params(
++        thread_id,
++        None,
++        5,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    let first = store.list_turns(params.clone()).await.unwrap();
++    assert!(turn_ids(&first).contains(&"turn-0"));
++    drop(store);
++    let changed = fs::read_to_string(&ancestors[0])
++        .unwrap()
++        .replace("turn-0", "turn-x");
++    let replacement = ancestors[0].with_extension("replacement");
++    fs::write(&replacement, changed).unwrap();
++    fs::rename(replacement, &ancestors[0]).unwrap();
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let store = reopen_history_store(home.path()).await;
++    let page = store.list_turns(params).await.unwrap();
++    assert!(turn_ids(&page).contains(&"turn-x"));
++    assert!(!turn_ids(&page).contains(&"turn-0"));
++    let mut events = [0_u8; 256];
++    assert!(
++        watch.read(&mut events).unwrap() > 0,
++        "replacement requires a source scan"
++    );
++}
++
++#[tokio::test]
++async fn persisted_source_scan_is_removed_with_its_projection_row() {
++    let (_home, store, thread_id, _root, _ancestors) = persistent_source_scan_fixture(2).await;
++    store
++        .list_turns(turn_params(
++            thread_id,
++            None,
++            2,
++            SortDirection::Desc,
++            StoredTurnItemsView::NotLoaded,
++        ))
++        .await
++        .unwrap();
++    let db = history_db(&store).await;
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
++            .fetch_one(db)
++            .await
++            .unwrap(),
++        1
++    );
++    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
++        .bind(thread_id.to_string())
++        .execute(db)
++        .await
++        .unwrap();
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
++            .fetch_one(db)
++            .await
++            .unwrap(),
++        0
++    );
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn invalid_persisted_source_scan_falls_back_to_sources() {
++    use std::io::Read;
++
++    for corrupt in ["version", "digest", "payload"] {
++        let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(2).await;
++        let params = turn_params(
++            thread_id,
++            None,
++            3,
++            SortDirection::Desc,
++            StoredTurnItemsView::NotLoaded,
++        );
++        let expected = store.list_turns(params.clone()).await.unwrap();
++        if corrupt == "payload" {
++            use sha2::Digest;
++            let bytes = b"{}";
++            let digest = sha2::Sha256::digest(bytes).to_vec();
++            sqlx::query("UPDATE frodex_source_scan_cache SET scan = ?, sha256 = ?")
++                .bind(bytes.as_slice())
++                .bind(digest)
++                .execute(history_db(&store).await)
++                .await
++                .unwrap();
++        } else {
++            let statement = if corrupt == "version" {
++                "UPDATE frodex_source_scan_cache SET version = 999"
++            } else {
++                "UPDATE frodex_source_scan_cache SET sha256 = X'00'"
++            };
++            sqlx::query(statement)
++                .execute(history_db(&store).await)
++                .await
++                .unwrap();
++        }
++        drop(store);
++        let mut watch = watch_history_file_opens(&ancestors[0]);
++        let store = reopen_history_store(home.path()).await;
++        let actual = store.list_turns(params).await.unwrap();
++        assert_eq!(turn_ids(&actual), turn_ids(&expected));
++        let mut events = [0_u8; 256];
++        assert!(
++            watch.read(&mut events).unwrap() > 0,
++            "{corrupt} requires a scan"
++        );
++    }
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn persisted_source_scan_rejects_root_rotation() {
++    use std::io::Read;
++
++    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(2).await;
++    let params = turn_params(
++        thread_id,
++        None,
++        4,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    store.list_turns(params.clone()).await.unwrap();
++    drop(store);
++    let prior_rollout_id = ThreadId::new();
++    let prior = selected_rollout_path(home.path(), thread_id, prior_rollout_id);
++    fs::rename(&root, &prior).unwrap();
++    let base = history_position(&prior, prior_rollout_id, 9);
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        10,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "new-root".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let store = reopen_history_store(home.path()).await;
++    let page = store.list_turns(params).await.unwrap();
++    assert_eq!(turn_ids(&page), ["new-root", "local", "turn-1", "turn-0"]);
++    let mut events = [0_u8; 256];
++    assert!(
++        watch.read(&mut events).unwrap() > 0,
++        "rotation requires a new scan"
++    );
++}
++
++#[tokio::test]
++async fn persisted_source_scan_does_not_hide_ancestor_truncation() {
++    let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(2).await;
++    let params = turn_params(
++        thread_id,
++        None,
++        3,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    store.list_turns(params.clone()).await.unwrap();
++    drop(store);
++    fs::OpenOptions::new()
++        .write(true)
++        .open(&ancestors[0])
++        .unwrap()
++        .set_len(0)
++        .unwrap();
++    let store = reopen_history_store(home.path()).await;
++    assert!(store.list_turns(params).await.is_err());
++}
++
++#[tokio::test]
++async fn persisted_source_scan_reads_current_root_after_rewrite() {
++    let (home, store, thread_id, root, _ancestors) = persistent_source_scan_fixture(2).await;
++    let params = turn_params(
++        thread_id,
++        None,
++        3,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    let before = store.list_turns(params.clone()).await.unwrap();
++    assert_eq!(turn_ids(&before)[0], "local");
++    drop(store);
++    let before = fs::read_to_string(&root).unwrap();
++    let after = before.replace("local", "newer");
++    assert_eq!(before.len(), after.len());
++    fs::write(&root, after).unwrap();
++    let store = reopen_history_store(home.path()).await;
++    let page = store.list_turns(params).await.unwrap();
++    assert_eq!(turn_ids(&page), ["newer", "turn-1", "turn-0"]);
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn repeated_cursorless_turn_pages_reuse_scan_until_rotation() {
++    use std::io::Read;
++
++    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(348).await;
++    let params = turn_params(
++        thread_id,
++        None,
++        7,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let bootstrap_start = std::time::Instant::now();
++    let first = store.list_turns(params.clone()).await.unwrap();
++    let bootstrap = bootstrap_start.elapsed();
++    assert_eq!(
++        turn_ids(&first),
++        [
++            "local", "turn-347", "turn-346", "turn-345", "turn-344", "turn-343", "turn-342"
++        ]
++    );
++    let expected = serde_json::to_value(&first).unwrap();
++    let mut events = [0_u8; 256];
++    assert!(watch.read(&mut events).unwrap() > 0);
++    let mut next_ordinal = 348 * 3 + 3;
++    let mut latencies = Vec::new();
++    for request in 0..507 {
++        if request % 20 == 0 {
++            let RolloutItem::EventMsg(event) =
++                timeline_user_item(thread_id, "local", &format!("appended-{request}"), "new")
++            else {
++                unreachable!();
++            };
++            append_with_leaf_proof(&store, thread_id, &root, next_ordinal, event).await;
++            next_ordinal += 1;
++        }
++        let start = std::time::Instant::now();
++        let page = store.list_turns(params.clone()).await.unwrap();
++        latencies.push(start.elapsed());
++        assert_eq!(serde_json::to_value(&page).unwrap(), expected);
++    }
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
++            .fetch_one(history_db(&store).await)
++            .await
++            .unwrap(),
++        1,
++        "participating root appends must retain the persisted predecessor scan"
++    );
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock,
++        "root appends must not cause predecessor content opens"
++    );
++    latencies.sort_unstable();
++    let median = latencies[latencies.len() / 2];
++
++    let prior_rollout_id = ThreadId::new();
++    let prior = selected_rollout_path(home.path(), thread_id, prior_rollout_id);
++    fs::rename(&root, &prior).unwrap();
++    let base = history_position(&prior, prior_rollout_id, next_ordinal);
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        next_ordinal + 1,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "new-root".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    let rotation_start = std::time::Instant::now();
++    let rotated = store.list_turns(params).await.unwrap();
++    let rotation = rotation_start.elapsed();
++    assert_eq!(turn_ids(&rotated)[..2], ["new-root", "local"]);
++    assert!(
++        watch.read(&mut events).unwrap() > 0,
++        "rotation currently invalidates the complete predecessor scan"
++    );
++    eprintln!(
++        "348 synthetic predecessors: first bootstrap={bootstrap:?}, 507 cursorless descending \
++         turn pages with 26 root appends median={median:?}, first page after rotation={rotation:?}"
++    );
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn warm_source_pages_do_not_enumerate_unrelated_rollouts() {
++    use std::io::Read;
++
++    let (home, store, thread_id, _root, _cursor) = source_item_race_fixture().await;
++    let unrelated = home.path().join("sessions/unrelated");
++    fs::create_dir_all(&unrelated).unwrap();
++    for _ in 0..512 {
++        let id = ThreadId::new();
++        fs::write(
++            unrelated.join(format!("rollout-2025-01-03T12-00-00-{id}.jsonl.zst")),
++            b"",
++        )
++        .unwrap();
++    }
++    let (_, initial_scan) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++
++    let mut watch = watch_history_file_opens(&unrelated);
++    for _ in 0..2 {
++        let (turn_cursor, item_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
++        assert!(turn_cursor.is_some());
++        assert!(item_cursor.is_some());
++        let turns = store
++            .list_turns(turn_params(
++                thread_id,
++                None,
++                5,
++                SortDirection::Desc,
++                StoredTurnItemsView::NotLoaded,
++            ))
++            .await
++            .unwrap();
++        assert_eq!(turn_ids(&turns), ["turn"]);
++        let items = store
++            .list_items(item_params(
++                thread_id,
++                Some("turn"),
++                None,
++                5,
++                SortDirection::Desc,
++            ))
++            .await
++            .unwrap();
++        assert_eq!(item_ids(&items), ["existing"]);
++    }
++    let mut events = [0; 1024];
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock,
++        "unchanged source reads must not open the unrelated directory"
++    );
++
++    let id = ThreadId::new();
++    fs::write(
++        unrelated.join(format!("rollout-2025-01-03T12-00-00-{id}.jsonl.zst")),
++        b"",
++    )
++    .unwrap();
++    while watch.read(&mut events).is_ok() {}
++    let (_, refreshed_scan) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(std::sync::Arc::ptr_eq(&initial_scan, &refreshed_scan));
++    assert!(
++        watch.read(&mut events).is_ok(),
++        "changed directory is reindexed"
++    );
++    uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock,
++        "the refreshed filename snapshot is reused"
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn cached_source_selection_rechecks_collisions_and_file_replacement() {
++    let (home, store, thread_id, _root, _cursor) = source_item_race_fixture().await;
++    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    let ancestor = graph.lineage.segments()[0].rollout_path();
++    let collision = home
++        .path()
++        .join("sessions")
++        .join(ancestor.file_name().unwrap());
++
++    // The index visits files in sessions before files in its child directories.
++    fs::copy(ancestor, &collision).unwrap();
++    assert!(
++        uncertified_items::discover_cached(&store, thread_id, &scan)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    fs::remove_file(&collision).unwrap();
++    assert!(
++        uncertified_items::discover_cached(&store, thread_id, &scan)
++            .await
++            .unwrap()
++            .is_some()
++    );
++
++    let replacement = home.path().join("replacement");
++    fs::copy(ancestor, &replacement).unwrap();
++    fs::rename(&replacement, ancestor).unwrap();
++    assert!(
++        uncertified_items::discover_cached(&store, thread_id, &scan)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    fs::remove_file(ancestor).unwrap();
++    assert!(
++        uncertified_items::discover_cached(&store, thread_id, &scan)
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++async fn paused_source_item_request(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    cursor: String,
++) -> (
++    std::sync::Arc<SourceItemPause>,
++    tokio::task::JoinHandle<ThreadStoreResult<ItemPage>>,
++) {
++    let pause = inject_source_item_pause(thread_id);
++    let store = store.clone();
++    let request = tokio::spawn(async move {
++        store
++            .list_items(item_params(
++                thread_id,
++                Some("turn"),
++                Some(cursor),
++                100,
++                SortDirection::Desc,
++            ))
++            .await
++    });
++    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
++        .await
++        .expect("item request reached final source revalidation");
++    (pause, request)
++}
++
++#[tokio::test]
++async fn source_item_page_survives_append_after_snapshot() {
++    let (_home, store, thread_id, root, cursor) = source_item_race_fixture().await;
++    let (pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
++    append_timeline_record(
++        &root,
++        10,
++        timeline_user_item(thread_id, "turn", "later", "new"),
++    );
++    pause.release.notify_one();
++    let page = request
++        .await
++        .unwrap()
++        .expect("append-only change preserves captured page");
++    assert_eq!(item_ids(&page), ["existing"]);
++    assert!(page.next_cursor.is_none());
++    let fresh = store
++        .list_items(item_params(
++            thread_id,
++            Some("turn"),
++            None,
++            100,
++            SortDirection::Desc,
++        ))
++        .await
++        .expect("fresh request observes appended item");
++    assert_eq!(item_ids(&fresh), ["later", "existing"]);
++}
++
++#[tokio::test]
++async fn source_index_survives_append_during_revalidation() {
++    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
++    store.uncertified_item_scans.lock().await.clear();
++    let pause = uncertified_items::inject_index_pause(thread_id);
++    let indexing_store = store.clone();
++    let request = tokio::spawn(async move {
++        uncertified_items::indexed_sources(&indexing_store, thread_id).await
++    });
++    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
++        .await
++        .expect("indexing reached source revalidation");
++    append_timeline_record(
++        &root,
++        10,
++        timeline_user_item(thread_id, "turn", "later", "new"),
++    );
++    pause.release.notify_one();
++    let (graph, scan) = request
++        .await
++        .unwrap()
++        .expect("append does not invalidate the predecessor index")
++        .expect("rotated history sources");
++    let root_scan = uncertified_items::scan_root_index(&graph, None)
++        .await
++        .unwrap()
++        .expect("root snapshot");
++    let events = uncertified_items::scan_selected_items(
++        &graph,
++        &scan,
++        ["turn".to_string()].into_iter().collect(),
++        root_scan.root_snapshot.as_ref(),
++    )
++    .await
++    .unwrap()
++    .expect("selected items");
++    let (_, items) = reduce_aggregate_sources(events).unwrap();
++    let items = items.get(&(thread_id, "turn".to_string())).unwrap();
++    assert!(items.contains_key("existing"));
++    assert!(items.contains_key("later"));
++}
++
++#[tokio::test]
++async fn source_index_reuses_ancestors_after_root_validation_fails() {
++    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
++    store.uncertified_item_scans.lock().await.clear();
++    let original = fs::read(&root).unwrap();
++    let pause = uncertified_items::inject_index_pause(thread_id);
++    let indexing_store = store.clone();
++    let request = tokio::spawn(async move {
++        uncertified_items::indexed_sources(&indexing_store, thread_id).await
++    });
++    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
++        .await
++        .expect("indexing reached source revalidation");
++    fs::write(&root, b"").unwrap();
++    pause.release.notify_one();
++    assert!(request.await.unwrap().is_err());
++    let slot = store
++        .uncertified_item_scans
++        .lock()
++        .await
++        .get(&thread_id)
++        .cloned()
++        .expect("index slot");
++    let cached = slot.lock().await.clone().expect("cached ancestor scan");
++    fs::write(&root, original).unwrap();
++    let (_, reused) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .expect("restored root");
++    assert!(std::sync::Arc::ptr_eq(&cached, &reused));
++}
++
++#[tokio::test]
++async fn source_scan_rejects_invalid_compacted_payload_after_fast_head() {
++    #[derive(serde::Serialize)]
++    struct OrderedRecord {
++        timestamp: &'static str,
++        ordinal: u64,
++        #[serde(rename = "type")]
++        kind: &'static str,
++        payload: serde_json::Value,
++    }
++
++    let (_home, store, thread_id, root, _) = source_item_race_fixture().await;
++    let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&root)
++        .await
++        .unwrap()
++        .0;
++    for line in lines.iter_mut().skip(1) {
++        line.ordinal = line.ordinal.map(|ordinal| ordinal + 1);
++    }
++    let compacted = CompactedItem {
++        message: "x".repeat(70_000),
++        replacement_history: None,
++        retained_context: None,
++        retained_context_replay: None,
++        guardian_history: None,
++        mcp_resource_origins: None,
++        window_number: None,
++        first_window_id: None,
++        previous_window_id: None,
++        window_id: None,
++        compaction_response_id: None,
++        latest_token_usage_record: None,
++        resume_metadata: None,
++        segment_state_checkpoint: None,
++    };
++    lines.insert(
++        1,
++        RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(7),
++            item: RolloutItem::Compacted(Box::new(compacted.clone())),
++        },
++    );
++    let serialize = |lines: &[RolloutLine]| {
++        format!(
++            "{}\n",
++            lines
++                .iter()
++                .map(|line| serde_json::to_string(line).unwrap())
++                .collect::<Vec<_>>()
++                .join("\n")
++        )
++    };
++    fs::write(&root, serialize(&lines)).unwrap();
++    store.uncertified_item_scans.lock().await.clear();
++    let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    let cached_size = fs::metadata(&root).unwrap().len();
++    let mut payload = serde_json::to_value(&compacted).unwrap();
++    payload["message"] = serde_json::json!(1234567);
++    let invalid = OrderedRecord {
++        timestamp: "2026-07-16T00:00:00.000Z",
++        ordinal: 7,
++        kind: "compacted",
++        payload,
++    };
++    let mut rewritten = vec![serde_json::to_string(&lines[0]).unwrap()];
++    rewritten.push(serde_json::to_string(&invalid).unwrap());
++    rewritten.extend(
++        lines
++            .iter()
++            .skip(2)
++            .map(|line| serde_json::to_string(line).unwrap()),
++    );
++    fs::write(&root, format!("{}\n", rewritten.join("\n"))).unwrap();
++    assert!(
++        super::super::uncertified_root_head::read_cached_compacted_head(&root, Some(cached_size))
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let graph = uncertified_items::discover_cached(&store, thread_id, &scan)
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(
++        uncertified_items::scan_root_index(&graph, None)
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++async fn compressed_compacted_predecessor_fixture() -> (
++    TempDir,
++    LocalThreadStore,
++    ThreadId,
++    ThreadId,
++    std::path::PathBuf,
++    std::path::PathBuf,
++    HistoryPosition,
++) {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
++    write_rollout(&predecessor, thread_id, None);
++    append_timeline_record(
++        &predecessor,
++        1,
++        RolloutItem::Compacted(Box::new(CompactedItem {
++            message: "x".repeat(2_000_000),
++            replacement_history: None,
++            retained_context: None,
++            retained_context_replay: None,
++            guardian_history: None,
++            mcp_resource_origins: None,
++            window_number: None,
++            first_window_id: None,
++            previous_window_id: None,
++            window_id: None,
++            compaction_response_id: None,
++            latest_token_usage_record: None,
++            resume_metadata: None,
++            segment_state_checkpoint: None,
++        })),
++    );
++    append_timeline_record(
++        &predecessor,
++        2,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "ancestor".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &predecessor,
++        3,
++        timeline_user_item(thread_id, "ancestor", "shared", "original"),
++    );
++    let base = history_position(&predecessor, predecessor_id, 4);
++    let compressed = predecessor.with_extension("jsonl.zst");
++    fs::write(
++        &compressed,
++        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
++    )
++    .unwrap();
++    fs::remove_file(&predecessor).unwrap();
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        5,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "root-turn".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(20),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &root,
++        6,
++        timeline_user_item(thread_id, "ancestor", "shared", "updated"),
++    );
++    append_timeline_record(
++        &root,
++        7,
++        timeline_user_item(thread_id, "ancestor", "late", "late"),
++    );
++    (
++        home,
++        store,
++        thread_id,
++        predecessor_id,
++        compressed,
++        root,
++        base,
++    )
++}
++
++#[tokio::test]
++async fn deferred_compressed_compacted_predecessor_preserves_late_items_and_cursors() {
++    let (_home, store, thread_id, _id, predecessor, _root, _base) =
++        compressed_compacted_predecessor_fixture().await;
++    assert!(
++        super::super::uncertified_root_head::read_deferred_compacted_head(&predecessor)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let turns = store
++        .list_turns(turn_params(
++            thread_id,
++            None,
++            5,
++            SortDirection::Desc,
++            StoredTurnItemsView::NotLoaded,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(turn_ids(&turns), ["root-turn", "ancestor"]);
++    let first = store
++        .list_items(item_params(
++            thread_id,
++            Some("ancestor"),
++            None,
++            1,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&first), ["late"]);
++    let second = store
++        .list_items(item_params(
++            thread_id,
++            Some("ancestor"),
++            first.next_cursor,
++            1,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&second), ["shared"]);
++    let item: serde_json::Value = serde_json::from_slice(&second.items[0].item_json).unwrap();
++    assert_eq!(item["content"][0]["text"], "updated");
++    assert_eq!(second.items[0].updated_at_ordinal, 6);
++    let (_, cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
++    assert_eq!(
++        parse_cursor(
++            cursor.as_deref(),
++            thread_id,
++            thread_id,
++            CursorScope::ItemsByCreatedAtOrdinal,
++        )
++        .unwrap()
++        .unwrap()
++        .rollout_ordinal,
++        7
++    );
++}
++
++#[tokio::test]
++async fn deferred_compressed_compacted_predecessor_preserves_inherited_cutoff() {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let parent_id = ThreadId::new();
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), parent_id, predecessor_id);
++    write_rollout(&predecessor, parent_id, None);
++    append_timeline_record(
++        &predecessor,
++        1,
++        RolloutItem::Compacted(Box::new(CompactedItem {
++            message: "x".repeat(2_000_000),
++            replacement_history: None,
++            retained_context: None,
++            retained_context_replay: None,
++            guardian_history: None,
++            mcp_resource_origins: None,
++            window_number: None,
++            first_window_id: None,
++            previous_window_id: None,
++            window_id: None,
++            compaction_response_id: None,
++            latest_token_usage_record: None,
++            resume_metadata: None,
++            segment_state_checkpoint: None,
++        })),
++    );
++    append_timeline_record(
++        &predecessor,
++        2,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "inherited".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &predecessor,
++        3,
++        timeline_user_item(parent_id, "inherited", "visible", "visible"),
++    );
++    let base = history_position(&predecessor, predecessor_id, 4);
++    append_timeline_record(
++        &predecessor,
++        4,
++        timeline_user_item(parent_id, "inherited", "excluded", "excluded"),
++    );
++    let compressed = predecessor.with_extension("jsonl.zst");
++    fs::write(
++        &compressed,
++        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
++    )
++    .unwrap();
++    fs::remove_file(predecessor).unwrap();
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        5,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "root-turn".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(20),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    let turns = store
++        .list_turns(turn_params(
++            thread_id,
++            None,
++            5,
++            SortDirection::Desc,
++            StoredTurnItemsView::NotLoaded,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(turn_ids(&turns), ["root-turn", "inherited"]);
++    let page = store
++        .list_items(item_params(
++            thread_id,
++            Some("inherited"),
++            None,
++            10,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&page), ["visible"]);
++    assert!(page.next_cursor.is_none());
++}
++
++#[tokio::test]
++async fn deferred_compressed_compacted_predecessor_enforces_selected_path_and_cutoff() {
++    let (home, store, thread_id, _id, predecessor, root, mut base) =
++        compressed_compacted_predecessor_fixture().await;
++    let selected = home
++        .path()
++        .join("sessions")
++        .join(predecessor.file_name().unwrap());
++    fs::copy(&predecessor, &selected).unwrap();
++    let graph = uncertified_items::discover(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(graph.lineage.segments()[0].rollout_path(), selected);
++    assert!(
++        uncertified_items::scan_ancestors(&graph)
++            .await
++            .unwrap()
++            .is_some()
++    );
++
++    base.end_byte_offset += 1;
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        5,
++        timeline_user_item(thread_id, "root", "root-item", "root"),
++    );
++    assert!(
++        uncertified_items::indexed_sources(&store, thread_id)
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn deferred_compressed_compacted_predecessor_rejects_invalid_payload() {
++    #[derive(serde::Serialize)]
++    struct OrderedRecord {
++        timestamp: &'static str,
++        ordinal: u64,
++        #[serde(rename = "type")]
++        kind: &'static str,
++        payload: serde_json::Value,
++    }
++
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
++    write_rollout(&predecessor, thread_id, None);
++    let invalid = OrderedRecord {
++        timestamp: "2026-07-16T00:00:00.000Z",
++        ordinal: 1,
++        kind: "compacted",
++        payload: serde_json::json!({"message": 7}),
++    };
++    writeln!(
++        fs::OpenOptions::new()
++            .append(true)
++            .open(&predecessor)
++            .unwrap(),
++        "{}",
++        serde_json::to_string(&invalid).unwrap()
++    )
++    .unwrap();
++    let base = HistoryPosition {
++        thread_id: predecessor_id,
++        end_ordinal_exclusive: 2,
++        end_byte_offset: fs::metadata(&predecessor).unwrap().len(),
++    };
++    let compressed = predecessor.with_extension("jsonl.zst");
++    fs::write(
++        &compressed,
++        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
++    )
++    .unwrap();
++    fs::remove_file(predecessor).unwrap();
++    let root = rollout_path(home.path(), thread_id);
++    write_rollout(&root, thread_id, Some(base));
++    append_timeline_record(
++        &root,
++        3,
++        timeline_user_item(thread_id, "root", "root-item", "root"),
++    );
++    assert!(
++        super::super::uncertified_root_head::read_deferred_compacted_head(&compressed)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    assert!(
++        uncertified_items::indexed_sources(&store, thread_id)
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn deferred_compressed_compacted_predecessor_rejects_truncated_frame() {
++    let (_home, store, thread_id, _id, predecessor, _root, _base) =
++        compressed_compacted_predecessor_fixture().await;
++    let len = fs::metadata(&predecessor).unwrap().len();
++    fs::OpenOptions::new()
++        .write(true)
++        .open(predecessor)
++        .unwrap()
++        .set_len(len - 1)
++        .unwrap();
++    assert!(
++        uncertified_items::indexed_sources(&store, thread_id)
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn source_item_scans_share_the_same_root_prefix_during_append() {
++    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
++    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .expect("rotated history sources");
++    let first = uncertified_items::scan_root_index(&graph, None)
++        .await
++        .unwrap()
++        .expect("root snapshot");
++    append_timeline_record(
++        &root,
++        10,
++        timeline_user_item(thread_id, "turn", "later", "new"),
++    );
++    let events = uncertified_items::scan_selected_items(
++        &graph,
++        &scan,
++        ["turn".to_string()].into_iter().collect(),
++        first.root_snapshot.as_ref(),
++    )
++    .await
++    .unwrap()
++    .expect("selected items use captured root prefix");
++    let (_, items) = reduce_aggregate_sources(events).unwrap();
++    let items = items.get(&(thread_id, "turn".to_string())).unwrap();
++    assert!(items.contains_key("existing"));
++    assert!(!items.contains_key("later"));
++    assert!(
++        uncertified_items::sources_still_current(
++            &store,
++            thread_id,
++            &graph,
++            &scan,
++            first.root_snapshot.as_ref(),
++        )
++        .await
++        .unwrap()
++    );
++}
++
++#[tokio::test]
++async fn source_item_page_never_serves_stale_data_after_destructive_change() {
++    for change in ["truncate", "rewrite", "replace", "rewrite_and_append"] {
++        let (_home, store, thread_id, root, cursor) = source_item_race_fixture().await;
++        let (pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
++        let original = fs::read(&root).unwrap();
++        if change == "truncate" {
++            fs::OpenOptions::new()
++                .write(true)
++                .open(&root)
++                .unwrap()
++                .set_len(u64::try_from(original.len() - 1).unwrap())
++                .unwrap();
++        } else {
++            let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&root)
++                .await
++                .unwrap()
++                .0;
++            let mut changed = false;
++            for line in &mut lines {
++                if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut line.item
++                    && let codex_protocol::items::TurnItem::UserMessage(message) = &mut event.item
++                    && let codex_protocol::user_input::UserInput::Text { text, .. } =
++                        &mut message.content[0]
++                {
++                    assert_eq!(text, "old");
++                    *text = "new".to_string();
++                    changed = true;
++                }
++            }
++            assert!(changed);
++            let rewritten = format!(
++                "{}\n",
++                lines
++                    .iter()
++                    .map(|line| serde_json::to_string(line).unwrap())
++                    .collect::<Vec<_>>()
++                    .join("\n")
++            );
++            assert_eq!(rewritten.len(), original.len());
++            if change == "replace" {
++                let replacement = root.with_extension("replacement");
++                fs::write(&replacement, rewritten).unwrap();
++                fs::rename(replacement, &root).unwrap();
++            } else {
++                fs::write(&root, rewritten).unwrap();
++            }
++            if change == "rewrite_and_append" {
++                append_timeline_record(
++                    &root,
++                    10,
++                    timeline_user_item(thread_id, "turn", "later", "later"),
++                );
++            }
++        }
++        pause.release.notify_one();
++        let outcome = request.await.unwrap();
++        if change == "truncate" {
++            assert!(
++                outcome.is_err(),
++                "truncated source must not return a captured page"
++            );
++        } else if let Ok(page) = outcome {
++            assert_eq!(item_ids(&page), ["existing"]);
++            let item: serde_json::Value = serde_json::from_slice(&page.items[0].item_json).unwrap();
++            assert_eq!(
++                item["content"][0]["text"], "new",
++                "{change} must not return stale content"
++            );
++        }
++    }
++}
++
+ #[tokio::test]
+ async fn newest_indexed_pages_do_not_read_unused_ancestors() {
+     let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+diff --git a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+index 09ab20819679be5313dd21b10a3054cec46b51ed..552b7e9f4d79e944abc9e2840fa7f163ee4ec6c6 100644
+--- a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
++++ b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+@@ -21,6 +21,8 @@ use serde::Deserialize;
+ use serde::de::MapAccess;
+ use serde::de::Visitor;
+ use serde_json::value::RawValue;
++use sha2::Digest;
++use sha2::Sha256;
+
+ use super::super::LocalThreadStore;
+ use super::super::rollout_lineage::HistoryPageWalk;
+@@ -29,12 +31,15 @@ use super::super::rollout_lineage::RolloutLineageSegment;
+ use super::super::rollout_lineage::WalkStep;
+ use super::super::rollout_lineage::read_rollout_head;
+ use super::projection_certificate::FileIdentity;
++use super::projection_certificate::file_identity;
+ use super::projection_certificate::leaf_identity;
+ use super::read::CursorScope;
+ use super::read::parse_cursor;
+ use super::read::stored_thread_item_row;
+ use super::segment_paging::page_item_rows_with_connection;
+ use super::thread_history_error;
++use super::uncertified_root_head::has_canonical_compacted_header;
++use super::uncertified_root_head::read_cached_compacted_head;
+ use crate::ItemPage;
+ use crate::ItemSortKey;
+ use crate::ListItemsParams;
+@@ -43,6 +48,8 @@ use crate::StoredThreadItem;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+
++mod persistent_scan;
++
+ const MAX_CACHED_THREADS: usize = 8;
+ const MAX_ANCESTOR_TURNS: usize = 200_000;
+ const MAX_ANCESTOR_TURN_BYTES: usize = 8 * 1024 * 1024;
+@@ -51,6 +58,39 @@ const MAX_ROOT_ITEMS: usize = 20_000;
+ const MAX_SUMMARY_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+ const SCAN_CONCURRENCY: usize = 8;
+
++#[cfg(test)]
++static INDEX_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
++    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
++
++/// A one-shot barrier before completing validation of a cached ancestor index.
++#[cfg(test)]
++pub(super) struct IndexPause {
++    pub(super) entered: tokio::sync::Notify,
++    pub(super) release: tokio::sync::Notify,
++}
++
++#[cfg(test)]
++pub(super) fn inject_index_pause(thread_id: ThreadId) -> Arc<IndexPause> {
++    let pause = Arc::new(IndexPause {
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    INDEX_PAUSES
++        .lock()
++        .unwrap()
++        .insert(thread_id, pause.clone());
++    pause
++}
++
++#[cfg(test)]
++async fn pause_index_validation(thread_id: ThreadId) {
++    let pause = INDEX_PAUSES.lock().unwrap().remove(&thread_id);
++    if let Some(pause) = pause {
++        pause.entered.notify_one();
++        pause.release.notified().await;
++    }
++}
++
+ /// Whether two item snapshots are equivalent, contradict, or differ in an unknown representation.
+ pub(super) enum ItemComparison {
+     Equivalent,
+@@ -82,6 +122,36 @@ impl<'de> Deserialize<'de> for UniqueFields {
+     }
+ }
+
++/// A rollout envelope with the same duplicate-field checks as `Record`.
++struct UniqueRolloutValue(serde_json::Value);
++
++impl<'de> Deserialize<'de> for UniqueRolloutValue {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        struct RolloutVisitor;
++        impl<'de> Visitor<'de> for RolloutVisitor {
++            type Value = UniqueRolloutValue;
++
++            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++                formatter.write_str("a rollout record object")
++            }
++
++            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
++                let mut fields = serde_json::Map::new();
++                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
++                    if matches!(key.as_str(), "timestamp" | "ordinal" | "type" | "payload")
++                        && fields.contains_key(&key)
++                    {
++                        return Err(serde::de::Error::custom("duplicate rollout field"));
++                    }
++                    fields.insert(key, value);
++                }
++                Ok(UniqueRolloutValue(serde_json::Value::Object(fields)))
++            }
++        }
++        deserializer.deserialize_map(RolloutVisitor)
++    }
++}
++
+ fn conflicting_values(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+     match (left, right) {
+         (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+@@ -163,21 +233,46 @@ fn assert_request_future_is_send(store: &LocalThreadStore, params: &ListItemsPar
+ }
+
+ /// A complete set of turn IDs in the selected immutable predecessor prefixes.
++#[derive(serde::Serialize, serde::Deserialize)]
+ pub(in crate::local) struct UncertifiedItemScan {
++    #[serde(default)]
++    pub(super) attached: bool,
+     root: RolloutLineageSegment,
+     ancestors: Vec<RolloutLineageSegment>,
+     identities: Vec<FileIdentity>,
++    #[serde(skip, default)]
++    path_snapshot: tokio::sync::Mutex<Option<Arc<codex_rollout::RolloutPathSnapshot>>>,
++    #[serde(skip)]
+     turn_ids: HashSet<String>,
++    #[serde(skip)]
+     pub(super) turn_segments: HashMap<String, Vec<usize>>,
++    #[serde(with = "persistent_scan::turn_events")]
+     pub(super) turn_events: Vec<SourceTurnEvent>,
+     pub(super) anchors: Vec<SourceItemAnchor>,
+ }
+
+ pub(super) struct DiscoveredLineage {
++    attached: bool,
+     pub(super) lineage: RolloutLineage,
+     pub(super) identities: Vec<FileIdentity>,
+ }
+
++/// The exact plain root prefix consumed by a source-backed page.
++#[derive(Clone)]
++pub(super) struct RootSnapshot {
++    identity: FileIdentity,
++    digest: [u8; 32],
++    file: Arc<std::fs::File>,
++}
++
++/// Conditions for reading one captured prefix from the selected root file.
++#[derive(Clone)]
++struct RootReadGuard {
++    identity: FileIdentity,
++    require_exact_identity: bool,
++    expected_digest: Option<[u8; 32]>,
++}
++
+ fn supported_owner_order(graph: &DiscoveredLineage) -> bool {
+     let mut seen = HashSet::new();
+     let mut previous = None;
+@@ -197,9 +292,13 @@ pub(super) async fn indexed_sources(
+     id: ThreadId,
+ ) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
+     let mut walk = HistoryPageWalk::new(store, id).await?;
+-    if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) || walk.complete() {
++    if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) {
++        return indexed_attached_sources(store, id).await;
++    }
++    if walk.complete() {
+         return Ok(None);
+     }
++    let root_rollout_id = walk.root_rollout_id();
+     let slot = {
+         let mut scans = store.uncertified_item_scans.lock().await;
+         if !scans.contains_key(&id) && scans.len() >= MAX_CACHED_THREADS {
+@@ -219,6 +318,9 @@ pub(super) async fn indexed_sources(
+             .clone()
+     };
+     let mut cached = slot.lock().await;
++    if cached.is_none() {
++        *cached = persistent_scan::load(store, id, root_rollout_id).await;
++    }
+     if let Some(scan) = cached.as_ref()
+         && let Some(graph) = discover_cached(store, id, scan).await?
+     {
+@@ -238,6 +340,8 @@ pub(super) async fn indexed_sources(
+         });
+     };
+     let scan = Arc::new(scan);
++    // The predecessor index remains reusable if only the mutable root changes.
++    *cached = Some(scan.clone());
+     let Some(current) = discover_cached(store, id, &scan).await? else {
+         return Err(ThreadStoreError::Conflict {
+             message: "rotated history sources changed while indexing".to_string(),
+@@ -246,10 +350,77 @@ pub(super) async fn indexed_sources(
+     if !supported_owner_order(&current) {
+         return Ok(None);
+     }
++    drop(cached);
++    persistent_scan::save(store, id, root_rollout_id, scan.clone()).await;
++    Ok(Some((current, scan)))
++}
++
++async fn indexed_attached_sources(
++    store: &LocalThreadStore,
++    id: ThreadId,
++) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
++    let Some(graph) = discover_attached(store, id).await? else {
++        return Ok(None);
++    };
++    let slot = {
++        let mut scans = store.uncertified_item_scans.lock().await;
++        if !scans.contains_key(&id) && scans.len() >= MAX_CACHED_THREADS {
++            let idle = scans
++                .iter()
++                .find_map(|(id, scan)| (Arc::strong_count(scan) == 1).then_some(*id));
++            if let Some(id) = idle {
++                scans.remove(&id);
++            } else {
++                drop(scans);
++                return index_attached_uncached(store, id, graph).await;
++            }
++        }
++        scans
++            .entry(id)
++            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
++            .clone()
++    };
++    let mut cached = slot.lock().await;
++    if let Some(scan) = cached.as_ref()
++        && scan.attached
++        && let Some(current) = discover_cached(store, id, scan).await?
++    {
++        return Ok(Some((current, scan.clone())));
++    }
++    let Some(scan) = scan_ancestors(&graph).await? else {
++        return Err(ThreadStoreError::Conflict {
++            message: "could not verify attached history sources".to_string(),
++        });
++    };
++    let scan = Arc::new(scan);
++    let Some(current) = discover_cached(store, id, &scan).await? else {
++        return Err(ThreadStoreError::Conflict {
++            message: "attached history sources changed while indexing".to_string(),
++        });
++    };
+     *cached = Some(scan.clone());
+     Ok(Some((current, scan)))
+ }
+
++async fn index_attached_uncached(
++    store: &LocalThreadStore,
++    id: ThreadId,
++    graph: DiscoveredLineage,
++) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
++    let Some(scan) = scan_ancestors(&graph).await? else {
++        return Err(ThreadStoreError::Conflict {
++            message: "could not verify attached history sources".to_string(),
++        });
++    };
++    let scan = Arc::new(scan);
++    let Some(current) = discover_cached(store, id, &scan).await? else {
++        return Err(ThreadStoreError::Conflict {
++            message: "attached history sources changed while indexing".to_string(),
++        });
++    };
++    Ok(Some((current, scan)))
++}
++
+ async fn index_uncached_sources(
+     store: &LocalThreadStore,
+     id: ThreadId,
+@@ -273,6 +444,7 @@ async fn index_uncached_sources(
+     if !supported_owner_order(&current) {
+         return Ok(None);
+     }
++    persistent_scan::save(store, id, current.lineage.root_rollout_id(), scan.clone()).await;
+     Ok(Some((current, scan)))
+ }
+
+@@ -282,13 +454,101 @@ pub(super) async fn sources_still_current(
+     id: ThreadId,
+     graph: &DiscoveredLineage,
+     scan: &UncertifiedItemScan,
++    root_snapshot: Option<&RootSnapshot>,
+ ) -> ThreadStoreResult<bool> {
+-    Ok(discover_cached(store, id, scan)
+-        .await?
+-        .is_some_and(|current| {
+-            current.lineage.segments() == graph.lineage.segments()
+-                && current.identities == graph.identities
+-        }))
++    let Some(current) = discover_cached(store, id, scan).await? else {
++        return Ok(false);
++    };
++    if current.lineage.segments() == graph.lineage.segments()
++        && current.identities == graph.identities
++    {
++        return Ok(true);
++    }
++    let Some(snapshot) = root_snapshot else {
++        return Ok(false);
++    };
++    let Some((root, ancestors)) = graph.lineage.segments().split_last() else {
++        return Ok(false);
++    };
++    let Some((current_root, current_ancestors)) = current.lineage.segments().split_last() else {
++        return Ok(false);
++    };
++    let Some((identity, ancestor_identities)) = graph.identities.split_last() else {
++        return Ok(false);
++    };
++    let Some((current_identity, current_ancestor_identities)) = current.identities.split_last()
++    else {
++        return Ok(false);
++    };
++    let mut normalized_root = current_root.clone();
++    normalized_root.physical_size = root.physical_size;
++    normalized_root.end_byte_offset = root.end_byte_offset;
++    normalized_root.jsonl_end_byte_offset = root.jsonl_end_byte_offset;
++    if ancestors != current_ancestors
++        || ancestor_identities != current_ancestor_identities
++        || normalized_root != *root
++        || snapshot.identity != *identity
++        || !identity.same_file_with_at_least(current_identity)
++        || current_identity.size() <= identity.size()
++    {
++        return Ok(false);
++    }
++    let path = root.rollout_path().to_path_buf();
++    let snapshot = snapshot.clone();
++    let expected = current_identity.clone();
++    tokio::task::spawn_blocking(move || verify_root_prefix(&path, &snapshot, &expected))
++        .await
++        .map_err(thread_history_error)
++}
++
++/// Verifies the consumed prefix without accepting a concurrent rewrite or replacement.
++fn verify_root_prefix(
++    path: &std::path::Path,
++    snapshot: &RootSnapshot,
++    current: &FileIdentity,
++) -> bool {
++    let Ok(file) = std::fs::File::open(path) else {
++        return false;
++    };
++    let matches_current = || {
++        file.metadata()
++            .ok()
++            .and_then(|meta| file_identity(&meta))
++            .as_ref()
++            == Some(current)
++            && snapshot
++                .file
++                .metadata()
++                .ok()
++                .and_then(|meta| file_identity(&meta))
++                .as_ref()
++                == Some(current)
++            && std::fs::symlink_metadata(path)
++                .ok()
++                .and_then(|meta| file_identity(&meta))
++                .as_ref()
++                == Some(current)
++    };
++    if !matches_current() {
++        return false;
++    }
++    let mut reader = (&file).take(snapshot.identity.size());
++    let mut digest = Sha256::new();
++    let mut buffer = [0_u8; 64 * 1024];
++    let mut read = 0_u64;
++    loop {
++        let Ok(count) = reader.read(&mut buffer) else {
++            return false;
++        };
++        if count == 0 {
++            break;
++        }
++        read += count as u64;
++        digest.update(&buffer[..count]);
++    }
++    read == snapshot.identity.size()
++        && <[u8; 32]>::from(digest.finalize()) == snapshot.digest
++        && matches_current()
+ }
+
+ /// Reads the mutable root once for turn metadata, item anchors, and requested snapshots.
+@@ -304,8 +564,25 @@ pub(super) async fn scan_root_index(
+         .clone();
+     let cancelled = ScanCancellation::default();
+     let stop = cancelled.0.clone();
++    let identity = graph.identities.last().expect("root has an identity");
++    let guard = (root.rollout_path().extension().and_then(|s| s.to_str()) != Some("zst")
++        && root.end_ordinal().is_none()
++        && root.physical_size == Some(identity.size()))
++    .then(|| RootReadGuard {
++        identity: identity.clone(),
++        require_exact_identity: true,
++        expected_digest: None,
++    });
+     match tokio::task::spawn_blocking(move || {
+-        scan_source(&root, Some(""), true, turns.as_ref(), true, &stop)
++        scan_source(
++            &root,
++            Some(""),
++            true,
++            turns.as_ref(),
++            true,
++            &stop,
++            guard.as_ref(),
++        )
+     })
+     .await
+     .map_err(thread_history_error)?
+@@ -325,6 +602,7 @@ pub(super) async fn scan_selected_items(
+     graph: &DiscoveredLineage,
+     scan: &UncertifiedItemScan,
+     turns: HashSet<String>,
++    root_snapshot: Option<&RootSnapshot>,
+ ) -> ThreadStoreResult<Option<Vec<SourceTurnEvent>>> {
+     let mut indexes = HashSet::new();
+     for turn in &turns {
+@@ -336,16 +614,31 @@ pub(super) async fn scan_selected_items(
+     let cancelled = ScanCancellation::default();
+     let stop = cancelled.0.clone();
+     let turns = Arc::new(turns);
++    let root_index = graph.lineage.segments().len() - 1;
++    let root_guard = root_snapshot.map(|snapshot| RootReadGuard {
++        identity: snapshot.identity.clone(),
++        require_exact_identity: false,
++        expected_digest: Some(snapshot.digest),
++    });
+     let mut jobs = futures::stream::iter(indexes)
+         .map(|index| {
+             let segment = graph.lineage.segments()[index].clone();
+             let turns = turns.clone();
+             let stop = stop.clone();
++            let guard = (index == root_index).then(|| root_guard.clone()).flatten();
+             async move {
+                 (
+                     index,
+                     tokio::task::spawn_blocking(move || {
+-                        scan_source(&segment, Some(""), false, Some(&turns), false, &stop)
++                        scan_source(
++                            &segment,
++                            Some(""),
++                            false,
++                            Some(&turns),
++                            false,
++                            &stop,
++                            guard.as_ref(),
++                        )
+                     })
+                     .await,
+                 )
+@@ -578,7 +871,7 @@ async fn scan_root(
+ ) -> ThreadStoreResult<Option<SourceScan>> {
+     let stop = cancelled.0.clone();
+     Ok(tokio::task::spawn_blocking(move || {
+-        scan_source(&root, Some(&turn), false, None, false, &stop)
++        scan_source(&root, Some(&turn), false, None, false, &stop, None)
+     })
+     .await
+     .map_err(thread_history_error)?
+@@ -605,6 +898,52 @@ pub(super) async fn discover(
+         return Ok(None);
+     }
+     Ok(Some(DiscoveredLineage {
++        attached: false,
++        lineage,
++        identities,
++    }))
++}
++
++async fn discover_attached(
++    store: &LocalThreadStore,
++    id: ThreadId,
++) -> ThreadStoreResult<Option<DiscoveredLineage>> {
++    let Some(selected) =
++        super::super::thread_rollout_resolver::resolve_current_including_archived(store, id)
++            .await?
++    else {
++        return Ok(None);
++    };
++    let meta = codex_rollout::read_session_meta_line_exact(&selected.path)
++        .await
++        .map_err(thread_history_error)?;
++    if !meta.meta.attached_thread {
++        return Ok(None);
++    }
++    let lineage = store.resolve_rollout_lineage_for_history_page(id).await?;
++    if lineage.root_rollout_id() != selected.rollout_id
++        || lineage.leaf_path() != selected.path.as_path()
++        || lineage.segments().is_empty()
++        || lineage
++            .segments()
++            .iter()
++            .any(|segment| segment.thread_id() != id || segment.filters_items())
++    {
++        return Err(ThreadStoreError::Conflict {
++            message: "unsupported attached history lineage".to_string(),
++        });
++    }
++    let mut identities = Vec::with_capacity(lineage.segments().len());
++    for segment in lineage.segments() {
++        let Some(identity) = leaf_identity(segment.rollout_path()).await else {
++            return Err(ThreadStoreError::Conflict {
++                message: "attached history source is unavailable".to_string(),
++            });
++        };
++        identities.push(identity);
++    }
++    Ok(Some(DiscoveredLineage {
++        attached: true,
+         lineage,
+         identities,
+     }))
+@@ -616,20 +955,31 @@ pub(super) async fn discover_cached(
+     id: ThreadId,
+     cached: &UncertifiedItemScan,
+ ) -> ThreadStoreResult<Option<DiscoveredLineage>> {
++    if cached.attached {
++        let Some(current) = discover_attached(store, id).await? else {
++            return Ok(None);
++        };
++        let Some((root, ancestors)) = current.lineage.segments().split_last() else {
++            return Ok(None);
++        };
++        let mut normalized = root.clone();
++        normalized.physical_size = cached.root.physical_size;
++        normalized.end_byte_offset = cached.root.end_byte_offset;
++        normalized.jsonl_end_byte_offset = cached.root.jsonl_end_byte_offset;
++        if normalized != cached.root
++            || ancestors != cached.ancestors
++            || current.identities[..current.identities.len() - 1] != cached.identities
++        {
++            return Ok(None);
++        }
++        return Ok(Some(current));
++    }
+     let walk = HistoryPageWalk::new(store, id).await?;
+     if walk.root_rollout_id() != cached.root.rollout_id()
+         || walk.root_path() != cached.root.rollout_path()
+-        || !walk.selected_is_current().await?
+     {
+         return Ok(None);
+     }
+-    let Some(identity) = leaf_identity(walk.root_path()).await else {
+-        return Ok(None);
+-    };
+-    let Ok(head) = read_rollout_head(walk.root_path()).await else {
+-        return Ok(None);
+-    };
+-    let meta = &head.session_meta.meta;
+     let expected_base = match cached.ancestors.last() {
+         Some(segment) => {
+             let Some((ordinal, offset)) =
+@@ -645,61 +995,128 @@ pub(super) async fn discover_cached(
+         }
+         None => None,
+     };
+-    if meta.id != id
+-        || meta.history_mode != ThreadHistoryMode::Paginated
+-        || meta.attached_thread
+-        || meta.subagent_history_start_ordinal.is_some()
+-        || meta.history_base != expected_base
+-        || head.leading_reference.is_some()
+-        || head.first_local_ordinal != cached.root.start_ordinal()
+-        || leaf_identity(walk.root_path()).await.as_ref() != Some(&identity)
+-    {
+-        return Ok(None);
+-    }
+-    let Ok(paths) =
+-        codex_rollout::index_rollout_paths_by_rollout_id(&store.config.codex_home).await
+-    else {
+-        return Ok(None);
++    let path_snapshot = {
++        let mut snapshot = cached.path_snapshot.lock().await;
++        if let Some(current) = snapshot.as_ref()
++            && current.is_current().await
++        {
++            Some(current.clone())
++        } else {
++            let ids = cached
++                .ancestors
++                .iter()
++                .map(RolloutLineageSegment::rollout_id)
++                .collect();
++            let Ok(current) =
++                codex_rollout::snapshot_rollout_paths_by_rollout_id(&store.config.codex_home, &ids)
++                    .await
++            else {
++                return Ok(None);
++            };
++            *snapshot = current.map(Arc::new);
++            snapshot.clone()
++        }
+     };
+-    if cached.ancestors.iter().any(|segment| {
+-        paths
+-            .get(&segment.rollout_id())
+-            .is_none_or(|path| path != segment.rollout_path())
+-    }) {
+-        return Ok(None);
++    if let Some(snapshot) = &path_snapshot {
++        if cached.ancestors.iter().any(|segment| {
++            snapshot
++                .get(&segment.rollout_id())
++                .is_none_or(|path| path != segment.rollout_path())
++        }) {
++            return Ok(None);
++        }
++    } else {
++        // Fall back when directory identities cannot establish a stable snapshot.
++        let Ok(paths) =
++            codex_rollout::index_rollout_paths_by_rollout_id(&store.config.codex_home).await
++        else {
++            return Ok(None);
++        };
++        if cached.ancestors.iter().any(|segment| {
++            paths
++                .get(&segment.rollout_id())
++                .is_none_or(|path| path != segment.rollout_path())
++        }) {
++            return Ok(None);
++        }
+     }
+-    let Ok(metadata) = tokio::fs::metadata(walk.root_path()).await else {
+-        return Ok(None);
+-    };
+-    let mut root = cached.root.clone();
+-    root.physical_size = Some(metadata.len());
+-    root.end_byte_offset = Some(metadata.len());
+-    root.jsonl_end_byte_offset = Some(metadata.len());
+-    let mut segments = cached.ancestors.clone();
+-    segments.push(root);
+-    let mut identities = cached.identities.clone();
+-    identities.push(identity);
+-    let graph = DiscoveredLineage {
+-        lineage: RolloutLineage::from_segments(
+-            id,
+-            walk.root_rollout_id(),
+-            walk.root_path().to_path_buf(),
+-            segments,
+-        ),
+-        identities,
+-    };
+-    if !identities_unchanged(&graph).await {
++    if !source_identities_unchanged(&cached.ancestors, &cached.identities).await
++        || !walk.selected_is_current().await?
++    {
+         return Ok(None);
+     }
+-    Ok(Some(graph))
++    #[cfg(test)]
++    pause_index_validation(id).await;
++    // Capture the mutable root after the potentially slow predecessor checks.
++    for _ in 0..4 {
++        let Some(identity) = leaf_identity(walk.root_path()).await else {
++            return Ok(None);
++        };
++        let head = if let Some(head) =
++            read_cached_compacted_head(walk.root_path(), cached.root.physical_size).await?
++        {
++            head
++        } else {
++            let Ok(head) = read_rollout_head(walk.root_path()).await else {
++                return Ok(None);
++            };
++            head
++        };
++        if leaf_identity(walk.root_path()).await.as_ref() != Some(&identity) {
++            continue;
++        }
++        let meta = &head.session_meta.meta;
++        if meta.id != id
++            || meta.history_mode != ThreadHistoryMode::Paginated
++            || meta.attached_thread
++            || meta.subagent_history_start_ordinal.is_some()
++            || meta.history_base != expected_base
++            || head.leading_reference.is_some()
++            || head.first_local_ordinal != cached.root.start_ordinal()
++        {
++            return Ok(None);
++        }
++        if let Some(snapshot) = &path_snapshot
++            && !snapshot.is_current().await
++        {
++            return Ok(None);
++        }
++        let mut root = cached.root.clone();
++        root.physical_size = Some(identity.size());
++        root.end_byte_offset = Some(identity.size());
++        root.jsonl_end_byte_offset = Some(identity.size());
++        let mut segments = cached.ancestors.clone();
++        segments.push(root);
++        let mut identities = cached.identities.clone();
++        identities.push(identity);
++        return Ok(Some(DiscoveredLineage {
++            attached: false,
++            lineage: RolloutLineage::from_segments(
++                id,
++                walk.root_rollout_id(),
++                walk.root_path().to_path_buf(),
++                segments,
++            ),
++            identities,
++        }));
++    }
++    Ok(None)
+ }
+
+ async fn identities_unchanged(graph: &DiscoveredLineage) -> bool {
+-    let sources = graph
+-        .lineage
+-        .segments()
++    source_identities_unchanged(graph.lineage.segments(), &graph.identities).await
++}
++
++async fn source_identities_unchanged(
++    segments: &[RolloutLineageSegment],
++    identities: &[FileIdentity],
++) -> bool {
++    if segments.len() != identities.len() {
++        return false;
++    }
++    let sources = segments
+         .iter()
+-        .zip(&graph.identities)
++        .zip(identities)
+         .map(|(segment, identity)| (segment.rollout_path().to_path_buf(), identity.clone()))
+         .collect::<Vec<_>>();
+     futures::stream::iter(sources)
+@@ -713,17 +1130,10 @@ async fn identities_unchanged(graph: &DiscoveredLineage) -> bool {
+
+ async fn ancestor_identities_unchanged(graph: &DiscoveredLineage) -> bool {
+     let count = graph.lineage.segments().len().saturating_sub(1);
+-    let sources = graph.lineage.segments()[..count]
+-        .iter()
+-        .zip(&graph.identities[..count])
+-        .map(|(segment, identity)| (segment.rollout_path().to_path_buf(), identity.clone()))
+-        .collect::<Vec<_>>();
+-    futures::stream::iter(sources)
+-    .map(|(path, expected)| async move {
+-        leaf_identity(&path).await.as_ref() == Some(&expected)
+-    })
+-    .buffer_unordered(16)
+-    .all(|same| async move { same })
++    source_identities_unchanged(
++        &graph.lineage.segments()[..count],
++        &graph.identities[..count],
++    )
+     .await
+ }
+
+@@ -743,7 +1153,7 @@ pub(super) async fn scan_ancestors(
+                 (
+                     index,
+                     tokio::task::spawn_blocking(move || {
+-                        scan_source(&segment, None, true, None, true, &stop)
++                        scan_source(&segment, None, true, None, true, &stop, None)
+                     })
+                     .await,
+                 )
+@@ -799,9 +1209,11 @@ pub(super) async fn scan_ancestors(
+         anchors.extend(scan.anchors);
+     }
+     Ok(Some(UncertifiedItemScan {
++        attached: graph.attached,
+         root,
+         ancestors: segments[..segments.len() - 1].to_vec(),
+         identities: graph.identities[..graph.identities.len() - 1].to_vec(),
++        path_snapshot: tokio::sync::Mutex::new(None),
+         turn_ids,
+         turn_segments,
+         turn_events,
+@@ -860,7 +1272,7 @@ struct ItemIdentity<'a> {
+ }
+
+ /// The original creation position of an item in a selected physical source.
+-#[derive(Clone)]
++#[derive(Clone, serde::Serialize, serde::Deserialize)]
+ pub(super) struct SourceItemAnchor {
+     pub(super) ordinal: u64,
+     pub(super) owner: ThreadId,
+@@ -896,6 +1308,7 @@ pub(super) struct SourceScan {
+     summary_bytes: usize,
+     pub(super) anchors: Vec<SourceItemAnchor>,
+     anchor_bytes: usize,
++    pub(super) root_snapshot: Option<RootSnapshot>,
+ }
+
+ fn check_summary_source_size(bytes: usize) -> io::Result<()> {
+@@ -916,9 +1329,30 @@ fn scan_source(
+     summary_turns: Option<&HashSet<String>>,
+     collect_anchors: bool,
+     stop: &Arc<AtomicBool>,
++    root_guard: Option<&RootReadGuard>,
+ ) -> io::Result<Option<SourceScan>> {
+     let path = segment.rollout_path();
+     let file = std::fs::File::open(path)?;
++    let root_file = if let Some(guard) = root_guard {
++        let Some(opened) = file_identity(&file.metadata()?) else {
++            return Ok(None);
++        };
++        let Some(selected) = file_identity(&std::fs::symlink_metadata(path)?) else {
++            return Ok(None);
++        };
++        let valid = if guard.require_exact_identity {
++            opened == guard.identity && selected == guard.identity
++        } else {
++            guard.identity.same_file_with_at_least(&opened)
++                && guard.identity.same_file_with_at_least(&selected)
++        };
++        if !valid {
++            return Ok(None);
++        }
++        Some(file.try_clone()?)
++    } else {
++        None
++    };
+     let source: Box<dyn Read> = if path.extension().and_then(|s| s.to_str()) == Some("zst") {
+         Box::new(zstd::stream::read::Decoder::new(file)?)
+     } else {
+@@ -935,45 +1369,94 @@ fn scan_source(
+     let mut bytes = Vec::new();
+     let mut offset = 0_u64;
+     let mut previous = None;
++    let mut record_index = 0_usize;
+     let mut result = SourceScan::default();
+     let mut items: HashMap<String, (i64, StoredThreadItem)> = HashMap::new();
++    let mut root_digest = root_guard.map(|_| Sha256::new());
+     loop {
++        if root_guard.is_some_and(|guard| offset == guard.identity.size()) {
++            break;
++        }
+         bytes.clear();
++        let remaining = root_guard
++            .map(|guard| guard.identity.size().saturating_sub(offset))
++            .unwrap_or(u64::MAX);
+         let count = reader
+             .by_ref()
+-            .take(16 * 1024 * 1024 + 1)
++            .take(remaining.min(16 * 1024 * 1024 + 1))
+             .read_until(b'\n', &mut bytes)?;
+         if count == 0 {
+-            if boundary.is_some_and(|(_, end)| end != offset) {
++            if boundary.is_some_and(|(_, end)| end != offset)
++                || root_guard.is_some_and(|guard| guard.identity.size() != offset)
++            {
+                 return Ok(None);
+             }
+             break;
+         }
++        if let Some(digest) = &mut root_digest {
++            digest.update(&bytes);
++        }
+         let next = offset
+             .checked_add(count as u64)
+             .ok_or_else(|| io::Error::other("history offset overflow"))?;
+         if bytes.last() != Some(&b'\n') || bytes.len() > 16 * 1024 * 1024 {
+             return Ok(None);
+         }
+-        let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
+-            return Ok(None);
++        let (ordinal, record) = if record_index == 1 && has_canonical_compacted_header(&bytes) {
++            let Ok(UniqueRolloutValue(value)) =
++                serde_json::from_slice::<UniqueRolloutValue>(&bytes)
++            else {
++                return Ok(None);
++            };
++            let Ok(Some(codex_rollout::RolloutLine {
++                ordinal: Some(ordinal),
++                item: codex_rollout::RolloutItem::Compacted(_),
++                ..
++            })) = codex_rollout::RolloutRecorder::parse_rollout_line_value(value)
++            else {
++                return Ok(None);
++            };
++            (ordinal, None)
++        } else {
++            let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
++                return Ok(None);
++            };
++            if record_index == 1 && record.kind == "compacted" {
++                match codex_rollout::RolloutRecorder::parse_rollout_line_bytes(&bytes) {
++                    Ok(Some(codex_rollout::RolloutLine {
++                        item: codex_rollout::RolloutItem::Compacted(_),
++                        ..
++                    })) => {}
++                    _ => return Ok(None),
++                }
++            }
++            (record.ordinal, Some(record))
+         };
++        record_index += 1;
+         if let Some((end_ordinal, end_offset)) = boundary {
+             if offset == end_offset {
+-                if record.ordinal < end_ordinal {
++                if ordinal < end_ordinal {
+                     return Ok(None);
+                 }
+                 io::copy(&mut reader, &mut io::sink())?;
+                 break;
+             }
+-            if offset > end_offset || next > end_offset || record.ordinal >= end_ordinal {
++            if offset > end_offset || next > end_offset || ordinal >= end_ordinal {
+                 return Ok(None);
+             }
+         }
+-        if previous.is_some_and(|value: u64| value.checked_add(1) != Some(record.ordinal)) {
++        if previous.is_some_and(|value: u64| value.checked_add(1) != Some(ordinal)) {
+             return Ok(None);
+         }
+-        previous = Some(record.ordinal);
++        previous = Some(ordinal);
++        if ordinal < segment.start_ordinal() && segment.history_page_start.is_some() {
++            offset = next;
++            continue;
++        }
++        let Some(record) = record else {
++            offset = next;
++            continue;
++        };
+         if record.kind == "rollout_reference" || record.kind == "fork_reference" {
+             return Ok(None);
+         }
+@@ -1130,6 +1613,28 @@ fn scan_source(
+         }
+         offset = next;
+     }
++    if let (Some(guard), Some(file), Some(digest)) = (root_guard, root_file, root_digest) {
++        let Some(opened) = file_identity(&file.metadata()?) else {
++            return Ok(None);
++        };
++        let Some(selected) = file_identity(&std::fs::symlink_metadata(path)?) else {
++            return Ok(None);
++        };
++        let digest: [u8; 32] = digest.finalize().into();
++        if !guard.identity.same_file_with_at_least(&opened)
++            || !guard.identity.same_file_with_at_least(&selected)
++            || guard
++                .expected_digest
++                .is_some_and(|expected| expected != digest)
++        {
++            return Ok(None);
++        }
++        result.root_snapshot = Some(RootSnapshot {
++            identity: guard.identity.clone(),
++            digest,
++            file: Arc::new(file),
++        });
++    }
+     result.items = items.into_values().collect();
+     result.items.sort_by_key(|item| item.0);
+     Ok(Some(result))
+@@ -1139,8 +1644,17 @@ fn scan_source(
+ mod tests {
+     use super::ItemComparison;
+     use super::MAX_SUMMARY_SOURCE_BYTES;
++    use super::UniqueRolloutValue;
+     use super::check_summary_source_size;
+     use super::compare_item_json;
++    use super::has_canonical_compacted_header;
++
++    #[test]
++    fn compacted_envelope_rejects_duplicate_known_fields() {
++        let bytes = br#"{"timestamp":"2026-07-16T00:00:00Z","ordinal":1,"type":"compacted","payload":{"message":"x"},"ordinal":2}"#;
++        assert!(has_canonical_compacted_header(bytes));
++        assert!(serde_json::from_slice::<UniqueRolloutValue>(bytes).is_err());
++    }
+
+     #[test]
+     fn item_comparison_accepts_only_known_missing_null_defaults() {
+diff --git a/codex-rs/thread-store/src/local/thread_history/uncertified_items/persistent_scan.rs b/codex-rs/thread-store/src/local/thread_history/uncertified_items/persistent_scan.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cd5fda0f6f0eb32ad14960293b2e87c8c2fa62d
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/thread_history/uncertified_items/persistent_scan.rs
+@@ -0,0 +1,340 @@
++//! Optional persisted copies of complete, source-verified predecessor scans.
++
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::io;
++use std::io::Write;
++use std::sync::Arc;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use sha2::Digest;
++use sha2::Sha256;
++
++use super::LocalThreadStore;
++use super::MAX_ANCESTOR_TURN_BYTES;
++use super::MAX_ANCESTOR_TURNS;
++use super::MAX_ANCHOR_BYTES;
++use super::SourceTurnEvent;
++use super::UncertifiedItemScan;
++
++// Change the version whenever source-scan or cached-record semantics change.
++const SCAN_VERSION: i64 = 1;
++const MAX_PERSISTED_BYTES: usize = 64 * 1024 * 1024;
++const MAX_PERSISTED_SCANS: i64 = 8;
++const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
++
++/// The scan contains turn metadata, not the summary items read for a particular page.
++pub(super) mod turn_events {
++    use codex_app_server_protocol::ThreadHistoryTurnMetadata;
++    use codex_app_server_protocol::TurnError;
++    use codex_app_server_protocol::TurnStatus;
++    use codex_protocol::ThreadId;
++    use serde::Deserialize;
++    use serde::Deserializer;
++    use serde::Serialize;
++    use serde::Serializer;
++    use serde::ser::Error;
++    use serde::ser::SerializeSeq;
++
++    use super::super::SourceTurnEvent;
++
++    #[derive(Serialize)]
++    struct TurnRef<'a> {
++        ordinal: u64,
++        owner: ThreadId,
++        turn_id: &'a str,
++        root_turn_id: &'a Option<String>,
++        status: &'a TurnStatus,
++        error: &'a Option<TurnError>,
++        started_at: Option<i64>,
++        completed_at: Option<i64>,
++        duration_ms: Option<i64>,
++    }
++
++    #[derive(Deserialize)]
++    struct Turn {
++        ordinal: u64,
++        owner: ThreadId,
++        turn_id: String,
++        root_turn_id: Option<String>,
++        status: TurnStatus,
++        error: Option<TurnError>,
++        started_at: Option<i64>,
++        completed_at: Option<i64>,
++        duration_ms: Option<i64>,
++    }
++
++    pub(in crate::local) fn serialize<S: Serializer>(
++        events: &[SourceTurnEvent],
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        let mut sequence = serializer.serialize_seq(Some(events.len()))?;
++        for event in events {
++            let SourceTurnEvent::Turn(ordinal, owner, turn) = event else {
++                return Err(S::Error::custom(
++                    "unexpected summary item in predecessor scan",
++                ));
++            };
++            sequence.serialize_element(&TurnRef {
++                ordinal: *ordinal,
++                owner: *owner,
++                turn_id: &turn.turn_id,
++                root_turn_id: &turn.root_turn_id,
++                status: &turn.status,
++                error: &turn.error,
++                started_at: turn.started_at,
++                completed_at: turn.completed_at,
++                duration_ms: turn.duration_ms,
++            })?;
++        }
++        sequence.end()
++    }
++
++    pub(in crate::local) fn deserialize<'de, D: Deserializer<'de>>(
++        deserializer: D,
++    ) -> Result<Vec<SourceTurnEvent>, D::Error> {
++        Vec::<Turn>::deserialize(deserializer).map(|turns| {
++            turns
++                .into_iter()
++                .map(|turn| {
++                    SourceTurnEvent::Turn(
++                        turn.ordinal,
++                        turn.owner,
++                        ThreadHistoryTurnMetadata {
++                            turn_id: turn.turn_id,
++                            root_turn_id: turn.root_turn_id,
++                            status: turn.status,
++                            error: turn.error,
++                            started_at: turn.started_at,
++                            completed_at: turn.completed_at,
++                            duration_ms: turn.duration_ms,
++                        },
++                    )
++                })
++                .collect()
++        })
++    }
++}
++
++/// Refuses serialization before allocating more than the persistent cache limit.
++#[derive(Default)]
++struct BoundedBytes(Vec<u8>);
++
++impl Write for BoundedBytes {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        if bytes.len() > MAX_PERSISTED_BYTES.saturating_sub(self.0.len()) {
++            return Err(io::Error::other(
++                "source scan exceeds persistent cache limit",
++            ));
++        }
++        self.0.extend_from_slice(bytes);
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++/// Loads only scans published by this version and anchored to an existing projection row.
++pub(super) async fn load(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    root_rollout_id: ThreadId,
++) -> Option<Arc<UncertifiedItemScan>> {
++    let pool = store.thread_history_db().await.ok()?;
++    let (bytes, digest): (Vec<u8>, Vec<u8>) = sqlx::query_as(
++        "SELECT scan, sha256 FROM frodex_source_scan_cache AS cache \
++         WHERE cache.thread_id = ? AND cache.root_id = ? AND cache.version = ? \
++         AND length(cache.scan) <= ? \
++         AND EXISTS (SELECT 1 FROM thread_history_projection_state AS state \
++                     WHERE state.thread_id = cache.root_id) \
++         AND 2 = (SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN \
++                  ('frodex_source_scan_root_delete', 'frodex_source_scan_root_move'))",
++    )
++    .bind(thread_id.to_string())
++    .bind(root_rollout_id.to_string())
++    .bind(SCAN_VERSION)
++    .bind(MAX_PERSISTED_BYTES as i64)
++    .fetch_optional(pool)
++    .await
++    .ok()??;
++    tokio::task::spawn_blocking(move || {
++        let actual: [u8; 32] = Sha256::digest(&bytes).into();
++        if actual.as_slice() != digest.as_slice() {
++            return None;
++        }
++        let scan: UncertifiedItemScan = serde_json::from_slice(&bytes).ok()?;
++        validate(scan, thread_id, root_rollout_id).map(Arc::new)
++    })
++    .await
++    .ok()?
++}
++
++/// Rejects malformed cached data before any segment index can be used as an array index.
++fn validate(
++    mut scan: UncertifiedItemScan,
++    thread_id: ThreadId,
++    root_rollout_id: ThreadId,
++) -> Option<UncertifiedItemScan> {
++    if scan.root.thread_id() != thread_id
++        || scan.root.rollout_id() != root_rollout_id
++        || scan.ancestors.is_empty()
++        || scan.ancestors.len() != scan.identities.len()
++        || scan.anchors.len() > MAX_ANCESTOR_TURNS
++        || scan.turn_events.len() > MAX_ANCESTOR_TURNS
++    {
++        return None;
++    }
++    let mut paths = HashSet::new();
++    if !paths.insert(scan.root.rollout_path()) {
++        return None;
++    }
++    let mut previous_end = None;
++    for (segment, identity) in scan.ancestors.iter().zip(&scan.identities) {
++        let end = segment.end_ordinal()?;
++        segment.jsonl_end_byte_offset()?;
++        if end < segment.start_ordinal()
++            || previous_end.is_some_and(|previous| previous > segment.start_ordinal())
++            || segment.physical_size != Some(identity.size())
++            || segment.filters_items()
++            || !paths.insert(segment.rollout_path())
++        {
++            return None;
++        }
++        previous_end = Some(end);
++    }
++    if previous_end.is_some_and(|end| end > scan.root.start_ordinal()) {
++        return None;
++    }
++    let find_segment = |owner, ordinal| {
++        let index = scan
++            .ancestors
++            .partition_point(|segment| segment.start_ordinal() <= ordinal)
++            .checked_sub(1)?;
++        let segment = &scan.ancestors[index];
++        (segment.thread_id() == owner && segment.contains_ordinal(ordinal)).then_some(index)
++    };
++    if scan.turn_events.iter().any(|event| match event {
++        SourceTurnEvent::Turn(ordinal, owner, _) => find_segment(*owner, *ordinal).is_none(),
++        SourceTurnEvent::SummaryItem(..) => true,
++    }) {
++        return None;
++    }
++    let mut turn_ids = HashSet::new();
++    let mut turn_segments: HashMap<String, Vec<usize>> = HashMap::new();
++    let mut anchor_bytes = 0_usize;
++    let mut turn_bytes = 0_usize;
++    let mut previous_anchor = None;
++    for anchor in &scan.anchors {
++        if previous_anchor.is_some_and(|previous| previous >= anchor.ordinal) {
++            return None;
++        }
++        previous_anchor = Some(anchor.ordinal);
++        anchor_bytes = anchor_bytes.saturating_add(anchor.turn_id.len() + anchor.item_id.len());
++        if anchor_bytes > MAX_ANCHOR_BYTES {
++            return None;
++        }
++        let index = find_segment(anchor.owner, anchor.ordinal)?;
++        if turn_ids.insert(anchor.turn_id.clone()) {
++            turn_bytes = turn_bytes.saturating_add(anchor.turn_id.len());
++            if turn_bytes > MAX_ANCESTOR_TURN_BYTES {
++                return None;
++            }
++        }
++        let indexes = turn_segments.entry(anchor.turn_id.clone()).or_default();
++        if indexes.last() != Some(&index) {
++            indexes.push(index);
++        }
++    }
++    scan.turn_ids = turn_ids;
++    scan.turn_segments = turn_segments;
++    Some(scan)
++}
++
++/// Best-effort publication; cache contention or an absent checkpoint never blocks history reads.
++pub(super) async fn save(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    root_rollout_id: ThreadId,
++    scan: Arc<UncertifiedItemScan>,
++) {
++    let eligible = tokio::time::timeout(WRITE_TIMEOUT, async {
++        let pool = store.thread_history_db().await.ok()?;
++        let found = sqlx::query_scalar::<_, i64>(
++            "SELECT EXISTS(SELECT 1 FROM thread_history_projection_state WHERE thread_id = ?)",
++        )
++        .bind(root_rollout_id.to_string())
++        .fetch_one(pool)
++        .await
++        .ok()?;
++        Some(found != 0)
++    })
++    .await
++    .ok()
++    .flatten()
++    .unwrap_or(false);
++    if !eligible {
++        return;
++    }
++    let encoded = tokio::task::spawn_blocking(move || {
++        let mut bytes = BoundedBytes::default();
++        serde_json::to_writer(&mut bytes, &*scan).ok()?;
++        let digest = Sha256::digest(&bytes.0).to_vec();
++        Some((bytes.0, digest))
++    })
++    .await
++    .ok()
++    .flatten();
++    let Some((bytes, digest)) = encoded else {
++        return;
++    };
++    let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
++        let pool = store.thread_history_db().await.ok()?;
++        let mut transaction = pool.begin().await.ok()?;
++        for statement in [
++            "CREATE TABLE IF NOT EXISTS frodex_source_scan_cache \
++             (thread_id TEXT NOT NULL, root_id TEXT PRIMARY KEY, version INTEGER NOT NULL, \
++              scan BLOB NOT NULL, sha256 BLOB NOT NULL)",
++            "CREATE TRIGGER IF NOT EXISTS frodex_source_scan_root_delete \
++             AFTER DELETE ON thread_history_projection_state BEGIN \
++             DELETE FROM frodex_source_scan_cache WHERE root_id = OLD.thread_id; END",
++            "CREATE TRIGGER IF NOT EXISTS frodex_source_scan_root_move \
++             AFTER UPDATE OF thread_id ON thread_history_projection_state \
++             WHEN OLD.thread_id != NEW.thread_id BEGIN \
++             DELETE FROM frodex_source_scan_cache WHERE root_id = OLD.thread_id; END",
++        ] {
++            sqlx::query(statement)
++                .execute(&mut *transaction)
++                .await
++                .ok()?;
++        }
++        sqlx::query(
++            "INSERT OR REPLACE INTO frodex_source_scan_cache \
++             (thread_id, root_id, version, scan, sha256) \
++             SELECT ?, ?, ?, ?, ? WHERE EXISTS \
++             (SELECT 1 FROM thread_history_projection_state WHERE thread_id = ?)",
++        )
++        .bind(thread_id.to_string())
++        .bind(root_rollout_id.to_string())
++        .bind(SCAN_VERSION)
++        .bind(bytes)
++        .bind(digest)
++        .bind(root_rollout_id.to_string())
++        .execute(&mut *transaction)
++        .await
++        .ok()?;
++        sqlx::query(
++            "DELETE FROM frodex_source_scan_cache WHERE rowid IN \
++             (SELECT rowid FROM frodex_source_scan_cache ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
++        )
++        .bind(MAX_PERSISTED_SCANS)
++        .execute(&mut *transaction)
++        .await
++        .ok()?;
++        transaction.commit().await.ok()?;
++        Some(())
++    })
++    .await;
++}
+diff --git a/codex-rs/thread-store/src/local/thread_history/uncertified_root_head.rs b/codex-rs/thread-store/src/local/thread_history/uncertified_root_head.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..51add464d78feee10e6285431fc52078b874e67f
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/thread_history/uncertified_root_head.rs
+@@ -0,0 +1,579 @@
++//! Bounded head lookup for source-backed pages with a compacted first record.
++
++use std::io::BufRead;
++use std::io::Read;
++use std::path::Path;
++
++use codex_rollout::RolloutItem;
++use codex_rollout::RolloutRecorder;
++use serde::de::DeserializeSeed;
++use serde::de::Error;
++use serde::de::MapAccess;
++use serde::de::Visitor;
++
++use super::super::rollout_lineage::RolloutHead;
++use super::thread_history_error;
++use crate::ThreadStoreResult;
++
++const MAX_METADATA_BYTES: u64 = 64 * 1024;
++const MAX_HEADER_BYTES: u64 = 64 * 1024;
++
++/// Fields needed to identify the first local compacted record before its payload.
++#[derive(Default)]
++struct HeaderFields {
++    timestamp: bool,
++    ordinal: Option<u64>,
++    kind: Option<String>,
++    complete: bool,
++}
++
++struct HeaderSeed<'a>(&'a mut HeaderFields);
++
++/// Recognizes the same bounded header in a complete record before full typed validation.
++pub(super) fn has_canonical_compacted_header(bytes: &[u8]) -> bool {
++    let prefix = &bytes[..bytes.len().min(MAX_HEADER_BYTES as usize)];
++    let mut fields = HeaderFields::default();
++    let mut deserializer = serde_json::Deserializer::from_slice(prefix);
++    let _ = HeaderSeed(&mut fields).deserialize(&mut deserializer);
++    fields.complete && fields.kind.as_deref() == Some("compacted")
++}
++
++impl<'de> DeserializeSeed<'de> for HeaderSeed<'_> {
++    type Value = ();
++
++    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
++        struct FieldsVisitor<'a>(&'a mut HeaderFields);
++        impl<'de> Visitor<'de> for FieldsVisitor<'_> {
++            type Value = ();
++
++            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++                formatter.write_str("a rollout record object")
++            }
++
++            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
++                while let Some(key) = map.next_key::<String>()? {
++                    match key.as_str() {
++                        "timestamp" if !self.0.timestamp => {
++                            let _: String = map.next_value()?;
++                            self.0.timestamp = true;
++                        }
++                        "ordinal" if self.0.timestamp && self.0.ordinal.is_none() => {
++                            self.0.ordinal = Some(map.next_value()?);
++                        }
++                        "type" if self.0.ordinal.is_some() && self.0.kind.is_none() => {
++                            self.0.kind = Some(map.next_value()?);
++                        }
++                        _ => return Err(M::Error::custom("noncanonical header")),
++                    }
++                    if self.0.ordinal.is_some() && self.0.kind.is_some() {
++                        self.0.complete = true;
++                        return Err(M::Error::custom("header fields captured"));
++                    }
++                }
++                Ok(())
++            }
++        }
++        deserializer.deserialize_map(FieldsVisitor(self.0))
++    }
++}
++
++/// Falls back unless the cached root already included a canonical compacted record header.
++pub(super) async fn read_cached_compacted_head(
++    path: &Path,
++    cached_size: Option<u64>,
++) -> ThreadStoreResult<Option<RolloutHead>> {
++    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
++        return Ok(None);
++    }
++    let Some(cached_size) = cached_size else {
++        return Ok(None);
++    };
++    if cached_size <= MAX_METADATA_BYTES {
++        return Ok(None);
++    }
++    let path = path.to_path_buf();
++    tokio::task::spawn_blocking(move || read_cached_compacted_head_blocking(&path, cached_size))
++        .await
++        .map_err(thread_history_error)
++}
++
++/// Reads a native predecessor's compacted header; the caller must validate its complete prefix.
++pub(in crate::local) async fn read_deferred_compacted_head(
++    path: &Path,
++) -> ThreadStoreResult<Option<RolloutHead>> {
++    let path = path.to_path_buf();
++    tokio::task::spawn_blocking(move || {
++        let file = std::fs::File::open(&path).ok()?;
++        let source: Box<dyn Read> = match path.extension().and_then(|value| value.to_str()) {
++            Some("zst") => Box::new(zstd::stream::read::Decoder::new(file).ok()?),
++            Some("jsonl") => Box::new(file),
++            _ => return None,
++        };
++        read_compacted_head(std::io::BufReader::new(source), None)
++    })
++    .await
++    .map_err(thread_history_error)
++}
++
++fn read_cached_compacted_head_blocking(path: &Path, cached_size: u64) -> Option<RolloutHead> {
++    let file = std::fs::File::open(path).ok()?;
++    read_compacted_head(std::io::BufReader::new(file), Some(cached_size))
++}
++
++fn read_compacted_head<R: BufRead>(
++    mut reader: R,
++    decoded_size: Option<u64>,
++) -> Option<RolloutHead> {
++    let mut metadata_line = Vec::new();
++    reader
++        .by_ref()
++        .take(MAX_METADATA_BYTES)
++        .read_until(b'\n', &mut metadata_line)
++        .ok()?;
++    if metadata_line.last() != Some(&b'\n') {
++        return None;
++    }
++    let first = RolloutRecorder::parse_rollout_line_bytes(&metadata_line).ok()??;
++    let RolloutItem::SessionMeta(session_meta) = first.item else {
++        return None;
++    };
++    // Match read_rollout_head's overflow check even when a second record exists.
++    session_meta
++        .meta
++        .history_base
++        .map_or(first.ordinal.unwrap_or(0), |base| {
++            base.end_ordinal_exclusive
++        })
++        .checked_add(1)?;
++    let remaining = match decoded_size {
++        Some(size) => size.checked_sub(u64::try_from(metadata_line.len()).ok()?)?,
++        None => MAX_HEADER_BYTES,
++    };
++    let mut reader = reader.take(remaining.min(MAX_HEADER_BYTES));
++    let mut bytes = Vec::new();
++    let mut chunk = [0_u8; 4096];
++    loop {
++        let count = reader.read(&mut chunk).ok()?;
++        if count == 0 {
++            return None;
++        }
++        bytes.extend_from_slice(&chunk[..count]);
++        let mut fields = HeaderFields::default();
++        let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
++        let parsed = HeaderSeed(&mut fields).deserialize(&mut deserializer);
++        if fields.complete {
++            if fields.kind.as_deref() != Some("compacted") {
++                return None;
++            }
++            return Some(RolloutHead {
++                session_meta: *session_meta,
++                session_meta_ordinal: first.ordinal,
++                leading_reference: None,
++                first_local_ordinal: fields.ordinal?,
++                has_local_history: true,
++            });
++        }
++        if !parsed.is_err_and(|error| error.is_eof()) {
++            return None;
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::path::Path;
++    use std::time::Instant;
++
++    use codex_protocol::ThreadId;
++    use codex_protocol::protocol::HistoryPosition;
++    use codex_protocol::protocol::SessionMeta;
++    use codex_protocol::protocol::SessionMetaLine;
++    use codex_rollout::CompactedItem;
++    use codex_rollout::RolloutItem;
++    use codex_rollout::RolloutLine;
++
++    use super::MAX_HEADER_BYTES;
++    use super::MAX_METADATA_BYTES;
++    use super::read_cached_compacted_head;
++    use super::read_compacted_head;
++    use super::read_deferred_compacted_head;
++    use crate::local::rollout_lineage::read_rollout_head;
++
++    fn write_fixture(path: &Path, second_line: &str) -> usize {
++        let thread_id = ThreadId::new();
++        let first = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(6),
++            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
++                meta: SessionMeta {
++                    id: thread_id,
++                    originator: "x".repeat(12_000),
++                    ..SessionMeta::default()
++                },
++                git: None,
++            })),
++        };
++        let first = serde_json::to_string(&first).unwrap();
++        std::fs::write(path, format!("{first}\n{second_line}\n")).unwrap();
++        first.len() + 1
++    }
++
++    fn compacted(message: String) -> CompactedItem {
++        CompactedItem {
++            message,
++            replacement_history: None,
++            retained_context: None,
++            retained_context_replay: None,
++            guardian_history: None,
++            mcp_resource_origins: None,
++            window_number: None,
++            first_window_id: None,
++            previous_window_id: None,
++            window_id: None,
++            compaction_response_id: None,
++            latest_token_usage_record: None,
++            resume_metadata: None,
++            segment_state_checkpoint: None,
++        }
++    }
++
++    #[tokio::test]
++    async fn compacted_header_matches_full_reader_without_scanning_payload() {
++        let home = tempfile::tempdir().unwrap();
++        let path = home.path().join("root.jsonl");
++        let second = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(7),
++            item: RolloutItem::Compacted(Box::new(compacted("x".repeat(872_000)))),
++        };
++        let metadata_size = write_fixture(&path, &serde_json::to_string(&second).unwrap());
++        let cached_size = std::fs::metadata(&path).unwrap().len();
++        let fast = read_cached_compacted_head(&path, Some(cached_size))
++            .await
++            .unwrap()
++            .expect("canonical compacted header");
++        let full = read_rollout_head(&path).await.unwrap();
++        assert_eq!(
++            serde_json::to_value(&fast.session_meta.meta).unwrap(),
++            serde_json::to_value(&full.session_meta.meta).unwrap()
++        );
++        assert_eq!(fast.session_meta_ordinal, full.session_meta_ordinal);
++        assert_eq!(fast.first_local_ordinal, full.first_local_ordinal);
++        assert_eq!(fast.has_local_history, full.has_local_history);
++        assert!(fast.leading_reference.is_none());
++        assert!(
++            read_cached_compacted_head(&path, Some(metadata_size as u64))
++                .await
++                .unwrap()
++                .is_none(),
++            "a record absent from the cached root must use the full reader"
++        );
++
++        let start = Instant::now();
++        for _ in 0..10 {
++            assert!(
++                read_cached_compacted_head(&path, Some(cached_size))
++                    .await
++                    .unwrap()
++                    .is_some()
++            );
++        }
++        let fast_elapsed = start.elapsed();
++        let start = Instant::now();
++        for _ in 0..10 {
++            read_rollout_head(&path).await.unwrap();
++        }
++        let full_elapsed = start.elapsed();
++        eprintln!("10 synthetic 872 KB heads: bounded={fast_elapsed:?}, full={full_elapsed:?}");
++    }
++
++    #[tokio::test]
++    async fn compressed_deferred_head_reads_only_a_bounded_decoded_prefix() {
++        use std::io::Read;
++        use std::sync::Arc;
++        use std::sync::atomic::AtomicUsize;
++        use std::sync::atomic::Ordering;
++
++        struct Counted<R> {
++            inner: R,
++            bytes: Arc<AtomicUsize>,
++        }
++
++        impl<R: Read> Read for Counted<R> {
++            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
++                let count = self.inner.read(buffer)?;
++                self.bytes.fetch_add(count, Ordering::Relaxed);
++                Ok(count)
++            }
++        }
++
++        let home = tempfile::tempdir().unwrap();
++        let plain = home.path().join("ancestor.jsonl");
++        let compressed = home.path().join("ancestor.jsonl.zst");
++        let second = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(7),
++            item: RolloutItem::Compacted(Box::new(compacted("x".repeat(4_000_000)))),
++        };
++        write_fixture(&plain, &serde_json::to_string(&second).unwrap());
++        let encoded = zstd::encode_all(std::fs::read(&plain).unwrap().as_slice(), 0).unwrap();
++        std::fs::write(&compressed, &encoded).unwrap();
++        let fast = read_deferred_compacted_head(&compressed)
++            .await
++            .unwrap()
++            .expect("compressed canonical compacted header");
++        let full = read_rollout_head(&compressed).await.unwrap();
++        assert_eq!(
++            serde_json::to_value(&fast.session_meta.meta).unwrap(),
++            serde_json::to_value(&full.session_meta.meta).unwrap()
++        );
++        assert_eq!(fast.session_meta_ordinal, full.session_meta_ordinal);
++        assert_eq!(fast.first_local_ordinal, full.first_local_ordinal);
++        assert_eq!(fast.has_local_history, full.has_local_history);
++        assert!(fast.leading_reference.is_none());
++
++        let bytes = Arc::new(AtomicUsize::new(0));
++        let decoder = zstd::stream::read::Decoder::new(encoded.as_slice()).unwrap();
++        let counted = Counted {
++            inner: decoder,
++            bytes: bytes.clone(),
++        };
++        assert!(read_compacted_head(std::io::BufReader::new(counted), None).is_some());
++        let decoded = bytes.load(Ordering::Relaxed);
++        assert!(decoded <= (MAX_METADATA_BYTES + MAX_HEADER_BYTES) as usize + 8192);
++        assert!(
++            decoded < 100_000,
++            "decoded {decoded} bytes of a 4 MB payload"
++        );
++        let start = Instant::now();
++        for _ in 0..4 {
++            assert!(
++                read_deferred_compacted_head(&compressed)
++                    .await
++                    .unwrap()
++                    .is_some()
++            );
++        }
++        let bounded = start.elapsed();
++        let start = Instant::now();
++        for _ in 0..4 {
++            read_rollout_head(&compressed).await.unwrap();
++        }
++        let full = start.elapsed();
++        eprintln!(
++            "4 synthetic compressed 4 MB compacted heads: bounded={bounded:?}, full={full:?}, bounded decoded bytes={decoded}"
++        );
++    }
++
++    #[tokio::test]
++    async fn noncanonical_and_reference_headers_use_full_reader() {
++        #[derive(serde::Serialize)]
++        struct Reordered<'a> {
++            timestamp: &'a str,
++            #[serde(rename = "type")]
++            kind: &'a str,
++            ordinal: u64,
++            payload: CompactedItem,
++        }
++
++        let home = tempfile::tempdir().unwrap();
++        let path = home.path().join("root.jsonl");
++        let compressed = home.path().join("ancestor.jsonl.zst");
++        let reordered = Reordered {
++            timestamp: "2026-07-16T00:00:00.000Z",
++            kind: "compacted",
++            ordinal: 7,
++            payload: compacted("x".repeat(872_000)),
++        };
++        write_fixture(&path, &serde_json::to_string(&reordered).unwrap());
++        let size = std::fs::metadata(&path).unwrap().len();
++        assert!(
++            read_cached_compacted_head(&path, Some(size))
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(
++            read_rollout_head(&path).await.unwrap().first_local_ordinal,
++            7
++        );
++        std::fs::write(
++            &compressed,
++            zstd::encode_all(std::fs::read(&path).unwrap().as_slice(), 0).unwrap(),
++        )
++        .unwrap();
++        assert!(
++            read_deferred_compacted_head(&compressed)
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(
++            read_rollout_head(&compressed)
++                .await
++                .unwrap()
++                .first_local_ordinal,
++            7
++        );
++
++        let reference = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(7),
++            item: RolloutItem::RolloutReference(codex_protocol::protocol::RolloutReferenceItem {
++                rollout_path: home.path().join("parent.jsonl"),
++                thread_id: None,
++                rollout_id: None,
++                rollout_timestamp: None,
++                segment_id: None,
++                max_depth: 2,
++                nth_user_message: None,
++                compacted_replacement_history_filter_texts: None,
++            }),
++        };
++        write_fixture(&path, &serde_json::to_string(&reference).unwrap());
++        let size = std::fs::metadata(&path).unwrap().len();
++        assert!(
++            read_cached_compacted_head(&path, Some(size))
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            read_rollout_head(&path)
++                .await
++                .unwrap()
++                .leading_reference
++                .is_some()
++        );
++        std::fs::write(
++            &compressed,
++            zstd::encode_all(std::fs::read(&path).unwrap().as_slice(), 0).unwrap(),
++        )
++        .unwrap();
++        assert!(
++            read_deferred_compacted_head(&compressed)
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            read_rollout_head(&compressed)
++                .await
++                .unwrap()
++                .leading_reference
++                .is_some()
++        );
++    }
++
++    #[tokio::test]
++    async fn oversized_compressed_metadata_uses_full_reader() {
++        let home = tempfile::tempdir().unwrap();
++        let compressed = home.path().join("ancestor.jsonl.zst");
++        let id = ThreadId::new();
++        let metadata = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(0),
++            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
++                meta: SessionMeta {
++                    id,
++                    originator: "m".repeat(MAX_METADATA_BYTES as usize),
++                    ..SessionMeta::default()
++                },
++                git: None,
++            })),
++        };
++        let second = RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(1),
++            item: RolloutItem::Compacted(Box::new(compacted("payload".to_string()))),
++        };
++        let contents = format!(
++            "{}\n{}\n",
++            serde_json::to_string(&metadata).unwrap(),
++            serde_json::to_string(&second).unwrap()
++        );
++        std::fs::write(
++            &compressed,
++            zstd::encode_all(contents.as_bytes(), 0).unwrap(),
++        )
++        .unwrap();
++        assert!(
++            read_deferred_compacted_head(&compressed)
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(
++            read_rollout_head(&compressed)
++                .await
++                .unwrap()
++                .first_local_ordinal,
++            1
++        );
++    }
++
++    #[tokio::test]
++    async fn overflow_uses_full_reader_for_cached_roots_and_compressed_predecessors() {
++        let home = tempfile::tempdir().unwrap();
++        let plain = home.path().join("root.jsonl");
++        let compressed = home.path().join("ancestor.jsonl.zst");
++
++        for (metadata_ordinal, base_ordinal, overflows) in [
++            (Some(u64::MAX), None, true),
++            (Some(0), Some(u64::MAX), true),
++            (Some(0), Some(u64::MAX - 1), false),
++        ] {
++            let id = ThreadId::new();
++            let metadata = RolloutLine {
++                timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++                ordinal: metadata_ordinal,
++                item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
++                    meta: SessionMeta {
++                        id,
++                        history_base: base_ordinal.map(|end_ordinal_exclusive| HistoryPosition {
++                            thread_id: ThreadId::new(),
++                            end_ordinal_exclusive,
++                            end_byte_offset: 0,
++                        }),
++                        ..SessionMeta::default()
++                    },
++                    git: None,
++                })),
++            };
++            let second = RolloutLine {
++                timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++                ordinal: Some(u64::MAX),
++                item: RolloutItem::Compacted(Box::new(compacted("x".repeat(100_000)))),
++            };
++            let contents = format!(
++                "{}\n{}\n",
++                serde_json::to_string(&metadata).unwrap(),
++                serde_json::to_string(&second).unwrap()
++            );
++            std::fs::write(&plain, &contents).unwrap();
++            std::fs::write(
++                &compressed,
++                zstd::encode_all(contents.as_bytes(), 0).unwrap(),
++            )
++            .unwrap();
++
++            let full = read_rollout_head(&compressed).await;
++            let root = read_cached_compacted_head(&plain, Some(contents.len() as u64))
++                .await
++                .unwrap();
++            let predecessor = read_deferred_compacted_head(&compressed).await.unwrap();
++            if overflows {
++                assert!(full.is_err());
++                assert!(root.is_none());
++                assert!(predecessor.is_none());
++            } else {
++                let full = full.unwrap();
++                assert_eq!(root.unwrap().first_local_ordinal, full.first_local_ordinal);
++                assert_eq!(
++                    predecessor.unwrap().first_local_ordinal,
++                    full.first_local_ordinal
++                );
++            }
++        }
++    }
++}
