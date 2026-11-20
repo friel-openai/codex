@@ -5361,7 +5361,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         "checkpoint publication must not mutate the shared parent envelopes"
     );
     {
-        let mut child_state = child.state.lock().await;
+        let child_state = child.state.lock().await;
         assert!(Arc::ptr_eq(
             &child_state.history.shared_annotated_items(),
             &source_response_items
@@ -5808,7 +5808,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         )
     }));
     {
-        let mut child_state = child.thread.session.state.lock().await;
+        let child_state = child.thread.session.state.lock().await;
         assert_eq!(
             child_state.reference_context_item(),
             Some(reference_context_item)

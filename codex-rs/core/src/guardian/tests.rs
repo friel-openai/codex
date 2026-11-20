@@ -22,7 +22,6 @@ use codex_config::NetworkDomainPermissionToml;
 use codex_config::NetworkDomainPermissionsToml;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
-use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::types::McpServerConfig;
 use codex_exec_server::LOCAL_FS;
