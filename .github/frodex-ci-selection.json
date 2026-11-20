@@ -590,7 +590,6 @@
         "suite::mcp_tool_cache::cached_http_mcp_starts_lazily_for_subagents::headers_helper_bypasses_cache",
         "suite::mcp_tool_cache::cached_http_mcp_starts_lazily_for_subagents::optional_server_uses_cache",
         "suite::mcp_tool_cache::cached_http_mcp_starts_lazily_for_subagents::required_server_uses_cache",
-        "suite::mcp_tool_cache::cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents",
         "suite::mcp_tool_cache::mcp_calls_stay_bound_to_each_thread",
         "suite::mcp_turn_metadata::mcp_tool_call_metadata_uses_captured_step_after_request_user_input",
         "suite::model_routing_streaming::completed_commentary_before_failure_is_not_duplicated",
@@ -646,6 +645,7 @@
         "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::uses_refreshed_executor_root",
         "suite::remote_env::ready_before_selection_resolves_resumed_thread_capability_root_after_wait::uses_refreshed_owner_root",
         "suite::rollout_compression::compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history",
+        "suite::scenarios::cached_stdio_stays_dormant_in_a_new_chat_until_first_use",
         "suite::scenarios::mcp_sharing::shared_mcp_keeps_tools_and_model_requested_input_per_chat",
         "suite::scenarios::model_catalog_refresh_preserves_tools_and_history",
         "suite::scenarios::reserved_spawn::cancelled_creation_cleans_registered_child",
@@ -667,7 +667,9 @@
         "suite::compact::manual_compact_twice_preserves_latest_user_messages",
         "suite::scenarios::audio_file::unsupported_steered_audio_is_rejected_before_continuation_and_resume",
         "suite::scenarios::audio_file::unsupported_uploaded_audio_fails_before_inference_without_poisoning_follow_up",
-        "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history",
+        "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history::_custom_tool_call_output_expects",
+        "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history::_function_call_output_expects",
+        "suite::scenarios::preparation::raw_injection_rejects_uploaded_audio_before_modifying_history::_message_expects",
         "suite::token_budget::new_context_tool_skips_auto_compact_fallback"
       ]
     },
