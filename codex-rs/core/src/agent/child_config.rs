@@ -14,7 +14,6 @@ use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
@@ -332,7 +331,7 @@ async fn apply_spawn_agent_role(
         .models_manager
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
-    if model_info.origin == ModelOrigin::Synthetic {
+    if model_info.origin.is_synthetic() {
         return Ok(());
     }
 

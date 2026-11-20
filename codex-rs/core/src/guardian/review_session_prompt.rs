@@ -9,7 +9,6 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelOrigin;
 use codex_tools::normalize_output_image_detail;
 use std::borrow::Cow;
 use tracing::warn;
@@ -69,7 +68,7 @@ pub(super) async fn build_guardian_prompt_items(
             / 100
     });
     let context_window =
-        context_window.filter(|limit| *limit > 0 && model_info.origin != ModelOrigin::Synthetic);
+        context_window.filter(|limit| *limit > 0 && !model_info.origin.is_synthetic());
     let image_mode = ImagePreparationMode::for_model(&params.spawn_config.features, model_info);
     let history_tokens = if context_window.is_some() && collected.sections.has_images() {
         let base_instructions = reviewer.session.get_base_instructions().await;
