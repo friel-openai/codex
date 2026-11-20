@@ -3487,6 +3487,28 @@ async fn segmented_legacy_projection_pages_full_turn_items() {
     assert_eq!(item_ids(&second_page), vec!["item-3"]);
     assert_eq!(second_page.items[0].started_at_ms, Some(13_100));
     assert_eq!(second_page.items[0].completed_at_ms, Some(13_200));
+
+    let base = item_params(
+        thread_id,
+        Some("turn-1"),
+        /*cursor*/ None,
+        /*page_size*/ 2,
+        SortDirection::Asc,
+    );
+    let mut by_id = base.clone();
+    by_id.item_ids = Some(vec!["item-1".to_string()]);
+    let mut by_update = base.clone();
+    by_update.sort_key = ItemSortKey::UpdatedAtOrdinal;
+    let mut after_update = base.clone();
+    after_update.after_updated_at_ordinal = Some(11);
+    let mut before_update = base;
+    before_update.before_updated_at_ordinal = Some(13);
+    for params in [by_id, by_update, after_update, before_update] {
+        assert!(matches!(
+            list_segmented_legacy_items(&store, params).await,
+            Err(ThreadStoreError::InvalidRequest { .. })
+        ));
+    }
 }
 
 #[tokio::test]
