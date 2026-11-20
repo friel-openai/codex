@@ -307,4 +307,5 @@ pub use environment_selection::TurnEnvironmentSnapshot;
 pub use environment_selection::validate_environment_ids_and_cwds;
 
 mod runtime_auth;
+pub use environment_selection::validate_environment_restatement_ids_and_cwds;
 pub use runtime_auth::build_runtime_auth_manager;
