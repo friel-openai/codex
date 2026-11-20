@@ -1527,8 +1527,16 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> Result<(), JSONRPCErrorError> {
+        let mcp_elicitations_auto_deny = xcode_26_4_mcp_elicitations_auto_deny(
+            app_server_client_name.as_deref(),
+            app_server_client_version.as_deref(),
+        );
         thread
-            .set_app_server_client_info(app_server_client_name, app_server_client_version)
+            .set_app_server_client_info(
+                app_server_client_name,
+                app_server_client_version,
+                mcp_elicitations_auto_deny,
+            )
             .await
             .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
     }
@@ -8909,7 +8917,7 @@ fn legacy_page_next_turn_id(
         .map(|turn| turn.id.clone())
 }
 
-fn xcode_26_4_mcp_elicitations_auto_deny(
+pub(super) fn xcode_26_4_mcp_elicitations_auto_deny(
     client_name: Option<&str>,
     client_version: Option<&str>,
 ) -> bool {
