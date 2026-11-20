@@ -103,7 +103,6 @@ mod persisted_resume_approval_policy_tests {
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
-    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::ThreadSettingsAppliedEvent;
     use codex_protocol::protocol::ThreadSettingsSnapshot;
     use codex_protocol::protocol::TurnContextItem;
@@ -127,6 +126,7 @@ mod persisted_resume_approval_policy_tests {
                     service_tier: None,
                     approval_policy,
                     approvals_reviewer: ApprovalsReviewer::User,
+                    requested_approvals_reviewer: None,
                     permission_profile: PermissionProfile::read_only(),
                     active_permission_profile: None,
                     cwd: cwd(),
@@ -168,14 +168,13 @@ mod persisted_resume_approval_policy_tests {
         RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(turn_id.to_string()),
             root_turn_id: None,
+            direct_only_tool_namespaces: None,
             disabled_plugin_ids: None,
             cwd: cwd(),
             approval_policy,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            file_system_sandbox_policy: None,
             model: "gpt-5".to_string(),
             comp_hash: None,
             collaboration_mode: None,

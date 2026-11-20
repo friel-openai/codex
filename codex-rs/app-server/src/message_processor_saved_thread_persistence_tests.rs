@@ -242,6 +242,7 @@ fn saved_thread_read_repairs_live_runtime_and_rejects_stale_fallback() -> Result
                             cursor: None,
                             limit: Some(100),
                             sort_direction: None,
+                            defer_output: None,
                         },
                     },
                     /*trace*/ None,

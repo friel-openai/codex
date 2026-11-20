@@ -4186,6 +4186,7 @@ mod tests {
                     id,
                     text,
                     phase,
+                    moderation,
                     delivery,
                     questions,
                     memory_citation,
@@ -4199,6 +4200,7 @@ mod tests {
                     "Agent message: ready for review from /root/goal_supervisor"
                 );
                 assert_eq!(phase, Some(MessagePhase::Commentary));
+                assert_eq!(moderation, None);
                 assert_eq!(delivery, None);
                 assert_eq!(memory_citation, None);
                 assert_eq!(questions, None);
