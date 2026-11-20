@@ -4315,6 +4315,21 @@ impl ThreadRequestProcessor {
             SortDirection::Asc => StoreSortDirection::Asc,
             SortDirection::Desc => StoreSortDirection::Desc,
         };
+        // `Full` is only a temporary compatibility path. Keep it out of ThreadStore's API:
+        // load turn shells here, then hydrate their items below.
+        let stored_items_view = match items_view {
+            TurnItemsView::NotLoaded => StoredTurnItemsView::NotLoaded,
+            TurnItemsView::Summary => StoredTurnItemsView::Summary,
+            TurnItemsView::Full => StoredTurnItemsView::NotLoaded,
+        };
+        let store_params = StoreListTurnsParams {
+            thread_id,
+            include_archived: true,
+            cursor: cursor.clone(),
+            page_size,
+            sort_direction,
+            items_view: stored_items_view,
+        };
         let use_unprojected_history = match cursor.as_deref() {
             Some(cursor) => parse_thread_turns_cursor(cursor).is_ok(),
             None => {
@@ -4327,8 +4342,26 @@ impl ThreadRequestProcessor {
                         || self.has_paginated_history_projection(thread_id).await?)
             }
         };
-        if use_unprojected_history
-            && let Some((response, _)) = self
+        let source_page = if use_unprojected_history
+            && cursor.is_none()
+            && matches!(sort_direction, StoreSortDirection::Desc)
+            && let Some(store) = self
+                .thread_store
+                .as_any()
+                .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            // A root append makes the checkpoint stale without invalidating its predecessor
+            // lineage. The source reader checks that lineage and can return a complete page;
+            // the bounded compatibility reader may stop before collecting enough turns.
+            store
+                .try_list_projected_source_turns(&store_params)
+                .await
+                .map_err(paginated_history_list_error)?
+        } else {
+            None
+        };
+        if use_unprojected_history && source_page.is_none() {
+            if let Some((response, _)) = self
                 .unprojected_paginated_thread_turns_list_response(
                     thread_id,
                     cursor.as_deref(),
@@ -4337,37 +4370,27 @@ impl ThreadRequestProcessor {
                     items_view,
                 )
                 .await?
-        {
-            return Ok(response);
+            {
+                return Ok(response);
+            }
         }
-        // `Full` is only a temporary compatibility path. Keep it out of ThreadStore's API:
-        // load turn shells here, then hydrate their items below.
-        let stored_items_view = match items_view {
-            TurnItemsView::NotLoaded => StoredTurnItemsView::NotLoaded,
-            TurnItemsView::Summary => StoredTurnItemsView::Summary,
-            TurnItemsView::Full => StoredTurnItemsView::NotLoaded,
+        let page = if let Some(page) = source_page {
+            page
+        } else {
+            self.thread_store
+                .list_turns(store_params)
+                .await
+                .map_err(|err| match err {
+                    ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                    ThreadStoreError::Unsupported { operation } => {
+                        unsupported_thread_store_operation(operation)
+                    }
+                    ThreadStoreError::ThreadNotFound { thread_id } => {
+                        invalid_request(format!("no rollout found for thread id {thread_id}"))
+                    }
+                    err => internal_error(format!("failed to list thread history: {err}")),
+                })?
         };
-        let page = self
-            .thread_store
-            .list_turns(StoreListTurnsParams {
-                thread_id,
-                include_archived: true,
-                cursor: cursor.clone(),
-                page_size,
-                sort_direction,
-                items_view: stored_items_view,
-            })
-            .await
-            .map_err(|err| match err {
-                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                ThreadStoreError::Unsupported { operation } => {
-                    unsupported_thread_store_operation(operation)
-                }
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    invalid_request(format!("no rollout found for thread id {thread_id}"))
-                }
-                err => internal_error(format!("failed to list thread history: {err}")),
-            })?;
         let mut turns = Vec::with_capacity(page.turns.len());
         for turn in page.turns {
             let mut turn = stored_turn_to_api_turn(turn, items_view)?;
@@ -5049,7 +5072,18 @@ impl ThreadRequestProcessor {
         &self,
         thread_id: ThreadId,
     ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
-        let (turns_page, _) = self
+        if let Some(store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            && let Some(cursors) = store
+                .try_projected_source_resume_backwards_cursors(thread_id)
+                .await
+                .map_err(paginated_history_list_error)?
+        {
+            return Ok(cursors);
+        }
+        let Some((turns_page, _)) = self
             .unprojected_paginated_thread_turns_list_response(
                 thread_id,
                 /*cursor*/ None,
@@ -5058,11 +5092,10 @@ impl ThreadRequestProcessor {
                 TurnItemsView::NotLoaded,
             )
             .await?
-            .ok_or_else(|| {
-                internal_error(format!(
-                    "failed to read unprojected turn head for thread {thread_id}"
-                ))
-            })?;
+        else {
+            return Self::paginated_resume_backwards_cursors(self.thread_store.as_ref(), thread_id)
+                .await;
+        };
         let items_page = self
             .unprojected_paginated_thread_items_list_response(
                 thread_id,
@@ -5170,25 +5203,30 @@ impl ThreadRequestProcessor {
             after_updated_at_ordinal: None,
             before_updated_at_ordinal: None,
         };
-        let fast_page = if !has_anchor
-            && !self
-                .unprojected_paginated_history_threads
-                .lock()
-                .await
-                .contains(&thread_id)
-            && !self.has_current_history_certificate(thread_id).await?
-        {
+        let unprojected = self
+            .unprojected_paginated_history_threads
+            .lock()
+            .await
+            .contains(&thread_id);
+        let fast_page = if !has_anchor {
             match self
                 .thread_store
                 .as_any()
                 .downcast_ref::<codex_thread_store::LocalThreadStore>()
             {
-                Some(store) => store
+                Some(store) if unprojected => store
+                    .try_list_projected_source_items(&store_params)
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to check thread item sources: {err}"))
+                    })?,
+                Some(store) if !self.has_current_history_certificate(thread_id).await? => store
                     .try_list_uncertified_turn_items(&store_params)
                     .await
                     .map_err(|err| {
                         internal_error(format!("failed to check thread item sources: {err}"))
                     })?,
+                Some(_) => None,
                 None => None,
             }
         } else {

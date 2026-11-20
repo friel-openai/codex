@@ -678,6 +678,379 @@ async fn direct_items_page_reads_compressed_leaf_at_recorded_plain_path() -> Res
 }
 
 #[tokio::test]
+async fn paginated_stale_root_checkpoint_keeps_cursorless_turn_pages_complete() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
+    let thread_id = codex_protocol::ThreadId::new();
+    let store = create_paginated_thread(codex_home.path(), thread_id).await?;
+
+    let mut turn_index = 0;
+    let mut required_segment = None;
+    for segment in 0..24 {
+        let count = if segment < 14 {
+            5
+        } else if segment < 20 {
+            4
+        } else {
+            1
+        };
+        let mut items = Vec::new();
+        for _ in 0..count {
+            let turn_id = format!("turn-{turn_index:02}");
+            items.push(paginated_turn_started(&turn_id));
+            if turn_index == 91 {
+                items.push(paginated_completed_item(
+                    thread_id,
+                    &turn_id,
+                    CoreTurnItem::UserMessage(UserMessageItem {
+                        id: "late-user".to_string(),
+                        client_id: None,
+                        content: vec![codex_protocol::user_input::UserInput::Text {
+                            text: "original".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    }),
+                ));
+                items.push(paginated_completed_item(
+                    thread_id,
+                    &turn_id,
+                    CoreTurnItem::UserMessage(UserMessageItem {
+                        id: "older-user".to_string(),
+                        client_id: None,
+                        content: vec![codex_protocol::user_input::UserInput::Text {
+                            text: "older item".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    }),
+                ));
+            }
+            items.push(paginated_turn_completed(&turn_id));
+            turn_index += 1;
+        }
+        store
+            .append_items(AppendThreadItemsParams { thread_id, items })
+            .await?;
+        let frozen = store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .await?;
+        if segment == 19 {
+            required_segment = Some(frozen.reference.rollout_path);
+        }
+    }
+    assert_eq!(turn_index, 98);
+    let mut root_items = certified_recent_history_checkpoint(codex_home.path()).into_items();
+    root_items.push(paginated_completed_item(
+        thread_id,
+        "turn-91",
+        CoreTurnItem::UserMessage(UserMessageItem {
+            id: "late-user".to_string(),
+            client_id: None,
+            content: vec![codex_protocol::user_input::UserInput::Text {
+                text: "updated after rotation".to_string(),
+                text_elements: Vec::new(),
+            }],
+        }),
+    ));
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: root_items,
+        })
+        .await?;
+    let root = store
+        .read_thread(StoreReadThreadParams {
+            thread_id,
+            include_archived: true,
+            include_history: false,
+        })
+        .await?
+        .rollout_path
+        .expect("active rollout");
+    store.shutdown_thread(thread_id).await?;
+    assert!(store.rebuild_history_projection(thread_id).await?);
+    assert!(store.has_bounded_history_root_projection(thread_id).await?);
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let first = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(first.data.len(), 7);
+    assert_eq!(
+        first
+            .data
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "turn-97", "turn-96", "turn-95", "turn-94", "turn-93", "turn-92", "turn-91"
+        ]
+    );
+    assert!(first.next_cursor.is_some());
+    let backwards = first.backwards_cursor.clone().expect("head cursor");
+
+    append_neutral_token_count(&root).await?;
+    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
+
+    let cursorless = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    let from_backwards = read_turns_page(
+        &mut mcp,
+        thread_id,
+        Some(backwards),
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(cursorless.data, first.data);
+    assert_eq!(cursorless.data, from_backwards.data);
+    assert_eq!(cursorless.next_cursor, from_backwards.next_cursor);
+    assert!(cursorless.next_cursor.is_some());
+
+    let default_view = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        None,
+    )
+    .await?;
+    assert_eq!(default_view.data.len(), 7);
+    assert_eq!(
+        default_view
+            .data
+            .iter()
+            .map(|turn| &turn.id)
+            .collect::<Vec<_>>(),
+        first.data.iter().map(|turn| &turn.id).collect::<Vec<_>>()
+    );
+    assert_eq!(default_view.next_cursor, from_backwards.next_cursor);
+    assert_eq!(
+        turn_user_texts(&default_view.data),
+        vec!["updated after rotation"]
+    );
+
+    let required_segment = required_segment.expect("segment needed by the first page");
+    let unavailable = required_segment.with_extension("jsonl.unavailable");
+    std::fs::rename(&required_segment, &unavailable)?;
+    let missing_request = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: thread_id.to_string(),
+            cursor: None,
+            limit: Some(7),
+            sort_direction: Some(SortDirection::Desc),
+            items_view: Some(TurnItemsView::NotLoaded),
+        })
+        .await?;
+    let missing = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(missing_request)),
+    )
+    .await??;
+    assert_eq!(missing.error.code, -32603);
+    std::fs::rename(&unavailable, &required_segment)?;
+
+    let invalid_cursor_request = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: thread_id.to_string(),
+            cursor: Some("invalid-cursor".to_string()),
+            limit: Some(7),
+            sort_direction: Some(SortDirection::Desc),
+            items_view: Some(TurnItemsView::NotLoaded),
+        })
+        .await?;
+    let invalid_cursor = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid_cursor_request)),
+    )
+    .await??;
+    assert_eq!(invalid_cursor.error.code, -32600);
+
+    // Simulate an earlier request that had no complete checkpoint and selected the compatibility
+    // reader. Its per-process marker must not keep selecting that reader after a rebuild.
+    let history_db = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs())
+        .thread_history_db_path();
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(history_db),
+    )
+    .await?;
+    sqlx::query("DELETE FROM thread_history_projection_state")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
+    let unprojected = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    let unprojected_cursor: Value = serde_json::from_str(
+        unprojected
+            .backwards_cursor
+            .as_deref()
+            .expect("compatibility head cursor"),
+    )?;
+    assert_eq!(unprojected_cursor["turnId"], "turn-97");
+    assert!(store.rebuild_history_projection(thread_id).await?);
+    assert!(store.has_bounded_history_root_projection(thread_id).await?);
+    let after_catchup = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(after_catchup.data, first.data);
+    assert_eq!(after_catchup.next_cursor, from_backwards.next_cursor);
+    let inherited_items = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-91"),
+        None,
+        Some(1),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(inherited_items.data.len(), 1);
+    assert_eq!(inherited_items.data[0].item.id(), "late-user");
+    assert!(matches!(
+        &inherited_items.data[0].item.payload,
+        ThreadItemPayload::UserMessage { content, .. }
+            if matches!(&content[..], [UserInput::Text { text, .. }] if text == "updated after rotation")
+    ));
+    let older_items = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-91"),
+        Some(inherited_items.next_cursor.expect("older item cursor")),
+        Some(1),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(older_items.data.len(), 1);
+    assert_eq!(older_items.data[0].item.id(), "older-user");
+    assert!(older_items.next_cursor.is_none());
+
+    append_neutral_token_count(&root).await?;
+    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
+    let stale_items = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-91"),
+        None,
+        Some(10),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(
+        stale_items
+            .data
+            .iter()
+            .map(|entry| entry.item.id())
+            .collect::<Vec<_>>(),
+        vec!["late-user", "older-user"]
+    );
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
+                limit: Some(7),
+                sort_direction: Some(SortDirection::Desc),
+                items_view: Some(TurnItemsView::NotLoaded),
+            }),
+            ..Default::default()
+        })
+        .await?;
+    let resumed: ThreadResumeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    let initial = resumed.initial_turns_page.expect("initial page");
+    assert_eq!(initial.data, first.data);
+    assert_eq!(initial.next_cursor, from_backwards.next_cursor);
+    let resumed_head = read_turns_page(
+        &mut mcp,
+        thread_id,
+        Some(resumed.turns_backwards_cursor.expect("resume head cursor")),
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(resumed_head.data, first.data);
+    assert_eq!(resumed_head.next_cursor, from_backwards.next_cursor);
+    append_neutral_token_count(&root).await?;
+    assert!(!store.has_bounded_history_root_projection(thread_id).await?);
+    let active_page = read_turns_page(
+        &mut mcp,
+        thread_id,
+        None,
+        Some(7),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(active_page.data, first.data);
+    assert_eq!(active_page.next_cursor, from_backwards.next_cursor);
+
+    Ok(())
+}
+
+async fn append_neutral_token_count(root: &Path) -> Result<()> {
+    let (lines, _, _) = RolloutRecorder::load_rollout_lines(root).await?;
+    let inherited_end = codex_rollout::read_session_meta_line_exact(root)
+        .await?
+        .meta
+        .history_base
+        .expect("rotated root has a history base")
+        .end_ordinal_exclusive;
+    let ordinal = lines
+        .iter()
+        .filter_map(|line| line.ordinal)
+        .max()
+        .map_or(inherited_end, |ordinal| (ordinal + 1).max(inherited_end));
+    writeln!(
+        OpenOptions::new().append(true).open(root)?,
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: "2026-11-20T00:00:00Z".to_string(),
+            ordinal: Some(ordinal),
+            item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+                info: None,
+                rate_limits: None,
+            })),
+        })?
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn paginated_segmented_history_without_index_returns_latest_five_turns() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;

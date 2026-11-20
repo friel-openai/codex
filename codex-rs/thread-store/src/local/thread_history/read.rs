@@ -51,6 +51,40 @@ use crate::TurnPage;
 #[path = "read_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+static SOURCE_ITEM_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<ThreadId, std::sync::Arc<SourceItemPause>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// A one-shot barrier before validating the sources used for an item page.
+#[cfg(test)]
+struct SourceItemPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn inject_source_item_pause(thread_id: ThreadId) -> std::sync::Arc<SourceItemPause> {
+    let pause = std::sync::Arc::new(SourceItemPause {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    SOURCE_ITEM_PAUSES
+        .lock()
+        .unwrap()
+        .insert(thread_id, pause.clone());
+    pause
+}
+
+#[cfg(test)]
+async fn pause_source_item_before_revalidation(thread_id: ThreadId) {
+    let pause = SOURCE_ITEM_PAUSES.lock().unwrap().remove(&thread_id);
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
 #[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(super) enum CursorScope {
@@ -369,7 +403,7 @@ async fn source_backed_turns(
     events.extend(root.turns);
     events.sort_by_key(SourceTurnEvent::ordinal);
     let (initial, _) = reduce_aggregate_sources(events.clone())?;
-    if initial.is_empty() {
+    if initial.is_empty() && !scan.attached {
         if graph.lineage.segments().len() > 900 {
             return Ok(None);
         }
@@ -473,7 +507,9 @@ async fn source_backed_turns(
             }
         }
         let ids = selected.iter().map(|(id, _)| id.clone()).collect();
-        let Some(item_events) = uncertified_items::scan_selected_items(&graph, &scan, ids).await?
+        let Some(item_events) =
+            uncertified_items::scan_selected_items(&graph, &scan, ids, root.root_snapshot.as_ref())
+                .await?
         else {
             return Err(ThreadStoreError::Conflict {
                 message: "could not read selected turn items".to_string(),
@@ -485,7 +521,15 @@ async fn source_backed_turns(
     } else {
         (initial, HashMap::new())
     };
-    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
+    if !uncertified_items::sources_still_current(
+        store,
+        params.thread_id,
+        &graph,
+        &scan,
+        root.root_snapshot.as_ref(),
+    )
+    .await?
+    {
         return Err(ThreadStoreError::Conflict {
             message: "rotated thread sources changed while listing turns".to_string(),
         });
@@ -537,6 +581,21 @@ async fn source_backed_turns(
         next_cursor,
         backwards_cursor,
     }))
+}
+
+pub(in crate::local) async fn try_list_source_backed_turns(
+    store: &LocalThreadStore,
+    params: &ListTurnsParams,
+) -> ThreadStoreResult<Option<TurnPage>> {
+    validate_thread_for_paginated_reads(
+        store,
+        params.thread_id,
+        params.include_archived,
+        "list_turns",
+    )
+    .await?;
+    validate_page_size(params.page_size)?;
+    source_backed_turns(store, params).await
 }
 
 pub(in crate::local) async fn resume_backwards_cursors(
@@ -651,7 +710,7 @@ async fn source_resume_cursors(
             .or_insert(anchor.ordinal);
     }
     let newest_item = creations.values().copied().max();
-    if newest_turn.is_none() && newest_item.is_none() {
+    if newest_turn.is_none() && newest_item.is_none() && !scan.attached {
         return Ok(None);
     }
     let turn_cursor = newest_turn
@@ -676,12 +735,28 @@ async fn source_resume_cursors(
             )
         })
         .transpose()?;
-    if !uncertified_items::sources_still_current(store, thread_id, &graph, &scan).await? {
+    if !uncertified_items::sources_still_current(
+        store,
+        thread_id,
+        &graph,
+        &scan,
+        root.root_snapshot.as_ref(),
+    )
+    .await?
+    {
         return Err(ThreadStoreError::Conflict {
             message: "rotated thread sources changed while preparing resume cursors".to_string(),
         });
     }
     Ok(Some((turn_cursor, item_cursor)))
+}
+
+pub(in crate::local) async fn try_source_resume_backwards_cursors(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
+    validate_thread_for_paginated_reads(store, thread_id, true, "list_turns").await?;
+    source_resume_cursors(store, thread_id).await
 }
 
 fn same_walked_prefix(left: &RolloutLineage, right: &RolloutLineage) -> bool {
@@ -931,10 +1006,17 @@ pub(super) async fn source_backed_items(
             .collect()
     };
     if selected_turns.is_empty() {
-        if scan.anchors.is_empty() && root.anchors.is_empty() {
+        if scan.anchors.is_empty() && root.anchors.is_empty() && !scan.attached {
             return Ok(None);
         }
-        if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await?
+        if !uncertified_items::sources_still_current(
+            store,
+            params.thread_id,
+            &graph,
+            &scan,
+            root.root_snapshot.as_ref(),
+        )
+        .await?
         {
             return Err(ThreadStoreError::Conflict {
                 message: "rotated thread sources changed while listing items".to_string(),
@@ -956,8 +1038,13 @@ pub(super) async fn source_backed_items(
             return Ok(None);
         }
     }
-    let Some(events) =
-        uncertified_items::scan_selected_items(&graph, &scan, selected_turns.clone()).await?
+    let Some(events) = uncertified_items::scan_selected_items(
+        &graph,
+        &scan,
+        selected_turns.clone(),
+        root.root_snapshot.as_ref(),
+    )
+    .await?
     else {
         return Err(ThreadStoreError::Conflict {
             message: "could not read selected turn items".to_string(),
@@ -968,7 +1055,7 @@ pub(super) async fn source_backed_items(
         .into_iter()
         .flat_map(|(_, items)| items.into_values())
         .collect::<Vec<_>>();
-    if all.is_empty() {
+    if all.is_empty() && !scan.attached {
         // No canonical items were found; the compatibility reader does not certify SQLite.
         return Ok(None);
     }
@@ -1092,7 +1179,17 @@ pub(super) async fn source_backed_items(
     } else {
         None
     };
-    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
+    #[cfg(test)]
+    pause_source_item_before_revalidation(params.thread_id).await;
+    if !uncertified_items::sources_still_current(
+        store,
+        params.thread_id,
+        &graph,
+        &scan,
+        root.root_snapshot.as_ref(),
+    )
+    .await?
+    {
         return Err(ThreadStoreError::Conflict {
             message: "rotated thread sources changed while listing items".to_string(),
         });

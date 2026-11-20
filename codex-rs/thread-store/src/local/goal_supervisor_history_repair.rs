@@ -24,7 +24,9 @@ const AFFECTED_CLI_VERSION: &str = "0.148.0-alpha.6+frodex.0";
 /// The thread ID prevents alpha6 evidence from crossing a fork, `history_base`, or filtered
 /// reference. A physical rollout must also persist the `openai` provider before inherited evidence
 /// can authorize its legacy representation.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 pub(super) enum GoalSupervisorLineageProvenance {
     #[default]
     Untrusted,

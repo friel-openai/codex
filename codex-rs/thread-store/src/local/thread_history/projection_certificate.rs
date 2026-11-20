@@ -54,10 +54,21 @@ pub(in crate::local) struct FileIdentity {
     ctime_nsec: i64,
 }
 
+impl FileIdentity {
+    pub(super) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Appends may change timestamps and size, but not the selected physical file.
+    pub(super) fn same_file_with_at_least(&self, current: &Self) -> bool {
+        self.device == current.device && self.inode == current.inode && current.size >= self.size
+    }
+}
+
 const MAX_APPEND_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+pub(super) fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
 
     metadata.file_type().is_file().then_some(FileIdentity {
@@ -72,7 +83,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
 }
 
 #[cfg(not(unix))]
-fn file_identity(_metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+pub(super) fn file_identity(_metadata: &std::fs::Metadata) -> Option<FileIdentity> {
     None
 }
 
