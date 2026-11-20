@@ -423,6 +423,8 @@ fn scan_model_context_from_lineage_blocking(
     is_cancelled: impl Fn() -> bool,
 ) -> io::Result<Vec<RolloutItem>> {
     let mut scan = ModelContextScan::default();
+    let is_goal_supervisor =
+        session_meta.meta.source.get_agent_role().as_deref() == Some("goal_supervisor");
     'segments: for segment in lineage.segments().iter().rev() {
         let file = lineage.reads.open(&segment.rollout_path, &is_cancelled)?;
         let mut scanner = match segment.end_byte_offset {
@@ -452,6 +454,12 @@ fn scan_model_context_from_lineage_blocking(
             }
             if matches!(&item, RolloutItem::RolloutReference(_))
                 || !segment.filter_rollout_item(&mut item)
+                || (is_goal_supervisor
+                    && segment.thread_id != session_meta.meta.id
+                    && !codex_history::retain_inherited_supervisor_rollout_item(
+                        &mut item,
+                        session_meta.meta.multi_agent_version,
+                    ))
             {
                 continue;
             }
@@ -471,6 +479,8 @@ async fn scan_loaded_model_context_from_lineage(
     session_meta: SessionMetaLine,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
     let mut scan = ModelContextScan::default();
+    let is_goal_supervisor =
+        session_meta.meta.source.get_agent_role().as_deref() == Some("goal_supervisor");
     'segments: for segment in lineage.segments().iter().rev() {
         let (lines, _, parse_errors) =
             codex_rollout::RolloutRecorder::load_rollout_lines_exact(segment.rollout_path.as_path())
@@ -499,6 +509,12 @@ async fn scan_loaded_model_context_from_lineage(
             }
             if matches!(&item, RolloutItem::RolloutReference(_))
                 || !segment.filter_rollout_item(&mut item)
+                || (is_goal_supervisor
+                    && segment.thread_id != session_meta.meta.id
+                    && !codex_history::retain_inherited_supervisor_rollout_item(
+                        &mut item,
+                        session_meta.meta.multi_agent_version,
+                    ))
             {
                 continue;
             }
