@@ -1218,6 +1218,7 @@
         "local::thread_history::read::tests::same_path_rotation_rebuilds_when_former_root_cutoff_changes",
         "local::thread_history::read::tests::same_path_rotation_rebuilds_when_segment_identity_is_ambiguous",
         "local::thread_history::read::tests::same_path_rotation_respects_both_cutoff_coordinates",
+        "local::thread_history::read::tests::same_path_rotation_revalidates_changes_during_extension",
         "local::thread_history::read::tests::same_path_rotation_revalidates_replaced_or_truncated_copy",
         "local::thread_history::read::tests::segmented_legacy_index_preserves_implicit_compaction_only_turn",
         "local::thread_history::read::tests::segmented_legacy_projection_pages_full_turn_items",
