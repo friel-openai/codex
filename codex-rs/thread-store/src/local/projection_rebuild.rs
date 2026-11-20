@@ -181,16 +181,31 @@ pub(super) async fn rebuild(
     let Some(_registration) = register(store, thread_id) else {
         return Ok(false);
     };
-    rebuild_registered(store, thread_id).await
+    rebuild_registered(store, thread_id, false).await
 }
 
 pub(super) async fn rebuild_waiting(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<bool> {
+    rebuild_waiting_inner(store, thread_id, false).await
+}
+
+pub(super) async fn rebuild_waiting_with_certificate(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<bool> {
+    rebuild_waiting_inner(store, thread_id, true).await
+}
+
+async fn rebuild_waiting_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    require_certificate: bool,
+) -> ThreadStoreResult<bool> {
     loop {
         if let Some(_registration) = register(store, thread_id) {
-            return rebuild_registered(store, thread_id).await;
+            return rebuild_registered(store, thread_id, require_certificate).await;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -232,13 +247,14 @@ fn register(
 async fn rebuild_registered(
     store: &LocalThreadStore,
     thread_id: ThreadId,
+    require_certificate: bool,
 ) -> ThreadStoreResult<bool> {
     if store.state_db.is_none() {
         return Ok(false);
     }
     let _rebuild_gate = store.projection_rebuild_gate.lock().await;
     cleanup_stale_staging(store).await?;
-    if store.has_history_projection(thread_id).await? {
+    if !require_certificate && store.has_history_projection(thread_id).await? {
         return Ok(true);
     }
     for _ in 0..MAX_REBUILD_ATTEMPTS {
@@ -280,6 +296,20 @@ async fn rebuild_registered(
         // requires a retry; sustained writes can exhaust MAX_REBUILD_ATTEMPTS rather than
         // publishing a projection assembled from different source versions.
         let source_stamps = projection_lineage.projection_source_stamps().await?;
+        let certificate = if ordinal_recovery.is_none() {
+            match thread_history::ProjectionCertificate::capture(
+                &projection_lineage,
+                &source_stamps,
+            )
+            .await
+            {
+                Ok(certificate) => certificate,
+                Err(ThreadStoreError::Conflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
 
         let staging_thread_id = ThreadId::new();
         let staging_guard =
@@ -404,12 +434,17 @@ async fn rebuild_registered(
                 continue;
             }
         }
-        thread_history::publish_staged_projection(
+        if let Err(error) = thread_history::publish_staged_projection(
             store,
             projection_lineage.root_rollout_id,
             staging_thread_id,
+            certificate.as_ref(),
         )
-        .await?;
+        .await
+        {
+            discard_staging(store, staging_thread_id, staging_guard).await?;
+            return Err(error);
+        }
         if let Some(recovery) = ordinal_recovery {
             recovery.select(store, thread_id).await?;
         }

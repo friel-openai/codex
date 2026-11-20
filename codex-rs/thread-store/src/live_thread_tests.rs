@@ -189,7 +189,7 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
         subagent_history_start_ordinal: None,
         persistence_mode: ThreadPersistenceMode::Durable,
         initial_rollout_ordinal: 0,
-        initial_window_id: uuid::Uuid::now_v7().to_string(),
+        initial_window_id: codex_protocol::ContextWindowId::Text(uuid::Uuid::now_v7().to_string()),
         runtime_workspace_roots: None,
         metadata: ThreadPersistenceMetadata {
             cwd: None,

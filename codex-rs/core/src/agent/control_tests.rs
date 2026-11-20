@@ -3725,6 +3725,7 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
                         item: TurnItem::UserMessage(message),
                         ..
                     })) if message.content == text_input("cold v1 delivery")
+                        .iter().map(ResolvedUserInput::to_user_input).collect::<Vec<_>>()
                 )
             })
             .count();
@@ -3747,6 +3748,157 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry(
             .count();
         assert_eq!(persisted_user_responses, 1);
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_agent_delivery_uses_captured_local_image_after_file_removal() -> anyhow::Result<()> {
+    use base64::Engine;
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("initial"),
+                ev_completed("initial"),
+            ]),
+            sse(vec![ev_response_created("image"), ev_completed("image")]),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    config.features.disable(Feature::MultiAgentV2)?;
+    config.features.enable(Feature::Sqlite)?;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_providers.insert(
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+    );
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let parent = harness
+        .manager
+        .start_thread(StartThreadOptions::new(harness.config.clone()))
+        .await?;
+    let child = make_cold_multi_agent_v1_child(&harness, parent.thread_id, None).await;
+    let path = harness.config.codex_home.join("captured-attachment.png");
+    tokio::fs::write(
+        &path,
+        base64::engine::general_purpose::STANDARD.decode(PNG)?,
+    )
+    .await?;
+    let image = ResolvedUserInput::from_client(UserInput::LocalImage {
+        path: path.to_path_buf(),
+        detail: None,
+    });
+    tokio::fs::remove_file(&path).await?;
+    harness
+        .control
+        .deliver_input_to_agent(
+            harness.config.clone(),
+            child,
+            vec![ResolvedUserInput::text("captured image".to_string()), image],
+            AgentInputDelivery::Queue,
+            TurnStartOptions::default(),
+        )
+        .await?;
+    timeout(Duration::from_secs(10), async {
+        while responses.requests().len() < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let requests = responses.requests();
+    let images = requests[1].message_input_image_urls("user");
+    assert_eq!(images, [format!("data:image/png;base64,{PNG}")]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_rollback_preserves_child_country_override() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let _response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("initial"),
+            ev_completed("initial"),
+        ]),
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    config.features.disable(Feature::MultiAgentV2)?;
+    config.features.enable(Feature::Sqlite)?;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_providers.insert(
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+    );
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let parent = harness
+        .manager
+        .start_thread(StartThreadOptions {
+            request_country: RequestCountry::from_iso_code("US")?,
+            ..StartThreadOptions::new(harness.config.clone())
+        })
+        .await?;
+    let child_id = make_cold_multi_agent_v1_child(&harness, parent.thread_id, None).await;
+    harness
+        .control
+        .ensure_agent_loaded(harness.config.clone(), child_id)
+        .await?;
+    let child = harness.manager.get_thread(child_id).await?;
+    let child_country = RequestCountry::from_iso_code("CA")?;
+    child
+        .session
+        .update_settings(SessionSettingsUpdate {
+            step_settings: StepSettingsUpdate {
+                request_country: Some(child_country.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+    let source = child.session_source.clone();
+    let config = child.config().await.as_ref().clone();
+    let instructions = child.session.inherited_instructions().await;
+    let lifecycle = harness.control.runtime.registry.agent_lifecycle(child_id);
+    let state = harness.control.runtime.upgrade()?;
+    assert!(
+        harness
+            .control
+            .unload_agent_thread(&state, child_id)
+            .await?
+    );
+    harness.control.forget_agent_residency(child_id);
+    harness
+        .control
+        .runtime
+        .registry
+        .release_spawned_thread(child_id);
+    harness
+        .control
+        .resume_agent_from_rollout_with_ownership_and_instructions(
+            config,
+            child_id,
+            source,
+            ownership::ResumedThreadOwnership::Transfer,
+            Some(instructions),
+            lifecycle,
+            Some(child_country.clone()),
+        )
+        .await?;
+    let restored = harness.manager.get_thread(child_id).await?;
+    assert_eq!(
+        restored.config_snapshot().await.request_country,
+        child_country
+    );
+    assert_eq!(
+        parent.thread.config_snapshot().await.request_country,
+        RequestCountry::from_iso_code("US")?
+    );
     Ok(())
 }
 
@@ -10658,7 +10810,12 @@ async fn goal_supervisor_new_user_turn_clears_snooze_inner() -> anyhow::Result<(
         .is_some()
     );
     parent_thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input("new user turn")))
+        .start_or_steer_turn(TurnInputRequest::user_input(
+            text_input("new user turn")
+                .iter()
+                .map(ResolvedUserInput::to_user_input)
+                .collect(),
+        ))
         .await?;
     assert_eq!(
         None,
@@ -11666,7 +11823,12 @@ async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inne
     let parent_thread_id = parent.thread_id;
     let parent_thread = parent.thread;
     parent_thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
+        .start_or_steer_turn(TurnInputRequest::user_input(
+            text_input("parent seed")
+                .iter()
+                .map(ResolvedUserInput::to_user_input)
+                .collect(),
+        ))
         .await?;
     wait_for_turn_complete(parent_thread.as_ref()).await;
     parent_thread.ensure_rollout_materialized().await;
@@ -12191,7 +12353,12 @@ while True:
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
     );
     parent_thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
+        .start_or_steer_turn(TurnInputRequest::user_input(
+            text_input("parent seed")
+                .iter()
+                .map(ResolvedUserInput::to_user_input)
+                .collect(),
+        ))
         .await?;
     wait_for_turn_complete(parent_thread.as_ref()).await;
     parent_thread
@@ -13295,6 +13462,28 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                     && start_options.parent_turn_id.as_deref() == Some("adoption-parent-turn")
                     && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
     }));
+
+    let child_country = RequestCountry::from_iso_code("CA").unwrap();
+    reloaded
+        .session
+        .update_settings(SessionSettingsUpdate {
+            step_settings: StepSettingsUpdate {
+                request_country: Some(child_country.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("apply the child's trusted country override");
+    destination_control
+        .promote_agent(child.thread_id)
+        .await
+        .expect("promote the loaded child");
+    let promoted = harness.manager.get_thread(child.thread_id).await.unwrap();
+    assert_eq!(
+        promoted.config_snapshot().await.request_country,
+        child_country
+    );
 }
 #[path = "control/membership_eviction_tests.rs"]
 mod membership_eviction_tests;
