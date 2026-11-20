@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use super::ContextManager;
 use crate::compact::is_summary_message;
-use crate::context::UserGoalUpdate;
 use crate::context::is_contextual_user_fragment;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
@@ -16,16 +15,11 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ReconciledRetainedContext;
 use codex_history::RetainedContext;
 use codex_history::RetainedInputSource;
+pub(super) use codex_history::RetainedMessageSource;
 use codex_history::RetainedUserMessage;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-
-/// Checkpoint items may have been shortened while preserving their original metadata.
-pub(super) enum RetainedMessageSource {
-    Original,
-    Checkpoint,
-}
 
 impl ContextManager {
     pub(super) fn has_legacy_user_messages(&self) -> bool {
@@ -103,11 +97,22 @@ impl ContextManager {
                     .as_ref()
                     .is_some_and(|metadata| metadata.inherited_user_message)
             }) {
-                let _ = self.record_retained_message(
+                let captured = self.record_retained_message(
                     &envelope.item,
                     envelope.metadata.as_ref(),
                     RetainedMessageSource::Checkpoint,
                 );
+                if let Some(saved) = envelope
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.retained_source.as_ref())
+                    && captured.as_ref().is_some_and(|captured| {
+                        captured.id == saved.id && captured.complete == saved.complete
+                    })
+                {
+                    // Adoption must not mint a new revision for the same saved evidence.
+                    Arc::make_mut(&mut self.retained_context).restore_source_revision(saved);
+                }
             }
         }
     }

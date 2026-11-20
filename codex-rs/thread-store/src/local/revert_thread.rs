@@ -21,8 +21,9 @@ pub(super) struct RevertPublicationPause {
 }
 
 #[cfg(test)]
-pub(super) static REVERT_PUBLICATION_PAUSES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ThreadId, std::sync::Arc<RevertPublicationPause>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+pub(super) static REVERT_PUBLICATION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<ThreadId, std::sync::Arc<RevertPublicationPause>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Revert an unloaded paginated thread by creating a new immutable rollout file.
 ///
@@ -43,27 +44,46 @@ pub(super) async fn revert(
         .ok_or(ThreadStoreError::Unsupported {
             operation: "revert_thread",
         })?;
-    let selected = thread_rollout_resolver::resolve_current(store, thread_id).await?
+    let selected = thread_rollout_resolver::resolve_current(store, thread_id)
+        .await?
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-    let mut history_access = super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
-        store, thread_id, &selected.path,
-    ).await?;
+    let mut history_access =
+        super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
+            store,
+            thread_id,
+            &selected.path,
+            super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
+        )
+        .await?;
     store.ensure_live_recorder_absent(thread_id).await?;
     let lineage = store.resolve_rollout_lineage(thread_id).await?;
     if lineage.has_exclusions() {
         return Err(ThreadStoreError::Conflict {
-            message: "history repair cannot bind an alternate revert lineage to its selected graph".to_string(),
+            message: "history repair cannot bind an alternate revert lineage to its selected graph"
+                .to_string(),
         });
     }
-    let reservation = history_access.writer_reservation().ok_or_else(|| ThreadStoreError::Conflict {
-        message: "revert history repair did not retain writer ownership".to_string(),
-    })?;
-    if lineage.segments().iter().any(|segment| !reservation.contains(segment.thread_id())) {
-        return Err(ThreadStoreError::Conflict { message: "revert lineage expanded outside history repair ownership".to_string() });
+    let reservation =
+        history_access
+            .writer_reservation()
+            .ok_or_else(|| ThreadStoreError::Conflict {
+                message: "revert history repair did not retain writer ownership".to_string(),
+            })?;
+    if lineage
+        .segments()
+        .iter()
+        .any(|segment| !reservation.contains(segment.thread_id()))
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: "revert lineage expanded outside history repair ownership".to_string(),
+        });
     }
-    let writer_lock = history_access.take_writer_lock(thread_id).ok_or_else(|| ThreadStoreError::Conflict {
-        message: format!("thread {thread_id} already has an active writer"),
-    })?;
+    let writer_lock =
+        history_access
+            .take_writer_lock(thread_id)
+            .ok_or_else(|| ThreadStoreError::Conflict {
+                message: format!("thread {thread_id} already has an active writer"),
+            })?;
 
     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
     let stored_metadata = state_db
@@ -77,9 +97,14 @@ pub(super) async fn revert(
     let current_rollout = thread_rollout_resolver::resolve_current(store, thread_id)
         .await?
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-    if current_rollout.rollout_id != selected.rollout_id || current_rollout.path != selected.path
-        || current_rollout.rollout_id != lineage.root_rollout_id() || current_rollout.path.as_path() != lineage.leaf_path() {
-        return Err(ThreadStoreError::Conflict { message: format!("thread {thread_id} changed while its writers were reserved") });
+    if current_rollout.rollout_id != selected.rollout_id
+        || current_rollout.path != selected.path
+        || current_rollout.rollout_id != lineage.root_rollout_id()
+        || current_rollout.path.as_path() != lineage.leaf_path()
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: format!("thread {thread_id} changed while its writers were reserved"),
+        });
     }
     let source_path = current_rollout.path;
     let mut source_meta = codex_rollout::read_session_meta_line_exact(source_path.as_path())
@@ -117,16 +142,28 @@ pub(super) async fn revert(
         .history_base
         .is_none()
         .then_some(current_rollout.rollout_id);
-    super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage).await?;
+    super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage)
+        .await?;
     // History repair covered the selected graph, not a later independently resolved copy.
     lineage.reads.prevent_retry();
-    let reservation = history_access.writer_reservation().expect("validated history repair ownership");
+    let reservation = history_access
+        .writer_reservation()
+        .expect("validated history repair ownership");
     let history_base = lineage
         .read_with_fallback(store, |mut lineage| async move {
-            if lineage.segments().iter().any(|segment| !reservation.contains(segment.thread_id())) {
-                return Err(ThreadStoreError::Conflict { message: "revert lineage expanded outside the reserved writers".to_string() });
+            if lineage
+                .segments()
+                .iter()
+                .any(|segment| !reservation.contains(segment.thread_id()))
+            {
+                return Err(ThreadStoreError::Conflict {
+                    message: "revert lineage expanded outside the reserved writers".to_string(),
+                });
             }
-            super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage).await?;
+            super::thread_history_materialization::ensure_fallback_projection_compatible(
+                store, &lineage,
+            )
+            .await?;
             for segment in &mut lineage.segments {
                 if Some(segment.rollout_id()) == standalone_rollout_id {
                     segment.rollout_path = codex_rollout::materialize_rollout_for_reference(
@@ -167,9 +204,14 @@ pub(super) async fn revert(
     tokio::spawn(async move {
         let _history_access = history_access;
         let recorder = create_replacement_recorder(
-            &publication_store, source_meta, rollout_id, history_base,
-            forked_from_ordinal_exclusive, writer_lock,
-        ).await?;
+            &publication_store,
+            source_meta,
+            rollout_id,
+            history_base,
+            forked_from_ordinal_exclusive,
+            writer_lock,
+        )
+        .await?;
         let replacement_path = recorder.rollout_path().to_path_buf();
         if let Err(error) = recorder.persist().await {
             let _ = recorder.shutdown().await;
@@ -181,17 +223,25 @@ pub(super) async fn revert(
             return Err(thread_store_io_error(error));
         }
         #[cfg(test)]
-        let pause = REVERT_PUBLICATION_PAUSES.lock().expect("revert pause mutex").remove(&thread_id);
+        let pause = REVERT_PUBLICATION_PAUSES
+            .lock()
+            .expect("revert pause mutex")
+            .remove(&thread_id);
         #[cfg(test)]
         if let Some(pause) = &pause {
             pause.persisted.notify_one();
             pause.resume.notified().await;
         }
-        let replaced = state_db.replace_rollout_path_if_current(
-            thread_id, expected_sqlite_path.as_path(), replacement_path.as_path(),
-        ).await.map_err(|err| ThreadStoreError::Internal {
-            message: format!("failed to switch thread {thread_id} to reverted rollout: {err}"),
-        })?;
+        let replaced = state_db
+            .replace_rollout_path_if_current(
+                thread_id,
+                expected_sqlite_path.as_path(),
+                replacement_path.as_path(),
+            )
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to switch thread {thread_id} to reverted rollout: {err}"),
+            })?;
         if !replaced {
             let _ = tokio::fs::remove_file(&replacement_path).await;
             return Err(ThreadStoreError::Conflict {
@@ -199,9 +249,13 @@ pub(super) async fn revert(
             });
         }
         #[cfg(test)]
-        if let Some(pause) = pause { pause.completed.notify_one(); }
+        if let Some(pause) = pause {
+            pause.completed.notify_one();
+        }
         Ok(())
-    }).await.map_err(|err| ThreadStoreError::Internal {
+    })
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
         message: format!("failed to join revert publication for {thread_id}: {err}"),
     })?
 }
