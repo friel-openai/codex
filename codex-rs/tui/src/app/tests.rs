@@ -130,10 +130,16 @@ use super::owned_transcript::tests::mouse;
 use super::test_support::enable_side_retention;
 use super::test_support::side_frame;
 use super::*;
+use crate::RemoteAppServerEndpoint;
+use crate::app::event_dispatch::ForkPaneFailureAction;
+use crate::app::event_dispatch::REMOTE_FORK_PANE_UNAVAILABLE_MESSAGE;
+use crate::app::event_dispatch::fork_pane_failure_action;
+use crate::app::event_dispatch::fork_pane_target_error;
 use crate::app_backtrack::BacktrackSelection;
 use crate::app_backtrack::BacktrackState;
 use crate::app_backtrack::nth_user_position;
 use crate::app_backtrack::user_count;
+use crate::app_event::ForkPanePlacement;
 use crate::app_event::HistoryBatchEntryResponse;
 use crate::app_server_session::user_message_submission::ActiveTurnSteerRace;
 use crate::app_server_session::user_message_submission::active_turn_not_steerable_turn_error;
@@ -166,6 +172,7 @@ use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
+use crate::terminal_multiplexer::FORK_PLACEMENT_REQUIRES_PANE_HOST_MESSAGE;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
@@ -270,6 +277,49 @@ macro_rules! assert_app_snapshot {
     };
 }
 
+#[test]
+fn explicit_fork_pane_failure_keeps_parent_session() {
+    assert_eq!(
+        fork_pane_failure_action(Some(ForkPanePlacement::Right)),
+        ForkPaneFailureAction::KeepParent
+    );
+    assert_eq!(
+        fork_pane_failure_action(/*placement*/ None),
+        ForkPaneFailureAction::ForkInPlace
+    );
+}
+
+#[test]
+fn remote_fork_pane_rejection_message_snapshot() {
+    assert_app_snapshot!(
+        "remote_fork_pane_rejection_message",
+        REMOTE_FORK_PANE_UNAVAILABLE_MESSAGE
+    );
+}
+
+#[test]
+fn unsupported_fork_pane_host_message_snapshot() {
+    assert_app_snapshot!(
+        "unsupported_fork_pane_host_message",
+        FORK_PLACEMENT_REQUIRES_PANE_HOST_MESSAGE
+    );
+}
+
+#[test]
+fn remote_fork_pane_target_fails_preflight() {
+    let remote = AppServerTarget::Remote {
+        endpoint: RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1234".to_string(),
+            auth_token: None,
+        },
+    };
+
+    assert_eq!(
+        fork_pane_target_error(&remote),
+        Some(REMOTE_FORK_PANE_UNAVAILABLE_MESSAGE)
+    );
+    assert_eq!(fork_pane_target_error(&AppServerTarget::Embedded), None);
+}
 fn test_absolute_path(path: &str) -> AbsolutePathBuf {
     AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
 }
@@ -5937,6 +5987,26 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
         @"• Permission selection requested: server-only"
     );
     let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.select_permission_profile(&mut server, selection.clone())
+        .await;
+    insta::assert_snapshot!(
+        next_history_message(&mut events),
+        @"■ Wait for permissions to update before changing permissions."
+    );
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        },
+    )
+    .await?;
+    let _ = next_history_message(&mut events);
+    insta::assert_snapshot!(
+        next_history_message(&mut events),
+        @"■ Wait for permissions to update before forking."
+    );
     app.chat_widget
         .restore_user_message_to_composer("use the selected profile".into());
     app.chat_widget
@@ -5951,6 +6021,11 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     )
     .await?;
     assert!(!app.pending_server_profiles.contains_key(&thread_id));
+    assert!(
+        !app.agents_overview
+            .requested_permission_profiles
+            .contains_key(&thread_id)
+    );
     assert_eq!(
         (
             app.runtime_approvals_reviewer_override,
@@ -6025,6 +6100,22 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     insta::assert_snapshot!(
         next_history_message(&mut events),
         @"• Permission selection requested: server-only"
+    );
+    app.handle_event(&mut tui, &mut server, AppEvent::SettingsSelectionSettled)
+        .await?;
+    assert!(app.pending_server_profiles.contains_key(&thread_id));
+    assert!(app.chat_widget.has_queued_follow_up_messages());
+    let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ThreadSettingsUpdated(settings),
+    )
+    .await?;
+    assert!(!app.pending_server_profiles.contains_key(&thread_id));
+    assert!(
+        !app.agents_overview
+            .requested_permission_profiles
+            .contains_key(&thread_id)
     );
     app.handle_event(&mut tui, &mut server, AppEvent::SettingsSelectionSettled)
         .await?;
@@ -7806,6 +7897,17 @@ async fn side_start_block_message_allows_replacing_open_side_conversation() {
 }
 
 #[tokio::test]
+async fn standalone_side_ui_survives_normal_side_ui_sync() {
+    let mut app = make_test_app().await;
+
+    app.activate_standalone_side_ui();
+    app.sync_side_thread_ui();
+
+    assert!(app.standalone_side_active);
+    assert!(app.chat_widget.side_conversation_active());
+}
+
+#[tokio::test]
 async fn side_parent_status_tracks_parent_turn_lifecycle() -> Result<()> {
     let mut app = make_test_app().await;
     let parent_thread_id = ThreadId::new();
@@ -9021,6 +9123,7 @@ async fn make_test_app() -> Box<App> {
         pane_resize: None,
         passive_link_drag: None,
         abandoned_side_threads: HashSet::new(),
+        standalone_side_active: false,
         active_thread_id: None,
         active_thread_rx: None,
         primary_thread_id: None,
@@ -9161,6 +9264,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             pane_resize: None,
             passive_link_drag: None,
             abandoned_side_threads: HashSet::new(),
+            standalone_side_active: false,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
