@@ -1,0 +1,159 @@
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 80338855022b9bd392b457ac22e7702818a39a94..370c77d85b363d463636626c9757cbbf8efdbaf2 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -220,6 +220,71 @@ async fn descending_turn_page_depends_on_ancestor_start_not_root_checkpoint() {
+     assert_eq!(turn_ids(&second), ["shared"]);
+ }
+
++#[tokio::test]
++async fn missing_predecessor_cannot_determine_descending_parent_page() {
++    let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let parent = ThreadId::new();
++    let predecessor_id = ThreadId::new();
++    let predecessor = selected_rollout_path(home.path(), parent, predecessor_id);
++    let started = |id: &str| {
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: id.to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        }))
++    };
++    write_rollout(&predecessor, parent, None);
++    append_timeline_record(&predecessor, 1, started("shared"));
++    let parent_path = rollout_path(home.path(), parent);
++    write_rollout(
++        &parent_path,
++        parent,
++        Some(history_position(&predecessor, predecessor_id, 2)),
++    );
++    append_timeline_record(&parent_path, 3, started("middle"));
++    append_timeline_record(&parent_path, 4, started("shared"));
++    let child_path = rollout_path(home.path(), child);
++    write_rollout(
++        &child_path,
++        child,
++        Some(history_position(&parent_path, parent, 5)),
++    );
++    append_timeline_record(&child_path, 6, started("child"));
++    let params = turn_params(
++        child,
++        None,
++        2,
++        SortDirection::Desc,
++        StoredTurnItemsView::NotLoaded,
++    );
++
++    let first = store.list_turns(params.clone()).await.unwrap();
++    assert_eq!(turn_ids(&first), ["child", "middle"]);
++    let predecessor_before = fs::read_to_string(&predecessor).unwrap();
++    let parent_before = fs::read(&parent_path).unwrap();
++    let child_before = fs::read(&child_path).unwrap();
++    fs::remove_file(&predecessor).unwrap();
++    assert!(matches!(
++        store.list_turns(params.clone()).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++
++    // The same predecessor boundary can describe a different turn start. Without
++    // that source, neither the parent nor child determines which page is correct.
++    let predecessor_after = predecessor_before.replace("shared", "otherx");
++    assert_ne!(predecessor_before, predecessor_after);
++    assert_eq!(predecessor_before.len(), predecessor_after.len());
++    fs::write(&predecessor, predecessor_after).unwrap();
++    assert_eq!(fs::read(&parent_path).unwrap(), parent_before);
++    assert_eq!(fs::read(&child_path).unwrap(), child_before);
++    let second = store.list_turns(params).await.unwrap();
++    assert_eq!(turn_ids(&second), ["child", "shared"]);
++}
++
+ async fn persistent_source_scan_fixture(
+     count: usize,
+ ) -> (
+@@ -8095,6 +8160,82 @@ async fn segmented_legacy_reads_reject_same_thread_history_bases() {
+     );
+ }
+
++#[tokio::test]
++async fn source_history_preserves_attached_visibility() {
++    for attached in [false, true] {
++        let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
++        let parent = ThreadId::new();
++        let parent_path = rollout_path(home.path(), parent);
++        write_rollout(&parent_path, parent, None);
++        let started = |id: &str| {
++            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++                turn_id: id.to_string(),
++                root_turn_id: None,
++                turn_attribution: None,
++                trace_id: None,
++                started_at: Some(10),
++                model_context_window: None,
++                collaboration_mode_kind: Default::default(),
++            }))
++        };
++        append_timeline_record(&parent_path, 1, started("parent-turn"));
++        append_timeline_record(
++            &parent_path,
++            2,
++            timeline_user_item(parent, "parent-turn", "parent-item", "parent text"),
++        );
++        let child_path = rollout_path(home.path(), child);
++        write_rollout(
++            &child_path,
++            child,
++            Some(history_position(&parent_path, parent, 3)),
++        );
++        let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&child_path)
++            .await
++            .unwrap()
++            .0;
++        let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
++            panic!("child must start with metadata");
++        };
++        meta.meta.attached_thread = attached;
++        meta.meta.forked_from_id = Some(parent);
++        meta.meta.forked_from_ordinal_exclusive = Some(3);
++        fs::write(
++            &child_path,
++            format!("{}\n", serde_json::to_string(&lines[0]).unwrap()),
++        )
++        .unwrap();
++        append_timeline_record(&child_path, 4, started("child-turn"));
++        append_timeline_record(
++            &child_path,
++            5,
++            timeline_user_item(child, "child-turn", "child-item", "child text"),
++        );
++
++        let turns = store
++            .list_turns(turn_params(
++                child,
++                None,
++                10,
++                SortDirection::Asc,
++                StoredTurnItemsView::NotLoaded,
++            ))
++            .await
++            .unwrap();
++        let items = store
++            .list_items(item_params(child, None, None, 10, SortDirection::Asc))
++            .await
++            .unwrap();
++        if attached {
++            assert_eq!(turn_ids(&turns), ["child-turn"]);
++            assert_eq!(item_ids(&items), ["child-item"]);
++        } else {
++            assert_eq!(turn_ids(&turns), ["parent-turn", "child-turn"]);
++            assert_eq!(item_ids(&items), ["parent-item", "child-item"]);
++        }
++    }
++}
++
+ #[tokio::test]
+ async fn indexed_native_history_admission_preserves_attached_visibility() {
+     for attached in [false, true] {
