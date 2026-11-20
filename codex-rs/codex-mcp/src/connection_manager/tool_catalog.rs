@@ -594,8 +594,7 @@ impl McpConnectionSet {
             .servers
             .iter()
             .filter(|(_, view)| {
-                view.connection.startup_is_dormant()
-                    && !view.connection.client.cancel_token.is_cancelled()
+                view.startup_is_dormant() && !view.connection.is_connection_cancelled()
             })
             .map(|(name, _)| name.clone())
             .collect();
