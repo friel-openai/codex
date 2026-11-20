@@ -12,6 +12,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_models_manager::manager::ThreadModelsManager;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::SessionSource;
 use codex_runtime_agent_instance::RuntimeAuthManager;
@@ -74,7 +75,6 @@ pub(super) struct ThreadModelCatalog {
     catalog: Option<ModelsResponse>,
     factory: Arc<dyn ModelCatalogFactory>,
     api_key_model_discovery_default: bool,
-    custom_models: HashMap<String, CustomModelConfig>,
     runtime_mode: Option<RuntimeAuthMode>,
 }
 
@@ -119,7 +119,6 @@ impl ThreadModelCatalog {
             catalog,
             factory,
             api_key_model_discovery_default,
-            custom_models,
             runtime_mode,
         }
     }
@@ -152,7 +151,10 @@ impl ThreadModelCatalog {
                 .ensure_initialized(config.http_client_factory())
                 .await;
         }
-        manager
+        Arc::new(ThreadModelsManager::new(
+            manager,
+            config.custom_models.clone(),
+        ))
     }
 
     pub(super) fn for_config(
@@ -169,7 +171,6 @@ impl ThreadModelCatalog {
             && self.matches_catalog_provider(&config.model_provider)
             && self.catalog.as_ref() == models
             && self.api_key_model_discovery_default == api_key_model_discovery_default
-            && self.custom_models == config.custom_models
         {
             return Arc::clone(&self.manager);
         }
@@ -203,9 +204,11 @@ mod tests {
     use super::*;
     use crate::config::test_config;
     use codex_login::CodexAuth;
+    use codex_models_manager::ModelsManagerConfig;
+    use codex_models_manager::manager::ModelsManager;
 
     #[tokio::test]
-    async fn changed_custom_models_rebuild_thread_catalog() {
+    async fn picker_refresh_does_not_change_thread_aliases() {
         let mut config = test_config().await;
         let credentials = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
         let auth = || ProviderAuthContext {
@@ -229,14 +232,122 @@ mod tests {
             CustomModelConfig {
                 model: "gpt-5.5".to_string(),
                 model_context_window: None,
+                routing_profile: None,
                 model_auto_compact_token_limit: None,
             },
         );
-        let changed = catalog.for_config(&config, config.model_catalog.as_ref(), auth(), true);
-        assert!(!Arc::ptr_eq(&catalog.manager, &changed));
-        assert!(changed.custom_models().contains_key("review-alias"));
-        assert!(!catalog.manager.custom_models().contains_key("review-alias"));
-        assert!(changed.build_available_models(Vec::new()).iter().any(|preset| preset.model == "review-alias"));
-        assert!(!catalog.manager.build_available_models(Vec::new()).iter().any(|preset| preset.model == "review-alias"));
+        let manager = catalog.for_config(&config, config.model_catalog.as_ref(), auth(), true);
+        assert!(Arc::ptr_eq(&catalog.manager, &manager));
+        let thread_a = ThreadModelsManager::new(Arc::clone(&manager), config.custom_models.clone());
+        let thread_b = ThreadModelsManager::new(Arc::clone(&manager), HashMap::new());
+        let originator = manager
+            .for_originator("codex_work_web")
+            .expect("originator catalog");
+        let thread_a_originator = thread_a
+            .for_originator("codex_work_web")
+            .expect("thread originator catalog");
+        let global_aliases = HashMap::from([(
+            "picker-alias".to_string(),
+            config.custom_models["review-alias"].clone(),
+        )]);
+        manager.replace_custom_models(global_aliases);
+        assert!(
+            manager
+                .custom_models_snapshot()
+                .contains_key("picker-alias")
+        );
+        assert!(
+            originator
+                .custom_models_snapshot()
+                .contains_key("picker-alias")
+        );
+        assert!(
+            thread_a
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        assert!(
+            !thread_b
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        manager.replace_custom_models(config.custom_models.clone());
+        assert!(
+            originator
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        let configured = ModelsManagerConfig {
+            custom_models: config.custom_models.clone(),
+            ..Default::default()
+        };
+        let removed = ModelsManagerConfig {
+            custom_models_authoritative: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            thread_a
+                .get_model_info("review-alias", &ModelsManagerConfig::default())
+                .await
+                .model
+                .request_model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            thread_a
+                .get_model_info("review-alias", &configured)
+                .await
+                .model
+                .request_model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_ne!(
+            thread_b
+                .get_model_info("review-alias", &removed)
+                .await
+                .model
+                .request_model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_ne!(
+            thread_a
+                .get_model_info("review-alias", &removed)
+                .await
+                .model
+                .request_model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        thread_a.replace_custom_models(HashMap::new());
+        assert!(
+            !thread_a
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        assert!(
+            !thread_a_originator
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        assert!(
+            manager
+                .custom_models_snapshot()
+                .contains_key("review-alias")
+        );
+        assert!(
+            !thread_a
+                .build_available_models(Vec::new())
+                .iter()
+                .any(|preset| preset.model == "review-alias")
+        );
+        assert!(
+            manager
+                .build_available_models(Vec::new())
+                .iter()
+                .any(|preset| preset.model == "review-alias")
+        );
     }
 }

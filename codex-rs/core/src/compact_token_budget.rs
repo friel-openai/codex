@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::compact::CompactionReporting;
 use crate::context::world_state::WorldState;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
@@ -23,7 +24,14 @@ pub(crate) async fn run_manual_compact_task(
     step_context: Arc<StepContext>,
     world_state: Arc<WorldState>,
 ) -> CodexResult<()> {
-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Manual).await
+    run_compact_task_inner(
+        &sess,
+        &step_context,
+        world_state,
+        CompactionTrigger::Manual,
+        CompactionReporting::Immediate,
+    )
+    .await
 }
 
 /// Runs token-budget inline auto-compaction as a normal compaction lifecycle.
@@ -35,8 +43,16 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     world_state: Arc<WorldState>,
+    reporting: CompactionReporting,
 ) -> CodexResult<()> {
-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Auto).await
+    run_compact_task_inner(
+        &sess,
+        &step_context,
+        world_state,
+        CompactionTrigger::Auto,
+        reporting,
+    )
+    .await
 }
 
 async fn run_compact_task_inner(
@@ -44,6 +60,7 @@ async fn run_compact_task_inner(
     step_context: &Arc<StepContext>,
     world_state: Arc<WorldState>,
     trigger: CompactionTrigger,
+    reporting: CompactionReporting,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let pre_compact_outcome = run_pre_compact_hooks(sess, turn_context, trigger).await;
@@ -60,9 +77,11 @@ async fn run_compact_task_inner(
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
 
-    let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
-    if let PostCompactHookOutcome::Stopped = post_compact_outcome {
-        return Err(CodexErr::TurnAborted);
+    if !reporting.defers_post_compact_hooks() {
+        let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
+        if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+            return Err(CodexErr::TurnAborted);
+        }
     }
 
     Ok(())
