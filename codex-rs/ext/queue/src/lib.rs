@@ -1,5 +1,7 @@
 //! Durable, storage-neutral user-message queue and idle dispatch.
 
+#![recursion_limit = "256"]
+
 use std::sync::Arc;
 
 use codex_extension_api::ExtensionRegistryBuilder;
