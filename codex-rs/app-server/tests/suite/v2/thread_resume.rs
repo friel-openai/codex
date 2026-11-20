@@ -258,6 +258,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
             collaboration_mode_kind: Default::default(),
         }),
         EventMsg::ItemCompleted(ItemCompletedEvent {
+            content_token_count: None,
             thread_id: ThreadId::from_string(&conversation_id)?,
             turn_id: "saved-turn".to_string(),
             item: CoreTurnItem::UserMessage(UserMessageItem {

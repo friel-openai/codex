@@ -270,6 +270,8 @@ async fn list_threads_for_relation_with_archived(
     mcp.request(|request_id| ClientRequest::ThreadList {
         request_id,
         params: codex_app_server_protocol::ThreadListParams {
+            include_attached_threads: false,
+            current_account_only: false,
             excluded_thread_ids: None,
             cursor,
             limit: Some(limit),
