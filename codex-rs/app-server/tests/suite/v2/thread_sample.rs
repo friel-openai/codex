@@ -173,6 +173,252 @@ async fn prediction_fork(client: &mut TestAppServer, parent: &str) -> Result<Str
     Ok(fork.thread.id)
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sample_from_large_certified_history_does_not_materialize_parent_turns() -> Result<()> {
+    use codex_app_server_protocol::ThreadResumeParams;
+    use codex_app_server_protocol::ThreadResumeResponse;
+    use codex_protocol::ThreadId;
+    use codex_protocol::items::TurnItem as CoreTurnItem;
+    use codex_protocol::items::UserMessageItem;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadMemoryMode;
+    use codex_protocol::protocol::TurnCompleteEvent;
+    use codex_protocol::protocol::TurnStartedEvent;
+    use codex_rollout::RolloutItem;
+    use codex_state::StateRuntime;
+    use codex_thread_store::AppendThreadItemsParams;
+    use codex_thread_store::CreateThreadParams;
+    use codex_thread_store::FreezeRolloutSegmentParams;
+    use codex_thread_store::LocalThreadStore;
+    use codex_thread_store::LocalThreadStoreConfig;
+    use codex_thread_store::PersistContext;
+    use codex_thread_store::ThreadPersistenceMetadata;
+    use codex_thread_store::ThreadStore;
+    use codex_utils_absolute_path::test_support::PathExt;
+
+    let server = responses::start_mock_server().await;
+    responses::mount_sse_sequence(
+        &server,
+        vec![responses::sse(vec![
+            responses::ev_assistant_message("prediction", "Continue"),
+            responses::ev_completed("sample-large"),
+        ])],
+    )
+    .await;
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
+    let state_db = StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: home.path().to_path_buf(),
+            sqlite,
+            default_model_provider_id: "mock_provider".to_string(),
+        },
+        Some(state_db),
+    );
+    store
+        .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Cli,
+            thread_source: None,
+            originator: "sample-test".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
+            runtime_workspace_roots: None,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    let start = |turn_id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(100),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }))
+    };
+    let complete = |turn_id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: turn_id.to_string(),
+            root_turn_id: None,
+            last_agent_message: None,
+            error: None,
+            started_at: Some(100),
+            completed_at: Some(101),
+            duration_ms: Some(1_000),
+            time_to_first_token_ms: None,
+        }))
+    };
+    let mut old_turn = vec![start("large-parent")];
+    for index in 0..17 {
+        old_turn.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
+            ItemCompletedEvent {
+                content_token_count: None,
+                thread_id,
+                turn_id: "large-parent".to_string(),
+                item: CoreTurnItem::UserMessage(UserMessageItem {
+                    id: format!("large-item-{index}"),
+                    client_id: None,
+                    content: vec![codex_protocol::user_input::UserInput::Text {
+                        text: "x".repeat(4 * 1024 * 1024),
+                        text_elements: Vec::new(),
+                    }],
+                }),
+                started_at_ms: Some(100_000),
+                completed_at_ms: 101_000,
+            },
+        )));
+    }
+    old_turn.push(complete("large-parent"));
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: old_turn,
+        })
+        .await?;
+    let predecessor = store
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate_checkpoint(
+                super::thread_fork::certified_indexed_fork_checkpoint(home.path()),
+            ),
+        )
+        .await?;
+    assert!(std::fs::metadata(&predecessor.reference.rollout_path)?.len() > 64 * 1024 * 1024);
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                start("current-turn"),
+                RolloutItem::ResponseItem(
+                    ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: "Current message".to_string(),
+                        }],
+                        phase: None,
+                        status: None,
+                        encrypted_content: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    }
+                    .into(),
+                ),
+                complete("current-turn"),
+            ],
+        })
+        .await?;
+    store.shutdown_thread(thread_id).await?;
+    drop(store);
+
+    let mut client = client(&home, &server, /*overrides*/ true).await?;
+    let resume_id = client
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            model: Some("gpt-5.4".to_string()),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse = timeout(WAIT, client.read_response(resume_id)).await??;
+    let sample_id = client
+        .send_raw_request(
+            "thread/sample",
+            Some(json!({
+                "threadId": thread_id.to_string(),
+                "expectedTurnId": "current-turn",
+                "prompt": "Continue",
+                "disableMcp": true,
+            })),
+        )
+        .await?;
+    let concurrent_resume_id = client
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let result: ThreadSampleResponse = timeout(WAIT, client.read_response(sample_id)).await??;
+    let _: ThreadResumeResponse =
+        timeout(WAIT, client.read_response(concurrent_resume_id)).await??;
+    assert_eq!(result.source_turn_id, "current-turn");
+    assert_eq!(result.text.as_deref(), Some("Continue"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn short_paginated_sample_returns_text() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("parent-answer", "Done"),
+                responses::ev_completed("parent"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("sample-answer", "Continue"),
+                responses::ev_completed("short-sample"),
+            ]),
+        ],
+    )
+    .await;
+    let home = TempDir::new()?;
+    let mut client = client(&home, &server, /*overrides*/ true).await?;
+    let (thread_id, turn_id) = ready_parent(
+        &mut client,
+        ThreadStartParams {
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let result = sample(
+        &mut client,
+        ThreadSampleParams {
+            thread_id,
+            expected_turn_id: turn_id,
+            prompt: "Continue".to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(result.text.as_deref(), Some("Continue"));
+    Ok(())
+}
+
 #[test_matrix(
     [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated],
     [TurnStatus::Completed, TurnStatus::Failed, TurnStatus::Interrupted],

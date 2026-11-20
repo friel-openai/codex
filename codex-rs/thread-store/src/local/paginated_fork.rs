@@ -48,6 +48,8 @@ use crate::ThreadStoreResult;
 enum ForkResponseHistory {
     Full,
     ModelContext,
+    /// The caller consumes only model_context, not the fork interruption state.
+    BoundedModelContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +82,11 @@ static LINEAGE_PERSISTENCE_PAUSES: LazyLock<
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[cfg(test)]
+static CERTIFIED_CONTEXT_PAUSES: LazyLock<
+    StdMutex<HashMap<codex_protocol::ThreadId, Arc<LineagePersistencePause>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
 pub(super) struct LineagePersistencePause {
     pub(super) entered: Notify,
     pub(super) release: Notify,
@@ -96,6 +103,21 @@ pub(super) fn inject_lineage_persistence_pause(
     LINEAGE_PERSISTENCE_PAUSES
         .lock()
         .expect("lineage persistence pause mutex")
+        .insert(thread_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(test)]
+pub(super) fn inject_certified_context_pause(
+    thread_id: codex_protocol::ThreadId,
+) -> Arc<LineagePersistencePause> {
+    let pause = Arc::new(LineagePersistencePause {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    CERTIFIED_CONTEXT_PAUSES
+        .lock()
+        .expect("certified context pause mutex")
         .insert(thread_id, Arc::clone(&pause));
     pause
 }
@@ -163,6 +185,22 @@ pub(super) async fn prepare_without_response_history_for_rollout(
         } else {
             ForkPersistence::ReferenceBacked
         },
+    )
+    .await
+}
+
+pub(super) async fn prepare_ephemeral_model_context_for_rollout(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    expected_rollout_id: RolloutId,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(
+        store,
+        params,
+        ForkResponseHistory::BoundedModelContext,
+        /*supplied_context*/ None,
+        Some(expected_rollout_id),
+        ForkPersistence::EphemeralContext,
     )
     .await
 }
@@ -403,6 +441,28 @@ async fn prepare_with_response_history_once(
             _lifecycle: lifecycle,
             history_access,
         };
+        let repair_reservation =
+            if matches!(response_history, ForkResponseHistory::BoundedModelContext) {
+                match try_prepare_certified_latest_model_context_fork(
+                    store,
+                    thread_id,
+                    expected_rollout_id,
+                    repair_reservation,
+                    persistence,
+                    /*require_stable_source*/ true,
+                )
+                .await?
+                {
+                    IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
+                    IndexedForkAttempt::Fallback(reservation) => *reservation,
+                }
+            } else {
+                repair_reservation
+            };
+        let response_history = match response_history {
+            ForkResponseHistory::BoundedModelContext => ForkResponseHistory::ModelContext,
+            other => other,
+        };
         let indexed_store = store.clone();
         let attempt = tokio::spawn(async move {
             try_prepare_indexed_latest_fork(
@@ -430,6 +490,7 @@ async fn prepare_with_response_history_once(
                         expected_rollout_id,
                         *reservation,
                         persistence,
+                        /*require_stable_source*/ false,
                     )
                     .await?
                     {
@@ -627,7 +688,10 @@ async fn prepare_with_response_history_once(
         .await?;
     }
     if matches!(boundary, ForkBoundary::Latest)
-        && matches!(response_history, ForkResponseHistory::ModelContext)
+        && matches!(
+            response_history,
+            ForkResponseHistory::ModelContext | ForkResponseHistory::BoundedModelContext
+        )
         && !lineage.requires_copied_history().await?
         && let Some(context) = prepared_clean_model_context.as_ref()
     {
@@ -886,7 +950,9 @@ async fn prepare_with_response_history_once(
             }),
             None,
         ),
-        (ForkResponseHistory::ModelContext, _, _) => (Arc::clone(&model_context), None),
+        (ForkResponseHistory::ModelContext | ForkResponseHistory::BoundedModelContext, _, _) => {
+            (Arc::clone(&model_context), None)
+        }
     };
     if has_fallback && let Some(copied_history) = copied_history.as_ref() {
         // The copied child does not depend on a reference that stabilization might re-resolve.
@@ -1618,7 +1684,40 @@ async fn try_prepare_indexed_latest_fork(
         }
     }
 
-    if !store.has_history_projection(thread_id).await? {
+    let latest_turn_params = ListTurnsParams {
+        thread_id,
+        include_archived: false,
+        cursor: None,
+        page_size: 1,
+        sort_direction: SortDirection::Desc,
+        items_view: StoredTurnItemsView::NotLoaded,
+    };
+    #[cfg(test)]
+    {
+        let pause = CERTIFIED_CONTEXT_PAUSES
+            .lock()
+            .expect("certified context pause mutex")
+            .remove(&thread_id);
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+    }
+    // A model-context fork needs a source-verified latest turn, not a complete response
+    // projection. Use a current certificate or the source-backed reader before attempting the
+    // complete projection, which can reopen every predecessor under the writer reservation.
+    let mut source_latest_turn = None;
+    let projection_is_current = if matches!(response_history, ForkResponseHistory::Full) {
+        store.has_history_projection(thread_id).await?
+    } else if store.has_current_history_certificate(thread_id).await? {
+        true
+    } else {
+        source_latest_turn = store
+            .try_list_projected_source_turns(&latest_turn_params)
+            .await?;
+        source_latest_turn.is_some() || store.has_history_projection(thread_id).await?
+    };
+    if !projection_is_current {
         fallback!("complete_history_projection_unavailable");
     }
 
@@ -1661,18 +1760,10 @@ async fn try_prepare_indexed_latest_fork(
             )
         })
     } else {
-        let latest = super::thread_history::list_turns(
-            store,
-            ListTurnsParams {
-                thread_id,
-                include_archived: false,
-                cursor: None,
-                page_size: 1,
-                sort_direction: SortDirection::Desc,
-                items_view: StoredTurnItemsView::NotLoaded,
-            },
-        )
-        .await?;
+        let latest = match source_latest_turn {
+            Some(latest) => latest,
+            None => super::thread_history::list_turns(store, latest_turn_params).await?,
+        };
         latest.turns.first().map(|turn| {
             (
                 turn.status,
@@ -1682,6 +1773,23 @@ async fn try_prepare_indexed_latest_fork(
             )
         })
     };
+    if !matches!(response_history, ForkResponseHistory::Full) {
+        let after = tokio::fs::metadata(metadata.rollout_path.as_path())
+            .await
+            .map_err(|error| ThreadStoreError::Conflict {
+                message: format!("selected fork source changed while preparing context: {error}"),
+            })?;
+        let selected = super::thread_rollout_resolver::resolve_current(store, thread_id).await?;
+        if !model_context::unchanged_active_rollout(&file_metadata, &after).unwrap_or(false)
+            || !selected.is_some_and(|selected| {
+                selected.rollout_id == resolved.rollout_id && selected.path == resolved.path
+            })
+        {
+            return Err(ThreadStoreError::Conflict {
+                message: "selected fork source changed while preparing context".to_string(),
+            });
+        }
+    }
     let fork_response_history = if let Some((
         StoredTurnStatus::InProgress,
         turn_id,
@@ -1732,6 +1840,18 @@ async fn try_prepare_indexed_latest_fork(
     } else {
         None
     };
+    if frozen_segment.is_some() && !matches!(response_history, ForkResponseHistory::Full) {
+        let after = tokio::fs::metadata(metadata.rollout_path.as_path())
+            .await
+            .map_err(|error| ThreadStoreError::Conflict {
+                message: format!("selected fork source changed while freezing context: {error}"),
+            })?;
+        if !model_context::unchanged_active_rollout(&file_metadata, &after).unwrap_or(false) {
+            return Err(ThreadStoreError::Conflict {
+                message: "selected fork source changed while freezing context".to_string(),
+            });
+        }
+    }
     let ForkHistoryReservation {
         _lifecycle: source_reservation,
         history_access,
@@ -1765,6 +1885,7 @@ async fn try_prepare_certified_latest_model_context_fork(
     expected_rollout_id: Option<RolloutId>,
     repair_reservation: ForkHistoryReservation,
     persistence: ForkPersistence,
+    require_stable_source: bool,
 ) -> ThreadStoreResult<IndexedForkAttempt> {
     macro_rules! fallback {
         ($reason:literal) => {{
@@ -1801,8 +1922,68 @@ async fn try_prepare_certified_latest_model_context_fork(
     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
         fallback!("active_rollout_not_plain");
     }
-    let Ok(session_meta) = codex_rollout::read_session_meta_line(path.as_path()).await else {
-        fallback!("session_metadata_unreadable");
+    let before = if require_stable_source {
+        Some(tokio::fs::metadata(path.as_path()).await.map_err(|error| {
+            ThreadStoreError::Conflict {
+                message: format!("selected fork source is unavailable: {error}"),
+            }
+        })?)
+    } else {
+        None
+    };
+    let session_meta = if require_stable_source {
+        let Ok(active_head) = super::rollout_lineage::read_rollout_head(path.as_path()).await
+        else {
+            fallback!("session_metadata_unreadable");
+        };
+        if active_head.leading_reference.is_some() && !active_head.has_local_history
+            || active_head
+                .leading_reference
+                .as_ref()
+                .is_some_and(|(_, reference)| {
+                    !super::rollout_lineage::canonical_same_thread_reference(
+                        store.config.codex_home.as_path(),
+                        path.as_path(),
+                        thread_id,
+                        resolved.rollout_id,
+                        reference,
+                    )
+                })
+        {
+            fallback!("active_rollout_reference_layout_ineligible");
+        }
+        if let Some((_, reference)) = active_head.leading_reference.as_ref() {
+            if codex_rollout::existing_rollout_path(reference.rollout_path.as_path()).await
+                != Some(reference.rollout_path.clone())
+                || super::helpers::scoped_reference_rollout_path(
+                    store.config.codex_home.as_path(),
+                    reference.rollout_path.as_path(),
+                )
+                .is_err()
+            {
+                fallback!("referenced_rollout_unavailable");
+            }
+            let Ok(reference_meta) =
+                codex_rollout::read_session_meta_line(reference.rollout_path.as_path()).await
+            else {
+                fallback!("referenced_session_metadata_unreadable");
+            };
+            if reference_meta.meta.id != thread_id
+                || reference_meta.meta.segment_id != reference.segment_id
+                || reference_meta.meta.history_mode != ThreadHistoryMode::Paginated
+                || reference_meta.meta.forked_from_id.is_some()
+                || reference_meta.meta.history_base.is_some()
+                || reference_meta.meta.subagent_history_start_ordinal.is_some()
+            {
+                fallback!("referenced_session_metadata_ineligible");
+            }
+        }
+        active_head.session_meta
+    } else {
+        let Ok(session_meta) = codex_rollout::read_session_meta_line(path.as_path()).await else {
+            fallback!("session_metadata_unreadable");
+        };
+        session_meta
     };
     let same_thread_history_base =
         history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
@@ -1823,18 +2004,51 @@ async fn try_prepare_certified_latest_model_context_fork(
     if !active_scan.segment_checkpoint {
         fallback!("active_checkpoint_missing");
     }
+    if require_stable_source
+        && active_scan
+            .suffix_lines
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+    {
+        fallback!("active_rollout_reference_layout_ineligible");
+    }
+    #[cfg(test)]
+    if require_stable_source {
+        let pause = CERTIFIED_CONTEXT_PAUSES
+            .lock()
+            .expect("certified context pause mutex")
+            .remove(&thread_id);
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+    }
     let Some(end_ordinal_exclusive) = active_scan
         .latest_ordinal
         .and_then(|ordinal| ordinal.checked_add(1))
     else {
         fallback!("active_ordinal_missing");
     };
-    let end_byte_offset = tokio::fs::metadata(path.as_path())
-        .await
-        .map_err(|error| ThreadStoreError::Internal {
-            message: format!("failed to read active rollout metadata: {error}"),
-        })?
-        .len();
+    let after =
+        tokio::fs::metadata(path.as_path())
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!("failed to read active rollout metadata: {error}"),
+            })?;
+    if let Some(before) = before.as_ref() {
+        let selected = super::thread_rollout_resolver::resolve_current(store, thread_id).await?;
+        if !super::model_context::unchanged_active_rollout(before, &after).unwrap_or(false)
+            || active_scan.source_end_byte_offset != Some(before.len())
+            || !selected.is_some_and(|selected| {
+                selected.rollout_id == resolved.rollout_id && selected.path == resolved.path
+            })
+        {
+            return Err(ThreadStoreError::Conflict {
+                message: "selected fork source changed while reading model context".to_string(),
+            });
+        }
+    }
+    let end_byte_offset = after.len();
     let position = HistoryPosition {
         thread_id: resolved.rollout_id,
         end_ordinal_exclusive,

@@ -31,6 +31,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::turn_input::StartIfIdleSubmission;
 use codex_protocol::turn_input::TurnInputRequest;
@@ -40,6 +41,7 @@ use codex_rollout::InitialHistory;
 use codex_rollout::ResumedHistory;
 use codex_thread_store::ListTurnsParams;
 use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::LocalThreadStore;
 use codex_thread_store::SortDirection;
 use codex_thread_store::StoredTurnItemsView;
 use codex_thread_store::StoredTurnStatus;
@@ -143,27 +145,33 @@ impl SampleTask {
             })
             .await
             .map_err(|error| invalid_request(error.to_string()))?;
+        let mut paginated_source_turn = None;
         let latest_turn_in_progress = match snapshot.history_mode {
             ThreadHistoryMode::Legacy => build_legacy_api_turns_from_rollout_items(&history.items)
                 .last()
                 .filter(|turn| turn.id == params.expected_turn_id)
                 .map(|turn| turn.status == TurnStatus::InProgress),
             // Paginated context can omit the turn start. Use the status observed at admission.
-            ThreadHistoryMode::Paginated => store
-                .list_turns(ListTurnsParams {
-                    thread_id: id,
-                    include_archived: false,
-                    cursor: None,
-                    page_size: 1,
-                    sort_direction: SortDirection::Desc,
-                    items_view: StoredTurnItemsView::NotLoaded,
-                })
-                .await
-                .map_err(|error| invalid_request(error.to_string()))?
-                .turns
-                .first()
-                .filter(|turn| turn.turn_id == params.expected_turn_id)
-                .map(|turn| turn.status == StoredTurnStatus::InProgress),
+            ThreadHistoryMode::Paginated => {
+                paginated_source_turn = store
+                    .list_turns(ListTurnsParams {
+                        thread_id: id,
+                        include_archived: false,
+                        cursor: None,
+                        page_size: 1,
+                        sort_direction: SortDirection::Desc,
+                        items_view: StoredTurnItemsView::NotLoaded,
+                    })
+                    .await
+                    .map_err(|error| invalid_request(error.to_string()))?
+                    .turns
+                    .into_iter()
+                    .next();
+                paginated_source_turn
+                    .as_ref()
+                    .filter(|turn| turn.turn_id == params.expected_turn_id)
+                    .map(|turn| turn.status == StoredTurnStatus::InProgress)
+            }
         };
         let Some(source_in_progress) =
             latest_turn_in_progress.filter(|running| !running || params.allow_in_progress_turn)
@@ -237,18 +245,88 @@ impl SampleTask {
         if Instant::now() >= deadline {
             return Err(internal_error("sample timed out"));
         }
+        let prepared = if let (Some(local_store), Some(revision), Some(rollout_id)) = (
+            store.as_any().downcast_ref::<LocalThreadStore>(),
+            history.revision.as_ref(),
+            parent
+                .rollout_path()
+                .as_deref()
+                .and_then(codex_rollout::rollout_id_from_path),
+        ) && snapshot.history_mode == ThreadHistoryMode::Paginated
+        {
+            let mut prepared = local_store
+                .prepare_ephemeral_model_context_for_rollout(id, rollout_id)
+                .await
+                .map_err(|error| internal_error(format!("sample fork failed: {error}")))?;
+            if !store
+                .is_model_context_current(
+                    LoadThreadHistoryParams {
+                        thread_id: id,
+                        include_archived: false,
+                    },
+                    revision.clone(),
+                )
+                .await
+                .map_err(|error| internal_error(error.to_string()))?
+            {
+                return Err(invalid_request("sample source changed"));
+            }
+            if prepared.frozen_segment.is_none() && prepared.copied_history.is_none() {
+                let mut model_context = history.items.clone();
+                if let Some(meta) = model_context.iter_mut().find_map(|item| match item {
+                    codex_rollout::RolloutItem::SessionMeta(meta) => Some(meta),
+                    _ => None,
+                }) {
+                    // The captured model context already contains the inherited model history.
+                    meta.meta.history_base = None;
+                }
+                prepared.model_context = Arc::new(model_context);
+                prepared.latest_model_context = Arc::clone(&prepared.model_context);
+                prepared.response_history = Arc::clone(&prepared.model_context);
+                prepared.interrupt_if_open = source_in_progress;
+                if source_in_progress {
+                    let turn = paginated_source_turn
+                        .as_ref()
+                        .expect("paginated admission selected a source turn");
+                    Arc::make_mut(&mut prepared.response_history).push(
+                        codex_rollout::RolloutItem::EventMsg(EventMsg::TurnStarted(
+                            TurnStartedEvent {
+                                turn_id: turn.turn_id.clone(),
+                                root_turn_id: turn.root_turn_id.clone(),
+                                turn_attribution: None,
+                                trace_id: None,
+                                started_at: turn.started_at,
+                                model_context_window: None,
+                                collaboration_mode_kind: Default::default(),
+                            },
+                        )),
+                    );
+                }
+                Some(prepared)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Do not cancel startup by dropping it: the owner must reclaim a partially initialized fork.
-        let fork = Box::pin(manager.fork_thread_from_history(
-            ForkSnapshot::Interrupted,
-            *options,
-            InitialHistory::Resumed(ResumedHistory {
-                history_revision: history.revision,
-                conversation_id: id,
-                history: Arc::new(history.items),
-                rollout_path: None,
-            }),
-        ))
-        .await
+        let fork = if let Some(prepared) = prepared {
+            Box::pin(manager.fork_prepared_thread(*options, prepared))
+                .await
+                .map(|(fork, _)| fork)
+        } else {
+            Box::pin(manager.fork_thread_from_history(
+                ForkSnapshot::Interrupted,
+                *options,
+                InitialHistory::Resumed(ResumedHistory {
+                    history_revision: history.revision,
+                    conversation_id: id,
+                    history: Arc::new(history.items),
+                    rollout_path: None,
+                }),
+            ))
+            .await
+        }
         .map_err(|error| internal_error(format!("sample fork failed: {error}")))?;
         let (sender, mut receiver) = oneshot::channel();
         samples
