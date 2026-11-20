@@ -697,10 +697,14 @@ async fn catalog_safety_failed_first_party_catalog_cannot_expose_fallback_tools(
             /*tool_suggest_candidates*/ None,
             session.dynamic_tools().await.as_ref(),
         );
-        assert!(
-            matches!(result, Err(codex_protocol::error::CodexErr::InvalidRequest(message))
-            if message.contains("model catalog") && message.contains("tool capabilities"))
-        );
+        let Err(error) = result else {
+            panic!("failed catalog must not expose fallback tools");
+        };
+        assert!(matches!(
+            error.details(),
+            codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+                if message.contains("model catalog") && message.contains("tool capabilities")
+        ));
     }
 
     model.origin = codex_protocol::openai_models::ModelOrigin::Synthetic;
