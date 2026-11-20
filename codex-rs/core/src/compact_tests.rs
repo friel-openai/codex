@@ -10,6 +10,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ResponseItemId;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
@@ -262,6 +263,101 @@ fn user_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+fn agent_message(author: &str, recipient: &str, text: &str) -> ResponseItem {
+    ResponseItem::AgentMessage {
+        id: None,
+        author: author.to_string(),
+        recipient: recipient.to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: text.to_string(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[test]
+fn compaction_preserves_original_subagent_assignment_and_recent_messages() {
+    let agent_path = AgentPath::try_from("/root/release_build").expect("valid agent path");
+    let old_user_request = ResponseItemEnvelope::new(user_message("Maintain the release goal"));
+    let assignment = ResponseItemEnvelope {
+        item: agent_message("/root", agent_path.as_str(), "Build the release candidate"),
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let messages = (0..MAX_RECENT_SUBAGENT_MESSAGES + 3)
+        .map(|index| {
+            ResponseItemEnvelope::new(agent_message(
+                "/root/release_audit",
+                agent_path.as_str(),
+                &format!("status update {index}"),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut previous_history = vec![old_user_request.clone(), assignment.clone()];
+    previous_history.extend(messages.clone());
+    previous_history.push(ResponseItemEnvelope::new(agent_message(
+        "/root",
+        "/root/other_agent",
+        "unrelated task",
+    )));
+
+    let summary = ResponseItemEnvelope::new(user_message(&format!(
+        "{SUMMARY_PREFIX}\ncompaction summary"
+    )));
+    let mut compacted_history = vec![old_user_request.clone(), summary.clone()];
+    retain_subagent_assignment_and_recent_messages(
+        &previous_history,
+        &mut compacted_history,
+        &agent_path,
+    );
+
+    let mut expected = vec![old_user_request, assignment];
+    expected.extend(messages.into_iter().skip(3));
+    expected.push(summary);
+    assert_eq!(expected, compacted_history);
+}
+
+#[test]
+fn compaction_deduplicates_assignment_from_remote_compaction() {
+    let agent_path = AgentPath::try_from("/root/release_build").expect("valid agent path");
+    let assignment =
+        ResponseItemEnvelope::new(agent_message("/root", agent_path.as_str(), "Build it"));
+    let latest = ResponseItemEnvelope::new(agent_message(
+        "/root",
+        agent_path.as_str(),
+        "Use the approved revision",
+    ));
+    let previous_history = vec![assignment.clone(), latest.clone()];
+    let summary = ResponseItemEnvelope::new(user_message(&format!(
+        "{SUMMARY_PREFIX}\ncompaction summary"
+    )));
+    let mut compacted_history = vec![assignment.clone(), latest.clone(), summary.clone()];
+
+    retain_subagent_assignment_and_recent_messages(
+        &previous_history,
+        &mut compacted_history,
+        &agent_path,
+    );
+
+    assert_eq!(vec![assignment, latest, summary], compacted_history);
+}
+
+#[test]
+fn compaction_keeps_assignment_and_pending_mail_in_summary_order() {
+    let agent_path = AgentPath::try_from("/root/release_build").expect("valid agent path");
+    let make_message = |sequence, text: &str| ResponseItemEnvelope {
+        item: agent_message("/root", agent_path.as_str(), text),
+        metadata: Some(CodexHarnessMetadata { history_sequence: Some(sequence), ..Default::default() }),
+    };
+    let assignment = make_message(1, "original assignment");
+    let pending = make_message(2, "pending message");
+    let previous = vec![assignment.clone(), pending.clone()];
+    let summary = ResponseItemEnvelope::new(user_message(&format!("{SUMMARY_PREFIX}\nsummary")));
+    let mut compacted = vec![pending.clone()];
+    retain_subagent_assignment_with_pending_mail(&previous, &mut compacted, &agent_path, 2);
+    let compacted = crate::compact_pending_input::insert_summary(compacted, summary.clone(), Some(2));
+    assert_eq!(compacted, vec![assignment, summary, pending]);
 }
 
 fn compacted_user_message<'a>(text: &str, original: &'a ResponseItem) -> CompactedUserMessage<'a> {
