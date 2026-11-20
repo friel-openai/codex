@@ -143,6 +143,7 @@ pub(crate) async fn make_test_app() -> Box<App> {
         passive_link_drag: None,
         sidebar_press: None,
         abandoned_side_threads: HashSet::new(),
+        standalone_side_active: false,
         active_thread_id: None,
         active_thread_rx: None,
         primary_thread_id: None,
