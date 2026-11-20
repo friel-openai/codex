@@ -71,12 +71,13 @@ impl HookMcpExecutor for CoreHookMcpExecutor {
                                 continue;
                             }
                             let prepared = prepared?;
+                            let admission_call = prepared.clone();
                             let result = prepared.call_with_admission(
                                 Some(call.timeout),
-                                || {
+                                move || {
                                     admit()?;
                                     anyhow::ensure!(
-                                        bundled_app_hook_connector(&prepared) == Some(expected_connector),
+                                        bundled_app_hook_connector(&admission_call) == Some(expected_connector.as_str()),
                                         "App hook connector or approval policy does not permit automatic execution"
                                     );
                                     Ok(())

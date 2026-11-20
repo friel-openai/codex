@@ -25,7 +25,9 @@ use async_channel::Sender;
 use codex_protocol::approvals::ElicitationAbandonedEvent;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::approvals::ElicitationRequestEvent;
+#[cfg(test)]
 use codex_protocol::mcp::ClientMcpExtensions;
+#[cfg(test)]
 use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
 use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_KEY;
@@ -69,6 +71,40 @@ pub trait ElicitationReviewer: Send + Sync {
 }
 
 pub type ElicitationReviewerHandle = Arc<dyn ElicitationReviewer>;
+
+/// Dispatches through the originating route and retains its source for terminal notifications.
+#[derive(Clone)]
+pub(crate) struct SendEvent {
+    /// Bounded sources must preserve asynchronous backpressure.
+    pub(crate) send: Arc<dyn Fn(Event) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+    /// Unbounded publication is synchronous; abandonment goes to the original source even after close.
+    pub(crate) unbounded: Option<(PublishElicitationEvent, Sender<Event>)>,
+}
+
+pub(crate) type PublishElicitationEvent = Arc<dyn Fn(Event) -> Result<()> + Send + Sync>;
+
+#[cfg(test)]
+impl SendEvent {
+    fn from_channel(tx_event: Sender<Event>) -> Self {
+        let unbounded = tx_event.capacity().is_none().then(|| {
+            let events = tx_event.clone();
+            let publish: PublishElicitationEvent =
+                Arc::new(move |event| events.try_send(event).map_err(|error| anyhow!("{error}")));
+            (publish, tx_event.clone())
+        });
+        let send = Arc::new(move |event| {
+            let tx_event = tx_event.clone();
+            async move {
+                tx_event
+                    .send(event)
+                    .await
+                    .map_err(|error| anyhow!("failed to deliver MCP elicitation request: {error}"))
+            }
+            .boxed()
+        });
+        Self { send, unbounded }
+    }
+}
 
 /// Holds an owner-provided registration while an MCP elicitation is waiting for a response.
 #[derive(Clone)]
@@ -273,13 +309,13 @@ impl ElicitationRequestRouter {
 
     async fn request_user_interaction(
         &self,
-        events: Option<Sender<Event>>,
+        send_event: Option<SendEvent>,
         authority: &ElicitationAuthority,
         server_key: McpServerKey,
         request: ElicitationRequest,
     ) -> Result<ElicitationResponse> {
         let server_name = server_key.name().to_owned();
-        let Some(events) = events else {
+        let Some(send_event) = send_event else {
             return Ok(ElicitationResponse {
                 action: ElicitationAction::Decline,
                 content: None,
@@ -289,7 +325,10 @@ impl ElicitationRequestRouter {
         // Core uses an unbounded source channel, which can atomically publish a request
         // and synchronously enqueue abandonment from Drop. Preserve bounded callers'
         // existing request-only behavior because they require asynchronous backpressure.
-        let abandonment_events = events.capacity().is_none().then(|| events.clone());
+        let abandonment_events = send_event
+            .unbounded
+            .as_ref()
+            .map(|(_, events)| events.clone());
         let (delivery_context, response_context) =
             if matches!(&request, ElicitationRequest::UserVerification { .. }) {
                 (
@@ -325,7 +364,7 @@ impl ElicitationRequestRouter {
                 request,
             }),
         };
-        let legacy_event = if abandonment_events.is_some() {
+        let legacy_event = if let Some((publish, _)) = &send_event.unbounded {
             let mut state = self
                 .requests
                 .lock()
@@ -344,7 +383,7 @@ impl ElicitationRequestRouter {
                     });
             // Resolve and close cannot observe a published request without its responder.
             // The validated unbounded send cannot wait or yield while admission is locked.
-            if let Err(error) = events.try_send(event) {
+            if let Err(error) = publish(event) {
                 responder.remove();
                 return Err(error).context(delivery_context);
             }
@@ -369,7 +408,7 @@ impl ElicitationRequestRouter {
             key: request_key,
         };
         if let Some(event) = legacy_event {
-            events.send(event).await.context(delivery_context)?;
+            (send_event.send)(event).await.context(delivery_context)?;
         }
         rx.await.context(response_context)
     }
@@ -389,6 +428,11 @@ pub(crate) struct ElicitationRequestManager {
 }
 
 impl ElicitationRequestManager {
+    pub(crate) fn shares_request_authority_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.authority, &other.authority)
+            && Arc::ptr_eq(&self.router.requests, &other.router.requests)
+    }
+
     pub(crate) fn new(
         config: Arc<McpConfig>,
         reviewer: Option<ElicitationReviewerHandle>,
@@ -422,6 +466,17 @@ impl ElicitationRequestManager {
         true
     }
 
+    #[cfg(test)]
+    pub(crate) async fn resolve(
+        &self,
+        server_name: String,
+        id: RequestId,
+        response: ElicitationResponse,
+    ) -> Result<()> {
+        self.router.resolve(server_name, id, response).await
+    }
+
+    #[cfg(test)]
     pub(crate) fn make_sender(
         &self,
         server_key: McpServerKey,
@@ -435,13 +490,24 @@ impl ElicitationRequestManager {
             .get(OPENAI_ELICITATION_EXTENSION_ID)
             .and_then(|settings| settings.get("userVerification"))
             .is_some_and(Value::is_object);
+        let send_event = tx_event.map(SendEvent::from_channel);
+        assert_eq!(server_key.name(), server_name);
+        self.make_sender_with_event_dispatch(server_key, send_event, user_verification_enabled)
+    }
+
+    pub(crate) fn make_sender_with_event_dispatch(
+        &self,
+        server_key: McpServerKey,
+        send_event: Option<SendEvent>,
+        user_verification_enabled: bool,
+    ) -> SendElicitation {
         let router = self.router.clone();
         let authority = self.authority.clone();
         Box::new(move |id, elicitation| {
             let router = router.clone();
-            let tx_event = tx_event.clone();
-            let server_name = server_name.clone();
+            let send_event = send_event.clone();
             let server_key = server_key.clone();
+            let server_name = server_key.name().to_owned();
             let authority = authority.clone();
             async move {
                 let authority = authority
@@ -467,7 +533,7 @@ impl ElicitationRequestManager {
                     }
                     return user_verification_elicitation::route(
                         router,
-                        tx_event,
+                        send_event,
                         authority,
                         server_key,
                         ElicitationRequest::UserVerification {
@@ -686,7 +752,7 @@ impl ElicitationRequestManager {
                     },
                 };
                 router
-                    .request_user_interaction(tx_event, &authority, server_key, request)
+                    .request_user_interaction(send_event, &authority, server_key, request)
                     .await
             }
             .boxed()

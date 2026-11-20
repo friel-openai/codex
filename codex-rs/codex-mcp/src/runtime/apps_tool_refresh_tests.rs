@@ -34,7 +34,7 @@ async fn stale_apps_refresh_does_not_publish() -> anyhow::Result<()> {
         .stable_catalog_revisions(/*required_servers*/ &[], &HashSet::new())
         .await
         .expect("Apps catalog is ready");
-    let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ true);
+    let runtime = Arc::new(McpRuntime::empty(/*prefix_mcp_tool_names*/ true));
     runtime.current.store(Arc::new(PublishedMcpRuntime {
         connections: connections.clone(),
         config: Some(Arc::new(crate::mcp::tests::test_mcp_config(
@@ -49,6 +49,7 @@ async fn stale_apps_refresh_does_not_publish() -> anyhow::Result<()> {
         ready_selected_capability_roots: Vec::new(),
         environment_selections: Arc::default(),
         ready_environments: HashMap::new(),
+        shutting_down: AtomicBool::new(false),
         cached_binding: Mutex::new(None),
     }));
 

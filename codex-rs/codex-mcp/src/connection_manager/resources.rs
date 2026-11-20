@@ -1,4 +1,3 @@
-use super::McpServerConnection;
 use crate::CODEX_APPS_MCP_SERVER_NAME;
 use crate::McpRuntime;
 use crate::McpServerKey;
@@ -6,8 +5,6 @@ use codex_rmcp_client::RmcpClient;
 use rmcp::model::ServerResult;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Weak;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -27,7 +24,6 @@ use tracing::warn;
 use super::McpConnectionSet;
 use crate::pagination::collect_paginated;
 use crate::resource_client::McpResourceServerCacheKey;
-use crate::rmcp_client::ManagedClient;
 
 impl McpConnectionSet {
     pub(crate) fn resource_cache_key(
@@ -35,11 +31,14 @@ impl McpConnectionSet {
         server: &str,
         generation: u64,
     ) -> Option<McpResourceServerCacheKey> {
-        self.server_by_name(server)
-            .map(|view| McpResourceServerCacheKey {
-                connection: Arc::downgrade(&view.connection),
-                generation,
-            })
+        self.server_by_name(server).and_then(|view| {
+            view.connection
+                .current_connection_id()
+                .map(|connection_id| McpResourceServerCacheKey {
+                    connection_id,
+                    generation,
+                })
+        })
     }
 
     /// Returns resources from servers selected by `include_server`.
@@ -53,23 +52,35 @@ impl McpConnectionSet {
             .iter()
             .filter(|(server_name, _)| include_server(server_name))
         {
-            let server_name = server_name.to_owned();
-            let Ok(client) = view.connection.client().await else {
-                continue;
-            };
+            let server_name = server_name.clone();
+            view.trigger_startup().await;
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let task = async move {
-                let resources = collect_paginated("resources/list", timeout, |params| {
-                    let client = client.clone();
-                    async move {
-                        let response = client.list_resources(params, timeout).await?;
-                        Ok((response.resources, response.next_cursor))
-                    }
-                })
+            join_set.spawn(McpRequestTrace::current().scope(async move {
+                let result = async {
+                    connection
+                        .await_current_startup(Arc::clone(&session_route))
+                        .await
+                        .context("failed to get client")?;
+                    connection
+                        .run_mcp_request(session_route, move |client| async move {
+                            let managed = client.client().await.context("failed to get client")?;
+                            let client = Arc::new(managed);
+                            collect_paginated("resources/list", timeout, |params| {
+                                let client = Arc::clone(&client);
+                                async move {
+                                    let response = client.list_resources(params, timeout).await?;
+                                    Ok((response.resources, response.next_cursor))
+                                }
+                            })
+                            .await
+                        })
+                        .await
+                }
                 .await;
-                (server_name, resources)
-            };
-            join_set.spawn(McpRequestTrace::current().scope(task));
+                (server_name, result)
+            }));
         }
 
         let mut resources = HashMap::new();
@@ -99,23 +110,36 @@ impl McpConnectionSet {
             include_server(server_name)
                 && !self.skips_resource_template_listing(&view.metadata.server_key)
         }) {
-            let server_name = server_name.to_owned();
-            let Ok(client) = view.connection.client().await else {
-                continue;
-            };
+            let server_name = server_name.clone();
+            view.trigger_startup().await;
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let task = async move {
-                let templates = collect_paginated("resources/templates/list", timeout, |params| {
-                    let client = client.clone();
-                    async move {
-                        let response = client.list_resource_templates(params, timeout).await?;
-                        Ok((response.resource_templates, response.next_cursor))
-                    }
-                })
+            join_set.spawn(McpRequestTrace::current().scope(async move {
+                let result = async {
+                    connection
+                        .await_current_startup(Arc::clone(&session_route))
+                        .await
+                        .context("failed to get client")?;
+                    connection
+                        .run_mcp_request(session_route, move |client| async move {
+                            let managed = client.client().await.context("failed to get client")?;
+                            let client = Arc::new(managed);
+                            collect_paginated("resources/templates/list", timeout, |params| {
+                                let client = Arc::clone(&client);
+                                async move {
+                                    let response =
+                                        client.list_resource_templates(params, timeout).await?;
+                                    Ok((response.resource_templates, response.next_cursor))
+                                }
+                            })
+                            .await
+                        })
+                        .await
+                }
                 .await;
-                (server_name, templates)
-            };
-            join_set.spawn(McpRequestTrace::current().scope(task));
+                (server_name, result)
+            }));
         }
 
         let mut templates = HashMap::new();
@@ -142,11 +166,26 @@ impl McpConnectionSet {
         server: &McpServerKey,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult> {
-        let (managed, timeout) = self.client(server).await?;
-        managed
-            .list_resources(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        view.connection
+            .await_current_startup(Arc::clone(&self.session_route))
             .await
-            .with_context(|| format!("resources/list failed for `{server}`"))
+            .context("failed to get client")?;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .list_resources(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/list failed for `{server}`"))
+            })
+            .await
     }
 
     pub async fn list_resource_templates(
@@ -154,11 +193,26 @@ impl McpConnectionSet {
         server: &McpServerKey,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult> {
-        let (managed, timeout) = self.client(server).await?;
-        managed
-            .list_resource_templates(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        view.connection
+            .await_current_startup(Arc::clone(&self.session_route))
             .await
-            .with_context(|| format!("resources/templates/list failed for `{server}`"))
+            .context("failed to get client")?;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .list_resource_templates(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/templates/list failed for `{server}`"))
+            })
+            .await
     }
 
     // Hosted Apps always returns an empty list. Resume discovery if it gains templates.
@@ -180,12 +234,34 @@ impl McpConnectionSet {
         server: &McpServerKey,
         params: ReadResourceRequestParams,
     ) -> Result<ReadResourceResult> {
-        let (managed, timeout) = self.client(server).await?;
-        let uri = params.uri.clone();
-        managed
-            .read_resource(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        view.connection
+            .await_current_startup(Arc::clone(&self.session_route))
             .await
-            .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+            .context("failed to get client")?;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        let binding = view
+            .connection
+            .bind_mcp_request(Arc::clone(&self.session_route), |client| async move {
+                Ok(Arc::new(
+                    client.client().await.context("failed to get client")?,
+                ))
+            })
+            .await?;
+        binding
+            .run_wire(move |managed, lease| async move {
+                let uri = params.uri.clone();
+                managed
+                    .read_resource(params, timeout, lease)
+                    .await
+                    .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+            })
+            .await
     }
 
     pub(crate) fn server_environment_id(&self, server: &McpServerKey) -> Option<&str> {
@@ -193,102 +269,58 @@ impl McpConnectionSet {
             .map(|view| view.metadata.environment_id.as_str())
     }
 
-    /// Returns the first Apps startup attempt only while its inventory is pending.
-    pub(crate) fn early_apps_discovery(
-        &self,
-    ) -> Option<(&Arc<McpServerConnection>, Option<Duration>)> {
+    pub(crate) fn early_apps_generation(&self) -> Option<u64> {
         if !self.config.as_ref()?.apps_early_resource_discovery {
             return None;
         }
+        self.servers
+            .get(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))?
+            .connection
+            .pending_early_apps_generation()
+    }
+
+    /// Discard the page if startup fails or the runtime changes its physical generation,
+    /// auth scope or resource generation before this request completes.
+    pub(crate) async fn with_early_apps_client<F, Fut>(
+        &self,
+        runtime: &McpRuntime,
+        expected_generation: u64,
+        request: F,
+    ) -> Result<ServerResult>
+    where
+        F: FnOnce(Arc<RmcpClient>, Option<Duration>) -> Fut,
+        Fut: std::future::Future<Output = Result<ServerResult>>,
+    {
         let view = self
             .servers
-            .get(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))?;
-        let connection = &view.connection;
-        if connection.initialized_apps.is_some()
-            && !connection.client.startup_complete.load(Ordering::Acquire)
-        {
-            Some((connection, view.tool_timeout))
-        } else {
-            None
-        }
-    }
-
-    pub(crate) async fn client_by_name(
-        &self,
-        name: &str,
-    ) -> Result<(ManagedClient, Option<Duration>)> {
-        let key = self
-            .resolve_server_name(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?;
-        self.client(key).await
-    }
-
-    async fn client(&self, key: &McpServerKey) -> Result<(ManagedClient, Option<Duration>)> {
-        let view = self
-            .server(key)
-            .ok_or_else(|| anyhow!("unknown MCP server '{key}'"))?;
-        let client = view
-            .connection
-            .client()
-            .await
-            .context("failed to get client")?;
-        Ok((client, view.tool_timeout))
-    }
-}
-
-impl McpServerConnection {
-    /// Borrows the authenticated transport while startup owns its inventory. Discard the page
-    /// if startup fails or the runtime replaces its connection, auth scope, or resource generation.
-    pub(crate) async fn with_early_apps_client(
-        self: &Arc<Self>,
-        runtime: &McpRuntime,
-        timeout: Option<Duration>,
-        request: impl AsyncFnOnce(Arc<RmcpClient>, Option<Duration>) -> Result<ServerResult>,
-    ) -> Result<ServerResult> {
+            .get(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))
+            .context("Apps registration was removed")?;
         let auth = runtime.auth_cache_key_for_server(CODEX_APPS_MCP_SERVER_NAME);
         let key = runtime
             .resource_cache_key(CODEX_APPS_MCP_SERVER_NAME)
             .context("Apps registration was removed")?;
         anyhow::ensure!(
-            key.connection.ptr_eq(&Arc::downgrade(self)),
+            key.connection_id == expected_generation,
             "Apps connection was replaced"
         );
-        let client = self.initialized_apps_client().await?;
-        let response = tokio::select! {
-            biased;
-            _ = self.client.cancel_token.cancelled() => anyhow::bail!("Apps startup cancelled"),
-            Err(error) = self.client.client.clone() => return Err(error.into()),
-            response = request(client, timeout) => response?,
-        };
+        if let Some(trigger) = &view.startup_trigger {
+            // trigger_startup waits for the final status, which follows tools/list.
+            trigger.send_replace(true);
+        }
+        let response = view
+            .connection
+            .run_early_apps_catalog(
+                Arc::clone(&self.session_route),
+                expected_generation,
+                view.startup_timeout,
+                |client| request(client, view.tool_timeout),
+            )
+            .await?;
         anyhow::ensure!(
             Some(key) == runtime.resource_cache_key(CODEX_APPS_MCP_SERVER_NAME)
                 && auth == runtime.auth_cache_key_for_server(CODEX_APPS_MCP_SERVER_NAME),
             "Apps connection changed during catalog discovery"
         );
         Ok(response)
-    }
-
-    pub(super) async fn initialized_apps_client(&self) -> Result<Arc<RmcpClient>> {
-        let mut initialized = self
-            .initialized_apps
-            .clone()
-            .context("Apps discovery is disabled")?;
-        let initialized_transport = async {
-            initialized
-                .wait_for(Option::is_some)
-                .await
-                .ok()
-                .and_then(|value| value.as_ref().and_then(Weak::upgrade))
-        };
-        let acquire = async {
-            tokio::select! {
-                biased;
-                ready = self.client.client.clone() => Ok(ready?.client),
-                Some(client) = initialized_transport => Ok(client),
-            }
-        };
-        tokio::time::timeout(self.startup_timeout, acquire)
-            .await
-            .context("timed out waiting for the initialized Apps client")?
     }
 }
