@@ -602,6 +602,7 @@ mod tests {
             &EventMsg::Error(codex_protocol::protocol::ErrorEvent {
                 message: "settings rejected".into(),
                 codex_error_info: None,
+                rejected_audio_file_ids: Vec::new(),
                 misalignment: None,
             }),
         );
