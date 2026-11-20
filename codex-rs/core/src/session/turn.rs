@@ -2201,6 +2201,44 @@ async fn run_auto_compact(
     {
         return Ok(false);
     }
+    let track_progress = matches!(reason, CompactionReason::ContextLimit)
+        && !turn_context.config.features.enabled(Feature::TokenBudget);
+    let mut required_before_compaction = 0;
+    let mut previous_required = 0;
+    let mut estimated_before_compaction = None;
+    if track_progress {
+        let replacement_turn = &replacement_step_context.turn;
+        let status =
+            super::context_window::context_window_token_status(sess, replacement_turn).await;
+        let key = compaction_budget_key(sess, &replacement_step_context, &status).await;
+        let required = super::auto_compaction_guard::required_reduction(
+            &status,
+            key.fallback_buffer,
+            key.post_turn_percent,
+            matches!(phase, CompactionPhase::PostTurn),
+        );
+        required_before_compaction = required;
+        estimated_before_compaction = sess.get_estimated_token_count(replacement_turn).await;
+        if let Some(baseline) = sess
+            .services
+            .thread_extension_data
+            .get::<super::auto_compaction_guard::CompactionBaseline>()
+            && baseline.key == key
+        {
+            previous_required = baseline.required_reduction;
+            if let Some(current) = estimated_before_compaction
+                && super::auto_compaction_guard::no_compactable_progress(
+                    baseline.estimated_history_tokens,
+                    current,
+                    baseline.required_reduction,
+                    required,
+                )
+            {
+                let message = "Automatic compaction could not reduce reported context usage below the limit. Reduce context or use a model with a larger context window before retrying.".to_string();
+                return Err(compaction_guard_error(sess, replacement_turn, phase, message).await);
+            }
+        }
+    }
     let world_state = Arc::new(
         sess.build_world_state_for_step(&replacement_step_context, /*new_window*/ true)
             .await?,
@@ -2217,15 +2255,29 @@ async fn run_auto_compact(
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
             Arc::clone(sess),
-            replacement_step_context,
+            Arc::clone(&replacement_step_context),
             world_state,
             reporting,
         )
         .await?;
+        let status = super::context_window::context_window_token_status(
+            sess,
+            &replacement_step_context.turn,
+        )
+        .await;
+        if status.full_context_window_limit_reached {
+            return Err(compaction_guard_error(
+                sess,
+                &replacement_step_context.turn,
+                phase,
+                "The retained context is still above the model's context window after compaction. Reduce context or use a model with a larger context window before retrying.".to_string(),
+            )
+            .await);
+        }
         return Ok(true);
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    let installed = match turn_context.provider.capabilities().remote_compaction {
         RemoteCompactionSupport::V2 => {
             let has_candidate = candidate.is_some();
             if !has_candidate {
@@ -2255,7 +2307,7 @@ async fn run_auto_compact(
             let installed = run_inline_remote_auto_compact_task_v2(
                 Arc::clone(sess),
                 step_context,
-                replacement_step_context,
+                Arc::clone(&replacement_step_context),
                 client_session,
                 world_state,
                 reason,
@@ -2272,7 +2324,7 @@ async fn run_auto_compact(
                     /*manual*/ false,
                 );
             }
-            Ok(installed)
+            installed
         }
         RemoteCompactionSupport::Unsupported => {
             emit_compact_metric(
@@ -2283,7 +2335,7 @@ async fn run_auto_compact(
             run_inline_auto_compact_task(
                 Arc::clone(sess),
                 Arc::clone(turn_context),
-                replacement_step_context,
+                Arc::clone(&replacement_step_context),
                 client_session,
                 world_state,
                 reason,
@@ -2291,8 +2343,95 @@ async fn run_auto_compact(
                 reporting,
             )
             .await?;
-            Ok(true)
+            true
         }
+    };
+    if installed {
+        let replacement_turn = &replacement_step_context.turn;
+        let status =
+            super::context_window::context_window_token_status(sess, replacement_turn).await;
+        if track_progress {
+            if let Some(estimated_history_tokens) =
+                sess.get_estimated_token_count(replacement_turn).await
+            {
+                let key = compaction_budget_key(sess, &replacement_step_context, &status).await;
+                let required_reduction = if required_before_compaction > 0 {
+                    required_before_compaction
+                } else if previous_required > 0 {
+                    previous_required
+                } else {
+                    estimated_before_compaction
+                        .unwrap_or(estimated_history_tokens)
+                        .saturating_sub(estimated_history_tokens)
+                        .max(1)
+                };
+                sess.services.thread_extension_data.insert(
+                    super::auto_compaction_guard::CompactionBaseline {
+                        key,
+                        estimated_history_tokens,
+                        required_reduction,
+                    },
+                );
+            } else {
+                sess.services
+                    .thread_extension_data
+                    .remove::<super::auto_compaction_guard::CompactionBaseline>();
+            }
+        }
+        if status.full_context_window_limit_reached {
+            return Err(compaction_guard_error(
+                sess,
+                replacement_turn,
+                phase,
+                "The retained context is still above the model's context window after compaction. Reduce context or use a model with a larger context window before retrying.".to_string(),
+            )
+            .await);
+        }
+    }
+    Ok(installed)
+}
+
+async fn compaction_guard_error(
+    sess: &Session,
+    turn: &TurnContext,
+    phase: CompactionPhase,
+    message: String,
+) -> CodexErr {
+    let error = CodexErr::InvalidRequest(message.clone());
+    match phase {
+        CompactionPhase::MidTurn | CompactionPhase::StandaloneTurn => {
+            sess.send_event(turn, EventMsg::Error(error.to_error_event(None)))
+                .await;
+        }
+        CompactionPhase::PostTurn => {
+            sess.send_event(turn, EventMsg::Warning(WarningEvent { message }))
+                .await;
+        }
+        CompactionPhase::PreTurn => {}
+    }
+    error
+}
+
+pub(super) async fn compaction_budget_key(
+    sess: &Session,
+    step: &StepContext,
+    status: &super::context_window::ContextWindowTokenStatus,
+) -> super::auto_compaction_guard::CompactionBudgetKey {
+    let config = &step.turn.config;
+    super::auto_compaction_guard::CompactionBudgetKey {
+        model: step.settings.model_info.slug.clone(),
+        compaction_hash: step.settings.model_info.comp_hash.clone(),
+        provider: config.model_provider_id.clone(),
+        scope: config.model_auto_compact_token_limit_scope,
+        auto_limit: status.auto_compact_scope_limit,
+        full_limit: status.full_context_window_limit,
+        fallback_buffer: config
+            .token_budget
+            .as_ref()
+            .map_or(0, crate::config::TokenBudgetConfig::fallback_buffer_tokens),
+        post_turn_percent: config.model_post_turn_compact_threshold_percent,
+        window_number: sess.current_auto_compact_window_number().await,
+        tools: step.tool_router.model_visible_specs(),
     }
 }
 
