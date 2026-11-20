@@ -259,6 +259,7 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
             message: message.to_string(),
             replacement_history: Some(Vec::new()),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
@@ -279,6 +280,7 @@ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
         message: message.to_string(),
         replacement_history: Some(Vec::new()),
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         compaction_response_id: None,
@@ -2668,6 +2670,47 @@ async fn resolver_infers_legacy_fork_identity_after_home_relocation() -> io::Res
     assert_eq!(
         resolve_rollout_reference_path(home.path(), &reference).await?,
         current_path
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn relocated_legacy_reference_skips_excluded_plain_copy_for_compressed_sibling()
+-> io::Result<()> {
+    let home = TempDir::new()?;
+    let old_home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let file_name = rollout_file_name("2026-07-13T00-00-00", thread_id);
+    let plain = home
+        .path()
+        .join(SESSIONS_SUBDIR)
+        .join("2026/07/13")
+        .join(&file_name);
+    write_rollout(&plain, &[legacy_meta_line(thread_id, 0)])?;
+    let compressed = plain.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(fs::File::open(&plain)?, 1)?,
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: old_home.path().join(file_name),
+        thread_id: None,
+        rollout_timestamp: None,
+        segment_id: None,
+        max_depth: 2,
+        nth_user_message: Some(usize::MAX),
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path_excluding(
+            home.path(),
+            &reference,
+            Some(&fs::canonicalize(&plain)?)
+        )
+        .await?,
+        fs::canonicalize(&compressed)?
     );
     Ok(())
 }

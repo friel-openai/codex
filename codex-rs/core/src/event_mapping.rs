@@ -1,3 +1,4 @@
+pub(crate) use codex_history::user_input_parts;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::ReasoningItem;
@@ -24,7 +25,6 @@ use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
-use codex_protocol::user_input::UserInput;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -118,35 +118,15 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
         return None;
     }
 
-    let mut content: Vec<UserInput> = Vec::new();
-
-    for (_, content_item) in user_input_parts(message) {
-        match content_item {
-            ContentItem::InputText { text } => {
-                content.push(UserInput::Text {
-                    text: text.clone(),
-                    // Model input content does not carry UI element ranges.
-                    text_elements: Vec::new(),
-                });
-            }
-            ContentItem::InputImage { image, detail } => {
-                content.push(UserInput::Image {
-                    image: image.clone(),
-                    detail: *detail,
-                });
-            }
-            ContentItem::InputAudio { audio } => {
-                content.push(UserInput::Audio {
-                    audio: audio.clone(),
-                });
-            }
-            ContentItem::OutputText { text, .. } => {
-                warn!("Output text in user message: {}", text);
-            }
+    for content_item in message {
+        if let ContentItem::OutputText { text, .. } = content_item {
+            warn!("Output text in user message: {}", text);
         }
     }
 
-    Some(UserMessageItem::new(&content))
+    Some(UserMessageItem::new(&codex_history::user_message_input(
+        message,
+    )))
 }
 
 fn parse_agent_message(
