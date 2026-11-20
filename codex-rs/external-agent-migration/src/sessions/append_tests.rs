@@ -8,6 +8,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ContextCompactedEvent;
 use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::TargetedAnswerModeration;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::security_risk::SecurityRiskScore;
 use pretty_assertions::assert_eq;
@@ -77,6 +78,52 @@ fn native_append_retains_display_items_and_exact_model_prefix() {
     appended.extend(suffix);
     assert!(model_transcripts_match(&source, &appended));
     assert!(plan_append(&native, &appended).is_none());
+}
+
+#[test]
+fn native_append_preserves_moderated_message_identity() {
+    let thread_id = ThreadId::new();
+    let mut source = rollout(&[
+        (MessageRole::User, "request"),
+        (MessageRole::Assistant, "answer"),
+    ]);
+    let message = source
+        .iter_mut()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::AgentMessage(message))
+                if message.message == "answer" =>
+            {
+                Some(message)
+            }
+            _ => None,
+        })
+        .expect("assistant event exists");
+    message.moderation = Some(TargetedAnswerModeration {
+        item_id: "moderated-item".to_string(),
+        moderated: true,
+        display: None,
+    });
+
+    let native = native_import_items(thread_id, &source).expect("native imported messages");
+    let (event, message) = native
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match &event.item {
+                TurnItem::AgentMessage(message) if message.id == "moderated-item" => {
+                    Some((event, message))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("moderated native item exists");
+    let moderation = message
+        .moderation
+        .as_ref()
+        .expect("moderation is preserved");
+    assert!(moderation.moderated);
+    assert!(moderation.display.is_none());
+    assert!(event.content_token_count.is_none());
 }
 
 #[test]
