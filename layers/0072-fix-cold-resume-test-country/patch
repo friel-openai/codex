@@ -1,0 +1,13 @@
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index acf39deeb01b50c108512110cfd00da5487b2e54..41e2c3570dd12abd6b340812bf70c088e922f943 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -1543,7 +1543,7 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
+     let resumed = manager
+         .state
+         .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
+-            request_country: config.request_country.clone(),
++            request_country: parent.thread.config_snapshot().await.request_country,
+             config,
+             prompt_cache_key: None,
+             initial_history,
