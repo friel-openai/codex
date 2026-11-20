@@ -90,6 +90,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::QuotaExceeded => "quota exceeded".to_string(),
         ApiError::UsageNotIncluded => "usage not included".to_string(),
         ApiError::SessionBudgetExceeded => "session budget exceeded".to_string(),
+        ApiError::UsageLimitReached(_) => "usage limit reached".to_string(),
         ApiError::Retryable { .. } => "retryable error".to_string(),
         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
@@ -99,6 +100,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::InvalidRequest { .. }
         | ApiError::InvalidAudioInput { .. }
         | ApiError::InvalidPrompt { .. } => "invalid request".to_string(),
+        ApiError::ModelUnavailable { .. } => "model unavailable".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::InferenceHookDenied { .. } => "inference hook denied".to_string(),
         ApiError::BioPolicy { .. } => "bio policy".to_string(),
@@ -196,5 +198,11 @@ mod tests {
             "invalid header value"
         );
         assert_eq!(telemetry_api_error_message(&stream), "socket closed");
+        assert_eq!(
+            telemetry_api_error_message(&ApiError::ModelUnavailable {
+                message: "provider diagnostic".to_string(),
+            }),
+            "model unavailable"
+        );
     }
 }

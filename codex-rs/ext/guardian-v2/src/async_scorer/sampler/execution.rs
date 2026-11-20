@@ -159,6 +159,7 @@ impl SamplingExecution {
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
                 | ApiError::SessionBudgetExceeded
+                | ApiError::UsageLimitReached(_)
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
                 | ApiError::InvalidAudioInput { .. }
@@ -167,6 +168,7 @@ impl SamplingExecution {
                 | ApiError::InferenceHookDenied { .. }
                 | ApiError::AccessProgramNotEnabled { .. }
                 | ApiError::ContentPolicyViolation { .. }
+                | ApiError::ModelUnavailable { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
                 | ApiError::BioPolicy { .. },

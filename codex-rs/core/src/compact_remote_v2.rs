@@ -17,6 +17,7 @@ use crate::client_common::SamplingUsage;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::compact::CompactionReporting;
 use crate::compact::compaction_status_from_result;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
@@ -129,6 +130,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     phase: CompactionPhase,
     candidate: Option<Box<BackgroundCompactionCandidate>>,
     fallback: CompactionFallback,
+    reporting: CompactionReporting,
 ) -> CodexResult<bool> {
     let compaction_metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Auto,
@@ -145,6 +147,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         compaction_metadata,
         candidate,
         fallback,
+        reporting,
     )
     .await
 }
@@ -169,6 +172,7 @@ pub(crate) async fn run_remote_compact_task(
         compaction_metadata,
         /*candidate*/ None,
         CompactionFallback::Foreground,
+        CompactionReporting::Immediate,
     )
     .await
     .map(|_| ())
@@ -184,6 +188,7 @@ async fn run_remote_compact_task_inner(
     compaction_metadata: CompactionTurnMetadata,
     candidate: Option<Box<BackgroundCompactionCandidate>>,
     fallback: CompactionFallback,
+    reporting: CompactionReporting,
 ) -> CodexResult<bool> {
     let turn_context = &step_context.turn;
     let trigger = compaction_metadata.trigger();
@@ -219,7 +224,10 @@ async fn run_remote_compact_task_inner(
             return Err(error);
         }
     }
-    let started_item = if candidate.is_none() && !sess.defer_compaction_start(turn_context, phase) {
+    let started_item = if candidate.is_none()
+        && !sess.defer_compaction_start(turn_context, phase)
+        && !reporting.defers_lifecycle()
+    {
         let item = TurnItem::ContextCompaction(ContextCompactionItem::new());
         sess.emit_turn_item_started(turn_context, &item).await;
         Some(item)
@@ -243,6 +251,7 @@ async fn run_remote_compact_task_inner(
         started_item.as_ref(),
         candidate.map(|candidate| *candidate),
         fallback,
+        reporting,
     ))
     .await;
     // Keep the registration through installation, not just through receiving the summary.
@@ -256,7 +265,7 @@ async fn run_remote_compact_task_inner(
     }
     let status = compaction_status_from_result(&result);
     let codex_error = result.as_ref().err();
-    if result.is_ok() && !interrupted {
+    if result.is_ok() && !interrupted && !reporting.defers_post_compact_hooks() {
         let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
         if let PostCompactHookOutcome::Stopped = post_compact_outcome {
             attempt
@@ -283,13 +292,15 @@ async fn run_remote_compact_task_inner(
             Err(err)
         }
         Err(err) => {
-            sess.track_turn_codex_error(turn_context, &err);
-            // Pre-turn failures are reported by run_turn after preserving the incoming prompt.
-            if !matches!(phase, CompactionPhase::PreTurn) {
-                let event = EventMsg::Error(
-                    err.to_error_event(Some("Error running remote compact task".to_string())),
-                );
-                sess.send_event(turn_context, event).await;
+            if reporting.emits_error() {
+                sess.track_turn_codex_error(turn_context, &err);
+                // Pre-turn failures are reported by run_turn after preserving the incoming prompt.
+                if !matches!(phase, CompactionPhase::PreTurn) {
+                    let event = EventMsg::Error(
+                        err.to_error_event(Some("Error running remote compact task".to_string())),
+                    );
+                    sess.send_event(turn_context, event).await;
+                }
             }
             Err(err)
         }

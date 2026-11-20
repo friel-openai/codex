@@ -6,6 +6,7 @@ mod review;
 mod user_shell;
 
 use crate::McpRefreshReason;
+use crate::session::turn::RunTurnProviderStartup;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -508,7 +509,7 @@ impl Session {
                     Arc::clone(&ctx_for_finish),
                     Vec::new(),
                     requirements,
-                    /*prewarmed_client_session*/ None,
+                    RunTurnProviderStartup::Ready(None),
                     task_cancellation_token.child_token(),
                 )
                 .await;
