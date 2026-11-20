@@ -1475,10 +1475,11 @@ async fn assert_same_thread_fork_fast_path_preserves_native_byte_cutoff(compress
         .expect("reserve source");
 
     let prepared = store
-        .try_prepare_same_thread_fork_lineage_reserved(
+        .try_prepare_clean_fork_lineage_reserved(
             thread_id,
             Some(thread_id),
             &reservation,
+            &crate::ForkBoundary::Latest,
             /*include_full_history*/ true,
         )
         .await
@@ -1576,10 +1577,11 @@ async fn same_thread_fork_fast_path_rejects_invalid_native_byte_cutoffs() {
                 .await
                 .expect("reserve source");
             let error = match store
-                .try_prepare_same_thread_fork_lineage_reserved(
+                .try_prepare_clean_fork_lineage_reserved(
                     thread_id,
                     Some(thread_id),
                     &reservation,
+                    &crate::ForkBoundary::Latest,
                     /*include_full_history*/ true,
                 )
                 .await
@@ -1620,10 +1622,11 @@ async fn same_thread_fork_fast_path_defers_stabilized_offsets_to_compatibility()
 
         assert!(
             store
-                .try_prepare_same_thread_fork_lineage_reserved(
+                .try_prepare_clean_fork_lineage_reserved(
                     thread_id,
                     Some(thread_id),
                     &reservation,
+                    &crate::ForkBoundary::Latest,
                     /*include_full_history*/ true
                 )
                 .await
