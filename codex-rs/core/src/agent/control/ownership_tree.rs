@@ -19,6 +19,8 @@ struct OwnedDescendant {
     original_source: SessionSource,
     original_control: LocalAgentControl,
     original_config: Config,
+    /// Trusted runtime country captured before unloading a live descendant.
+    original_request_country: Option<codex_protocol::RequestCountry>,
     /// Applied instructions captured before unloading a live descendant.
     original_instructions: Option<SessionInstructions>,
     /// Transition lock retained by callers waiting across the ownership transfer.
@@ -224,6 +226,7 @@ impl LocalAgentControl {
                 original_source,
                 original_control,
                 original_config,
+                original_request_country: None,
                 original_instructions,
                 original_lifecycle,
                 original_metadata,
@@ -273,6 +276,8 @@ impl LocalAgentControl {
                 }
                 descendant.original_instructions =
                     Some(thread.session.inherited_instructions().await);
+                descendant.original_request_country =
+                    Some(thread.config_snapshot().await.request_country);
                 let status = thread.agent_status().await;
                 descendant.original_cold_terminal_status = matches!(
                     status,
@@ -550,6 +555,7 @@ impl LocalAgentControl {
                         super::ownership::ResumedThreadOwnership::Transfer,
                         descendant.original_instructions.clone(),
                         descendant.original_lifecycle.clone(),
+                        descendant.original_request_country.clone(),
                     )
                     .await?;
                 if let Some(lifecycle) = descendant

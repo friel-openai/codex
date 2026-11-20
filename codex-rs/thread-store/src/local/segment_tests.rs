@@ -76,6 +76,48 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 
 #[tokio::test]
+async fn fork_seeds_model_ids_from_resolved_inherited_prefix() {
+    let home = TempDir::new().unwrap();
+    let store = state_backed_store(home.path()).await;
+    let parent = ThreadId::new();
+    store
+        .create_thread(create_params(parent, ThreadHistoryMode::Paginated))
+        .await
+        .unwrap();
+    let inherited: RolloutItem = serde_json::from_value(serde_json::json!({
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "content": [],
+                    "id": "inherited", "id_allocation": {"salt": "item", "ordinal": 24, "value": 3}}
+    }))
+    .unwrap();
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: parent,
+            items: vec![inherited],
+        })
+        .await
+        .unwrap();
+    let frozen = store
+        .freeze_thread_segment(parent, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .await
+        .unwrap();
+    let child = ThreadId::new();
+    let mut params = create_params(child, ThreadHistoryMode::Paginated);
+    params.forked_from_id = Some(parent);
+    params.history_base = frozen.history_base;
+    params.initial_rollout_ordinal = frozen.next_rollout_ordinal.unwrap_or_default();
+    params.initial_window_id = serde_json::from_value(serde_json::json!({
+        "salt": "window", "ordinal": 0, "value": 5
+    }))
+    .unwrap();
+    store
+        .create_thread(params)
+        .await
+        .expect("create child from frozen prefix");
+    assert_eq!(*store.live_writer_locks.lock(child).await, 25);
+}
+
+#[tokio::test]
 async fn native_snapshot_reference_matches_the_persisted_immutable_identity() {
     let home = TempDir::new().expect("temp dir");
     let store = LocalThreadStore::new(test_config(home.path()), None);
@@ -767,8 +809,8 @@ async fn segment_rotation_process_crash_child() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.clone();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.clone());
     store
         .state_db()
         .await
@@ -1113,8 +1155,8 @@ async fn concurrent_side_and_desktop_reads_rebuild_one_missing_projection() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -1323,8 +1365,8 @@ async fn missing_projection_rebuilds_compressed_segmented_paginated_lineage() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -1477,8 +1519,8 @@ async fn projection_rebuild_retries_after_concurrent_append_and_rotation() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -1660,8 +1702,8 @@ async fn unprojected_read_does_not_cancel_an_active_background_rebuild() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -1789,8 +1831,8 @@ async fn projection_rebuild_process_crash_child() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home;
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home);
     store
         .state_db()
         .await
@@ -1967,8 +2009,8 @@ async fn projection_rebuild_recovers_abandoned_staging_after_task_termination() 
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -2092,8 +2134,8 @@ async fn projection_rebuild_rejects_stale_and_ahead_active_offsets() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -2209,8 +2251,8 @@ async fn projection_integrity_triggers_reject_missing_middle_rows() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.path().to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.path().to_path_buf());
     store
         .state_db()
         .await
@@ -2909,8 +2951,8 @@ async fn assert_resumed_segmented_legacy_history_preserves_projected_item_identi
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    selected_metadata.history_mode = ThreadHistoryMode::Legacy;
-    selected_metadata.cwd = home.path().to_path_buf();
+    selected_metadata = selected_metadata.with_history_mode(ThreadHistoryMode::Legacy);
+    selected_metadata = selected_metadata.with_cwd(home.path().to_path_buf());
     state_db
         .upsert_thread(&selected_metadata.build(store.config.default_model_provider_id.as_str()))
         .await
@@ -4774,8 +4816,8 @@ async fn exports_native_history_base_compatibility_fixture() {
         chrono::Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.clone();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.clone());
     state_db
         .upsert_thread(&metadata.build(store.config.default_model_provider_id.as_str()))
         .await
@@ -5214,6 +5256,7 @@ fn turn_items(
         RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
             thread_id,
             turn_id: turn_id.to_string(),
+            content_token_count: None,
             item: TurnItem::UserMessage(UserMessageItem {
                 id: item_id.to_string(),
                 client_id: None,
@@ -5367,6 +5410,7 @@ fn certified_checkpoint_with_replacement(
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),
@@ -5450,7 +5494,7 @@ fn create_params(thread_id: ThreadId, history_mode: ThreadHistoryMode) -> Create
         subagent_history_start_ordinal: None,
         persistence_mode: crate::ThreadPersistenceMode::Durable,
         initial_rollout_ordinal: 0,
-        initial_window_id: uuid::Uuid::now_v7().to_string(),
+        initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
         runtime_workspace_roots: None,
         metadata: ThreadPersistenceMetadata {
             cwd: Some(std::env::current_dir().expect("cwd")),

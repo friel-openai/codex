@@ -1977,6 +1977,7 @@ fn create_history_rollout(
                     text_elements: Vec::new(),
                 }],
             }),
+            content_token_count: None,
             started_at_ms: None,
             completed_at_ms: 0,
         });

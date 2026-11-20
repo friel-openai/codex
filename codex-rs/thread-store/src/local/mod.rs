@@ -12,8 +12,8 @@ mod list_threads;
 mod live_writer;
 mod model_context;
 mod move_thread_to_section;
-mod original_history;
 mod ordinal_recovery;
+mod original_history;
 mod paginated_fork;
 mod pending_thread_metadata;
 mod projection_rebuild;
@@ -198,8 +198,15 @@ pub struct LocalThreadStore {
     startup_migration_retry_gate: Option<Arc<StartupMigrationRetryGate>>,
     projection_rebuilds: Arc<StdMutex<HashSet<ThreadId>>>,
     projection_rebuild_schedules: Arc<StdMutex<projection_rebuild::ScheduledProjectionRebuilds>>,
+    /// Avoids repeatedly rebuilding an unchanged rollout that cannot be certified.
+    projection_certificate_attempts: Arc<
+        StdMutex<HashMap<ThreadId, (RolloutId, u64, std::time::SystemTime, std::time::Instant)>>,
+    >,
     /// Bounds complete-lineage projection repair to one disk- and memory-intensive scan.
     projection_rebuild_gate: Arc<Mutex<()>>,
+    /// Shares source-only ancestor scans between concurrent turn-item requests.
+    uncertified_item_scans:
+        Arc<Mutex<HashMap<ThreadId, Arc<Mutex<Option<Arc<thread_history::UncertifiedItemScan>>>>>>>,
     /// Coordinates first-request rollout conversion with thread-specific reads.
     rollout_migration_coordinator: Arc<rollout_migration::StartupMigrationCoordinator>,
 }
@@ -340,7 +347,7 @@ impl LiveWriterLocks {
             .await
     }
 
-    async fn try_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<OwnedMutexGuard<()>> {
+    async fn try_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<OwnedMutexGuard<u64>> {
         self.coordination(thread_id)
             .await
             .writer
@@ -427,7 +434,9 @@ impl LocalThreadStore {
             startup_migration_retry_gate: None,
             projection_rebuilds: Arc::new(StdMutex::new(HashSet::new())),
             projection_rebuild_schedules: Arc::new(StdMutex::new(HashMap::new())),
+            projection_certificate_attempts: Arc::new(StdMutex::new(HashMap::new())),
             projection_rebuild_gate: Arc::new(Mutex::new(())),
+            uncertified_item_scans: Arc::new(Mutex::new(HashMap::new())),
             rollout_migration_coordinator: Arc::new(
                 rollout_migration::StartupMigrationCoordinator::default(),
             ),
@@ -554,6 +563,75 @@ impl LocalThreadStore {
         Ok(true)
     }
 
+    /// Checks the selected rollout against a current complete-history certificate.
+    pub async fn has_current_history_certificate(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<bool> {
+        let Some(resolved) =
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        else {
+            return Ok(false);
+        };
+        thread_history::certificate_is_current(self, resolved.rollout_id, &resolved.path).await
+    }
+
+    /// Checks only the selected active rollout before a bounded descending history page.
+    ///
+    /// This is not a complete-lineage guarantee. The page reader must resolve each older
+    /// segment it actually needs; complete-history operations use `has_history_projection`.
+    pub async fn has_bounded_history_root_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<bool> {
+        let Some(resolved) =
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        else {
+            return Ok(false);
+        };
+        let Some(projection) = thread_history::projection_state(self, resolved.rollout_id).await?
+        else {
+            return Ok(false);
+        };
+        if !projection.lineage_complete
+            || resolved
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("jsonl")
+        {
+            return Ok(false);
+        }
+        let session_meta = match resolved.authenticated_session_meta {
+            Some(meta) => meta,
+            None => {
+                codex_rollout::read_session_meta_line_exact(&resolved.path)
+                    .await
+                    .map_err(|error| ThreadStoreError::Internal {
+                        message: format!("failed to read selected rollout metadata: {error}"),
+                    })?
+                    .meta
+            }
+        };
+        if session_meta.id != thread_id
+            || session_meta.history_mode != ThreadHistoryMode::Paginated
+            || session_meta.attached_thread
+        {
+            return Ok(false);
+        }
+        Ok(tokio::fs::metadata(&resolved.path)
+            .await
+            .is_ok_and(|metadata| metadata.len() == projection.next_byte_offset))
+    }
+
+    /// Attempts a source-verified, turn-specific page without rebuilding history projections.
+    pub async fn try_list_uncertified_turn_items(
+        &self,
+        params: &crate::ListItemsParams,
+    ) -> ThreadStoreResult<Option<crate::ItemPage>> {
+        thread_history::try_list_uncertified_turn_items(self, params).await
+    }
+
     /// Returns whether the already-validated Paginated rollout has a complete projection at the
     /// supplied durable byte boundary.
     pub(super) async fn has_complete_history_projection_at(
@@ -576,6 +654,86 @@ impl LocalThreadStore {
     /// lineage scan and exists for startup maintenance, explicit repair, and deterministic tests.
     pub async fn rebuild_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
         projection_rebuild::rebuild_waiting(self, thread_id).await
+    }
+
+    /// Rebuilds the complete graph so its optional item-coverage certificate can be published.
+    pub async fn rebuild_history_projection_with_certificate(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<bool> {
+        projection_rebuild::rebuild_waiting_with_certificate(self, thread_id).await
+    }
+
+    /// Prepares a full-graph certificate after the initial bounded page has returned.
+    pub fn schedule_history_projection_certificate(&self, thread_id: ThreadId) {
+        let store = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let result = async {
+                let Some(selected) =
+                    thread_rollout_resolver::resolve_current_including_archived(&store, thread_id)
+                        .await?
+                else {
+                    return Ok::<_, ThreadStoreError>(());
+                };
+                if thread_history::certificate_is_current(
+                    &store,
+                    selected.rollout_id,
+                    &selected.path,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                let metadata = tokio::fs::metadata(&selected.path).await.map_err(|error| {
+                    ThreadStoreError::Internal {
+                        message: format!("failed to inspect certificate source: {error}"),
+                    }
+                })?;
+                let modified = metadata
+                    .modified()
+                    .map_err(|error| ThreadStoreError::Internal {
+                        message: format!("failed to inspect certificate source time: {error}"),
+                    })?;
+                let generation = (selected.rollout_id, metadata.len(), modified);
+                {
+                    let mut attempts = store
+                        .projection_certificate_attempts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if attempts.get(&thread_id).is_some_and(|attempt| {
+                        (attempt.0, attempt.1, attempt.2) == generation
+                            && attempt.3.elapsed() < std::time::Duration::from_secs(60)
+                    }) {
+                        return Ok(());
+                    }
+                    attempts.insert(
+                        thread_id,
+                        (
+                            generation.0,
+                            generation.1,
+                            generation.2,
+                            std::time::Instant::now(),
+                        ),
+                    );
+                }
+                if let Err(error) =
+                    projection_rebuild::rebuild_waiting_with_certificate(&store, thread_id).await
+                {
+                    store
+                        .projection_certificate_attempts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&thread_id);
+                    return Err(error);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%thread_id, %error, "background history certificate rebuild failed");
+            }
+        });
     }
 
     /// Starts a single delayed projection rebuild without blocking the current request.
@@ -2164,9 +2322,7 @@ mod tests {
                 initial_recency_at,
                 SessionSource::Exec,
             );
-            builder.updated_at = Some(initial_recency_at);
-            builder.recency_at = Some(initial_recency_at);
-            builder.cwd = home.path().to_path_buf();
+            builder = builder.with_cwd(home.path().to_path_buf());
             runtime
                 .upsert_thread(&builder.build("test-provider"))
                 .await

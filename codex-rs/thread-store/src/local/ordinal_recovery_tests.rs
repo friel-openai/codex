@@ -73,6 +73,7 @@ fn fixture_bytes(home: &Path, thread_id: ThreadId) -> (SessionMetaLine, Vec<u8>)
                 text: "preserved after duplicate".to_string(),
                 text_elements: Vec::new(),
             }])),
+            content_token_count: None,
             started_at_ms: None,
             completed_at_ms: 0,
         })),
@@ -127,8 +128,8 @@ async fn fixture(home: &Path) -> (LocalThreadStore, ThreadId, PathBuf, Vec<u8>) 
         chrono::Utc::now(),
         SessionSource::Cli,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
-    metadata.cwd = home.to_path_buf();
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
+    metadata = metadata.with_cwd(home.to_path_buf());
     state
         .upsert_thread(&metadata.build(&config.default_model_provider_id))
         .await

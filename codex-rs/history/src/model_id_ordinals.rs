@@ -52,7 +52,8 @@ pub fn next_model_id_ordinals(records: &[RolloutItem]) -> (u64, u64) {
             }) => {
                 item = item.max(item_ordinal(&source.revision));
             }
-            RolloutItem::DynamicToolsUpdated { .. }
+            RolloutItem::RolloutReference(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::TokenUsageRecord(_)

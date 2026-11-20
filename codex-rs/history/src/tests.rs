@@ -38,6 +38,21 @@ fn thread_settings_snapshot(disabled_plugin_ids: Vec<String>) -> Result<ThreadSe
 }
 
 #[test]
+fn rollout_reference_does_not_allocate_model_ids() {
+    let reference = RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: "ancestor.jsonl".into(),
+        thread_id: Some(ThreadId::new()),
+        rollout_id: None,
+        rollout_timestamp: None,
+        segment_id: None,
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    });
+    assert_eq!(crate::next_model_id_ordinals(&[reference]), (0, 0));
+}
+
+#[test]
 fn latest_disabled_plugin_ids_preserves_owned_updates_and_clears() -> Result<()> {
     let thread_id = ThreadId::new();
     let ancestor_id = ThreadId::new();
@@ -1342,6 +1357,7 @@ fn migration_retained_context_override_round_trips_without_changing_older_checkp
             phase: None,
         },
         crate::RetainedInputSource::Local(None),
+        &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
     );
     let mut legacy = crate::RetainedContext::default();
     legacy.mark_user_messages_incomplete();

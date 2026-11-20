@@ -5,6 +5,7 @@ use super::*;
 use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::connection_manager::tests::create_test_apps_client;
 use crate::connection_manager::tests::create_test_tool;
+use crate::elicitation::ElicitationRequestManager;
 use crate::mcp::tests::test_mcp_config;
 use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeManager;
@@ -26,11 +27,12 @@ struct AppsStartup {
     list_started: Arc<Notify>,
     release_list: Arc<Notify>,
     list_requests: Arc<AtomicUsize>,
+    _session_route: Arc<McpSessionRoute>,
 }
 
 async fn start_overlapping_apps_clients(
     home: &Path,
-    startup_timeout: Duration,
+    startup_timeout: Option<Duration>,
 ) -> anyhow::Result<(AppsStartup, AppsStartup)> {
     let cache = ConnectorRuntimeManager::new_without_cache().context(
         home.to_path_buf(),
@@ -44,6 +46,13 @@ async fn start_overlapping_apps_clients(
     );
     let start = |tool_name: &str| {
         let (publish, mut initialized) = watch::channel(None);
+        let session_route = Arc::new(McpSessionRoute::new(
+            "apps-startup-test".to_string(),
+            elicitation_requests.clone(),
+            /*tx_event*/ None,
+        ));
+        let request_router = McpConnectionRequestRouter::default();
+        request_router.register(&session_route);
         let params = StartServerTaskParams {
             server_key: McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
             publish_apps: Some(publish),
@@ -51,8 +60,7 @@ async fn start_overlapping_apps_clients(
             server_capabilities: Arc::default(),
             is_codex_apps_mcp_server: true,
             startup_timeout,
-            tx_event: None,
-            elicitation_requests: elicitation_requests.clone(),
+            request_router,
             codex_apps_tools_cache_context: Some(cache.clone()),
             tool_catalog_cache_context: None,
             tool_catalog_fetch_ticket: None,
@@ -88,11 +96,16 @@ async fn start_overlapping_apps_clients(
                 list_started,
                 release_list,
                 list_requests,
+                _session_route: session_route,
             })
         }
     };
     let first = start("lookup").await?;
-    tokio::time::timeout(startup_timeout, first.list_started.notified()).await?;
+    tokio::time::timeout(
+        startup_timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT),
+        first.list_started.notified(),
+    )
+    .await?;
     let second = start("peer_lookup").await?;
     Ok((first, second))
 }
@@ -102,7 +115,7 @@ async fn overlapping_apps_startups_share_tools_and_keep_their_own_connections() 
 {
     let home = tempfile::tempdir()?;
     let (first, second) =
-        start_overlapping_apps_clients(home.path(), DEFAULT_STARTUP_TIMEOUT).await?;
+        start_overlapping_apps_clients(home.path(), Some(DEFAULT_STARTUP_TIMEOUT)).await?;
     first.release_list.notify_one();
     second.release_list.notify_one();
     let first_client = first.task.await??;
@@ -131,7 +144,7 @@ async fn overlapping_apps_startups_share_tools_and_keep_their_own_connections() 
 async fn waiting_for_apps_tools_uses_the_configured_startup_timeout() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
     let (first, second) =
-        start_overlapping_apps_clients(home.path(), Duration::from_secs(5)).await?;
+        start_overlapping_apps_clients(home.path(), Some(Duration::from_secs(5))).await?;
     // The second server could reply immediately if its client issued another listing.
     second.release_list.notify_one();
     let (first_result, second_result) = tokio::try_join!(first.task, second.task)?;
@@ -146,10 +159,33 @@ async fn waiting_for_apps_tools_uses_the_configured_startup_timeout() -> anyhow:
 }
 
 #[tokio::test(start_paused = true)]
+async fn apps_startup_without_timeout_waits_for_the_shared_catalog() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let (first, second) = start_overlapping_apps_clients(home.path(), None).await?;
+    tokio::time::advance(DEFAULT_STARTUP_TIMEOUT * 2).await;
+    assert!(!first.task.is_finished());
+    assert!(!second.task.is_finished());
+    first.release_list.notify_one();
+    second.release_list.notify_one();
+    let first_client = first.task.await??;
+    let second_client = second.task.await??;
+    assert_eq!(first.list_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(second.list_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(first_client.tool_catalog.read(tool_names).await, ["lookup"]);
+    assert_eq!(
+        second_client.tool_catalog.read(tool_names).await,
+        ["lookup"]
+    );
+    first_client.client.shutdown().await;
+    second_client.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelling_an_apps_startup_releases_the_waiting_client() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
     let (first, second) =
-        start_overlapping_apps_clients(home.path(), DEFAULT_STARTUP_TIMEOUT).await?;
+        start_overlapping_apps_clients(home.path(), Some(DEFAULT_STARTUP_TIMEOUT)).await?;
     let interval = DEFAULT_STARTUP_TIMEOUT / 3;
     tokio::select! {
         biased;

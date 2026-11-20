@@ -25,6 +25,9 @@ fn write_review_input_source_with_replay(
     checkpoint.retained_context = Some(Default::default());
     checkpoint.retained_context_replay = retained_context_replay;
     checkpoint.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -193,6 +196,9 @@ async fn migrated_review_input_preserves_independent_only_baseline_envelopes() {
             resolved_review_input: None,
         });
         checkpoint.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+            next_item_ordinal: None,
+            observation_clock_floor_ms: None,
+            rejected_audio_file_ids: Default::default(),
             multi_agent_version: None,
             dynamic_tools: None,
             last_started_turn_id: None,

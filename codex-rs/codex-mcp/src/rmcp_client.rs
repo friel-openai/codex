@@ -1138,7 +1138,7 @@ fn add_plugin_provenance_to_tool(tool: &mut ToolInfo, plugin_names: &[String]) {
 }
 
 /// Adds server-scoped plugin names to regular MCP tools without changing their input schemas.
-fn prepare_regular_mcp_tools_for_model(
+pub(crate) fn prepare_regular_mcp_tools_for_model(
     mut tools: Vec<ToolInfo>,
     tool_plugin_context: &ToolPluginContext,
 ) -> Vec<ToolInfo> {
@@ -1331,7 +1331,7 @@ async fn start_server_task(
     let requested_capabilities = params.capabilities.clone();
     let started_at = Instant::now();
     let initialize_result = client
-        .initialize(params, Some(startup_timeout), send_elicitation)
+        .initialize(params, startup_timeout, send_elicitation)
         .await;
     record_protocol_discovery_metrics(
         client.protocol_mode(),
@@ -1412,19 +1412,26 @@ async fn start_server_task(
         is_codex_apps_mcp_server,
         /*codex_apps_refresh_trigger*/ "initial",
         &client,
-        Some(startup_timeout),
+        startup_timeout,
         catalog_item_limit,
         initialize_result.instructions.as_deref(),
     );
     let (client_tools, meta) = match &codex_apps_tools_cache_context {
-        Some(context) => tokio::select! {
-            // If the lock and deadline become ready together, skip the expired request.
-            biased;
-            () = tokio::time::sleep(startup_timeout) => {
-                return Err(anyhow!("tools/list startup timed out after {startup_timeout:?}").into());
+        Some(context) => {
+            let fetch = context.fetch_startup_tools(&server_info, list);
+            if let Some(startup_timeout) = startup_timeout {
+                tokio::select! {
+                    // If the lock and deadline become ready together, skip the expired request.
+                    biased;
+                    () = tokio::time::sleep(startup_timeout) => {
+                        return Err(anyhow!("tools/list startup timed out after {startup_timeout:?}").into());
+                    }
+                    result = fetch => result?,
+                }
+            } else {
+                fetch.await?
             }
-            result = context.fetch_startup_tools(&server_info, list) => result?,
-        },
+        }
         None => {
             let (tools, meta) = list.await?;
             (tools.into(), meta)
