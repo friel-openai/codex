@@ -34,6 +34,17 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ToolResultMetadata;
 
+/// A terminal tool may finish its turn without adding a model-visible response.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "ordinary tool results retain their by-value envelope without an extra allocation"
+)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum ToolCallResponse {
+    Response(ResponseItemEnvelope),
+    TerminalNoResponse,
+}
+
 struct ToolCallTimingGuard {
     started_at: Option<Instant>,
     call_state: Arc<ToolCallState>,
@@ -125,7 +136,7 @@ impl ToolCallRuntime {
         self,
         call: ToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResponse, CodexErr>> {
         let error_call = call.clone();
         let source = call.direct_source();
         let file_backed_tool_audio = self
@@ -157,24 +168,26 @@ impl ToolCallRuntime {
                     {
                         call.set_tool_result_metadata(ToolResultMetadata::new(metadata));
                     }
-                    result.into_response(file_backed_tool_audio)
+                    Self::response_for_tool_result(result, file_backed_tool_audio)
                 }
                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
-                Err(other) => {
-                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into())
-                }
+                Err(other) => ToolCallResponse::Response(ResponseItemEnvelope::new(
+                    Self::failure_response(error_call, other).into(),
+                )),
             };
-            if let Some(text) = call_state.delivered_assistant_message.get() {
-                response
-                    .metadata
-                    .get_or_insert_default()
-                    .delivered_assistant_message = Some(text.clone());
+            if let ToolCallResponse::Response(response) = &mut response {
+                if let Some(text) = call_state.delivered_assistant_message.get() {
+                    response
+                        .metadata
+                        .get_or_insert_default()
+                        .delivered_assistant_message = Some(text.clone());
+                }
+                recorder.attach_direct_call_to_output(
+                    &mut response.item,
+                    recorded_call,
+                    &item_id_generator,
+                );
             }
-            recorder.attach_direct_call_to_output(
-                &mut response.item,
-                recorded_call,
-                &item_id_generator,
-            );
             Ok(response)
         }
     }
@@ -475,6 +488,17 @@ impl ToolCallRuntime {
 impl ToolCallRuntime {
     pub(crate) fn batch_timing(&self) -> Option<ToolBatchTiming> {
         self.timing.as_ref().map(|timing| timing.batch.clone())
+    }
+
+    fn response_for_tool_result(
+        response: AnyToolResult,
+        file_backed_tool_audio: bool,
+    ) -> ToolCallResponse {
+        if response.result.terminal_no_response() {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(response.into_response(file_backed_tool_audio))
+        }
     }
 
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
@@ -858,6 +882,7 @@ mod tests {
                 tool_name: tool_name.clone(),
                 supports_parallel: false,
                 calls: AtomicUsize::default(),
+                terminal_no_response: false,
             })
         };
         let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -964,6 +989,7 @@ mod tests {
         tool_name: codex_tools::ToolName,
         supports_parallel: bool,
         calls: AtomicUsize,
+        terminal_no_response: bool,
     }
 
     impl ToolExecutor<ToolInvocation> for ImmediateHandler {
@@ -992,10 +1018,13 @@ mod tests {
         {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Box::pin(async {
-                Ok(
-                    Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
-                        as Box<dyn crate::tools::context::ToolOutput>,
-                )
+                let output = FunctionToolOutput::from_text("ok".to_string(), Some(true));
+                let output = if self.terminal_no_response {
+                    output.into_terminal_no_response()
+                } else {
+                    output
+                };
+                Ok(Box::new(output) as Box<dyn crate::tools::context::ToolOutput>)
             })
         }
     }
@@ -1041,10 +1070,12 @@ mod tests {
         }
     }
 
-    #[test_case::test_case(false; "posted cost checked after the slot opens")]
+    #[test_case::test_case(false, false; "ordinary response")]
+    #[test_case::test_case(false, true; "terminal response")]
     #[tokio::test]
     async fn completed_and_budget_stopped_tools_report_their_own_lifecycle(
         weighted: bool,
+        terminal_no_response: bool,
     ) -> anyhow::Result<()> {
         let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
         session
@@ -1071,11 +1102,13 @@ mod tests {
             tool_name: tool_name.clone(),
             supports_parallel: true,
             calls: AtomicUsize::default(),
+            terminal_no_response,
         });
         let queued_handler = Arc::new(ImmediateHandler {
             tool_name: queued_name.clone(),
             supports_parallel: false,
             calls: AtomicUsize::default(),
+            terminal_no_response: false,
         });
         let handlers: [Arc<dyn CoreToolRuntime>; 2] =
             [parallel_handler.clone(), queued_handler.clone()];
@@ -1159,18 +1192,20 @@ mod tests {
         let held_reply = tokio::time::timeout(Duration::from_secs(1), held).await??;
         let expected_denial = "rollout budget exhausted";
         assert_eq!(
-            held_reply.item,
-            ResponseInputItem::FunctionCallOutput {
-                call_id: "held-at-start".into(),
-                output: FunctionCallOutputPayload::from_text(format!(
-                    "aborted before handler start: {expected_denial}"
-                ),),
-            }
-            .into()
+            held_reply,
+            ToolCallResponse::Response(ResponseItemEnvelope::new(
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: "held-at-start".into(),
+                    output: FunctionCallOutputPayload::from_text(format!(
+                        "aborted before handler start: {expected_denial}"
+                    ),),
+                }
+                .into()
+            ))
         );
         lifecycle.release_finish.notify_one();
         assert_eq!(
-            ResponseItemEnvelope::new(expected_abort.into()),
+            ToolCallResponse::Response(ResponseItemEnvelope::new(expected_abort.into())),
             tokio::time::timeout(Duration::from_secs(1), queued).await??
         );
 
@@ -1182,10 +1217,12 @@ mod tests {
                 success: Some(true),
             },
         };
-        assert_eq!(
-            ResponseItemEnvelope::new(expected_response.into()),
-            response
-        );
+        let expected = if terminal_no_response {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(ResponseItemEnvelope::new(expected_response.into()))
+        };
+        assert_eq!(expected, response);
         assert_eq!(parallel_handler.calls.load(Ordering::Relaxed), 1);
         assert_eq!(queued_handler.calls.load(Ordering::Relaxed), 0);
 
@@ -1208,6 +1245,28 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn terminal_tool_result_does_not_create_response_item() {
+        let result = AnyToolResult {
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            result: Box::new(
+                FunctionToolOutput::from_text(String::new(), Some(true))
+                    .into_terminal_no_response(),
+            ),
+            post_tool_use_payload: None,
+        };
+
+        assert_eq!(
+            ToolCallResponse::TerminalNoResponse,
+            ToolCallRuntime::response_for_tool_result(
+                result, /*file_backed_tool_audio*/ false
+            )
+        );
     }
 }
 
