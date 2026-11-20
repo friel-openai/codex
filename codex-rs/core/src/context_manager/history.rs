@@ -599,6 +599,12 @@ impl ContextManager {
         self.world_state_baseline = Some(snapshot);
     }
 
+    pub(crate) fn invalidate_restored_command_sessions(&mut self) {
+        if let Some(snapshot) = &mut self.world_state_baseline {
+            snapshot.invalidate_section("command_sessions");
+        }
+    }
+
     pub(crate) fn world_state_checkpoint(&self) -> Option<WorldStateItem> {
         self.world_state_baseline
             .clone()
@@ -808,6 +814,22 @@ impl ContextManager {
         self.rejected_audio_file_ids = Arc::new(rejected);
     }
 
+    /// Shares the current immutable annotated history without copying the parent transcript.
+    pub(crate) fn shared_annotated_items(&self) -> Arc<Vec<ResponseItemEnvelope>> {
+        Arc::clone(&self.items)
+    }
+
+    /// Appends child-only fork items while retaining inherited history metadata.
+    pub(crate) fn append_fork_items(
+        &mut self,
+        items: impl IntoIterator<Item = ResponseItemEnvelope>,
+    ) {
+        for mut item in items {
+            self.sampling.record(&mut item);
+            Arc::make_mut(&mut self.items).push(item);
+        }
+    }
+
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
         Arc::unwrap_or_clone(self.into_shared_annotated_items())
@@ -887,11 +909,14 @@ impl ContextManager {
         self.replace_annotated(items.into_iter().map(ResponseItemEnvelope::new).collect());
     }
 
-    pub(crate) fn replace_annotated(&mut self, mut items: Vec<ResponseItemEnvelope>) {
-        self.sampling = super::sampling::SamplingProgress::restore(&mut items);
-        self.restored_through_sequence = self
-            .restored_through_sequence
-            .min(self.sampling.last_sequence);
+    pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.replace_shared_annotated(Arc::new(items));
+    }
+
+    /// Installs an immutable parent snapshot while preserving copy-on-write mutation behavior.
+    pub(crate) fn replace_shared_annotated(&mut self, mut items: Arc<Vec<ResponseItemEnvelope>>) {
+        self.sampling = super::sampling::SamplingProgress::restore_shared(&mut items);
+        self.restored_through_sequence = self.restored_through_sequence.min(self.sampling.last_sequence);
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
@@ -901,7 +926,7 @@ impl ContextManager {
                     .filter(|entry| !is_guardian_context_message(&entry.item)),
             );
         }
-        self.items = Arc::new(items);
+        self.items = items;
         self.reset_last_usage_boundary();
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
@@ -951,6 +976,58 @@ impl ContextManager {
         }
         self.world_state_baseline = None;
         promoted
+    }
+
+    /// Preserves parent model state while retaining the child's history generation.
+    pub(crate) fn replace_shared_snapshot(&mut self, source: &Self) {
+        let history_version = self.history_version.saturating_add(1);
+        *self = source.clone();
+        self.history_version = history_version;
+        // Guardian compares reset identities across asynchronous context capture. A parent
+        // reset identity could equal the child's next reset and hide that intervening reset.
+        self.reset_version = history_version;
+    }
+
+    /// Detects any parent model-state change between optimistic fork snapshot checks.
+    pub(crate) fn has_same_fork_metadata(&self, other: &Self) -> bool {
+        // Keep this exhaustive so new state must participate in fork validation. Shared
+        // payload identities avoid comparing the full transcript at every fork checkpoint.
+        let Self {
+            items,
+            review_history,
+            retained_context,
+            guardian_context_mode,
+            guardian_review_mode,
+            retain_inherited_user_messages,
+            history_version,
+            reset_version,
+            user_message_revision,
+            token_info,
+            reference_context_item,
+            world_state_baseline,
+        } = self;
+        Arc::ptr_eq(items, &other.items)
+            && Arc::ptr_eq(retained_context, &other.retained_context)
+            && match (review_history, &other.review_history) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.generation() == right.generation()
+                        && left
+                            .items()
+                            .map(std::ptr::from_ref)
+                            .eq(right.items().map(std::ptr::from_ref))
+                }
+                _ => false,
+            }
+            && guardian_context_mode == &other.guardian_context_mode
+            && guardian_review_mode == &other.guardian_review_mode
+            && retain_inherited_user_messages == &other.retain_inherited_user_messages
+            && history_version == &other.history_version
+            && reset_version == &other.reset_version
+            && user_message_revision == &other.user_message_revision
+            && token_info == &other.token_info
+            && reference_context_item == &other.reference_context_item
+            && world_state_baseline == &other.world_state_baseline
     }
 
     /// Drop the last `num_turns` instruction turns from this history.

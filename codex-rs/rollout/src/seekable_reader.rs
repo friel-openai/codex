@@ -75,10 +75,25 @@ pub fn open_rollout_seekable_reader(
     path: &Path,
     is_cancelled: impl Fn() -> bool,
 ) -> io::Result<impl Read + Seek> {
+    open_rollout_seekable_reader_with_exact_path(path, is_cancelled, false)
+}
+
+/// Opens the selected representation when `exact` is true, without preferring its sibling.
+pub fn open_rollout_seekable_reader_with_exact_path(
+    path: &Path,
+    is_cancelled: impl Fn() -> bool,
+    exact: bool,
+) -> io::Result<impl Read + Seek> {
     if is_cancelled() {
         return Err(io::Error::other("rollout read cancelled"));
     }
-    let file = match RolloutReader::open(path)? {
+    let source = if exact {
+        let file = File::open(path)?;
+        if path.to_string_lossy().ends_with(".zst") { RolloutReader::Compressed(file) } else { RolloutReader::Plain(file) }
+    } else {
+        RolloutReader::open(path)?
+    };
+    let file = match source {
         RolloutReader::Plain(file) => file,
         RolloutReader::Compressed(file) => {
             let mut decoded = tempfile::tempfile()?;

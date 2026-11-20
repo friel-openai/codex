@@ -17,7 +17,9 @@ use strum_macros::EnumIter;
 
 use crate::AgentPath;
 use crate::ResponseItemId;
+use crate::RolloutId;
 use crate::SanitizedGitUrl;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationAbandonedEvent;
@@ -3530,6 +3532,8 @@ pub struct SessionMeta {
     /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     /// Marks a persisted fork as attached to `forked_from_id`.
@@ -3608,6 +3612,7 @@ impl Default for SessionMeta {
             creator_account_id: None,
             session_id: id.into(),
             id,
+            segment_id: None,
             forked_from_id: None,
             attached_thread: false,
             forked_from_ordinal_exclusive: None,
@@ -3671,6 +3676,33 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
             serde_json::from_value(value).map_err(D::Error::custom)?;
         Ok(Self { meta, git })
     }
+}
+
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+/// A compact pointer to an immutable rollout segment inherited by this thread.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    /// Concrete rollout file identity. Older references used `thread_id` for both identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<RolloutId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
 }
 
 /// Persisted comparison state used to resume model-visible world-state diffing.
@@ -3746,6 +3778,23 @@ pub struct TurnContextItem {
     pub summary: Option<ReasoningSummaryConfig>,
 }
 
+/// Accepts the short-lived file-URI representation without changing current serialization.
+fn deserialize_turn_context_cwd<'de, D>(deserializer: D) -> Result<AbsolutePathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let serialized = String::deserialize(deserializer)?;
+    if serialized.starts_with("file:") {
+        let cwd = PathUri::parse(&serialized).map_err(D::Error::custom)?;
+        return cwd.to_abs_path().map_err(D::Error::custom);
+    }
+    let path = PathBuf::from(serialized);
+    if !path.is_absolute() {
+        return Err(D::Error::custom("AbsolutePathBuf deserialized without a base path"));
+    }
+    AbsolutePathBuf::from_absolute_path(path).map_err(D::Error::custom)
+}
+
 impl<'de> Deserialize<'de> for TurnContextItem {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3757,6 +3806,7 @@ impl<'de> Deserialize<'de> for TurnContextItem {
             root_turn_id: Option<String>,
             direct_only_tool_namespaces: Option<Vec<String>>,
             disabled_plugin_ids: Option<Vec<String>>,
+            #[serde(deserialize_with = "deserialize_turn_context_cwd")]
             cwd: AbsolutePathBuf,
             approval_policy: AskForApproval,
             approvals_reviewer: Option<ApprovalsReviewer>,
@@ -3772,6 +3822,8 @@ impl<'de> Deserialize<'de> for TurnContextItem {
             realtime_active: Option<bool>,
             cyber_access_program: Option<CyberAccessProgram>,
             effort: Option<ReasoningEffortConfig>,
+            service_tier: Option<String>,
+            model_profile: Option<String>,
             summary: Option<ReasoningSummaryConfig>,
         }
 
@@ -3818,8 +3870,16 @@ impl<'de> Deserialize<'de> for TurnContextItem {
             realtime_active: wire.realtime_active,
             cyber_access_program: wire.cyber_access_program,
             effort: wire.effort,
+            service_tier: wire.service_tier,
+            model_profile: wire.model_profile,
             summary: wire.summary,
         })
+    }
+}
+
+impl TurnContextItem {
+    pub fn permission_profile(&self) -> PermissionProfile {
+        self.permission_profile.clone()
     }
 }
 
@@ -4029,6 +4089,7 @@ pub struct ExecCommandBeginEvent {
     /// The command to be executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -4063,6 +4124,7 @@ pub struct ExecCommandEndEvent {
     /// The command that was executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -4085,6 +4147,20 @@ pub struct ExecCommandEndEvent {
     pub status: ExecCommandStatus,
 }
 
+/// Accepts the native absolute paths used by older persisted events.
+pub(crate) fn deserialize_path_uri_or_legacy_absolute_path<'de, D>(
+    deserializer: D,
+) -> Result<PathUri, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = LegacyAppPathString::deserialize(deserializer)?;
+    if let Ok(path_uri) = PathUri::parse(path.as_str()) {
+        return Ok(path_uri);
+    }
+    path.try_into().map_err(D::Error::custom)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ViewImageToolCallEvent {
     /// Identifier for the originating tool call.
@@ -4093,6 +4169,7 @@ pub struct ViewImageToolCallEvent {
     ///
     /// This core event is not exposed directly in the app-server API. App-server
     /// converts the path to `LegacyAppPathString` when building its public item.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub path: PathUri,
 }
 
@@ -6743,6 +6820,28 @@ mod tests {
         assert_eq!(item.permission_profile, PermissionProfile::Disabled);
         assert_eq!(item.comp_hash, None);
         assert_eq!(serde_json::to_value(item)?.get("summary"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_legacy_file_uri_preserves_plugin_selection() -> Result<()> {
+        let cwd = test_path_buf("/tmp").abs();
+        let native = json!({
+            "cwd": cwd,
+            "disabled_plugin_ids": ["example-plugin"],
+            "approval_policy": "never",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "gpt-5",
+            "summary": "auto",
+        });
+        let expected: TurnContextItem = serde_json::from_value(native.clone())?;
+        let mut legacy = native;
+        legacy["cwd"] = json!(PathUri::from_abs_path(&cwd));
+
+        let decoded: TurnContextItem = serde_json::from_value(legacy)?;
+
+        assert_eq!(decoded, expected);
+        assert_eq!(serde_json::to_value(&decoded)?["cwd"], json!(cwd));
         Ok(())
     }
 

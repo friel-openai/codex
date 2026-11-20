@@ -140,6 +140,8 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
