@@ -122,6 +122,7 @@ pub use environment::EnvironmentConnectionState;
 pub use environment::EnvironmentManager;
 pub use environment::EnvironmentObservedStatus;
 pub use environment::EnvironmentReadyInfo;
+pub use environment::FirstEnvironmentRegistration;
 pub use environment::LOCAL_ENVIRONMENT_ID;
 pub use environment::MAX_SELECTED_CAPABILITY_ROOTS;
 pub use environment::REMOTE_ENVIRONMENT_ID;
