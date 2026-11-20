@@ -7,6 +7,10 @@ use codex_app_server_client::RemoteAppServerEndpoint;
 
 pub(super) async fn run(cli: Cli, endpoint: RemoteAppServerEndpoint) -> anyhow::Result<()> {
     anyhow::ensure!(
+        cli.fork_session_id.is_none(),
+        "--remote does not yet support --fork"
+    );
+    anyhow::ensure!(
         !cli.trust
             && !cli.ignore_user_config
             && !cli.ignore_rules
@@ -145,4 +149,27 @@ pub(super) async fn run(cli: Cli, endpoint: RemoteAppServerEndpoint) -> anyhow::
         interrupt_rx,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn remote_fork_is_rejected_before_connecting() {
+        let cli = Cli::parse_from(["codex-exec", "--fork", "source", "prompt"]);
+        let endpoint = RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1".to_string(),
+            auth_token: None,
+        };
+        let error = run(cli, endpoint)
+            .await
+            .expect_err("remote fork is unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("--remote does not yet support --fork")
+        );
+    }
 }
