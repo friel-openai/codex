@@ -1,6 +1,5 @@
 use super::step_settings::ResolvedStepSettings;
 use super::*;
-use codex_protocol::openai_models::ModelOrigin;
 
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
@@ -51,7 +50,7 @@ pub(super) async fn spawn_review_thread(
     per_turn_config.features = review_features.clone();
     if let Some(current_effort) = reasoning_effort.as_ref()
         && review_model_info.slug != parent_turn_context.model_info().slug
-        && review_model_info.origin != ModelOrigin::Synthetic
+        && !review_model_info.origin.is_synthetic()
         && !review_model_info
             .supported_reasoning_levels
             .iter()

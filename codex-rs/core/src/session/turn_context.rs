@@ -33,7 +33,6 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
-use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::permissions::RawFileSystemSandboxPolicy;
 use codex_protocol::protocol::EnvironmentConfig;
@@ -1069,7 +1068,7 @@ impl TurnContext {
             );
             Arc::make_mut(&mut model_info).model = overridden.into();
         }
-        let has_authoritative_metadata = model_info.origin != ModelOrigin::Synthetic;
+        let has_authoritative_metadata = !model_info.origin.is_synthetic();
 
         let reasoning_effort = if let Some(reasoning_effort) = candidate.reasoning_effort.as_ref() {
             let supports_effort = model_info
@@ -1787,7 +1786,7 @@ impl Session {
     }
 
     pub(crate) async fn maybe_emit_model_warnings_for_turn(&self, tc: &TurnContext) {
-        if tc.model_info().origin == ModelOrigin::Synthetic {
+        if tc.model_info().origin.is_synthetic() {
             self.send_event(
                 tc,
                 EventMsg::Warning(WarningEvent {

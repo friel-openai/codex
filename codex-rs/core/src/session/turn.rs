@@ -76,6 +76,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::router::record_registration_metrics;
 use crate::tools::spec_plan::build_tool_router;
+use crate::tools::spec_plan::model_catalog_unavailable;
 use crate::tools::spec_plan::tool_suggest_enabled;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::turn_timing::record_turn_ttft_metric;
@@ -2856,13 +2857,21 @@ pub(crate) async fn prepare_tool_recommendations(
 pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
-    model_info: &codex_protocol::openai_models::ModelInfo,
+    model_info: &codex_protocol::openai_models::CatalogModel,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
     prepared_recommendations: PreparedToolRecommendations,
     dynamic_tools: &[codex_protocol::dynamic_tools::DynamicToolSpec],
 ) -> CodexResult<Arc<ToolRouter>> {
+    if sess
+        .services
+        .models_manager
+        .fallback_snapshot_requires_refresh(model_info)
+        .await
+    {
+        return Err(model_catalog_unavailable());
+    }
     let all_mcp_tools = mcp.tools();
     let connector_snapshot = mcp.config().connector_snapshot.clone();
 
@@ -3963,6 +3972,14 @@ async fn try_run_sampling_request(
     };
     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
     let mut stream_request = async |prompt: &Prompt| {
+        if sess
+            .services
+            .models_manager
+            .fallback_snapshot_requires_refresh(&step_context.settings.model_info)
+            .await
+        {
+            return Err(model_catalog_unavailable());
+        }
         client_session
             .stream(
                 prompt,

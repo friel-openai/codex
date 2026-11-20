@@ -7,7 +7,6 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelOrigin;
 use codex_tools::normalize_output_image_detail;
 use std::borrow::Cow;
 use tracing::warn;
@@ -51,7 +50,7 @@ pub(super) async fn build_guardian_prompt_items(
             / 100
     });
     let context_window =
-        context_window.filter(|limit| *limit > 0 && model_info.origin != ModelOrigin::Synthetic);
+        context_window.filter(|limit| *limit > 0 && !model_info.origin.is_synthetic());
     let image_mode = if unified_image_budget_enabled(&params.spawn_config.features, model_info) {
         ImagePreparationMode::UnifiedBudget
     } else {

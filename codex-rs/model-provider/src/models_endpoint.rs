@@ -319,6 +319,15 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
             || (self.provider_info.is_openai() && self.provider_info.base_url.is_none())
     }
 
+    fn requires_first_party_catalog(&self) -> bool {
+        // A configured base URL can route to a custom provider even when it
+        // has the Codex backend path.
+        self.provider_info.requires_openai_auth
+            && self.provider_info.model_catalog_url.is_none()
+            && self.provider_info.base_url.is_none()
+            && self.provider_info.supports_codex_backend_routes()
+    }
+
     fn has_provider_api_key(&self) -> bool {
         self.provider_info.env_key.is_some()
             || self.provider_info.experimental_bearer_token.is_some()
