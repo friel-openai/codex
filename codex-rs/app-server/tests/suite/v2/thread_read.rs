@@ -1590,8 +1590,8 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
         vec!["item-7", "item-8", "item-9", "item-5", "item-6"]
     );
     assert!(matches!(
-        &latest_page.data[0].items[2],
-        ThreadItem::InterAgentCommunication { communication, .. }
+        &latest_page.data[0].items[2].payload,
+        ThreadItemPayload::InterAgentCommunication { communication, .. }
             if communication.content == "worker completed"
     ));
 
@@ -1868,8 +1868,8 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
         }
         if page.data[0].id == "turn-00" {
             assert!(page.data[0].items.iter().any(|item| matches!(
-                item,
-                ThreadItem::Plan { id, text }
+                &item.payload,
+                ThreadItemPayload::Plan { id, text }
                     if id == "late-older-plan"
                         && text == "older turn updated from a newer segment"
             )));
