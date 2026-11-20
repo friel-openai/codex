@@ -6,7 +6,6 @@ use codex_prompts::ResolvedMessage;
 use codex_prompts::ResolvedModelMessages;
 use codex_prompts::ResolvedMultiAgentMessages;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -101,18 +100,13 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
         .multi_agent_mode_hint_text
         .as_deref()
         .or(multi_agent_messages.hint);
+
+    // Custom hints, including empty strings, override Frodex's effort-independent proactive
+    // default. Catalog mode templates supply wording without restricting the reasoning effort.
     let multi_agent_mode = match hint {
         Some(text) => MultiAgentMode::Custom(text.to_owned()),
         None => {
-            let (message, builtin) =
-                if settings.effective_reasoning_effort() == Some(ReasoningEffort::Ultra) {
-                    (multi_agent_messages.proactive, MultiAgentMode::Proactive)
-                } else {
-                    (
-                        multi_agent_messages.explicit,
-                        MultiAgentMode::ExplicitRequestOnly,
-                    )
-                };
+            let message = multi_agent_messages.proactive;
             if config.disable_native_tools {
                 let policy = message
                     .text()
@@ -123,7 +117,7 @@ pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<M
             } else {
                 match message {
                     ResolvedMessage::Catalog(text) => MultiAgentMode::Custom(text.to_owned()),
-                    ResolvedMessage::Bundled(_) => builtin,
+                    ResolvedMessage::Bundled(_) => MultiAgentMode::Proactive,
                 }
             }
         }
