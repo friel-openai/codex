@@ -13,7 +13,7 @@ from frodex_thread_resume_smoke import load_app_server_client, response_result
 
 CHILD_MESSAGE = "FRODEX_CAPACITY_CHILD"
 PROACTIVE = "Proactive multi-agent delegation is active."
-EXPLICIT = "Do not spawn sub-agents unless the user"
+EXPLICIT = "Complete your assigned work directly."
 CUSTOM = "Delegate only when explicitly requested by the user."
 
 
@@ -41,6 +41,7 @@ def run_case(client_type, codex, home, work, name, child_limit):
     """Keep children executing until all parent spawn results have been inspected."""
     home.mkdir()
     requests = []
+    child_requests = []
     outputs = {}
     condition = threading.Condition()
     release_children = threading.Event()
@@ -73,6 +74,7 @@ def run_case(client_type, codex, home, work, name, child_limit):
             )
             if child:
                 with condition:
+                    child_requests.append(body)
                     children_started += 1
                     condition.notify_all()
                 if not release_children.wait(40):
@@ -249,6 +251,13 @@ multi_agent_mode_hint_text = "{CUSTOM}"
             PROACTIVE in instructions and EXPLICIT not in instructions
             if child_limit is None
             else CUSTOM in instructions and PROACTIVE not in instructions
+        ),
+        "children_require_scoped_delegation": bool(child_requests)
+        and all(
+            EXPLICIT in "\n".join(message_texts(body, "developer"))
+            and PROACTIVE not in "\n".join(message_texts(body, "developer"))
+            and CUSTOM not in "\n".join(message_texts(body, "developer"))
+            for body in child_requests
         ),
         "limit_enforcement": (
             not failures
