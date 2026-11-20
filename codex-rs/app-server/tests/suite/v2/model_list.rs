@@ -669,6 +669,7 @@ async fn listed_aliases(app: &mut TestAppServer) -> Result<Vec<String>> {
                 limit: Some(100),
                 cursor: None,
                 include_hidden: Some(true),
+                ..Default::default()
             },
         })
         .await?;

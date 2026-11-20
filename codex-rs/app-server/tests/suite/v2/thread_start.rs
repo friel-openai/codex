@@ -1210,6 +1210,8 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
     for archived in [false, true] {
         let request_id = mcp
             .send_thread_list_request(ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(50),

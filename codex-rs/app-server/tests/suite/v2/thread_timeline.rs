@@ -281,7 +281,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -317,6 +317,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
                 }],
             }),
             TurnItem::AgentMessage(AgentMessageItem {
+                moderation: None,
                 id: format!("agent-{index}"),
                 questions: None,
                 content: vec![AgentMessageContent::Text {
@@ -329,6 +330,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
         ] {
             items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
                 ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id: source_id,
                     turn_id: turn_id.clone(),
                     item,
@@ -431,6 +433,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
                 request_id,
                 params: ThreadItemsListParams {
                     thread_id: child_id.clone(),
+                    defer_output: None,
                     turn_id: None,
                     cursor: None,
                     limit: Some(10),

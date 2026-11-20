@@ -770,14 +770,14 @@ async fn assert_ordinal_recovery_preserves_fork_boundaries(
     let state =
         codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
     for (id, path) in [(thread_id, &active_path), (child_id, &child_path)] {
-        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+        let metadata = codex_state::ThreadMetadataBuilder::new(
             id,
             path.clone(),
             chrono::Utc::now(),
             SessionSource::Cli,
-        );
-        metadata.history_mode = codex_protocol::protocol::ThreadHistoryMode::Paginated;
-        metadata.cwd = home.path().to_path_buf();
+        )
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Paginated)
+        .with_cwd(home.path().to_path_buf());
         state
             .upsert_thread(&metadata.build("mock_provider"))
             .await?;
@@ -1112,6 +1112,8 @@ async fn automatic_migration_keeps_list_nonblocking_and_gates_resume() -> Result
         .await?;
     let list_id = secondary
         .send_thread_list_request(ThreadListParams {
+            include_attached_threads: false,
+            current_account_only: false,
             excluded_thread_ids: None,
             cursor: None,
             limit: Some(10),
@@ -1503,6 +1505,7 @@ fn paginated_completed_user_message(
     text: &str,
 ) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id,
         turn_id: turn_id.to_string(),
         item: TurnItem::UserMessage(UserMessageItem {

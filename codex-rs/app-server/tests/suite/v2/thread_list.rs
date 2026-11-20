@@ -1949,6 +1949,8 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: Some(vec![expected_current[0].0.clone()]),
                 attached_to_thread_id: None,
                 originators: None,
