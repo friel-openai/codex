@@ -443,9 +443,9 @@ async fn prepare_with_response_history_once(
         }
         trace_fork_stage("indexed_attempt_fell_back");
     }
-    let mut prepared_same_thread_model_context = None;
-    let mut prepared_same_thread_full_history = None;
-    let mut prepared_same_thread_session_meta = None;
+    let mut prepared_clean_model_context = None;
+    let mut prepared_clean_full_history = None;
+    let mut prepared_clean_session_meta = None;
     let fast_lineage = if let Some(reservation) = indexed_fallback_reservation {
         let writer_reservation =
             reservation
@@ -455,10 +455,11 @@ async fn prepare_with_response_history_once(
                     message: "history repair did not retain fork writer ownership".to_string(),
                 })?;
         let prepared = store
-            .try_prepare_same_thread_fork_lineage_reserved(
+            .try_prepare_clean_fork_lineage_reserved(
                 thread_id,
                 expected_rollout_id,
                 writer_reservation,
+                &boundary,
                 matches!(response_history, ForkResponseHistory::Full),
             )
             .await?;
@@ -476,9 +477,10 @@ async fn prepare_with_response_history_once(
             _lifecycle: source_reservation,
             history_access,
         } = *reservation;
-        prepared_same_thread_model_context = Some(Arc::new(prepared.model_context));
-        prepared_same_thread_full_history = prepared.full_history.map(Arc::new);
-        prepared_same_thread_session_meta = Some(prepared.session_meta);
+        prepared_clean_model_context = Some(Arc::new(prepared.model_context));
+        prepared_clean_full_history = prepared.full_history.map(Arc::new);
+        prepared_clean_session_meta = Some(prepared.session_meta);
+        trace_fork_stage("prepared_clean_lineage");
         (
             prepared.lineage,
             history_access,
@@ -625,7 +627,7 @@ async fn prepare_with_response_history_once(
     if matches!(boundary, ForkBoundary::Latest)
         && matches!(response_history, ForkResponseHistory::ModelContext)
         && !lineage.requires_copied_history().await?
-        && let Some(context) = prepared_same_thread_model_context.as_ref()
+        && let Some(context) = prepared_clean_model_context.as_ref()
     {
         // The reserved lineage already reconstructed authoritative model context. Old Paginated
         // rollouts may retain legacy presentation events that a stateless UI projection cannot
@@ -816,7 +818,7 @@ async fn prepare_with_response_history_once(
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
-    let latest_model_context = if let Some(model_context) = prepared_same_thread_model_context {
+    let latest_model_context = if let Some(model_context) = prepared_clean_model_context {
         model_context
     } else {
         Arc::new(model_context::load_for_fork(lineage.clone(), Some(latest_position)).await?)
@@ -849,7 +851,7 @@ async fn prepare_with_response_history_once(
     let (response_history, projected_response_turns) = match (
         response_history,
         copied_history.as_ref(),
-        prepared_same_thread_full_history,
+        prepared_clean_full_history,
     ) {
         (ForkResponseHistory::Full, Some(copied_history), _) => (Arc::clone(copied_history), None),
         (ForkResponseHistory::Full, None, Some(prepared_full_history)) => {
@@ -862,18 +864,16 @@ async fn prepare_with_response_history_once(
             )),
         ),
         (ForkResponseHistory::Full, None, None) => (
-            Arc::new(
-                if let Some(session_meta) = prepared_same_thread_session_meta {
-                    model_context::load_full_for_fork_with_session_meta(
-                        lineage,
-                        history_base,
-                        session_meta,
-                    )
-                    .await?
-                } else {
-                    model_context::load_full_for_fork(lineage, history_base).await?
-                },
-            ),
+            Arc::new(if let Some(session_meta) = prepared_clean_session_meta {
+                model_context::load_full_for_fork_with_session_meta(
+                    lineage,
+                    history_base,
+                    session_meta,
+                )
+                .await?
+            } else {
+                model_context::load_full_for_fork(lineage, history_base).await?
+            }),
             None,
         ),
         (ForkResponseHistory::ModelContext, _, _) => (Arc::clone(&model_context), None),
