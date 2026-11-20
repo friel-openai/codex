@@ -444,6 +444,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
                 }],
             }),
             TurnItem::AgentMessage(AgentMessageItem {
+                moderation: None,
                 id: format!("agent-{index}"),
                 moderation: None,
                 questions: None,
@@ -457,6 +458,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
         ] {
             items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
                 ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id: source_id,
                     turn_id: turn_id.clone(),
                     item,
@@ -559,6 +561,7 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
                 request_id,
                 params: ThreadItemsListParams {
                     thread_id: child_id.clone(),
+                    defer_output: None,
                     turn_id: None,
                     cursor: None,
                     limit: Some(10),
