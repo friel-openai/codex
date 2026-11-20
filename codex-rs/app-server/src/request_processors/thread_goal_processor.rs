@@ -13,6 +13,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::WriterLockCoordinator;
+use tokio::sync::OwnedMutexGuard;
 
 #[path = "thread_goal_user_context.rs"]
 mod user_context;
@@ -130,6 +131,21 @@ impl ThreadGoalRequestProcessor {
             .map_err(|err| err.to_string())
     }
 
+    async fn lock_goal_mutation(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<OwnedMutexGuard<()>, JSONRPCErrorError> {
+        let guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
+        let state = self.thread_state_manager.thread_state(thread_id).await;
+        // The old listener can still forward a goal event after Core removes the runtime.
+        if state.lock().await.pending_shutdown_drain().is_some() {
+            return Err(invalid_request(format!(
+                "thread {thread_id} is closing; retry after its listener has drained"
+            )));
+        }
+        Ok(guard)
+    }
+
     async fn thread_goal_set_inner(
         &self,
         request_id: ConnectionRequestId,
@@ -140,7 +156,7 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
+        let _goal_resume_guard = self.lock_goal_mutation(thread_id).await?;
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
@@ -284,7 +300,7 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
+        let _goal_resume_guard = self.lock_goal_mutation(thread_id).await?;
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
