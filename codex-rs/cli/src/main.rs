@@ -1193,7 +1193,11 @@ async fn dispatch_cli(
                 ))
                 .await??;
         }
-        Some(Subcommand::Exec(mut exec_cli)) => {
+        Some(Subcommand::Exec(exec_cli)) => {
+            let mut exec_cli = match exec_cli.validate() {
+                Ok(exec_cli) => exec_cli,
+                Err(err) => err.exit(),
+            };
             if let Some(root_endpoint) = &root_remote
                 && let Some(exec_endpoint) = &exec_cli.remote
                 && root_endpoint != exec_endpoint
@@ -3247,6 +3251,40 @@ enabled = true
         );
         assert_eq!(args.session_id.as_deref(), Some("session-123"));
         assert_eq!(args.prompt.as_deref(), Some("re-review"));
+    }
+    #[test]
+    fn exec_fork_accepts_prompt_positional() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "exec",
+            "--json",
+            "--fork",
+            "session-123",
+            "2+2",
+        ])
+        .expect("parse should succeed");
+
+        let Some(Subcommand::Exec(exec)) = cli.subcommand else {
+            panic!("expected exec subcommand");
+        };
+
+        assert_eq!(exec.fork_session_id.as_deref(), Some("session-123"));
+        assert!(exec.command.is_none());
+        assert_eq!(exec.prompt.as_deref(), Some("2+2"));
+    }
+
+    #[test]
+    fn exec_fork_conflicts_with_resume_subcommand() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "exec", "--fork", "session-123", "resume"])
+                .expect("parse should succeed");
+
+        let Some(Subcommand::Exec(exec)) = cli.subcommand else {
+            panic!("expected exec subcommand");
+        };
+
+        let validate_result = exec.validate();
+        assert!(validate_result.is_err());
     }
 
     #[test]

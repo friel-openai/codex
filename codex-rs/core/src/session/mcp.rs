@@ -312,6 +312,7 @@ impl Session {
                 Some(self.mcp_elicitation_reviewer()),
             )
             .await;
+            *self.services.mcp_tool_snapshot.lock().await = None;
             refresh_invalidation.published = true;
         }
     }
@@ -537,7 +538,7 @@ impl Session {
             self.refresh_mcp_if_dirty().await;
         }
         self.wait_for_apps_tool_refresh().await;
-        if let Some(binding) = self
+        let binding = if let Some(binding) = self
             .services
             .mcp_runtime
             .current_binding_with_requirements(
@@ -547,10 +548,21 @@ impl Session {
             )
             .await
         {
-            return binding;
-        }
-        let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
-        Arc::new(codex_mcp::McpBinding::empty(config))
+            binding
+        } else {
+            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+            Arc::new(codex_mcp::McpBinding::empty(config))
+        };
+        let inherited_tools = self
+            .services
+            .mcp_tool_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.tools.clone());
+        inherited_tools
+            .map(|tools| Arc::new(binding.with_tool_catalog(tools)))
+            .unwrap_or(binding)
     }
 
     fn discovery_sandbox(
@@ -1018,6 +1030,7 @@ impl Session {
             elicitation_reviewer,
         )
         .await;
+        *self.services.mcp_tool_snapshot.lock().await = None;
         refresh_invalidation.published = true;
     }
 
