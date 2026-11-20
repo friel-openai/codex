@@ -1,0 +1,325 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index a269ea8db13ea5321a6bdc26d6d696c84030686e..1671cca8f4ddc3f18a9264533e0110f3ce17b937 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -3231,17 +3231,17 @@ async fn selected_server_lists_do_not_start_unrelated_servers() {
+     let (trigger, _receiver) = watch::channel(/*init*/ false);
+     manager
+         .servers
+-        .get_mut("unrelated")
++        .get_mut(&McpServerKey::unscoped("unrelated"))
+         .unwrap()
+         .startup_trigger = Some(trigger.clone());
+
+     let (server_infos, (tools, errors)) =
+         tokio::time::timeout(Duration::from_millis(/*millis*/ 100), async {
+             let server_infos = manager
+-                .list_available_server_infos(|name| name == "selected")
++                .list_available_server_infos(|name| name == &McpServerKey::unscoped("selected"))
+                 .await;
+             let tools = manager
+-                .list_tools_with_errors(|name| name == "selected")
++                .list_tools_with_errors(|name| name == &McpServerKey::unscoped("selected"))
+                 .await;
+             (server_infos, tools)
+         })
+@@ -3250,7 +3250,7 @@ async fn selected_server_lists_do_not_start_unrelated_servers() {
+
+     assert_eq!(
+         server_infos,
+-        HashMap::from([("selected".to_string(), selected_info)])
++        HashMap::from([(McpServerKey::unscoped("selected"), selected_info)])
+     );
+     assert_eq!(errors, HashMap::new());
+     assert_eq!(
+@@ -3597,31 +3597,6 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+         "explicitly requested servers must wait"
+     );
+
+-    assert!(
+-        tokio::time::timeout(
+-            Duration::from_millis(1),
+-            binding.list_resources(
+-                &McpServerKey::in_environment(
+-                    codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+-                    "pending-one"
+-                ),
+-                /*params*/ None
+-            ),
+-        )
+-        .await
+-        .is_err(),
+-        "resources must wait for an omitted server instead of failing immediately"
+-    );
+-    assert!(
+-        tokio::time::timeout(
+-            Duration::from_millis(1),
+-            binding.list_all_resources(|server| server.name() == "pending-one"),
+-        )
+-        .await
+-        .is_ok(),
+-        "resource discovery must not wait for an omitted optional server"
+-    );
+-
+     for server_name in ["pending-one", "pending-selected"] {
+         let required_servers = vec![McpServerKey::in_environment(
+             codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+@@ -3693,6 +3668,31 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+         .is_err(),
+         "configured-required selected plugin servers must wait beyond the optional grace"
+     );
++    // Dropping this explicit resource request cancels startup when it owns the only route.
++    assert!(
++        tokio::time::timeout(
++            Duration::from_millis(1),
++            binding.list_resources(
++                &McpServerKey::in_environment(
++                    codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
++                    "pending-one"
++                ),
++                /*params*/ None
++            ),
++        )
++        .await
++        .is_err(),
++        "resources must wait for an omitted server instead of failing immediately"
++    );
++    assert!(
++        tokio::time::timeout(
++            Duration::from_millis(1),
++            binding.list_all_resources(|server| server.name() == "pending-one"),
++        )
++        .await
++        .is_ok(),
++        "resource discovery must not wait for an omitted optional server"
++    );
+ }
+
+ #[tokio::test(start_paused = true)]
+@@ -3991,7 +3991,9 @@ fn create_test_manager_with_catalog_ready_client(
+         .get_mut(&McpServerKey::unscoped("cached"))
+         .unwrap()
+         .startup_readiness = config.startup_readiness;
+-    manager.required_servers.push("cached".to_string());
++    manager
++        .required_servers
++        .push(McpServerKey::unscoped("cached"));
+     manager
+ }
+
+@@ -4847,7 +4849,7 @@ async fn catalog_listing_preserves_legacy_apps_tools_during_failed_startup() {
+         client.request_router = Default::default();
+         manager
+             .servers
+-            .get_mut(CODEX_APPS_MCP_SERVER_NAME)
++            .get_mut(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))
+             .expect("Apps server")
+             .connection = client.into();
+
+@@ -5919,7 +5921,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
+         .await;
+         let error = match manager
+             .servers
+-            .get("fake-first-party")
++            .get(&McpServerKey::unscoped("fake-first-party"))
+             .expect("fake first-party server")
+             .connection
+             .run(Arc::clone(&manager.session_route), |client| async move {
+@@ -6696,7 +6698,7 @@ async fn reconcile_ema_server(
+             plugins_available: false,
+             ready_selected_capability_roots: Vec::new(),
+             mcp_servers: HashMap::from([(
+-                "docs".to_string(),
++                McpServerKey::unscoped("docs"),
+                 EffectiveMcpServer::from_host_config(config),
+             )]),
+             submit_id: "refresh-ema".to_string(),
+@@ -6709,6 +6711,7 @@ async fn reconcile_ema_server(
+             tool_catalog_cache: McpToolCatalogCache::default(),
+             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
+             client_mcp_extensions: ClientMcpExtensions::default(),
++            runtime_auth: None,
+             auth: None,
+             auth_manager: None,
+             elicitation_reviewer: None,
+@@ -8311,7 +8314,11 @@ async fn reconciliation_reuses_active_pending_connection_when_identity_is_unchan
+     let previous = Arc::new(previous);
+     let startup = {
+         let previous = Arc::clone(&previous);
+-        tokio::spawn(async move { previous.wait_for_server_startup("docs").await })
++        tokio::spawn(async move {
++            previous
++                .wait_for_server_startup(&McpServerKey::unscoped("docs"))
++                .await
++        })
+     };
+     tokio::time::timeout(Duration::from_secs(1), startup_started)
+         .await
+@@ -8430,7 +8437,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
+         .connection_id();
+     let codex_home = tempdir().expect("tempdir");
+     let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+-    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
++    mcp_config.client.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+
+     let reconciled = McpConnectionSet::new(
+         /*ema_auth*/ Arc::new(OnceLock::new()),
+@@ -8447,7 +8454,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
+             plugins_available: false,
+             ready_selected_capability_roots: Vec::new(),
+             mcp_servers: HashMap::from([(
+-                "docs".to_string(),
++                McpServerKey::unscoped("docs"),
+                 EffectiveMcpServer::from_host_config(config),
+             )]),
+             submit_id: "refresh".to_string(),
+@@ -8462,6 +8469,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
+                 /*account_id*/ None, /*chatgpt_user_id*/ None,
+             ),
+             client_mcp_extensions: ClientMcpExtensions::default(),
++            runtime_auth: None,
+             auth: None,
+             auth_manager: None,
+             elicitation_reviewer: None,
+diff --git a/codex-rs/codex-mcp/src/connection_pool_tests.rs b/codex-rs/codex-mcp/src/connection_pool_tests.rs
+index 13e957877cd1f626e4403969d02c4a3c6008e604..8959ee5fcb89fcc1d1381b4ce30b0099b90f774c 100644
+--- a/codex-rs/codex-mcp/src/connection_pool_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_pool_tests.rs
+@@ -1244,7 +1244,8 @@ fn identity_with_catalog_limit(
+     let auth = has_runtime_auth.then(|| CodexAuth::from_api_key("test-runtime-auth"));
+     let runtime_auth_provider = auth
+         .as_ref()
+-        .map(codex_model_provider::auth_provider_from_auth);
++        .map(codex_model_provider::auth_provider_from_auth)
++        .map(crate::auth::McpAuthProvider::Credentials);
+     McpConnectionIdentity::new(
+         "test",
+         &server,
+@@ -1255,6 +1256,7 @@ fn identity_with_catalog_limit(
+         resolved_environment,
+         &runtime_context,
+         runtime_auth_provider.as_ref(),
++        /*runtime_auth_mode*/ None,
+         auth.as_ref(),
+         Some((PathBuf::from("/codex-home"), connector_context)),
+         elicitation_capability.clone(),
+@@ -1271,7 +1273,9 @@ fn identity_with_auth(auth: &CodexAuth) -> McpConnectionIdentity {
+         Arc::new(environment_manager_without_environments()),
+         PathBuf::from("/one"),
+     );
+-    let provider = codex_model_provider::auth_provider_from_auth(auth);
++    let provider = crate::auth::McpAuthProvider::Credentials(
++        codex_model_provider::auth_provider_from_auth(auth),
++    );
+     McpConnectionIdentity::new(
+         "test",
+         &server,
+@@ -1282,6 +1286,7 @@ fn identity_with_auth(auth: &CodexAuth) -> McpConnectionIdentity {
+         &Ok(None),
+         &runtime_context,
+         Some(&provider),
++        /*runtime_auth_mode*/ None,
+         Some(auth),
+         Some((
+             PathBuf::from("/codex-home"),
+@@ -1314,6 +1319,7 @@ fn identity_with_agent_plugin(agent_plugin: bool) -> McpConnectionIdentity {
+         &Ok(None),
+         &runtime_context,
+         /*runtime_auth_provider*/ None,
++        /*runtime_auth_mode*/ None,
+         /*auth*/ None,
+         Some((
+             PathBuf::from("/codex-home"),
+@@ -1606,6 +1612,7 @@ async fn connection_pool_reuse_and_replacement_isolate_credential_policies() {
+             &Ok(None),
+             &runtime_context,
+             /*runtime_auth_provider*/ None,
++            /*runtime_auth_mode*/ None,
+             /*auth*/ None,
+             /*codex_apps_cache_identity*/ None,
+             ElicitationCapability::default(),
+@@ -1838,20 +1845,35 @@ async fn provisional_replacement_preserves_shared_generation_until_commit() {
+ async fn publication_can_retire_an_old_generation_from_another_pool() {
+     let old_pool = McpConnectionPool::default();
+     let new_pool = McpConnectionPool::default();
++    let acquisition_slot = Arc::new(ConnectionSlot::default());
++    let client_slot = Arc::clone(&acquisition_slot);
+     let old = old_pool.acquire_named(
+         "server".to_string(),
+         identity("server", "/tmp"),
+         McpConnectionPoolMode::Reuse,
+         &route(),
+-        client,
++        move |router| {
++            let mut client = client(router);
++            client.connection_slot = Some(Arc::clone(&client_slot));
++            client
++        },
+     );
+     let physical = old.inner.slot.current();
+     assert!(physical.check_new_request().is_ok());
++    assert!(matches!(
++        &*acquisition_slot.state.lock().unwrap(),
++        SlotState::Available
++    ));
+     assert_eq!(
+         new_pool.commit_provisional(std::iter::empty(), [&old]),
+         ProvisionalCommit::Committed
+     );
+-    assert!(physical.check_new_request().is_err());
++    assert!(matches!(
++        &*acquisition_slot.state.lock().unwrap(),
++        SlotState::Retired
++    ));
++    // Retiring an acquisition must not revoke the already-held physical connection.
++    assert!(physical.check_new_request().is_ok());
+ }
+
+ #[tokio::test]
+@@ -2940,7 +2962,11 @@ async fn pooled_capture_retains_raw_catalog_snapshot_when_connector_tools_are_fi
+     );
+
+     catalog
+-        .refresh(|| async { Ok((raw_tools, None, ())) }, |_, _, ()| {})
++        .refresh(
++            || async { Ok((raw_tools, None, ())) },
++            || Some(()),
++            |_, _, ()| {},
++        )
+         .await?;
+     assert_eq!(
+         catalog
+@@ -3073,6 +3099,7 @@ async fn prepared_call_waits_for_refresh_route_before_locking_catalog() -> anyho
+                             release_rx.await?;
+                             Ok((Vec::new(), None, ()))
+                         },
++                        || Some(()),
+                         |_, _, ()| {},
+                     )
+                     .await
+@@ -3127,8 +3154,11 @@ async fn cancelling_prepared_call_releases_route_and_catalog_locks() -> anyhow::
+
+     let mut other_route = Box::pin(other_binding.acquire_route());
+     assert!(futures::poll!(&mut other_route).is_pending());
+-    let mut refresh =
+-        Box::pin(catalog.refresh(|| async { Ok((Vec::new(), None, ())) }, |_, _, ()| {}));
++    let mut refresh = Box::pin(catalog.refresh(
++        || async { Ok((Vec::new(), None, ())) },
++        || Some(()),
++        |_, _, ()| {},
++    ));
+     assert!(futures::poll!(&mut refresh).is_pending());
+
+     drop(call);
+diff --git a/codex-rs/codex-mcp/src/rmcp_client/apps_startup_tests.rs b/codex-rs/codex-mcp/src/rmcp_client/apps_startup_tests.rs
+index 97b4ad8d9b7b71c80609632d02c27c1ae4e0a18a..4bb8770100312d31f2688b9c0b4827d1c06d0bbf 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client/apps_startup_tests.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client/apps_startup_tests.rs
+@@ -133,6 +133,7 @@ async fn overlapping_apps_startups_share_tools_and_keep_their_own_connections()
+             /*arguments*/ None,
+             |_| Ok(None),
+             Some(DEFAULT_TOOL_TIMEOUT),
++            /*lease*/ None,
+         )
+         .await?;
+     assert!(!reply.is_error.unwrap_or(false));
