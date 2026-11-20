@@ -230,6 +230,7 @@ async fn late_steer_continues_before_thread_idle_lifecycle(outcome: TaskOutcome)
         *turn_context.terminal_error.lock().await = Some(ErrorEvent {
             message: "already-reported terminal failure".to_string(),
             codex_error_info: None,
+            rejected_audio_file_ids: Vec::new(),
             misalignment: None,
         });
     }

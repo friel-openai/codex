@@ -19,8 +19,14 @@ fn goal_supervisor_reconciliation_does_not_migrate_indexed_children() {
             let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
             let manager = ThreadManager::new(
                 &config,
-                auth.clone(),
-                crate::thread_manager::build_models_manager(&config, auth),
+                crate::build_startup_models(
+                    &config,
+                    auth,
+                    uuid::Uuid::new_v4().to_string(),
+                    Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                        config.codex_home.to_path_buf(),
+                    )),
+                ),
                 crate::CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -30,7 +36,6 @@ fn goal_supervisor_reconciliation_does_not_migrate_indexed_children() {
                 crate::thread_manager::passthrough_image_store(),
                 store,
                 crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
-                uuid::Uuid::new_v4().to_string(),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ None,
             );
