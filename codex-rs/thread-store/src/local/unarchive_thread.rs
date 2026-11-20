@@ -32,15 +32,23 @@ pub(super) async fn unarchive_threads(
     lock_thread_ids.sort_unstable_by_key(ToString::to_string);
     lock_thread_ids.dedup();
     let mut _lifecycle_guards = Vec::with_capacity(lock_thread_ids.len());
-    for thread_id in lock_thread_ids {
-        _lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(thread_id).await);
+    for thread_id in &lock_thread_ids {
+        _lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(*thread_id).await);
+    }
+    let mut _live_writer_guards = Vec::with_capacity(lock_thread_ids.len());
+    for thread_id in &lock_thread_ids {
+        _live_writer_guards.push(store.live_writer_locks.lock(*thread_id).await);
     }
     // Hold ownership while discovering and moving rollouts, as archive does. A busy
     // descendant remains a best-effort failure rather than blocking the parent's restore.
     let mut thread_ids = Vec::new();
     let mut _writer_guards = Vec::new();
     for (index, thread_id) in requested_ids.into_iter().enumerate() {
-        match store.acquire_writer_lock(thread_id) {
+        match store
+            .ensure_live_recorder_absent(thread_id)
+            .await
+            .and_then(|()| store.acquire_writer_lock(thread_id))
+        {
             Ok(guard) => {
                 _writer_guards.push(guard);
                 thread_ids.push(thread_id);
