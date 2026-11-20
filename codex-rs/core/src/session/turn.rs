@@ -71,6 +71,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -811,6 +812,7 @@ pub(crate) async fn run_turn(
                     needs_follow_up: model_needs_follow_up,
                     mailbox_preempted,
                     last_agent_message: sampling_request_last_agent_message,
+                    refresh_turn_context,
                 } = sampling_request_output;
                 let AssistantMessages {
                     final_answer,
@@ -823,6 +825,30 @@ pub(crate) async fn run_turn(
                     stop_ran: false,
                 };
                 let mut completion_hooks = hooks;
+                if refresh_turn_context {
+                    let settings = turn_context.next_step_settings.load_full();
+                    let refreshed_turn_context = sess
+                        .refresh_active_turn_context(turn_context.as_ref(), &settings)
+                        .await;
+                    let refreshed_step_context = sess
+                        .capture_step_context(
+                            Arc::clone(&refreshed_turn_context),
+                            &cancellation_token,
+                        )
+                        .await?;
+                    let display_roots =
+                        turn_diff_display_roots(refreshed_step_context.as_ref()).await;
+                    turn_diff_tracker
+                        .lock()
+                        .await
+                        .set_environment_display_roots(display_roots);
+                    sess.record_context_updates_and_set_reference_context_item(
+                        refreshed_step_context.as_ref(),
+                    )
+                    .await?;
+                    turn_context = refreshed_turn_context;
+                    next_step_context = Some(refreshed_step_context);
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -2640,6 +2666,7 @@ async fn run_sampling_request(
                     needs_follow_up: true,
                     mailbox_preempted: draining_for_mailbox,
                     last_agent_message: AssistantMessages::default(),
+                    refresh_turn_context: step_context.turn_context_refresh_requested(),
                 },
                 notify_messages,
             ));
@@ -2792,6 +2819,7 @@ struct SamplingRequestResult {
     /// Queued mail interrupted sampling and must be drained before the next request.
     mailbox_preempted: bool,
     last_agent_message: AssistantMessages,
+    refresh_turn_context: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -3858,6 +3886,8 @@ async fn try_run_sampling_request(
         == codex_config::config_toml::ResponseProcessMode::Streaming;
     let mut wait_for_bill_only = false;
     let mut in_flight = FuturesOrdered::new();
+    let mut tool_call_count = 0usize;
+    let mut workspace_cwd_call_seen = false;
     let mut needs_follow_up = false;
     let mut last_agent_message = AssistantMessages::default();
     let mut active_item: Option<TurnItem> = None;
@@ -3901,6 +3931,7 @@ async fn try_run_sampling_request(
                 needs_follow_up,
                 mailbox_preempted: *draining_for_mailbox,
                 last_agent_message,
+                refresh_turn_context: false,
             });
         }
         let handle_responses = trace_span!(
@@ -3980,6 +4011,7 @@ async fn try_run_sampling_request(
                     needs_follow_up: true,
                     mailbox_preempted: *draining_for_mailbox,
                     last_agent_message,
+                    refresh_turn_context: false,
                 });
             }
             break Err(CodexErr::Stream(
@@ -4009,6 +4041,7 @@ async fn try_run_sampling_request(
                         needs_follow_up: true,
                         mailbox_preempted: true,
                         last_agent_message,
+                        refresh_turn_context: false,
                     });
                 }
                 break Err(err);
@@ -4184,6 +4217,10 @@ async fn try_run_sampling_request(
                 };
                 if let Some(tool) = output_result.tool_future {
                     in_flight.push_back(tool);
+                }
+                if let Some(tool_name) = output_result.tool_name {
+                    tool_call_count += 1;
+                    workspace_cwd_call_seen |= is_set_workspace_cwd_tool(&tool_name);
                 }
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message.record(agent_message);
@@ -4450,6 +4487,7 @@ async fn try_run_sampling_request(
                         needs_follow_up: true,
                         mailbox_preempted: *draining_for_mailbox,
                         last_agent_message,
+                        refresh_turn_context: false,
                     });
                 }
                 if resampling.retry_pending {
@@ -4760,6 +4798,9 @@ async fn try_run_sampling_request(
         *unfinished_plan_id = state.plan_item_state.unfinished_id();
     }
 
+    if workspace_cwd_call_seen && tool_call_count != 1 {
+        step_context.reject_context_transition_mixed_with_sibling_tool();
+    }
     if !in_flight.is_empty() || !completed_tools.is_empty() {
         let _tool_blocking_timing_guard = turn_context
             .turn_timing_state
@@ -4789,7 +4830,10 @@ async fn try_run_sampling_request(
         return Err(CodexErr::TurnAborted);
     }
 
-    outcome
+    outcome.map(|mut outcome| {
+        outcome.refresh_turn_context = step_context.turn_context_refresh_requested();
+        outcome
+    })
 }
 
 pub(crate) fn get_last_assistant_message_from_turn<'a>(

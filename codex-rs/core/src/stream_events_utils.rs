@@ -16,6 +16,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::call_trace;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use codex_memories_read::citations::parse_memory_citation;
 use codex_memories_read::citations::thread_ids_from_memory_citation;
@@ -28,6 +29,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout::state_db;
+use codex_tools::ToolName;
 use codex_utils_stream_parser::strip_proposed_plan_blocks;
 use futures::Future;
 use tracing::debug;
@@ -235,6 +237,7 @@ pub(crate) struct AssistantText {
 pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<AssistantText>,
     pub needs_follow_up: bool,
+    pub tool_name: Option<ToolName>,
     pub tool_future: Option<InFlightFuture<'static>>,
 }
 
@@ -384,10 +387,22 @@ pub(crate) async fn handle_output_item_done(
                 .await;
 
             let cancellation_token = ctx.cancellation_token.child_token();
+            output.tool_name = Some(call.tool_name.clone());
             let runtime = ctx.tool_runtime.clone();
+            let defer_dispatch = is_set_workspace_cwd_tool(&call.tool_name);
             let dispatch = |allowed: bool| -> InFlightFuture<'static> {
                 if allowed && !cancellation_token.is_cancelled() {
-                    Box::pin(runtime.handle_tool_call(call, cancellation_token))
+                    if defer_dispatch {
+                        Box::pin(async move {
+                            if cancellation_token.is_cancelled() {
+                                let output = ToolCallRuntime::aborted_before_dispatch(&call);
+                                return Ok(output.into_response(/*file_backed_tool_audio*/ false));
+                            }
+                            runtime.handle_tool_call(call, cancellation_token).await
+                        })
+                    } else {
+                        Box::pin(runtime.handle_tool_call(call, cancellation_token))
+                    }
                 } else {
                     let output = ToolCallRuntime::aborted_before_dispatch(&call);
                     Box::pin(std::future::ready(Ok(
