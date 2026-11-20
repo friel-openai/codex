@@ -2921,7 +2921,9 @@ async fn reconstruct_history_matches_live_compactions() {
     assert_eq!(
         reconstructed
             .window_id
-            .map(|window_id| window_id.get_version_num()),
+            .map(|window_id| Uuid::parse_str(&window_id.to_string())
+                .expect("window ID is a UUID")
+                .get_version_num()),
         Some(7)
     );
 }
@@ -5078,18 +5080,22 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
                 phase: None,
             },
             codex_history::RetainedInputSource::Local(Some(3)),
+            &source.item_id_generator,
         );
-        retained_context.record(&codex_history::RetainedContextEvent::VerifiedAnswer {
-            answer: codex_history::VerifiedAnswer {
-                turn_id: "parent-authorization-turn".to_owned(),
-                call_id: "parent-publication-question".to_owned(),
-                questions: vec![codex_history::VerifiedQuestionAnswer {
-                    question: "May I publish?".to_owned(),
-                    answer: "Only privately.".to_owned(),
-                }],
+        retained_context.record(
+            &codex_history::RetainedContextEvent::VerifiedAnswer {
+                answer: codex_history::VerifiedAnswer {
+                    turn_id: "parent-authorization-turn".to_owned(),
+                    call_id: "parent-publication-question".to_owned(),
+                    questions: vec![codex_history::VerifiedQuestionAnswer {
+                        question: "May I publish?".to_owned(),
+                        answer: "Only privately.".to_owned(),
+                    }],
+                },
+                acceptance_order: Some(4),
             },
-            acceptance_order: Some(4),
-        });
+            &source.item_id_generator,
+        );
     } else {
         retained_context.mark_user_messages_incomplete();
     }
@@ -5221,15 +5227,19 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         rate_limit_reached_type: None,
     };
     let window_ids = AutoCompactWindowIds {
-        first_window_id: Uuid::now_v7(),
-        previous_window_id: Some(Uuid::now_v7()),
-        window_id: Uuid::now_v7(),
+        first_window_id: ContextWindowId::new_uuid_v7(),
+        previous_window_id: Some(ContextWindowId::new_uuid_v7()),
+        window_id: ContextWindowId::new_uuid_v7(),
     };
 
     {
         let mut state = source.state.lock().await;
-        state.history =
-            ContextManager::for_session(&SessionSource::Exec, &source_turn.config.features);
+        state.history = ContextManager::for_session(
+            source_turn.root_capabilities_restricted,
+            &source_turn.config.features,
+            source_turn.config.guardian_context_budgeting(),
+            Arc::clone(&source.item_id_generator),
+        );
         state.replace_shared_history(
             Arc::clone(&source_response_items),
             Some(reference_context_item.clone()),
@@ -5253,7 +5263,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             .history
             .set_world_state_baseline(world_state.render_full().0);
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids.clone());
     }
     // Pause between capture and recheck while changing only turn attribution.
     let state_guard = source.state.lock().await;
@@ -5358,7 +5368,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             Some(authoritative_rate_limits.clone())
         );
         assert_eq!(child_state.auto_compact_window_number(), 7);
-        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+        assert_eq!(child_state.auto_compact_window_ids(), &window_ids);
         assert_eq!(child_state.history.history_version(), 1);
         assert_eq!(
             child_state.history.guardian_history_checkpoint(),
@@ -5368,8 +5378,8 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         assert!(
             child_state
                 .history
-                .update_world_state(&world_state)
-                .1
+                .render_step_world_state(&world_state)
+                .2
                 .is_none(),
             "an unchanged parent world-state baseline must not be reintroduced"
         );
@@ -5599,8 +5609,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
     ));
     let manager = crate::ThreadManager::new(
         &config,
-        Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager,
+            "prepared-fork-test-installation".to_string(),
+            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                config.codex_home.to_path_buf(),
+            )),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -5610,7 +5626,6 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         crate::thread_manager::passthrough_image_store(),
         store.clone(),
         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
-        "prepared-fork-test-installation".to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -5667,9 +5682,9 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         model_context_window: Some(8_192),
     };
     let window_ids = AutoCompactWindowIds {
-        first_window_id: Uuid::now_v7(),
-        previous_window_id: Some(Uuid::now_v7()),
-        window_id: Uuid::now_v7(),
+        first_window_id: ContextWindowId::new_uuid_v7(),
+        previous_window_id: Some(ContextWindowId::new_uuid_v7()),
+        window_id: ContextWindowId::new_uuid_v7(),
     };
     {
         let mut state = source.thread.session.state.lock().await;
@@ -5678,7 +5693,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
             .set_world_state_baseline(world_state.render_full().0);
         state.set_token_info(Some(token_info.clone()));
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids.clone());
     }
 
     let expected_position = store
@@ -5717,6 +5732,11 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
     let (child, response_history) = manager
         .fork_prepared_thread(crate::StartThreadOptions::new(config), prepared)
         .await?;
+    let crate::thread_manager::PreparedForkResponseHistory::Captured(response_history) =
+        response_history
+    else {
+        panic!("local frozen source must capture response history");
+    };
 
     let child_items = child
         .thread
@@ -5769,12 +5789,12 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         );
         assert_eq!(child_state.token_info(), Some(token_info));
         assert_eq!(child_state.auto_compact_window_number(), 7);
-        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+        assert_eq!(child_state.auto_compact_window_ids(), &window_ids);
         assert!(
             child_state
                 .history
-                .update_world_state(&world_state)
-                .1
+                .render_step_world_state(&world_state)
+                .2
                 .is_none(),
             "an unchanged parent world-state baseline must not be reintroduced"
         );
@@ -5869,7 +5889,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: codex_thread_store::ThreadPersistenceMetadata {
                 cwd: Some(test.config.cwd.to_path_buf()),
@@ -5901,6 +5921,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
                         collaboration_mode_kind: Default::default(),
                     })),
                     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                        content_token_count: None,
                         thread_id: source_thread_id,
                         turn_id: turn_id.clone(),
                         item: TurnItem::UserMessage(UserMessageItem {
@@ -5955,13 +5976,13 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             .codex
             .state_db()
             .expect("paginated source state database");
-        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+        let metadata = codex_state::ThreadMetadataBuilder::new(
             source_thread_id,
             active_rollout_path,
             chrono::Utc::now(),
             SessionSource::Cli,
-        );
-        metadata.history_mode = ThreadHistoryMode::Paginated;
+        )
+        .with_history_mode(ThreadHistoryMode::Paginated);
         state_db
             .upsert_thread(&metadata.build(&test.config.model_provider_id))
             .await?;
@@ -7221,7 +7242,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
     let mut assistant_item = assistant_message("before compaction answer");
     assistant_item.set_id(Some(assistant_item_id.clone()));
     let mut expected_retained_context = codex_history::RetainedContext::default();
-    expected_retained_context.record(&retained_answer);
+    expected_retained_context.record(&retained_answer, &session.item_id_generator);
     expected_retained_context.record_user_message(
         codex_history::RetainedUserMessage {
             turn_id: turn_context.sub_id.clone(),
@@ -7232,6 +7253,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
             phase: None,
         },
         codex_history::RetainedInputSource::Local(Some(2)),
+        &session.item_id_generator,
     );
     expected_retained_context.record_assistant_message(
         codex_history::RetainedUserMessage {
@@ -7243,6 +7265,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
             phase: None,
         },
         codex_history::RetainedInputSource::Local(Some(3)),
+        &session.item_id_generator,
     );
     session
         .record_conversation_items(
@@ -7305,6 +7328,7 @@ async fn assert_compacted_history_freezes_the_previous_rollout_segment(
             replacement_history.clone(),
             turn_context.to_turn_context_item(),
             expected_world_state.clone(),
+            /*rejected_audio_file_ids*/ Default::default(),
             CompactedHistoryMetadata {
                 input_goal_ids: Default::default(),
                 message: "compacted summary".to_string(),
@@ -7497,7 +7521,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
     let captured_prefix = CompactionPrefix {
         generation: captured.history_version(),
         len: captured.annotated_items().len(),
-        auth_owner_generation: session.services.model_client.auth_owner_generation(),
+        auth_owner: session.services.model_client.auth_owner(),
     };
     session
         .record_user_goal_update(crate::context::UserGoalUpdate::Clear)
@@ -7546,6 +7570,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
             prefix: captured_prefix,
             prefix_context: Vec::new(),
             initial_context: Vec::new(),
+            reset_world_state_sections: Vec::new(),
             model_info: turn_context.model_info(),
             compaction_response_id: "failed-prefix".to_string(),
             reviewer_compaction_hash: Some("test-compaction-model-hash".to_string()),
@@ -7575,6 +7600,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
             })],
             turn_context.to_turn_context_item(),
             WorldStateSnapshot::default(),
+            /*rejected_audio_file_ids*/ Default::default(),
             installation,
         )
         .await
@@ -7729,7 +7755,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
     let captured_prefix = CompactionPrefix {
         generation: captured.history_version(),
         len: captured.annotated_items().len(),
-        auth_owner_generation: session.services.model_client.auth_owner_generation(),
+        auth_owner: session.services.model_client.auth_owner(),
     };
     for _ in 0..2 {
         session
@@ -7749,6 +7775,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
             prefix: captured_prefix,
             prefix_context: Vec::new(),
             initial_context: Vec::new(),
+            reset_world_state_sections: Vec::new(),
             model_info: &model_info,
             compaction_response_id: "compatible-prefix".to_string(),
             reviewer_compaction_hash: model_info.comp_hash.clone(),
@@ -7778,6 +7805,7 @@ async fn committed_compaction_cancels_legacy_reviews_and_releases_reasoning_effo
             })],
             turn_context.to_turn_context_item(),
             WorldStateSnapshot::default(),
+            /*rejected_audio_file_ids*/ Default::default(),
             installation,
         ),
     ));
@@ -11420,6 +11448,7 @@ async fn queued_client_info_update_succeeds_after_compacted_checkpoint_commits()
             replacement_history,
             turn_context.to_turn_context_item(),
             world_state_baseline,
+            /*rejected_audio_file_ids*/ Default::default(),
             CompactedHistoryMetadata {
                 input_goal_ids: Default::default(),
                 compaction_response_id: None,

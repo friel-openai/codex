@@ -1341,15 +1341,15 @@ async fn selected_v2_agent_metadata_uses_indexed_identity_without_reading_rollou
         agent_nickname: Some("source-name".to_string()),
         agent_role: Some("source-role".to_string()),
     });
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         indexed_thread_id,
         malformed_rollout.to_path_buf(),
         chrono::Utc::now(),
         source,
-    );
-    builder.agent_path = Some(indexed_path.to_string());
-    builder.agent_nickname = Some("indexed-name".to_string());
-    builder.agent_role = Some("indexed-role".to_string());
+    )
+    .with_agent_path(Some(indexed_path.to_string()))
+    .with_agent_nickname(Some("indexed-name".to_string()))
+    .with_agent_role(Some("indexed-role".to_string()));
     state_db
         .upsert_thread(&builder.build("openai"))
         .await
@@ -1705,6 +1705,7 @@ async fn on_event_updates_status_from_failed_task_complete() {
             misalignment: None,
             message: "boom".to_string(),
             codex_error_info: None,
+            rejected_audio_file_ids: Vec::new(),
         }),
         completed_at: None,
         duration_ms: None,
@@ -2972,7 +2973,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
         let hidden = path.with_extension("unavailable-during-sender-read");
         std::fs::rename(&path, &hidden).expect("hide review transcript during sender inspection");
         let delivery = ResponseItem::FunctionCallOutput {
-            id: Some(ResponseItemId::new("delivery")),
+            id: Some(ResponseItemId::from_server("delivery".to_owned())),
             call_id: None,
             name: Some("send_message_to_thread".to_string()),
             namespace: Some("codex_app".to_string()),
@@ -3333,6 +3334,7 @@ async fn check_saved_thread_read_repair(read: SavedThreadRepairRead) {
             sort_direction: codex_thread_store::SortDirection::Asc,
             sort_key: codex_thread_store::ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         })
         .await
         .expect("page repaired native history");
@@ -4944,8 +4946,12 @@ async fn full_history_agent_fork_uses_nonlocal_thread_store() {
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
         &config,
-        auth_manager.clone(),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager,
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -4955,7 +4961,6 @@ async fn full_history_agent_fork_uses_nonlocal_thread_store() {
         crate::thread_manager::passthrough_image_store(),
         store.clone(),
         /*agent_graph_store*/ None,
-        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -5179,7 +5184,7 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
             subagent_history_start_ordinal: None,
             persistence_mode: ThreadPersistenceMode::Durable,
             initial_rollout_ordinal: 0,
-            initial_window_id: "window-history-base".to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(harness.config.cwd.to_path_buf()),
@@ -5628,6 +5633,7 @@ async fn full_history_fork_persists_metadata_only_sanitization(compacted: bool) 
                 items.to_vec(),
                 step.to_turn_context_item(),
                 world_state.render_full().0,
+                Default::default(),
                 crate::compact::CompactedHistoryMetadata {
                     input_goal_ids: Default::default(),
                     message: String::new(),
@@ -10967,8 +10973,12 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
     crate::thread_manager::set_thread_manager_test_mode_for_tests(true);
     let manager = ThreadManager::new(
         &config,
-        Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager,
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -10978,7 +10988,6 @@ async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner
         crate::thread_manager::passthrough_image_store(),
         crate::thread_manager::thread_store_from_config(&config, state_db.clone()),
         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
-        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -11673,9 +11682,9 @@ async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inne
                 compaction_response_id: None,
                 latest_token_usage_record: None,
                 window_number: Some(window_number),
-                first_window_id: Some(window_id.to_string()),
+                first_window_id: Some(window_id.clone()),
                 previous_window_id: None,
-                window_id: Some(window_id.to_string()),
+                window_id: Some(window_id),
                 segment_state_checkpoint: None,
             },
             Some(previous_turn_settings),
@@ -12057,8 +12066,12 @@ while True:
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
         &config,
-        auth_manager.clone(),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager,
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -12068,7 +12081,6 @@ while True:
         crate::thread_manager::passthrough_image_store(),
         store,
         crate::thread_manager::local_agent_graph_store_from_state_db(state_db.as_ref()),
-        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -12863,7 +12875,9 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
         TurnStartOptions {
             turn_trigger: None,
             final_output_json_schema: None,
+            direct_only_tool_namespaces: None,
             service_tier: None,
+            prompt_cache_ttl: None,
             parent_turn_id: None,
             root_turn_id: None,
             cyber_access_program: None,

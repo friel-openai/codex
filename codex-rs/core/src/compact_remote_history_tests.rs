@@ -4,7 +4,9 @@ use codex_history::CodexHarnessMetadata;
 #[test]
 fn independent_thread_input_is_not_replaced_by_truncated_tool_output() {
     let envelope = ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
-        id: Some(codex_protocol::ResponseItemId::new("delivery")),
+        id: Some(codex_protocol::ResponseItemId::from_server(
+            "delivery".to_owned(),
+        )),
         call_id: None,
         name: Some("send_message_to_thread".to_string()),
         namespace: Some("frodex".to_string()),

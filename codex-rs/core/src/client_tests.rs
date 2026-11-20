@@ -1567,7 +1567,7 @@ fn developer_message_item(text: &str) -> ResponseItem {
 
 fn reasoning_item(id: &str, text: &str) -> ResponseItem {
     ResponseItem::Reasoning {
-        id: Some(codex_protocol::ResponseItemId::new(id)),
+        id: Some(codex_protocol::ResponseItemId::from_server(id.to_owned())),
         summary: vec![ReasoningItemReasoningSummary::SummaryText {
             text: "summary".to_string(),
         }],
@@ -1608,6 +1608,7 @@ fn test_response_continuation() -> ResponseContinuation {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: Some(ThreadId::new().to_string()),
+            prompt_cache_options: None,
             text: None,
             client_metadata: None,
             access_programs: None,
@@ -1970,6 +1971,7 @@ fn ephemeral_root_fork_cache_key_survives_transitive_subagent_forks() {
         sender,
         /*codex_responses_headers*/ None,
         crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+        /*required_cyber_access_programs*/ None,
     );
     let child = fork_test_model_client(&ephemeral_root, spawned_session_source());
     let grandchild = fork_test_model_client(&child, spawned_session_source());
@@ -2024,6 +2026,7 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
         sender,
         /*codex_responses_headers*/ None,
         crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+        /*required_cyber_access_programs*/ None,
     );
     let child = fork_test_model_client(&guardian, spawned_session_source());
     assert_eq!(child.fork_prompt_cache_key(), guardian.state.thread_id);
@@ -2049,6 +2052,7 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
         include: Vec::new(),
         service_tier: Some("test-tier".to_string()),
         prompt_cache_key: Some(ThreadId::new().to_string()),
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
         access_programs: None,
@@ -2072,7 +2076,8 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
     let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
     session.websocket_session.last_response_rx = Some(last_response_rx);
     session.websocket_session.last_response_from_untraced_warmup = true;
-    session.websocket_session.auth_owner_generation = Some(7);
+    let owner = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")).auth_owner();
+    session.websocket_session.auth_owner = Some(owner.clone());
     session
         .websocket_session
         .responses_headers
@@ -2090,7 +2095,7 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
     assert!(session.websocket_session.last_response_rx.is_none());
     assert!(!session.websocket_session.last_response_from_untraced_warmup);
     assert!(!session.websocket_session.connection_reused());
-    assert_eq!(session.websocket_session.auth_owner_generation, Some(7));
+    assert_eq!(session.websocket_session.auth_owner, Some(owner));
     assert!(session.websocket_session.responses_headers.is_empty());
     assert_eq!(
         session.websocket_session.continuation_reset_reason,

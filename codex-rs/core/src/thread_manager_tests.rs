@@ -234,7 +234,9 @@ async fn shared_service_tier_is_published_by_registered_startup() {
                 ..StartThreadOptions::new(config.clone())
             },
             /*forked_from_thread_id*/ None,
+            /*inherited_agent_control*/ None,
             Some(Arc::clone(&startup)),
+            /*fork_startup_items*/ Default::default(),
         ));
         let io = std::future::poll_fn(|cx| {
             assert!(start.as_mut().poll(cx).is_pending());
@@ -720,6 +722,7 @@ fn checkpoint_settings_item(
                 service_tier: config.service_tier.clone(),
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),
@@ -1774,8 +1777,11 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
                 crate::agent::host::PreparedChildInheritance {
                     instructions: parent.thread.session.inherited_instructions().await,
                     exec_policy: None,
+                    inherited_thread_state: Default::default(),
                     originator: parent.thread.session.originator().await,
                     attachment_source: None,
+                    fork_startup_items: Default::default(),
+                    fork_source_reservation: None,
                 },
             )
             .await
@@ -1786,7 +1792,11 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
                 options,
                 control,
                 Some(parent.thread_id),
+                /*inherited_instructions*/ None,
                 /*inherited_exec_policy*/ None,
+                /*inherited_thread_state*/ Default::default(),
+                /*fork_startup_items*/ Default::default(),
+                /*fork_source_reservation*/ None,
             )
             .await
     }
@@ -4522,7 +4532,11 @@ async fn new_uses_active_provider_for_model_refresh(with_cache: bool) {
                     .local_agent_runtime
                     .control(started.thread.session.session_id()),
                 Some(started.thread_id),
+                /*inherited_instructions*/ None,
                 /*inherited_exec_policy*/ None,
+                /*inherited_thread_state*/ Default::default(),
+                /*fork_startup_items*/ Default::default(),
+                /*fork_source_reservation*/ None,
             )
             .await
             .expect("spawn child with the parent's provider headers");
@@ -5005,6 +5019,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .await
         .expect("fork context-only interrupted snapshot");
     assert!(ephemeral_fork.thread.rollout_path().is_none());
+    let PreparedForkResponseHistory::Captured(ephemeral_response_history) =
+        ephemeral_response_history
+    else {
+        panic!("frozen source must capture response history");
+    };
     // The response history must not append the prepared abort suffix twice.
     assert_eq!(
         ephemeral_response_history
@@ -5172,8 +5191,14 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
     let state_db = init_state_db(&config).await;
     let manager = ThreadManager::new(
         &config,
-        auth_manager.clone(),
-        build_models_manager(&config, auth_manager.clone()),
+        crate::build_startup_models(
+            &config,
+            auth_manager.clone(),
+            TEST_INSTALLATION_ID.to_string(),
+            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                config.codex_home.to_path_buf(),
+            )),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -5183,7 +5208,6 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
         passthrough_image_store(),
         thread_store_from_config(&config, state_db.clone()),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
-        TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -5328,8 +5352,14 @@ async fn reference_backed_fork_reserves_source_until_child_reference_is_durable(
     let state_db = init_state_db(&config).await;
     let manager = Arc::new(ThreadManager::new(
         &config,
-        auth_manager.clone(),
-        build_models_manager(&config, auth_manager.clone()),
+        crate::build_startup_models(
+            &config,
+            auth_manager.clone(),
+            TEST_INSTALLATION_ID.to_string(),
+            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                config.codex_home.to_path_buf(),
+            )),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -5339,7 +5369,6 @@ async fn reference_backed_fork_reserves_source_until_child_reference_is_durable(
         passthrough_image_store(),
         thread_store_from_config(&config, state_db.clone()),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
-        TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     ));

@@ -423,14 +423,23 @@ fn repeated_resets_advance_the_ordinal_suffix() {
     assert_eq!(active_agents.nickname_reset_count, 2);
 }
 
-#[test]
-fn evicted_runtime_settings_retain_and_clear_ephemerality() {
+#[tokio::test]
+async fn evicted_runtime_settings_retain_and_clear_ephemerality() {
     let registry = AgentRegistry::default();
     let thread_id = ThreadId::new();
     registry.register_root_thread(thread_id);
     assert_eq!(registry.evicted_ephemeral(thread_id), None);
 
+    let home = tempfile::tempdir().expect("isolated config home");
+    let config = crate::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("test config");
     let environments = EvictedEnvironments {
+        config: Arc::new(config),
+        has_independent_service_tier: false,
         selections: Vec::new(),
         bindings: TurnEnvironmentSnapshot::default(),
     };

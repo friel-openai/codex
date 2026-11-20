@@ -1065,6 +1065,7 @@ mod tests {
             output.clone(),
             &Features::with_defaults(),
             RetainedImageBudget::Disabled,
+            &FileAudioDurations::default(),
         );
         assert!(!history.iter().any(|item| item == &assignment));
 

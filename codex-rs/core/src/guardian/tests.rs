@@ -4105,13 +4105,7 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
     .expect("config layer stack");
     let mut parent_config = Config::load_config_with_layer_stack(
         LOCAL_FS.as_ref(),
-        ConfigToml {
-            auto_review: Some(AutoReviewToml {
-                extra_policy: Some("Use the user-configured additional policy.".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+        ConfigToml::default(),
         ConfigOverrides {
             cwd: Some(workspace.path().to_path_buf()),
             ..Default::default()

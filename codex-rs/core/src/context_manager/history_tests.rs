@@ -43,6 +43,7 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol_test_support::ContentItemTestExt;
+use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -443,8 +444,12 @@ fn checkpoint_replayed_messages_keep_legacy_review_when_the_source_survives() {
 fn replayed_guardian_history_preserves_independent_review(restore_transcript: bool) {
     let mut features = codex_features::Features::with_defaults();
     features.disable(Feature::GuardianReuseParentCompaction);
-    let mut history =
-        ContextManager::for_session(&SessionSource::Cli, &ManagedFeatures::from(features));
+    let mut history = ContextManager::for_session(
+        /*root_capabilities_restricted*/ false,
+        &ManagedFeatures::from(features),
+        codex_guardian_context::ContextBudgeting::Fixed,
+        uuid_v7_item_id_generator_for_test(),
+    );
     let parent_items = vec![
         assistant_msg("Stale parent evidence."),
         serde_json::from_value(serde_json::json!({
@@ -461,7 +466,10 @@ fn replayed_guardian_history_preserves_independent_review(restore_transcript: bo
         }),
     };
     let replayed = restore_transcript.then(|| {
-        let mut transcript = TranscriptHistory::new(/*generation*/ 3);
+        let mut transcript = TranscriptHistory::new(
+            /*generation*/ 3,
+            codex_guardian_context::ContextBudgeting::Fixed,
+        );
         transcript.record(&restored);
         transcript
     });
@@ -1291,11 +1299,11 @@ fn fork_copy_on_write_preserves_harness_metadata() {
             ..Default::default()
         }),
     };
-    let mut parent = ContextManager::new();
+    let mut parent = ContextManager::new(uuid_v7_item_id_generator_for_test());
     parent.replace_annotated(vec![inherited.clone()]);
     let inherited = parent.annotated_items()[0].clone();
     let shared = parent.shared_annotated_items();
-    let mut child = ContextManager::new();
+    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
     child.replace_shared_annotated(Arc::clone(&shared));
 
     assert!(Arc::ptr_eq(&shared, &child.shared_annotated_items()));
@@ -1304,29 +1312,41 @@ fn fork_copy_on_write_preserves_harness_metadata() {
     assert_eq!(parent.annotated_items(), std::slice::from_ref(&inherited));
     assert_eq!(child.annotated_items()[0], inherited);
     assert_eq!(child.annotated_items().len(), 2);
-    assert!(child.annotated_items()[1].metadata.as_ref().and_then(|m| m.history_sequence) > inherited.metadata.as_ref().and_then(|m| m.history_sequence));
+    assert!(
+        child.annotated_items()[1]
+            .metadata
+            .as_ref()
+            .and_then(|m| m.history_sequence)
+            > inherited.metadata.as_ref().and_then(|m| m.history_sequence)
+    );
     assert!(!Arc::ptr_eq(&shared, &child.shared_annotated_items()));
 }
 
 #[test]
 fn shared_legacy_fork_history_assigns_sequences_without_mutating_parent() {
     let parent = Arc::new(vec![ResponseItemEnvelope::new(assistant_msg("legacy"))]);
-    let mut child = ContextManager::new();
+    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
     child.replace_shared_annotated(Arc::clone(&parent));
 
     assert!(!Arc::ptr_eq(&parent, &child.shared_annotated_items()));
     assert!(parent[0].metadata.is_none());
-    assert!(child.annotated_items()[0].metadata.as_ref().and_then(|m| m.history_sequence).is_some());
+    assert!(
+        child.annotated_items()[0]
+            .metadata
+            .as_ref()
+            .and_then(|m| m.history_sequence)
+            .is_some()
+    );
 }
 
 #[test]
 fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
-    let mut parent = ContextManager::new();
+    let mut parent = ContextManager::new(uuid_v7_item_id_generator_for_test());
     parent.replace(vec![assistant_msg("first parent window")]);
     parent.replace(vec![assistant_msg("second parent window")]);
     assert_eq!(parent.reset_version, 2);
 
-    let mut child = ContextManager::new();
+    let mut child = ContextManager::new(uuid_v7_item_id_generator_for_test());
     child.replace_shared_snapshot(&parent);
     let captured = child.clone();
     assert_eq!(captured.history_version(), 1);
@@ -1347,9 +1367,10 @@ fn fork_snapshot_reset_identity_does_not_collide_with_the_next_child_reset() {
 
 #[test]
 fn fork_snapshot_detects_context_changes_without_response_item_changes() {
-    let mut original = ContextManager::new();
+    let mut original = ContextManager::new(uuid_v7_item_id_generator_for_test());
     original.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("parent"))]);
-    let mut review_history = TranscriptHistory::new(1);
+    let mut review_history =
+        TranscriptHistory::new(1, codex_guardian_context::ContextBudgeting::Fixed);
     review_history.record(&assistant_msg("review evidence").into());
     original.review_history = Some(review_history);
     original.guardian_review_mode = GuardianContextMode::Legacy;
