@@ -455,6 +455,7 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
             routing_profile: None,
             model_context_window: Some(64_000),
             model_auto_compact_token_limit: Some(48_000),
+            trust_candidate_constraints: false,
         },
     );
     config.base_instructions = Some(configured_instructions.to_string());

@@ -150,6 +150,7 @@ async fn static_catalog_records_its_supplied_origin() {
                     routing_profile: None,
                     model_context_window: None,
                     model_auto_compact_token_limit: None,
+                    trust_candidate_constraints: false,
                 },
             ),
             (
@@ -159,6 +160,7 @@ async fn static_catalog_records_its_supplied_origin() {
                     routing_profile: None,
                     model_context_window: None,
                     model_auto_compact_token_limit: None,
+                    trust_candidate_constraints: false,
                 },
             ),
         ]);
