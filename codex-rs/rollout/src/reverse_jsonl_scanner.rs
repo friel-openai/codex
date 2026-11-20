@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::RolloutLine;
+use crate::RolloutRecorder;
 
 const READ_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -149,15 +150,28 @@ where
         }
     }
 
-    /// Scans the next rollout record through the canonical persisted JSON decoder.
+    /// Scans the next rollout record through the canonical compatibility decoder.
+    ///
+    /// `RolloutLine` must not be deserialized directly because Serde's buffered
+    /// flattened fields are incompatible with `serde_json/arbitrary_precision`.
     pub fn scan_next_rollout_line(&mut self) -> io::Result<Option<ScanOutcome<RolloutLine>>> {
-        Ok(self.scan_next::<Value>()?.map(|outcome| match outcome {
-            ScanOutcome::Parsed(value) => match crate::decode_rollout_line(value) {
-                Ok(line) => ScanOutcome::Parsed(line),
-                Err(error) => ScanOutcome::Rejected(error),
-            },
-            ScanOutcome::Rejected(error) => ScanOutcome::Rejected(error),
-        }))
+        loop {
+            let Some(outcome) = self.scan_next::<Value>()? else {
+                return Ok(None);
+            };
+            match outcome {
+                ScanOutcome::Parsed(value) => {
+                    match RolloutRecorder::parse_rollout_line_value(value) {
+                        Ok(Some(line)) => return Ok(Some(ScanOutcome::Parsed(line))),
+                        Ok(None) => continue,
+                        Err(error) => return Ok(Some(ScanOutcome::Rejected(error))),
+                    }
+                }
+                ScanOutcome::Rejected(error) => {
+                    return Ok(Some(ScanOutcome::Rejected(error)));
+                }
+            }
+        }
     }
 
     fn finish_record<T>(&mut self) -> Option<ScanOutcome<T>>

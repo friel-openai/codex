@@ -14,6 +14,7 @@ use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 use tracing::warn;
@@ -38,11 +39,19 @@ const BATCH_STEPS: usize = 256;
 ///
 /// Legacy checkpoints do not identify their source bytes. A copy selected on a later invocation
 /// cannot be distinguished from the copy that produced an existing checkpoint.
-pub(super) async fn ensure_fallback_projection_compatible(store: &LocalThreadStore, lineage: &RolloutLineage) -> ThreadStoreResult<()> {
-    if !lineage.has_exclusions() { return Ok(()); }
+pub(super) async fn ensure_fallback_projection_compatible(
+    store: &LocalThreadStore,
+    lineage: &RolloutLineage,
+) -> ThreadStoreResult<()> {
+    if !lineage.has_exclusions() {
+        return Ok(());
+    }
     for segment in lineage.segments() {
-        let Some(_original) = lineage.excluded_copy_for(&segment.rollout_path) else { continue };
-        if let Some(state) = super::thread_history::projection_state(store, segment.rollout_id()).await?
+        let Some(_original) = lineage.excluded_copy_for(&segment.rollout_path) else {
+            continue;
+        };
+        if let Some(state) =
+            super::thread_history::projection_state(store, segment.rollout_id()).await?
             && (state.next_byte_offset != 0 || state.next_ordinal != 0)
         {
             return Err(ThreadStoreError::Conflict { message: "cannot resume an existing projection from an alternate ancestor without verified prefix equality".to_string() });
@@ -50,7 +59,6 @@ pub(super) async fn ensure_fallback_projection_compatible(store: &LocalThreadSto
     }
     Ok(())
 }
-
 
 struct ProjectionRollout {
     path: PathBuf,
@@ -73,6 +81,33 @@ pub(super) async fn materialize_to_sqlite_with_reads(
     rollout_path: &Path,
     reads: &AncestorReads,
 ) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(store, thread_id, rollout_path, reads, None).await
+}
+
+/// Project an authenticated decoded prefix without consuming a fork ancestor's later records.
+pub(super) async fn materialize_prefix_to_sqlite(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    end: HistoryPosition,
+) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(
+        store,
+        thread_id,
+        rollout_path,
+        &AncestorReads::default(),
+        Some(end),
+    )
+    .await
+}
+
+async fn materialize_to_sqlite_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    reads: &AncestorReads,
+    end: Option<HistoryPosition>,
+) -> ThreadStoreResult<()> {
     if store.state_db.is_none() {
         return Ok(());
     }
@@ -87,7 +122,7 @@ pub(super) async fn materialize_to_sqlite_with_reads(
     };
     // A later ancestor can fail after this projection has committed. Remember progress even
     // when this call succeeds, so the entire operation cannot retry with another copy.
-    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout).await;
+    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout, end).await;
     if reads.has_tracked() {
         let after = super::thread_history::projection_state(store, thread_id).await;
         let position = |state: Option<super::thread_history::RolloutProjectionState>| {
@@ -96,8 +131,8 @@ pub(super) async fn materialize_to_sqlite_with_reads(
         let before = before.and_then(Result::ok).map(position);
         let after = after.ok().map(position);
         let changed_or_unknown = before.is_none() || after.is_none() || before != after;
-        let failed_with_existing_state = result.is_err()
-            && before.flatten().is_some_and(|state| state != (0, 0));
+        let failed_with_existing_state =
+            result.is_err() && before.flatten().is_some_and(|state| state != (0, 0));
         if changed_or_unknown || failed_with_existing_state {
             reads.prevent_retry();
         }
@@ -110,6 +145,7 @@ async fn materialize_to_sqlite_with_state_db(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     rollout: ProjectionRollout,
+    end: Option<HistoryPosition>,
 ) -> ThreadStoreResult<()> {
     let projection_state = super::thread_history::projection_state(store, thread_id).await?;
     let mut start_offset = projection_state
@@ -137,7 +173,8 @@ async fn materialize_to_sqlite_with_state_db(
         .await?;
         start_offset = 0;
     }
-    if projection_state.is_none()
+    if end.is_none()
+        && projection_state.is_none()
         && !rollout.reads.tracks(&rollout.path)
         && codex_rollout::existing_rollout_path(&rollout.path)
             .await
@@ -150,27 +187,30 @@ async fn materialize_to_sqlite_with_state_db(
     } else {
         codex_rollout::read_session_meta_line(&rollout.path).await
     }
-        .map_err(|err| {
-            rollout.reads.record_failure(&rollout.path);
-            ThreadStoreError::Internal {
-                message: format!(
-                    "failed to read rollout metadata {}: {err}",
-                    rollout.path.display()
-                ),
-            }
-        })?
-        .meta;
+    .map_err(|err| {
+        rollout.reads.record_failure(&rollout.path);
+        ThreadStoreError::Internal {
+            message: format!(
+                "failed to read rollout metadata {}: {err}",
+                rollout.path.display()
+            ),
+        }
+    })?
+    .meta;
     let initial_ordinal = match session_meta.history_base {
         Some(base) => base.end_ordinal_exclusive,
-        None => first_rollout_ordinal(&rollout.path, rollout.reads.tracks(&rollout.path)).await.map_err(|err| {
-            rollout.reads.record_failure(&rollout.path);
-            err
-        })?.unwrap_or(0),
+        None => first_rollout_ordinal(&rollout.path, rollout.reads.tracks(&rollout.path))
+            .await
+            .map_err(|err| {
+                rollout.reads.record_failure(&rollout.path);
+                err
+            })?
+            .unwrap_or(0),
     };
     if projection_state.is_none()
         && (session_meta.history_base.is_some()
             || super::rollout_lineage::leading_same_thread_reference_ordinal(
-                rollout_path,
+                &rollout.path,
                 session_meta.id,
             )
             .await?
@@ -195,6 +235,7 @@ async fn materialize_to_sqlite_with_state_db(
         expected_ordinal,
         initial_ordinal,
         subagent_history_start_ordinal,
+        end,
     )
     .await
 }
@@ -279,8 +320,8 @@ async fn materialize_legacy_to_sqlite_inner(
             })?;
 
         if !line_bytes.iter().all(u8::is_ascii_whitespace) {
-            match codex_rollout::parse_rollout_line_bytes(&line_bytes) {
-                Ok(line) => {
+            match codex_rollout::RolloutRecorder::parse_rollout_line_bytes(&line_bytes) {
+                Ok(Some(line)) => {
                     let created_at_ms = DateTime::parse_from_rfc3339(line.timestamp.as_str())
                         .map(|timestamp| timestamp.timestamp_millis())
                         .map_err(thread_history_error)?;
@@ -317,6 +358,7 @@ async fn materialize_legacy_to_sqlite_inner(
                             }
                         })?;
                 }
+                Ok(None) => {}
                 Err(err) => {
                     warn!(
                         "skipping rejected legacy rollout line while projecting {rollout_path:?}: {err}"
@@ -368,14 +410,13 @@ async fn first_rollout_ordinal(rollout_path: &Path, exact: bool) -> ThreadStoreR
     } else {
         codex_rollout::open_rollout_line_reader(rollout_path).await
     }
-        .map_err(thread_store_io_error)?;
+    .map_err(thread_store_io_error)?;
     while let Some(line) = reader.next_line().await.map_err(thread_store_io_error)? {
         if line.trim().is_empty() {
             continue;
         }
-        let line =
-            codex_rollout::parse_rollout_line(line.as_str()).map_err(thread_history_error)?;
-        return Ok(line.ordinal);
+        return codex_rollout::rollout_ordinal_from_slice(line.as_bytes())
+            .map_err(thread_history_error);
     }
     Ok(None)
 }
@@ -387,6 +428,7 @@ fn read_projection_batches(
     expected_ordinal: u64,
     thread_id: ThreadId,
     subagent_history_start_ordinal: Option<u64>,
+    end: Option<HistoryPosition>,
     is_cancelled: impl Fn() -> bool,
     mut emit: impl FnMut(Vec<RolloutProjectionStep>, u64) -> ThreadStoreResult<()>,
 ) -> ThreadStoreResult<()> {
@@ -396,16 +438,30 @@ fn read_projection_batches(
         Err(err)
             if err.kind() == std::io::ErrorKind::NotFound
                 && start_offset == 0
-                && !rollout.reads.tracks(rollout_path) =>
+                && !rollout.reads.tracks(rollout_path)
+                && end.is_none() =>
         {
             return Ok(());
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
-    let file_end_offset = match rollout.reads.cutoff(rollout_path) {
-        Some(end) => end.end_byte_offset,
-        None => file.seek(SeekFrom::End(0)).map_err(thread_store_io_error)?,
-    };
+    let file_len = file.seek(SeekFrom::End(0)).map_err(thread_store_io_error)?;
+    let tracked_end = rollout.reads.cutoff(rollout_path);
+    if tracked_end.is_some() && end.is_some() && tracked_end != end {
+        return Err(thread_history_error(
+            "conflicting tracked and requested rollout boundaries".to_string(),
+        ));
+    }
+    let file_end_offset = end
+        .or(tracked_end)
+        .map_or(file_len, |end| end.end_byte_offset);
+    if file_end_offset > file_len {
+        rollout.reads.record_failure(rollout_path);
+        return Err(thread_history_error(format!(
+            "rollout {} ends at byte {file_len}, before selected byte {file_end_offset}",
+            rollout_path.display()
+        )));
+    }
     let byte_count = file_end_offset.checked_sub(start_offset).ok_or_else(|| {
         rollout.reads.record_failure(rollout_path);
         ThreadStoreError::Internal {
@@ -547,6 +603,18 @@ fn read_projection_batches(
         let changes = if is_inherited_subagent_history {
             ThreadHistoryChangeSet::default()
         } else {
+            // Older files can claim Paginated while retaining legacy-only presentation events.
+            // The stateless projector ignores those events; blessing its checkpoint would hide
+            // their history, even if canonical ItemCompleted records were appended afterward.
+            if codex_rollout::persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
+                .is_some()
+                && codex_rollout::persisted_rollout_item(&line.item, ThreadHistoryMode::Paginated)
+                    .is_none()
+            {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "materialize_paginated_legacy_event",
+                });
+            }
             project_rollout_line(&line)
         };
         let fallback_created_at_ms = if changes
@@ -634,6 +702,16 @@ fn read_projection_batches(
         return Err(thread_store_io_error(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "durable rollout shrank during projection",
+        )));
+    }
+    if let Some(end) = end
+        && (next_offset != end.end_byte_offset || next_ordinal != end.end_ordinal_exclusive)
+    {
+        return Err(thread_history_error(format!(
+            "rollout {} projected through byte {next_offset}, ordinal {next_ordinal}; expected byte {}, ordinal {}",
+            rollout_path.display(),
+            end.end_byte_offset,
+            end.end_ordinal_exclusive
         )));
     }
     if next_offset != batch_start_offset {

@@ -14,7 +14,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_supervisor_tools_namespace(vec![create_supervisor_snooze_tool()])
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move { handle_snooze(invocation).await.map(boxed_tool_output) })
     }
 }

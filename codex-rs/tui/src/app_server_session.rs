@@ -414,6 +414,7 @@ pub(crate) struct AppServerSession {
     thread_params_mode: ThreadParamsMode,
     /// Explicit CLI provider selection, distinct from resolved configuration defaults.
     pub(crate) model_provider_override: Option<String>,
+    background_rollout_migration_enabled: bool,
     history_support: ThreadHistorySupport,
     pub(crate) thread_settings_update_supported: bool,
     cloud_model_selections: HashMap<ThreadId, user_message_submission::CloudModelSelection>,
@@ -634,6 +635,7 @@ impl AppServerSession {
             remote_cwd_override: None,
             thread_params_mode,
             model_provider_override: None,
+            background_rollout_migration_enabled: true,
             history_support: ThreadHistorySupport::Paginated,
             thread_settings_update_supported: true,
             cloud_model_selections: HashMap::new(),

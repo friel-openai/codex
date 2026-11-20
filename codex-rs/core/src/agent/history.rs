@@ -243,7 +243,7 @@ pub(super) async fn prepare_forked_history(
         .then_some(ThreadHistoryMode::Paginated);
     let (
         mut forked_rollout_items,
-        reference_rollout_items,
+        reference_backed_history,
         source_reservation,
         forked_from_ordinal_exclusive,
     ) = match fork_mode {
@@ -256,12 +256,16 @@ pub(super) async fn prepare_forked_history(
                     .as_any()
                     .is::<codex_thread_store::LocalThreadStore>() =>
         {
-            let (reference_history, logical_history, reservation, end_ordinal) = state
-                .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
-                .await?;
+            let (reference_history, logical_history, model_history, reservation, end_ordinal) =
+                state
+                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                    .await?;
             (
                 logical_history,
-                Some(reference_history.get_rollout_items().to_vec()),
+                Some((
+                    reference_history.get_rollout_items().to_vec(),
+                    model_history,
+                )),
                 Some(Arc::new(std::sync::Mutex::new(reservation))),
                 end_ordinal,
             )
@@ -330,11 +334,11 @@ pub(super) async fn prepare_forked_history(
                 initial_task_message,
             ));
         }
-        let (history, startup_items) = match reference_rollout_items {
-            Some(reference_items) => (
+        let (history, startup_items) = match reference_backed_history {
+            Some((reference_items, model_items)) => (
                 InitialHistory::Forked(reference_items),
                 ForkStartupItems::with_model_history_override(
-                    forked_rollout_items,
+                    model_items,
                     /*shared_model_response_items*/ None,
                     /*shared_model_state*/ None,
                 ),
@@ -354,7 +358,7 @@ pub(super) async fn prepare_forked_history(
             source_reservation,
         });
     }
-    let unsanitized_parent_history = reference_rollout_items
+    let unsanitized_parent_history = reference_backed_history
         .as_ref()
         .map(|_| serde_json::to_value(&forked_rollout_items))
         .transpose()?;
@@ -522,6 +526,7 @@ pub(super) async fn prepare_forked_history(
                 // Parent-local review evidence must not become the child's authorization.
                 // Root user authorization is collected separately by the host.
                 compacted.guardian_history = None;
+                compacted.retained_context_replay = None;
                 // Only V2 fetches root authorization live. Its local scope starts known-empty;
                 // V1 must remain incomplete when inherited authorization has been stripped.
                 compacted.retained_context = (multi_agent_version == MultiAgentVersion::V2)
@@ -564,8 +569,8 @@ pub(super) async fn prepare_forked_history(
             )).into(),
         ));
     }
-    if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
-        (reference_rollout_items, unsanitized_parent_history)
+    if let (Some((reference_rollout_items, _)), Some(unsanitized_parent_history)) =
+        (reference_backed_history, unsanitized_parent_history)
         && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
     {
         forked_rollout_items = reference_rollout_items;
