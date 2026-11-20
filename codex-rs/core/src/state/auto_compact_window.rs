@@ -22,6 +22,31 @@ impl AutoCompactWindowIds {
     }
 }
 
+/// A proposed auto-compaction window transition that has not mutated session state.
+///
+/// Compaction renders initial context before it acquires the checkpoint transaction. Keeping the
+/// prior and next identities together lets publication verify that rendered context still matches
+/// the state it is about to commit.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the prepared transition must be committed with the rendered compaction history"]
+pub(crate) struct PreparedAutoCompactWindowAdvance {
+    prior_window_number: u64,
+    prior_ids: AutoCompactWindowIds,
+    window_number: u64,
+    ids: AutoCompactWindowIds,
+    clear_prefill: bool,
+}
+
+impl PreparedAutoCompactWindowAdvance {
+    pub(crate) fn ids(&self) -> AutoCompactWindowIds {
+        self.ids.clone()
+    }
+
+    pub(crate) fn clear_prefill_on_commit(&mut self) {
+        self.clear_prefill = true;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AutoCompactWindowSnapshot {
     pub(crate) prefill_input_tokens: Option<i64>,
@@ -77,13 +102,46 @@ impl AutoCompactWindow {
         self.ids = ids;
     }
 
+    #[cfg(test)]
     pub(super) fn advance(&mut self, window_id: ContextWindowId) -> (u64, AutoCompactWindowIds) {
-        self.window_number = self.window_number.saturating_add(1);
-        self.ids.previous_window_id = Some(std::mem::replace(&mut self.ids.window_id, window_id));
+        let prepared = self.prepare_advance(window_id);
+        self.commit_prepared_advance(prepared)
+            .expect("freshly prepared auto-compaction window transition must commit")
+    }
+
+    pub(super) fn prepare_advance(
+        &self,
+        window_id: ContextWindowId,
+    ) -> PreparedAutoCompactWindowAdvance {
+        let mut ids = self.ids.clone();
+        ids.previous_window_id = Some(ids.window_id);
+        ids.window_id = window_id;
+        PreparedAutoCompactWindowAdvance {
+            prior_window_number: self.window_number,
+            prior_ids: self.ids.clone(),
+            window_number: self.window_number.saturating_add(1),
+            ids,
+            clear_prefill: false,
+        }
+    }
+
+    pub(super) fn commit_prepared_advance(
+        &mut self,
+        prepared: PreparedAutoCompactWindowAdvance,
+    ) -> Option<(u64, AutoCompactWindowIds)> {
+        if self.window_number != prepared.prior_window_number || self.ids != prepared.prior_ids {
+            return None;
+        }
+
+        self.window_number = prepared.window_number;
+        self.ids = prepared.ids;
         self.new_context_window_requested = false;
         self.token_budget_reminder_delivered = false;
         self.auto_compact_fallback_delivered = false;
-        (self.window_number, self.ids.clone())
+        if prepared.clear_prefill {
+            self.clear_prefill();
+        }
+        Some((self.window_number, self.ids.clone()))
     }
 
     pub(super) fn claim_token_budget_reminder(&mut self) -> bool {
@@ -147,6 +205,24 @@ impl AutoCompactWindow {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn prepared_window_clears_prefill_only_when_committed() {
+        let mut window = AutoCompactWindow::new_with_ids(AutoCompactWindowIds::new_initial(
+            ContextWindowId::new_uuid_v7(),
+        ));
+        window.set_estimated_prefill(150);
+        let mut stale = window.prepare_advance(ContextWindowId::new_uuid_v7());
+        stale.clear_prefill_on_commit();
+        let accepted = window.prepare_advance(ContextWindowId::new_uuid_v7());
+        assert!(window.commit_prepared_advance(accepted).is_some());
+        assert!(window.commit_prepared_advance(stale).is_none());
+        assert_eq!(window.snapshot().prefill_input_tokens, Some(150));
+        let mut clearing = window.prepare_advance(ContextWindowId::new_uuid_v7());
+        clearing.clear_prefill_on_commit();
+        assert!(window.commit_prepared_advance(clearing).is_some());
+        assert_eq!(window.snapshot().prefill_input_tokens, None);
+    }
 
     #[test]
     fn tracks_prefill_and_window_boundaries() {
