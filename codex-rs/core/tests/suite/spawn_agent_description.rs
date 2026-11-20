@@ -227,6 +227,10 @@ pub(super) async fn model_catalog_refresh_requests(
         .with_config(move |config| {
             config
                 .features
+                .disable(Feature::MultiAgentV2)
+                .expect("exercise the V1 tool contract");
+            config
+                .features
                 .enable(Feature::Collab)
                 .expect("test config should allow feature update");
             config
