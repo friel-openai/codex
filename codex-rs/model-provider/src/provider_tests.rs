@@ -742,9 +742,13 @@ async fn amazon_bedrock_provider_creates_static_models_manager() {
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
         /*auth_manager*/ None,
     );
-    let manager = provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
-    let uncached_manager =
-        provider.models_manager_without_cache(/*config_model_catalog*/ None);
+    let manager = provider.models_manager(
+        test_codex_home(),
+        /*config_model_catalog*/ None,
+        Default::default(),
+    );
+    let uncached_manager = provider
+        .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
 
     let catalog = manager
         .raw_model_catalog(
@@ -759,6 +763,18 @@ async fn amazon_bedrock_provider_creates_static_models_manager() {
         )
         .await;
     assert_eq!(uncached_catalog, catalog);
+    let sourced_catalog = manager
+        .model_catalog_with_origins(
+            RefreshStrategy::InMemory,
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+        .await;
+    assert_eq!(sourced_catalog.len(), catalog.models.len());
+    assert!(
+        sourced_catalog
+            .iter()
+            .all(|entry| entry.origin == codex_models_manager::ModelOrigin::Provider)
+    );
     for slug in [
         "openai.gpt-6.1-sol",
         "openai.gpt-6.1-terra",
@@ -853,6 +869,14 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
     let configured_catalog = ModelsResponse {
         models: vec![configured_model],
     };
+    let aliases = HashMap::from([(
+        "local-reviewer".to_string(),
+        CustomModelConfig {
+            model: "gpt-5.5".to_string(),
+            model_context_window: None,
+            model_auto_compact_token_limit: None,
+        },
+    )]);
     let mut expected = configured_catalog.clone();
     expected.models[0].web_search_tool_type =
         codex_protocol::openai_models::WebSearchToolType::Text;
@@ -866,9 +890,20 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
         gov_provider,
     ] {
         let provider = create_model_provider(provider_info, /*auth_manager*/ None);
+        let cache = Arc::new(crate::test_support::UnusedModelsCache);
         for manager in [
-            provider.models_manager(test_codex_home(), Some(configured_catalog.clone())),
-            provider.models_manager_without_cache(Some(configured_catalog.clone())),
+            provider.models_manager(
+                test_codex_home(),
+                Some(configured_catalog.clone()),
+                aliases.clone(),
+            ),
+            provider
+                .models_manager_without_cache(Some(configured_catalog.clone()), aliases.clone()),
+            provider.models_manager_with_cache(
+                Some(configured_catalog.clone()),
+                cache,
+                aliases.clone(),
+            ),
         ] {
             let catalog = manager
                 .raw_model_catalog(
@@ -877,8 +912,90 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
                 )
                 .await;
             assert_eq!(catalog, expected);
+            let sourced_catalog = manager
+                .model_catalog_with_origins(
+                    RefreshStrategy::InMemory,
+                    HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                )
+                .await;
+            assert_eq!(sourced_catalog.len(), 1);
+            assert_eq!(
+                sourced_catalog[0].origin,
+                codex_models_manager::ModelOrigin::ExplicitConfig
+            );
+            assert_eq!(manager.custom_models(), &aliases);
+            let alias = manager
+                .get_model_info("local-reviewer", &ModelsManagerConfig::default())
+                .await;
+            assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
+            assert_eq!(alias.service_tiers, expected.models[0].service_tiers);
+            assert_eq!(
+                alias.default_service_tier,
+                expected.models[0].default_service_tier
+            );
+            assert_eq!(
+                alias.web_search_tool_type,
+                expected.models[0].web_search_tool_type
+            );
+            assert_eq!(
+                alias.origin,
+                codex_models_manager::ModelOrigin::ExplicitConfig
+            );
         }
     }
+}
+
+#[tokio::test]
+async fn configured_catalog_preserves_origins_and_custom_aliases() {
+    let provider = create_model_provider(ModelProviderInfo::create_openai_provider(None), None);
+    let mut catalog = codex_models_manager::bundled_models_response().unwrap();
+    catalog.models.retain(|model| model.slug == "gpt-5.5");
+    assert_eq!(catalog.models.len(), 1);
+    let aliases = HashMap::from([(
+        "local-reviewer".to_string(),
+        CustomModelConfig {
+            model: "gpt-5.5".to_string(),
+            model_context_window: Some(64_000),
+            model_auto_compact_token_limit: Some(48_000),
+        },
+    )]);
+    let home = tempfile::tempdir().unwrap();
+    let cache = Arc::new(crate::test_support::UnusedModelsCache);
+    for manager in [
+        provider.models_manager(home.path().into(), Some(catalog.clone()), aliases.clone()),
+        provider.models_manager_without_cache(Some(catalog.clone()), aliases.clone()),
+        provider.models_manager_with_cache(Some(catalog.clone()), cache, aliases.clone()),
+        provider.models_manager_with_settings(
+            Some(catalog.clone()),
+            ModelCatalogSettings::default(),
+            aliases.clone(),
+        ),
+    ] {
+        assert_eq!(manager.custom_models(), &aliases);
+        let sourced = manager
+            .model_catalog_with_origins(
+                RefreshStrategy::InMemory,
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .await;
+        assert_eq!(sourced.len(), 1);
+        assert_eq!(sourced[0].model.as_ref(), &catalog.models[0]);
+        assert_eq!(
+            sourced[0].origin,
+            codex_models_manager::ModelOrigin::ExplicitConfig
+        );
+        let alias = manager
+            .get_model_info("local-reviewer", &ModelsManagerConfig::default())
+            .await;
+        assert_eq!(alias.request_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(alias.context_window, Some(64_000));
+        assert_eq!(alias.auto_compact_token_limit, Some(48_000));
+        assert_eq!(
+            alias.origin,
+            codex_models_manager::ModelOrigin::ExplicitConfig
+        );
+    }
+    assert!(!home.path().join("models_cache.json").exists());
 }
 
 #[tokio::test]
@@ -917,8 +1034,11 @@ async fn configured_provider_models_manager_uses_provider_bearer_token() {
                 provider_info.clone(),
                 auth.clone().map(AuthManager::from_auth_for_testing),
             );
-            let manager =
-                provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+            let manager = provider.models_manager(
+                test_codex_home(),
+                /*config_model_catalog*/ None,
+                Default::default(),
+            );
             manager.set_api_key_model_discovery_enabled(enabled);
             let refresh_strategy = if enabled {
                 RefreshStrategy::Online

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use codex_login::CodexAuth;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::OpenAiModelsManager;
@@ -360,6 +362,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager;
 
     /// Build a thread catalog with the same cache and live discovery policy as its harness.
@@ -367,8 +370,9 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         config_model_catalog: Option<ModelsResponse>,
         _settings: ModelCatalogSettings,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.models_manager_without_cache(config_model_catalog)
+        self.models_manager_without_cache(config_model_catalog, custom_models)
     }
 
     /// Creates a model manager with caching disabled.
@@ -378,6 +382,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     fn models_manager_without_cache(
         &self,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         let origin = if config_model_catalog.is_some() {
             codex_models_manager::ModelOrigin::ExplicitConfig
@@ -387,10 +392,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         let model_catalog = config_model_catalog
             .or_else(|| codex_models_manager::bundled_models_response().ok())
             .unwrap_or_default();
-        Arc::new(StaticModelsManager::new(
+        Arc::new(StaticModelsManager::new_with_custom_models(
             self.auth_manager(),
             model_catalog,
             origin,
+            custom_models,
         ))
     }
 
@@ -404,9 +410,10 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         config_model_catalog: Option<ModelsResponse>,
         cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         drop(cache);
-        self.models_manager_without_cache(config_model_catalog)
+        self.models_manager_without_cache(config_model_catalog, custom_models)
     }
 }
 
@@ -699,10 +706,12 @@ impl ModelProvider for ConfiguredModelProvider {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         self.models_manager_with_settings(
             config_model_catalog,
             ModelCatalogSettings::disk(codex_home),
+            custom_models,
         )
     }
 
@@ -710,12 +719,14 @@ impl ModelProvider for ConfiguredModelProvider {
         &self,
         config_model_catalog: Option<ModelsResponse>,
         settings: ModelCatalogSettings,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         if let Some(model_catalog) = config_model_catalog {
-            return Arc::new(StaticModelsManager::new(
+            return Arc::new(StaticModelsManager::new_with_custom_models(
                 self.auth_manager.clone(),
                 model_catalog,
                 codex_models_manager::ModelOrigin::ExplicitConfig,
+                custom_models,
             ));
         }
         let endpoint = Arc::new(
@@ -727,7 +738,12 @@ impl ModelProvider for ConfiguredModelProvider {
             .with_runtime_auth(self.catalog_runtime_auth.clone()),
         );
         let auth_manager = self.auth_manager.clone();
-        let manager = OpenAiModelsManager::with_settings(settings, endpoint, auth_manager);
+        let manager = OpenAiModelsManager::with_settings_and_custom_models(
+            settings,
+            endpoint,
+            auth_manager,
+            custom_models,
+        );
         match &self.info.model_catalog_url {
             Some(_) => Arc::new(manager.with_provider_catalog()),
             None => Arc::new(manager),
@@ -737,18 +753,25 @@ impl ModelProvider for ConfiguredModelProvider {
     fn models_manager_without_cache(
         &self,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.models_manager_with_settings(config_model_catalog, ModelCatalogSettings::default())
+        self.models_manager_with_settings(
+            config_model_catalog,
+            ModelCatalogSettings::default(),
+            custom_models,
+        )
     }
 
     fn models_manager_with_cache(
         &self,
         config_model_catalog: Option<ModelsResponse>,
         cache: Arc<dyn ModelsCache>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         self.models_manager_with_settings(
             config_model_catalog,
             ModelCatalogSettings::with_cache(cache),
+            custom_models,
         )
     }
 }
