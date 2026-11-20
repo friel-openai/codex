@@ -169,7 +169,9 @@ async fn remote_compact_v2_trim_estimate_uses_session_base_instructions(
                 .with_config({
                     let instructions = instructions.to_string();
                     move |config| {
-                        config.model_context_window = Some(12_000);
+                        // Incremental requests include Frodex's larger tool catalog in history.
+                        config.model_context_window =
+                            Some(if incremental_tools { 17_000 } else { 12_000 });
                         config.base_instructions = Some(instructions);
                         if incremental_tools {
                             config
