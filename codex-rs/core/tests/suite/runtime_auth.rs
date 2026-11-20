@@ -420,7 +420,7 @@ async fn exercise_harness(server_uri: String) -> Result<()> {
             boundary: codex_thread_store::ForkBoundary::Latest,
         })
         .await?;
-    let child = test
+    let (child, _) = test
         .thread_manager
         .fork_prepared_thread(
             StartThreadOptions {
