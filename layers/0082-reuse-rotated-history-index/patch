@@ -1,0 +1,464 @@
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs b/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
+index c9a5818a25aaddcd30cc588a0c38806534a4fc4d..f54541db4d978a048caf781622dae37089687a59 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage/history_page_walk.rs
+@@ -100,6 +100,11 @@ impl<'a> HistoryPageWalk<'a> {
+         self.next.is_none()
+     }
+
++    /// The history-base cutoff recorded by the most recently opened segment.
++    pub(in crate::local) fn next_history_position(&self) -> Option<HistoryPosition> {
++        self.next.as_ref().and_then(|(_, _, end)| *end)
++    }
++
+     pub(in crate::local) fn snapshot(&self) -> RolloutLineage {
+         let mut segments = self.segments.clone();
+         segments.reverse();
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 33ff69d56bd83f8fb590d29a68c902637cdd11b8..c4cc077ed263671bd7348872e3ee653a5bce3201 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -827,6 +827,221 @@ async fn repeated_cursorless_turn_pages_reuse_scan_until_rotation() {
+     );
+ }
+
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn rotated_source_index_extends_once_for_concurrent_readers() {
++    use std::io::Read;
++
++    let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(8).await;
++    let (_, original) = uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    append_timeline_record(
++        &old_root,
++        27,
++        timeline_user_item(thread_id, "local", "old-late", "late"),
++    );
++    let old_base = history_position(&old_root, thread_id, 28);
++    let compressed = old_root.with_extension("jsonl.zst");
++    fs::write(
++        &compressed,
++        zstd::stream::encode_all(fs::read(&old_root).unwrap().as_slice(), 0).unwrap(),
++    )
++    .unwrap();
++    fs::remove_file(&old_root).unwrap();
++
++    let middle_id = ThreadId::new();
++    let middle = selected_rollout_path(home.path(), thread_id, middle_id);
++    write_rollout(&middle, thread_id, Some(old_base));
++    append_timeline_record(
++        &middle,
++        29,
++        timeline_user_item(thread_id, "local", "middle", "split"),
++    );
++    let middle_base = history_position(&middle, middle_id, 30);
++    append_timeline_record(
++        &middle,
++        30,
++        timeline_user_item(thread_id, "local", "excluded", "after cutoff"),
++    );
++    let new_id = ThreadId::new();
++    let new_root = selected_rollout_path(home.path(), thread_id, new_id);
++    write_rollout(&new_root, thread_id, Some(middle_base));
++    append_timeline_record(
++        &new_root,
++        31,
++        timeline_user_item(thread_id, "local", "new-root", "split"),
++    );
++    select_rollout_path(&store, thread_id, new_root).await;
++
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let mut readers = Vec::new();
++    for _ in 0..8 {
++        let reader = store.clone();
++        readers.push(tokio::spawn(async move {
++            uncertified_items::indexed_sources(&reader, thread_id)
++                .await
++                .unwrap()
++                .unwrap()
++                .1
++        }));
++    }
++    let mut scans = Vec::new();
++    for reader in readers {
++        scans.push(reader.await.unwrap());
++    }
++    assert!(!std::sync::Arc::ptr_eq(&original, &scans[0]));
++    assert!(
++        scans
++            .iter()
++            .all(|scan| std::sync::Arc::ptr_eq(scan, &scans[0]))
++    );
++    let mut events = [0; 1024];
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock,
++        "rotation must not reopen the already indexed ancestor"
++    );
++    let local = store
++        .list_items(item_params(
++            thread_id,
++            Some("local"),
++            None,
++            100,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(
++        item_ids(&local),
++        ["new-root", "middle", "old-late", "local-item"]
++    );
++    let inherited = store
++        .list_items(item_params(
++            thread_id,
++            Some("turn-0"),
++            None,
++            100,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&inherited), ["item-0"]);
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn rotated_source_index_rebuilds_for_changed_ancestor_or_cutoff() {
++    use std::io::Read;
++
++    for change in ["rewrite", "replacement", "collision", "cutoff"] {
++        let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(4).await;
++        uncertified_items::indexed_sources(&store, thread_id)
++            .await
++            .unwrap()
++            .unwrap();
++        if change == "cutoff" {
++            let original = fs::read_to_string(&old_root).unwrap();
++            let (head, tail) = original.split_once('\n').unwrap();
++            let mut head = codex_rollout::parse_rollout_line_bytes(head.as_bytes()).unwrap();
++            let last = &ancestors[3];
++            let cutoff =
++                history_position(last, codex_rollout::rollout_id_from_path(last).unwrap(), 11);
++            let RolloutItem::SessionMeta(meta) = &mut head.item else {
++                panic!("expected session metadata");
++            };
++            meta.meta.history_base = Some(cutoff);
++            fs::write(
++                &old_root,
++                format!("{}\n{tail}", serde_json::to_string(&head).unwrap()),
++            )
++            .unwrap();
++        } else {
++            let original = fs::read_to_string(&ancestors[0]).unwrap();
++            let changed = original.replace("item-0", "item-x");
++            assert_eq!(original.len(), changed.len());
++            match change {
++                "rewrite" => fs::write(&ancestors[0], changed).unwrap(),
++                "replacement" => {
++                    let replacement = home.path().join("replacement");
++                    fs::write(&replacement, changed).unwrap();
++                    fs::rename(replacement, &ancestors[0]).unwrap();
++                }
++                "collision" => {
++                    let collision = home
++                        .path()
++                        .join("sessions")
++                        .join(ancestors[0].file_name().unwrap());
++                    fs::write(collision, changed).unwrap();
++                }
++                _ => unreachable!(),
++            }
++        }
++        let base = history_position(&old_root, thread_id, 15);
++        let new_id = ThreadId::new();
++        let new_root = selected_rollout_path(home.path(), thread_id, new_id);
++        write_rollout(&new_root, thread_id, Some(base));
++        select_rollout_path(&store, thread_id, new_root).await;
++        let watched = if change == "collision" {
++            home.path()
++                .join("sessions")
++                .join(ancestors[0].file_name().unwrap())
++        } else {
++            ancestors[0].clone()
++        };
++        let mut watch = watch_history_file_opens(&watched);
++        let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
++            .await
++            .unwrap()
++            .unwrap();
++        let mut events = [0; 1024];
++        assert!(
++            watch.read(&mut events).is_ok(),
++            "{change} must rebuild the old index"
++        );
++        if change == "cutoff" {
++            assert!(!scan.anchors.iter().any(|anchor| anchor.item_id == "item-3"));
++            assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
++        } else {
++            assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-x"));
++            assert!(!scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
++        }
++    }
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn rotated_source_index_after_restart_falls_back_to_full_scan() {
++    use std::io::Read;
++
++    let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(4).await;
++    uncertified_items::indexed_sources(&store, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    let base = history_position(&old_root, thread_id, 15);
++    let new_id = ThreadId::new();
++    let new_root = selected_rollout_path(home.path(), thread_id, new_id);
++    write_rollout(&new_root, thread_id, Some(base));
++    select_rollout_path(&store, thread_id, new_root).await;
++    drop(store);
++    let reopened = reopen_history_store(home.path()).await;
++    let mut watch = watch_history_file_opens(&ancestors[0]);
++    let (_, scan) = uncertified_items::indexed_sources(&reopened, thread_id)
++        .await
++        .unwrap()
++        .unwrap();
++    let mut events = [0; 1024];
++    assert!(watch.read(&mut events).is_ok());
++    assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
++    assert!(
++        scan.anchors
++            .iter()
++            .any(|anchor| anchor.item_id == "local-item")
++    );
++}
++
+ #[cfg(target_os = "linux")]
+ #[tokio::test]
+ async fn warm_source_pages_do_not_enumerate_unrelated_rollouts() {
+diff --git a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+index aa5bfc73edeb1c3b6cd16f16ffd025024565bc82..f628860067871124941bfdc571ce845ed7e3291a 100644
+--- a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
++++ b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+@@ -58,6 +58,7 @@ const MAX_ANCHOR_BYTES: usize = 32 * 1024 * 1024;
+ const MAX_ROOT_ITEMS: usize = 20_000;
+ const MAX_SUMMARY_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+ const SCAN_CONCURRENCY: usize = 8;
++const MAX_ROTATION_EXTENSION_SEGMENTS: usize = 16;
+
+ #[cfg(test)]
+ static INDEX_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
+@@ -449,6 +450,14 @@ pub(super) async fn indexed_sources(
+         }
+         return Ok(Some((graph, scan.clone())));
+     }
++    if let Some(previous) = cached.as_ref()
++        && let Some((graph, scan)) = extend_rotated_scan(store, id, &mut walk, previous).await?
++    {
++        *cached = Some(scan.clone());
++        drop(cached);
++        persistent_scan::save(store, id, graph.lineage.root_rollout_id(), scan.clone()).await;
++        return Ok(Some((graph, scan)));
++    }
+     let Some(graph) = discover(store, id).await? else {
+         return Err(ThreadStoreError::Conflict {
+             message: "could not resolve rotated history sources".to_string(),
+@@ -475,6 +484,90 @@ pub(super) async fn indexed_sources(
+     Ok(Some((current, scan)))
+ }
+
++/// Extends an in-memory predecessor scan when the selected root rotated within the same thread.
++async fn extend_rotated_scan(
++    store: &LocalThreadStore,
++    id: ThreadId,
++    walk: &mut HistoryPageWalk<'_>,
++    cached: &UncertifiedItemScan,
++) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
++    if cached.attached
++        || cached.root.thread_id() != id
++        || walk.root_rollout_id() == cached.root.rollout_id()
++    {
++        return Ok(None);
++    }
++    let Some(expected_base) = cached_predecessor_position(cached) else {
++        return Ok(None);
++    };
++    for _ in 0..MAX_ROTATION_EXTENSION_SEGMENTS {
++        if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) {
++            return Ok(None);
++        }
++        let segment = walk.current();
++        if segment.thread_id() != id {
++            return Ok(None);
++        }
++        if segment.rollout_id() != cached.root.rollout_id() {
++            continue;
++        }
++        // The former root is rescanned at the new child's exact cutoff. Its physical copy and
++        // length may have changed after rotation, but its metadata and inherited cutoff must not.
++        let mut normalized = segment.clone();
++        normalized.rollout_path = cached.root.rollout_path.clone();
++        normalized.end_ordinal_exclusive = cached.root.end_ordinal_exclusive;
++        normalized.jsonl_end_byte_offset = cached.root.jsonl_end_byte_offset;
++        normalized.end_byte_offset = cached.root.end_byte_offset;
++        normalized.byte_boundary_recorded = cached.root.byte_boundary_recorded;
++        normalized.physical_size = cached.root.physical_size;
++        if normalized != cached.root || walk.next_history_position() != expected_base {
++            return Ok(None);
++        }
++        let partial = walk.snapshot();
++        let mut segments = cached.ancestors.clone();
++        segments.extend_from_slice(partial.segments());
++        let mut identities = cached.identities.clone();
++        identities.extend(walk.deferred_identities().iter().rev().cloned());
++        let graph = DiscoveredLineage {
++            attached: false,
++            lineage: RolloutLineage::from_segments(
++                id,
++                walk.root_rollout_id(),
++                walk.root_path().to_path_buf(),
++                segments,
++            ),
++            identities,
++        };
++        if !supported_owner_order(&graph) {
++            return Ok(None);
++        }
++        let Some(scan) = scan_ancestors_with_prefix(&graph, Some(cached)).await? else {
++            return Ok(None);
++        };
++        let scan = Arc::new(scan);
++        let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
++            return Ok(None);
++        };
++        return Ok(Some((current, scan)));
++    }
++    Ok(None)
++}
++
++/// The history-base cutoff that connects the cached root to its predecessor scan.
++fn cached_predecessor_position(cached: &UncertifiedItemScan) -> Option<Option<HistoryPosition>> {
++    match cached.ancestors.last() {
++        Some(segment) => {
++            let (ordinal, offset) = segment.end_ordinal().zip(segment.jsonl_end_byte_offset())?;
++            Some(Some(HistoryPosition {
++                thread_id: segment.rollout_id(),
++                end_ordinal_exclusive: ordinal,
++                end_byte_offset: offset,
++            }))
++        }
++        None => Some(None),
++    }
++}
++
+ async fn indexed_attached_sources(
+     store: &LocalThreadStore,
+     id: ThreadId,
+@@ -964,6 +1057,12 @@ pub(in crate::local) async fn try_list_uncertified_turn_items(
+         };
+         if let Some(graph) = current {
+             (graph, cached.clone())
++        } else if let Some(previous) = cached.as_ref()
++            && let Some((graph, scan)) =
++                extend_rotated_scan(store, params.thread_id, &mut selected, previous).await?
++        {
++            *cached = Some(scan.clone());
++            (graph, Some(scan))
+         } else {
+             let Some(graph) = discover(store, params.thread_id).await? else {
+                 return Ok(None);
+@@ -1178,20 +1277,8 @@ pub(super) async fn discover_cached(
+     {
+         return Ok(None);
+     }
+-    let expected_base = match cached.ancestors.last() {
+-        Some(segment) => {
+-            let Some((ordinal, offset)) =
+-                segment.end_ordinal().zip(segment.jsonl_end_byte_offset())
+-            else {
+-                return Ok(None);
+-            };
+-            Some(HistoryPosition {
+-                thread_id: segment.rollout_id(),
+-                end_ordinal_exclusive: ordinal,
+-                end_byte_offset: offset,
+-            })
+-        }
+-        None => None,
++    let Some(expected_base) = cached_predecessor_position(cached) else {
++        return Ok(None);
+     };
+     let path_snapshot = {
+         let mut snapshot = cached.path_snapshot.lock().await;
+@@ -1339,19 +1426,27 @@ async fn ancestor_identities_unchanged(graph: &DiscoveredLineage) -> bool {
+
+ pub(super) async fn scan_ancestors(
+     graph: &DiscoveredLineage,
++) -> ThreadStoreResult<Option<UncertifiedItemScan>> {
++    scan_ancestors_with_prefix(graph, None).await
++}
++
++async fn scan_ancestors_with_prefix(
++    graph: &DiscoveredLineage,
++    prefix: Option<&UncertifiedItemScan>,
+ ) -> ThreadStoreResult<Option<UncertifiedItemScan>> {
+     let segments = graph.lineage.segments();
+     let root = segments.last().expect("discover requires a root").clone();
+     let cancelled = ScanCancellation::default();
+     let stop = cancelled.0.clone();
+-    let ancestors = segments[..segments.len() - 1].to_vec();
++    let prefix_len = prefix.map_or(0, |scan| scan.ancestors.len());
++    let ancestors = segments[prefix_len..segments.len() - 1].to_vec();
+     let mut scans = futures::stream::iter(ancestors)
+         .enumerate()
+         .map(move |(index, segment)| {
+             let stop = stop.clone();
+             async move {
+                 (
+-                    index,
++                    index + prefix_len,
+                     tokio::task::spawn_blocking(move || {
+                         scan_source(&segment, None, true, None, true, &stop, None)
+                     })
+@@ -1360,13 +1455,20 @@ pub(super) async fn scan_ancestors(
+             }
+         })
+         .buffer_unordered(SCAN_CONCURRENCY);
+-    let mut turn_ids = HashSet::new();
+-    let mut turn_segments: HashMap<String, Vec<usize>> = HashMap::new();
++    let mut turn_ids = prefix.map_or_else(HashSet::new, |scan| scan.turn_ids.clone());
++    let mut turn_segments: HashMap<String, Vec<usize>> =
++        prefix.map_or_else(HashMap::new, |scan| scan.turn_segments.clone());
+     let mut results = Vec::new();
+-    let mut anchor_bytes = 0usize;
+-    let mut anchor_count = 0usize;
+-    let mut turn_bytes = 0usize;
+-    let mut event_count = 0usize;
++    let mut anchor_bytes = prefix.map_or(0, |scan| {
++        scan.anchors.iter().fold(0usize, |bytes, anchor| {
++            bytes.saturating_add(anchor.turn_id.len() + anchor.item_id.len())
++        })
++    });
++    let mut anchor_count = prefix.map_or(0, |scan| scan.anchors.len());
++    let mut turn_bytes = turn_ids
++        .iter()
++        .fold(0usize, |bytes, turn| bytes.saturating_add(turn.len()));
++    let mut event_count = prefix.map_or(0, |scan| scan.turn_events.len());
+     while let Some((index, result)) = scans.next().await {
+         let scan = match result.map_err(thread_history_error)? {
+             Ok(Some(scan)) => scan,
+@@ -1402,8 +1504,8 @@ pub(super) async fn scan_ancestors(
+         return Ok(None);
+     }
+     results.sort_by_key(|(index, _)| *index);
+-    let mut turn_events = Vec::new();
+-    let mut anchors = Vec::new();
++    let mut turn_events = prefix.map_or_else(Vec::new, |scan| scan.turn_events.clone());
++    let mut anchors = prefix.map_or_else(Vec::new, |scan| scan.anchors.clone());
+     for (_, scan) in results {
+         turn_events.extend(scan.turns);
+         anchors.extend(scan.anchors);
