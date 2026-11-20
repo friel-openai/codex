@@ -304,7 +304,10 @@ async fn rebuild_registered(
             }
         }
         let current = store.resolve_rollout_lineage(thread_id).await?;
-        if current != lineage {
+        if current.root_rollout_id != lineage.root_rollout_id
+            || current.segments != lineage.segments
+            || current.has_attached_visibility != lineage.has_attached_visibility
+        {
             discard_staging(store, staging_thread_id, staging_guard).await?;
             continue;
         }
