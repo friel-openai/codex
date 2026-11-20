@@ -81,6 +81,13 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
 
 pub(crate) type SessionTaskResult = CodexResult<Option<regular::RegularTaskOutput>>;
 
+/// Result of atomically closing a task to steering or retaining it for accepted input.
+pub(crate) enum TaskFinishAction {
+    Finish,
+    /// Settings and workspace replacements belong to the retained task, not its initial context.
+    Continue(Arc<TurnContext>, Option<McpStartupRequirements>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
     Disabled,
@@ -210,6 +217,24 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = SessionTaskResult> + Send;
 
+    /// Whether accepted input arriving during finalization can continue this same turn.
+    fn supports_pending_input_continuation(&self) -> bool {
+        false
+    }
+
+    /// Processes queued input without repeating turn-start events or startup preparation.
+    fn run_pending_input_continuation(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) -> impl std::future::Future<Output = SessionTaskResult> + Send {
+        async move {
+            let _ = (session, ctx, cancellation_token);
+            Ok(None)
+        }
+    }
+
     /// Gives the task a chance to perform cleanup after an abort.
     ///
     /// The default implementation is a no-op; override this if additional
@@ -240,6 +265,15 @@ pub(crate) trait AnySessionTask: Send + Sync + 'static {
     ) -> BoxFuture<'static, SessionTaskResult>;
 
     fn abort<'a>(&'a self, session: Arc<Session>, ctx: Arc<TurnContext>) -> BoxFuture<'a, ()>;
+
+    fn supports_pending_input_continuation(&self) -> bool;
+
+    fn run_pending_input_continuation(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) -> BoxFuture<'static, SessionTaskResult>;
 }
 
 impl<T> AnySessionTask for T
@@ -272,6 +306,24 @@ where
 
     fn abort<'a>(&'a self, session: Arc<Session>, ctx: Arc<TurnContext>) -> BoxFuture<'a, ()> {
         Box::pin(SessionTask::abort(self, session, ctx))
+    }
+
+    fn supports_pending_input_continuation(&self) -> bool {
+        SessionTask::supports_pending_input_continuation(self)
+    }
+
+    fn run_pending_input_continuation(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) -> BoxFuture<'static, SessionTaskResult> {
+        Box::pin(SessionTask::run_pending_input_continuation(
+            self,
+            session,
+            ctx,
+            cancellation_token,
+        ))
     }
 }
 
@@ -413,7 +465,7 @@ impl Session {
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
         let task_future = async move {
-            let ctx_for_finish = Arc::clone(&ctx);
+            let mut ctx_for_finish = Arc::clone(&ctx);
             let mut task_result = async {
                 let input = match host_admission {
                     Some(provider) => admission::admit(
@@ -425,7 +477,7 @@ impl Session {
                     ).await?,
                     None => task_input,
                 };
-                task_for_run
+                Arc::clone(&task_for_run)
                     .run(
                         Arc::clone(&session),
                         ctx,
@@ -457,21 +509,17 @@ impl Session {
                 if task_cancellation_token.is_cancelled() {
                     break;
                 }
-                let Some(requirements) = session
-                    .on_task_finished(Arc::clone(&ctx_for_finish), task_result)
-                    .await
-                else {
-                    break;
+                let (current_context, requirements) = match session
+                    .on_task_finished(Arc::clone(&ctx_for_finish), task_result).await {
+                    TaskFinishAction::Finish => break,
+                    TaskFinishAction::Continue(current_context, requirements) => (current_context, requirements),
                 };
-                task_result = RegularTask::run_turns(
-                    Arc::clone(&session),
-                    Arc::clone(&ctx_for_finish),
-                    Vec::new(),
-                    requirements,
-                    RunTurnProviderStartup::Ready(None),
-                    task_cancellation_token.child_token(),
-                )
-                .await;
+                ctx_for_finish = current_context;
+                task_result = if let Some(requirements) = requirements {
+                    RegularTask::run_turns(Arc::clone(&session), Arc::clone(&ctx_for_finish), Vec::new(), requirements, RunTurnProviderStartup::Ready(None), task_cancellation_token.child_token()).await
+                } else {
+                    Arc::clone(&task_for_run).run_pending_input_continuation(Arc::clone(&session), Arc::clone(&ctx_for_finish), task_cancellation_token.child_token()).await
+                };
             }
             done_clone.notify_waiters();
         }
@@ -752,7 +800,8 @@ impl Session {
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         task_result: SessionTaskResult,
-    ) -> Option<McpStartupRequirements> {
+    ) -> TaskFinishAction {
+        let successful = task_result.is_ok();
         let (regular_output, abort_reason, task_error) = match task_result {
             Ok(output) => (output, None, None),
             Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
@@ -764,24 +813,28 @@ impl Session {
             }
         };
         let can_continue =
-            regular_output.is_some() && turn_context.terminal_error.lock().await.is_none();
+            successful && turn_context.terminal_error.lock().await.is_none();
         let finishing = CancellationToken::new();
         let finish_recording = finishing.clone().drop_guard();
         let (turn_state, unadmitted_task, mut pending_input, outcome_handoff) = {
             let mut active = self.active_turn.lock().await;
-            let active_turn = active.as_mut()?;
-            if !Arc::ptr_eq(&active_turn.task.as_ref()?.turn_context, &turn_context) {
-                return None;
-            }
-            if can_continue {
+            let Some(active_turn) = active.as_mut() else { return TaskFinishAction::Finish; };
+            let Some(task) = active_turn.task.as_ref() else { return TaskFinishAction::Finish; };
+            if task.turn_context.sub_id != turn_context.sub_id { return TaskFinishAction::Finish; }
+            if can_continue && !task.cancellation_token.is_cancelled()
+                && (regular_output.is_some() || task.task.supports_pending_input_continuation())
+            {
                 let state = active_turn.turn_state.lock().await;
                 if state.accepts_mailbox_delivery_for_current_turn()
-                    && !state.pending_input.is_empty()
+                    && (!state.pending_input.is_empty() || self.input_queue.has_pending_mailbox_items().await)
                 {
-                    return regular_output.map(|output| output.mcp_startup_requirements);
+                    return TaskFinishAction::Continue(
+                        Arc::clone(&task.turn_context),
+                        regular_output.map(|output| output.mcp_startup_requirements),
+                    );
                 }
             }
-            let task = active_turn.task.take()?;
+            let Some(task) = active_turn.task.take() else { return TaskFinishAction::Finish; };
             task.handle.detach();
             active_turn.finishing = Some(finishing);
             (
@@ -1039,7 +1092,7 @@ impl Session {
         if cleared_active_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
-        None
+        TaskFinishAction::Finish
     }
 
     async fn take_active_turn(&self, reason: &TurnAbortReason) -> Option<ActiveTurn> {
