@@ -1237,72 +1237,6 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     ))))
 }
 
-async fn resolve_compatibility_fork_lineage(
-    store: &LocalThreadStore,
-    thread_id: codex_protocol::ThreadId,
-    expected_rollout_id: Option<RolloutId>,
-) -> ThreadStoreResult<(
-    super::rollout_lineage::RolloutLineage,
-    GoalSupervisorHistoryAccess,
-    OwnedRwLockReadGuard<()>,
-    bool,
-)> {
-    let source = resolve_fork_source(store, thread_id).await?;
-    trace_fork_stage("resolved_source_for_compatibility");
-    let mut history_access =
-        super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
-            store,
-            thread_id,
-            source.path.as_path(),
-            super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
-        )
-        .await?;
-    trace_fork_stage("repaired_compatibility_history");
-    let source_reservation = history_access
-        .take_lifecycle(thread_id)
-        .ok_or_else(missing_source_reservation)?;
-    // Keep the source reserved until persistence and lineage materialization finish, even if the
-    // caller cancels fork preparation.
-    let lineage_store = store.clone();
-    tokio::spawn(async move {
-        let writer_reservation =
-            history_access
-                .writer_reservation()
-                .ok_or_else(|| ThreadStoreError::Internal {
-                    message: "history repair did not retain fork writer ownership".to_string(),
-                })?;
-        let (lineage, source_projection_was_missing) = lineage_store
-            .resolve_rollout_lineage_for_reference_reserved(
-                thread_id,
-                expected_rollout_id,
-                writer_reservation,
-            )
-            .await?;
-        #[cfg(test)]
-        let pause = {
-            LINEAGE_PERSISTENCE_PAUSES
-                .lock()
-                .expect("lineage persistence pause mutex")
-                .remove(&thread_id)
-        };
-        #[cfg(test)]
-        if let Some(pause) = pause {
-            pause.entered.notify_one();
-            pause.release.notified().await;
-        }
-        Ok::<_, ThreadStoreError>((
-            lineage,
-            history_access,
-            source_reservation,
-            source_projection_was_missing,
-        ))
-    })
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to resolve fork lineage: {err}"),
-    })?
-}
-
 fn trace_fork_stage(stage: &'static str) {
     tracing::event!(
         target: "codex_history_io",
@@ -2084,6 +2018,7 @@ async fn load_projected_response_turns(
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         },
     )
     .await?
