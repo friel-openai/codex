@@ -192,12 +192,29 @@ pub async fn first_rollout_content_match_snippet(
     first_content_match_snippet(path, search_term, &mut None).await
 }
 
+/// Search exactly the selected physical rollout representation.
+pub async fn first_rollout_content_match_snippet_exact(
+    path: &Path,
+    search_term: &str,
+) -> io::Result<Option<String>> {
+    let lines = compression::open_rollout_line_reader_exact(path).await?;
+    match_content_lines(lines, search_term, &mut None).await
+}
+
 async fn first_content_match_snippet(
     path: &Path,
     search_term: &str,
     patterns: &mut Option<(Regex, Regex)>,
 ) -> io::Result<Option<String>> {
     let lines = compression::open_rollout_line_reader(path).await?;
+    match_content_lines(lines, search_term, patterns).await
+}
+
+async fn match_content_lines(
+    lines: compression::RolloutLineReader,
+    search_term: &str,
+    patterns: &mut Option<(Regex, Regex)>,
+) -> io::Result<Option<String>> {
     // Keep compilation errors inside the caller's per-file error handler.
     let (json_search_term, search_term) = match patterns {
         Some(patterns) => patterns,

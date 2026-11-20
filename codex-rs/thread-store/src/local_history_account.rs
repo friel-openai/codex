@@ -26,10 +26,55 @@ impl LocalHistoryAccount {
         page_thread_ids: &[ThreadId],
         original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
     ) -> bool {
+        self.includes_with_path_policy(
+            codex_home,
+            thread_id,
+            rollout_path,
+            page_thread_ids,
+            original_paths,
+            false,
+        )
+        .await
+    }
+
+    /// Checks the selected physical rollout without substituting a sibling representation.
+    pub(crate) async fn includes_exact(
+        &self,
+        codex_home: &Path,
+        thread_id: ThreadId,
+        rollout_path: Option<&Path>,
+        page_thread_ids: &[ThreadId],
+        original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
+    ) -> bool {
+        self.includes_with_path_policy(
+            codex_home,
+            thread_id,
+            rollout_path,
+            page_thread_ids,
+            original_paths,
+            true,
+        )
+        .await
+    }
+
+    async fn includes_with_path_policy(
+        &self,
+        codex_home: &Path,
+        thread_id: ThreadId,
+        rollout_path: Option<&Path>,
+        page_thread_ids: &[ThreadId],
+        original_paths: &mut Option<HashMap<ThreadId, PathBuf>>,
+        exact: bool,
+    ) -> bool {
         let Some(path) = rollout_path else {
             return false;
         };
-        let Ok(header) = codex_rollout::read_session_meta_line(path).await else {
+        let header = if exact {
+            codex_rollout::read_session_meta_line_exact(path).await
+        } else {
+            codex_rollout::read_session_meta_line(path).await
+        };
+        let Ok(header) = header else {
             return false;
         };
         let mut meta = header.meta;
@@ -53,7 +98,12 @@ impl LocalHistoryAccount {
             else {
                 return false;
             };
-            let Ok(header) = codex_rollout::read_session_meta_line(original).await else {
+            let header = if exact {
+                codex_rollout::read_session_meta_line_exact(original).await
+            } else {
+                codex_rollout::read_session_meta_line(original).await
+            };
+            let Ok(header) = header else {
                 return false;
             };
             meta = header.meta;
