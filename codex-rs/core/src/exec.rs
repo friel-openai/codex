@@ -356,15 +356,19 @@ pub async fn build_exec_request(
 
     let manager = SandboxManager::new();
     let enforce_managed_network = network.is_some();
-    let (env, managed_network) = if let Some(network) = network.as_ref() {
+    let (env, managed_network, environment_proxy_lease) = if let Some(network) = network.as_ref() {
         let prepared = network
             .prepare_for_optional_environment(env, network_environment_id.as_deref())
             .map_err(|err| {
                 network_proxy_environment_error(network_environment_id.as_deref(), err)
             })?;
-        (prepared.env, Some(prepared.sandbox_context))
+        (
+            prepared.env,
+            Some(prepared.sandbox_context),
+            prepared.environment_proxy_lease,
+        )
     } else {
-        (env, None)
+        (env, None, None)
     };
     let sandbox_policy_cwd_uri = PathUri::from_abs_path(sandbox_cwd);
     let workspace_roots = if windows_sandbox_workspace_roots.is_empty() {
@@ -423,7 +427,9 @@ pub async fn build_exec_request(
             windows_sandbox_level,
         })?
         .into_command_request()?;
-    let request = ExecRequest::from_sandbox_exec_request(request, options, workspace_roots).await?;
+    let mut request =
+        ExecRequest::from_sandbox_exec_request(request, options, workspace_roots).await?;
+    request.environment_proxy_lease = environment_proxy_lease;
     tracing::debug!("Sandbox type: {:?}", request.sandbox);
     Ok(request)
 }
@@ -450,6 +456,7 @@ pub(crate) async fn execute_exec_request(
         permission_profile,
         windows_sandbox_filesystem_overrides,
         network_environment_id,
+        environment_proxy_lease: _environment_proxy_lease,
         arg0,
         exec_server_sandbox: _,
         exec_server_enforce_managed_network: _,
@@ -626,13 +633,15 @@ async fn exec_windows_sandbox(
         windows_sandbox_level,
         ..
     } = params;
-    if let Some(network) = network.as_ref() {
+    let _environment_proxy_lease = if let Some(network) = network.as_ref() {
         network
             .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
             .map_err(|err| {
                 network_proxy_environment_error(network_environment_id.as_deref(), err)
-            })?;
-    }
+            })?
+    } else {
+        None
+    };
     let network_proxy_restricting_sid = network
         .as_ref()
         .map(|network| {
@@ -938,13 +947,15 @@ async fn exec(
         sandbox_permissions: _,
         justification: _,
     } = params;
-    if let Some(network) = network.as_ref() {
+    let _environment_proxy_lease = if let Some(network) = network.as_ref() {
         network
             .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
             .map_err(|err| {
                 network_proxy_environment_error(network_environment_id.as_deref(), err)
-            })?;
-    }
+            })?
+    } else {
+        None
+    };
 
     let (program, args) = command.split_first().ok_or_else(|| {
         CodexErr::Io(io::Error::new(
