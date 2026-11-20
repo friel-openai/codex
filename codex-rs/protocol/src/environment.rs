@@ -198,6 +198,7 @@ impl TurnEnvironmentSelections {
     pub fn into_requests(self) -> TurnEnvironmentRequests {
         TurnEnvironmentRequests {
             preserve_secondary_workspaces: false,
+            retain_default_secondaries: false,
             legacy_fallback_cwd: self.legacy_fallback_cwd,
             environment_requests: self
                 .environments
@@ -216,6 +217,9 @@ pub struct TurnEnvironmentRequests {
     /// Updates the local primary workspace; the remaining entries identify bindings to retain,
     /// not new selections. This is set by the app-server, not by the wire request.
     pub preserve_secondary_workspaces: bool,
+    /// The coordinator regenerated defaults rather than accepting an explicit selection.
+    /// This can retain existing eligibility, but cannot establish it.
+    pub retain_default_secondaries: bool,
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environment_requests: Vec<TurnEnvironmentRequest>,
     /// Whether the environment list came from registry defaults.
@@ -229,6 +233,7 @@ impl TurnEnvironmentRequests {
     ) -> Self {
         Self {
             preserve_secondary_workspaces: false,
+            retain_default_secondaries: false,
             legacy_fallback_cwd,
             environment_requests,
             implicit_selection: false,
