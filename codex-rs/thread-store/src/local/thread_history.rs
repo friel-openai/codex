@@ -19,6 +19,7 @@ mod search;
 mod segment_paging;
 mod turn_lookup;
 mod uncertified_items;
+mod uncertified_root_head;
 
 pub(super) use bulk_projection::BulkProjection;
 pub(super) use projection_certificate::FileIdentity as ProjectionLeafIdentity;
@@ -34,6 +35,8 @@ pub(super) use read::list_segmented_legacy_items;
 pub(super) use read::list_segmented_legacy_turns;
 pub(super) use read::list_turns;
 pub(super) use read::resume_backwards_cursors;
+pub(super) use read::try_list_source_backed_turns;
+pub(super) use read::try_source_resume_backwards_cursors;
 pub(super) use read::validate_thread_for_paginated_reads;
 pub(super) use realtime::list_timeline;
 pub(super) use realtime_stream::list_realtime;
@@ -44,6 +47,7 @@ pub(super) use turn_lookup::find_visible_turn;
 pub(super) use turn_lookup::first_user_preview;
 pub(super) use uncertified_items::UncertifiedItemScan;
 pub(super) use uncertified_items::try_list_uncertified_turn_items;
+pub(super) use uncertified_root_head::read_deferred_compacted_head;
 
 #[cfg(test)]
 static LEAF_TRANSACTION_TIMINGS: std::sync::LazyLock<

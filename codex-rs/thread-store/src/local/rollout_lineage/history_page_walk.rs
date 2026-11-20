@@ -11,6 +11,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 
 use super::super::thread_history::ProjectionLeafIdentity;
 use super::super::thread_history::projection_leaf_identity;
+use super::super::thread_history::read_deferred_compacted_head;
 use super::GoalSupervisorLineageProvenance;
 use super::LineageOffsetMode;
 use super::LineageResolutionMode;
@@ -197,9 +198,18 @@ impl<'a> HistoryPageWalk<'a> {
         } else {
             None
         };
-        let head = match read_rollout_head(&path).await {
-            Ok(head) => head,
-            Err(_) => return Ok(WalkStep::FullResolution),
+        // Deferred callers validate the entire selected predecessor before using this head.
+        let deferred_head = if offset_mode == LineageOffsetMode::Deferred && end.is_some() {
+            read_deferred_compacted_head(&path).await?
+        } else {
+            None
+        };
+        let head = match deferred_head {
+            Some(head) => head,
+            None => match read_rollout_head(&path).await {
+                Ok(head) => head,
+                Err(_) => return Ok(WalkStep::FullResolution),
+            },
         };
         let meta = &head.session_meta.meta;
         if meta.history_mode != ThreadHistoryMode::Paginated

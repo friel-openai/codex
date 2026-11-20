@@ -584,14 +584,73 @@ impl LocalThreadStore {
         &self,
         thread_id: ThreadId,
     ) -> ThreadStoreResult<bool> {
+        Ok(self
+            .paginated_root_projection_sizes(thread_id)
+            .await?
+            .is_some_and(|(actual, projected)| actual == projected))
+    }
+
+    /// Attempts a source-backed page when a complete root projection checkpoint exists.
+    ///
+    /// The source reader validates the referenced lineage rather than trusting the checkpoint.
+    /// `None` leaves compatibility histories and roots without a checkpoint to their existing
+    /// readers.
+    pub async fn try_list_projected_source_turns(
+        &self,
+        params: &crate::ListTurnsParams,
+    ) -> ThreadStoreResult<Option<crate::TurnPage>> {
+        if self
+            .paginated_root_projection_sizes(params.thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        thread_history::try_list_source_backed_turns(self, params).await
+    }
+
+    /// Attempts a source-verified item page when a complete root checkpoint exists.
+    pub async fn try_list_projected_source_items(
+        &self,
+        params: &crate::ListItemsParams,
+    ) -> ThreadStoreResult<Option<crate::ItemPage>> {
+        if self
+            .paginated_root_projection_sizes(params.thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        thread_history::try_list_uncertified_turn_items(self, params).await
+    }
+
+    /// Attempts to derive both resume cursors from the same verified source lineage.
+    pub async fn try_projected_source_resume_backwards_cursors(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
+        if self
+            .paginated_root_projection_sizes(thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        thread_history::try_source_resume_backwards_cursors(self, thread_id).await
+    }
+
+    async fn paginated_root_projection_sizes(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<(u64, u64)>> {
         let Some(resolved) =
             thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(projection) = thread_history::projection_state(self, resolved.rollout_id).await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         if !projection.lineage_complete
             || resolved
@@ -600,7 +659,7 @@ impl LocalThreadStore {
                 .and_then(|extension| extension.to_str())
                 != Some("jsonl")
         {
-            return Ok(false);
+            return Ok(None);
         }
         let session_meta = match resolved.authenticated_session_meta {
             Some(meta) => meta,
@@ -617,11 +676,12 @@ impl LocalThreadStore {
             || session_meta.history_mode != ThreadHistoryMode::Paginated
             || session_meta.attached_thread
         {
-            return Ok(false);
+            return Ok(None);
         }
         Ok(tokio::fs::metadata(&resolved.path)
             .await
-            .is_ok_and(|metadata| metadata.len() == projection.next_byte_offset))
+            .ok()
+            .map(|metadata| (metadata.len(), projection.next_byte_offset)))
     }
 
     /// Attempts a source-verified, turn-specific page without rebuilding history projections.
