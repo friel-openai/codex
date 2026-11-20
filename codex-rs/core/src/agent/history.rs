@@ -1,5 +1,7 @@
 //! Loads stored agent context and prepares the history a child inherits when it forks.
 
+use crate::agent::control::role_prompt_item;
+use crate::agent::control::subagent_assignment_item;
 use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
 use crate::config::Config;
@@ -179,7 +181,9 @@ pub(super) async fn prepare_forked_history(
     multi_agent_version: MultiAgentVersion,
     allow_rollout_references: bool,
 ) -> CodexResult<PreparedForkHistory> {
-    if options.fork_parent_spawn_call_id.is_none() {
+    let is_goal_supervisor_helper =
+        crate::goal_supervisor::is_goal_supervisor_helper_source(session_source);
+    if options.fork_parent_spawn_call_id.is_none() && !is_goal_supervisor_helper {
         return Err(CodexErr::Fatal(
             "spawn_agent fork requires a parent spawn call id".to_string(),
         ));
@@ -276,6 +280,80 @@ pub(super) async fn prepare_forked_history(
     };
     let dynamic_tools =
         codex_history::latest_dynamic_tools(&forked_rollout_items).map(<[_]>::to_vec);
+    if is_goal_supervisor_helper {
+        let mut tail = Vec::new();
+        if let Some(role_prompt) =
+            crate::session::load_agent_role_prompt(config, session_source).await
+        {
+            tail.push(role_prompt_item(role_prompt));
+        }
+        let mut boot_context = Vec::new();
+        if let Some(state_db) = parent_thread.session.state_db().as_ref()
+            && let Ok(Some(parent_goal)) = state_db
+                .thread_goals()
+                .get_thread_goal(parent_thread_id)
+                .await
+        {
+            let goal_id = parent_goal.goal_id.clone();
+            let parent_goal = crate::goal_supervisor::protocol_goal_from_state(parent_goal);
+            boot_context.push(
+                crate::goal_supervisor::supervisor_continuity_context_item(
+                    &parent_thread.session,
+                    &goal_id,
+                    &parent_goal,
+                    &forked_rollout_items,
+                )
+                .await,
+            );
+        }
+        let agent_control = parent_thread
+            .session
+            .services
+            .local_agent_runtime
+            .control(parent_thread.session.session_id());
+        boot_context.extend(
+            agent_control
+                .supervisor_boot_context_items(state, parent_thread_id)
+                .await,
+        );
+        for item in boot_context {
+            let RolloutItem::ResponseItem(item) = item else {
+                return Err(CodexErr::Fatal(
+                    "goal supervisor boot context must contain response items".to_string(),
+                ));
+            };
+            tail.push(item.item);
+        }
+        if let Some(initial_task_message) = options.initial_task_message.clone() {
+            tail.push(subagent_assignment_item(
+                session_source,
+                initial_task_message,
+            ));
+        }
+        let (history, startup_items) = match reference_rollout_items {
+            Some(reference_items) => (
+                InitialHistory::Forked(reference_items),
+                ForkStartupItems::with_model_history_override(
+                    forked_rollout_items,
+                    /*shared_model_response_items*/ None,
+                    /*shared_model_state*/ None,
+                ),
+            ),
+            None => (
+                InitialHistory::Forked(forked_rollout_items),
+                ForkStartupItems::default(),
+            ),
+        };
+        return Ok(PreparedForkHistory {
+            history,
+            history_mode: destination_history_mode,
+            startup_items: startup_items
+                .with_tail_items(tail)
+                .with_dynamic_tools(dynamic_tools)
+                .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
+            source_reservation,
+        });
+    }
     let unsanitized_parent_history = reference_rollout_items
         .as_ref()
         .map(|_| serde_json::to_value(&forked_rollout_items))
@@ -534,6 +612,14 @@ pub(super) async fn prepare_forked_history(
         history: InitialHistory::Forked(forked_rollout_items),
         history_mode: destination_history_mode,
         startup_items: ForkStartupItems::default()
+            .with_tail_items(
+                options
+                    .initial_task_message
+                    .clone()
+                    .into_iter()
+                    .map(|message| subagent_assignment_item(session_source, message))
+                    .collect(),
+            )
             .with_dynamic_tools(dynamic_tools)
             .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive),
         source_reservation,
