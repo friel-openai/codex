@@ -390,14 +390,10 @@ async fn source_backed_turns(
     store: &LocalThreadStore,
     params: &ListTurnsParams,
 ) -> ThreadStoreResult<Option<TurnPage>> {
-    let Some((graph, scan)) = uncertified_items::indexed_sources(store, params.thread_id).await?
+    let Some((graph, scan, root)) =
+        uncertified_items::indexed_sources_with_root(store, params.thread_id).await?
     else {
         return Ok(None);
-    };
-    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
-        return Err(ThreadStoreError::Conflict {
-            message: "could not read the selected rollout".to_string(),
-        });
     };
     let mut events = scan.turn_events.clone();
     events.extend(root.turns);
@@ -521,6 +517,8 @@ async fn source_backed_turns(
     } else {
         (initial, HashMap::new())
     };
+    #[cfg(test)]
+    pause_source_item_before_revalidation(params.thread_id).await;
     if !uncertified_items::sources_still_current(
         store,
         params.thread_id,
@@ -685,13 +683,10 @@ async fn source_resume_cursors(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
-    let Some((graph, scan)) = uncertified_items::indexed_sources(store, thread_id).await? else {
+    let Some((graph, scan, root)) =
+        uncertified_items::indexed_sources_with_root(store, thread_id).await?
+    else {
         return Ok(None);
-    };
-    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
-        return Err(ThreadStoreError::Conflict {
-            message: "could not read the selected rollout".to_string(),
-        });
     };
     let mut events = scan.turn_events.clone();
     events.extend(root.turns);
@@ -940,14 +935,10 @@ pub(super) async fn source_backed_items(
     {
         return Ok(None);
     }
-    let Some((graph, scan)) = uncertified_items::indexed_sources(store, params.thread_id).await?
+    let Some((graph, scan, root)) =
+        uncertified_items::indexed_sources_with_root(store, params.thread_id).await?
     else {
         return Ok(None);
-    };
-    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
-        return Err(ThreadStoreError::Conflict {
-            message: "could not read the selected rollout".to_string(),
-        });
     };
     let cursor_text = match params.position.as_ref() {
         Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
@@ -1056,6 +1047,67 @@ pub(super) async fn source_backed_items(
         .flat_map(|(_, items)| items.into_values())
         .collect::<Vec<_>>();
     if all.is_empty() && !scan.attached {
+        // Only an active root-only turn with no SQLite items can be answered
+        // from an empty source scan; other empty scans may hide legacy rows.
+        if let Some(turn_id) = turn_id
+            && graph.lineage.segments().len() < 900
+            && root.turns.iter().any(|event| {
+                matches!(event,
+                SourceTurnEvent::Turn(_, _, turn)
+                    if turn.turn_id == turn_id && turn.status == TurnStatus::InProgress)
+            })
+            && !root.turns.iter().any(|event| {
+                matches!(event,
+                SourceTurnEvent::Turn(_, _, turn)
+                    if turn.turn_id == turn_id && turn.status != TurnStatus::InProgress)
+            })
+            && !scan.turn_events.iter().any(|event| {
+                matches!(event,
+                SourceTurnEvent::Turn(_, _, turn) if turn.turn_id == turn_id)
+            })
+        {
+            let pool = store.thread_history_db().await?;
+            let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT EXISTS(SELECT 1 FROM thread_items WHERE turn_id = ",
+            );
+            query.push_bind(turn_id).push(" AND thread_id IN (");
+            let mut ids = query.separated(", ");
+            ids.push_bind(params.thread_id.to_string());
+            for segment in graph.lineage.segments() {
+                ids.push_bind(segment.rollout_id().to_string());
+            }
+            ids.push_unseparated("))");
+            let has_rows: i64 = query
+                .build_query_scalar()
+                .fetch_one(pool)
+                .await
+                .map_err(super::thread_history_error)?;
+            if has_rows == 0 {
+                // The SQLite query is the snapshot point only if no source changed
+                // since the root scan. An append could otherwise precede the query
+                // while its items are absent from the captured root snapshot.
+                #[cfg(test)]
+                pause_source_item_before_revalidation(params.thread_id).await;
+                if !uncertified_items::sources_still_current(
+                    store,
+                    params.thread_id,
+                    &graph,
+                    &scan,
+                    None,
+                )
+                .await?
+                {
+                    return Err(ThreadStoreError::Conflict {
+                        message: "rotated thread sources changed while listing items".to_string(),
+                    });
+                }
+                return Ok(Some(ItemPage {
+                    items: Vec::new(),
+                    next_cursor: None,
+                    backwards_cursor: None,
+                }));
+            }
+        }
         // No canonical items were found; the compatibility reader does not certify SQLite.
         return Ok(None);
     }
