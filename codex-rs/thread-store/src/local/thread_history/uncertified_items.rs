@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::io;
 use std::io::BufRead;
 use std::io::Read;
+use std::io::Seek;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -61,6 +62,125 @@ const SCAN_CONCURRENCY: usize = 8;
 #[cfg(test)]
 static INDEX_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static ROOT_SCAN_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static ROOT_IDENTITY_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<ThreadId, (Arc<IndexPause>, usize)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn inject_root_identity_pauses(thread_id: ThreadId, count: usize) -> Arc<IndexPause> {
+    let pause = Arc::new(IndexPause {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    ROOT_IDENTITY_PAUSES
+        .lock()
+        .unwrap()
+        .insert(thread_id, (pause.clone(), count));
+    pause
+}
+
+#[cfg(test)]
+async fn pause_root_identity(thread_id: ThreadId) {
+    let pause = {
+        let mut pauses = ROOT_IDENTITY_PAUSES.lock().unwrap();
+        let pause = pauses.get_mut(&thread_id).map(|(pause, count)| {
+            *count -= 1;
+            (pause.clone(), *count == 0)
+        });
+        if pause.as_ref().is_some_and(|(_, finished)| *finished) {
+            pauses.remove(&thread_id);
+        }
+        pause.map(|(pause, _)| pause)
+    };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+pub(super) fn inject_root_scan_pause(thread_id: ThreadId) -> Arc<IndexPause> {
+    let pause = Arc::new(IndexPause {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    ROOT_SCAN_PAUSES
+        .lock()
+        .unwrap()
+        .insert(thread_id, pause.clone());
+    pause
+}
+
+#[cfg(test)]
+static VERIFY_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, Arc<VerifyPause>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The point at which a final prefix validation is paused by a synthetic test.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerifyPausePoint {
+    AfterFirstChunk,
+    AfterHash,
+}
+
+/// A one-shot barrier inside final prefix validation.
+#[cfg(test)]
+pub(super) struct VerifyPause {
+    point: VerifyPausePoint,
+    pub(super) entered: tokio::sync::Notify,
+    released: std::sync::Mutex<bool>,
+    condition: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl VerifyPause {
+    pub(super) fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.condition.notify_one();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn inject_verify_pause(
+    path: &std::path::Path,
+    point: VerifyPausePoint,
+) -> Arc<VerifyPause> {
+    let pause = Arc::new(VerifyPause {
+        point,
+        entered: tokio::sync::Notify::new(),
+        released: std::sync::Mutex::new(false),
+        condition: std::sync::Condvar::new(),
+    });
+    VERIFY_PAUSES
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), pause.clone());
+    pause
+}
+
+#[cfg(test)]
+fn pause_root_verification(path: &std::path::Path, point: VerifyPausePoint) {
+    let pause = {
+        let mut pauses = VERIFY_PAUSES.lock().unwrap();
+        if pauses.get(path).is_some_and(|pause| pause.point == point) {
+            pauses.remove(path)
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        let released = pause.released.lock().unwrap();
+        drop(pause.condition.wait_while(released, |released| !*released));
+    }
+}
 
 /// A one-shot barrier before completing validation of a cached ancestor index.
 #[cfg(test)]
@@ -342,7 +462,7 @@ pub(super) async fn indexed_sources(
     let scan = Arc::new(scan);
     // The predecessor index remains reusable if only the mutable root changes.
     *cached = Some(scan.clone());
-    let Some(current) = discover_cached(store, id, &scan).await? else {
+    let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "rotated history sources changed while indexing".to_string(),
         });
@@ -393,7 +513,7 @@ async fn indexed_attached_sources(
         });
     };
     let scan = Arc::new(scan);
-    let Some(current) = discover_cached(store, id, &scan).await? else {
+    let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "attached history sources changed while indexing".to_string(),
         });
@@ -413,7 +533,7 @@ async fn index_attached_uncached(
         });
     };
     let scan = Arc::new(scan);
-    let Some(current) = discover_cached(store, id, &scan).await? else {
+    let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "attached history sources changed while indexing".to_string(),
         });
@@ -436,7 +556,7 @@ async fn index_uncached_sources(
         });
     };
     let scan = Arc::new(scan);
-    let Some(current) = discover_cached(store, id, &scan).await? else {
+    let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "rotated history sources changed while indexing".to_string(),
         });
@@ -446,6 +566,29 @@ async fn index_uncached_sources(
     }
     persistent_scan::save(store, id, current.lineage.root_rollout_id(), scan.clone()).await;
     Ok(Some((current, scan)))
+}
+
+/// Rechecks an ancestor scan without rebuilding it when the root grows during discovery.
+async fn discover_cached_after_scan(
+    store: &LocalThreadStore,
+    id: ThreadId,
+    scan: &UncertifiedItemScan,
+    graph: &DiscoveredLineage,
+) -> ThreadStoreResult<Option<DiscoveredLineage>> {
+    let root = graph.lineage.segments().last().expect("lineage has a root");
+    let identity = graph.identities.last().expect("root has an identity");
+    for _ in 0..16 {
+        if let Some(current) = discover_cached(store, id, scan).await? {
+            return Ok(Some(current));
+        }
+        let current = leaf_identity(root.rollout_path()).await;
+        if !current.as_ref().is_some_and(|current| {
+            identity.same_file_with_at_least(current) && current.size() > identity.size()
+        }) {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 /// Rechecks selected filenames, cutoffs and physical identities after a page is assembled.
@@ -507,48 +650,103 @@ fn verify_root_prefix(
     snapshot: &RootSnapshot,
     current: &FileIdentity,
 ) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
-    let matches_current = || {
+    let matches_identity = |file: &std::fs::File, expected: &FileIdentity| {
         file.metadata()
             .ok()
             .and_then(|meta| file_identity(&meta))
             .as_ref()
-            == Some(current)
+            == Some(expected)
             && snapshot
                 .file
                 .metadata()
                 .ok()
                 .and_then(|meta| file_identity(&meta))
                 .as_ref()
-                == Some(current)
+                == Some(expected)
             && std::fs::symlink_metadata(path)
                 .ok()
                 .and_then(|meta| file_identity(&meta))
                 .as_ref()
-                == Some(current)
+                == Some(expected)
     };
-    if !matches_current() {
-        return false;
-    }
-    let mut reader = (&file).take(snapshot.identity.size());
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut read = 0_u64;
-    loop {
-        let Ok(count) = reader.read(&mut buffer) else {
+    // A writer may append while the prefix is hashed. Retry with a fresh identity,
+    // but accept a digest only if all three identities stay exact throughout a hash.
+    for _ in 0..16 {
+        let Some(expected) = file.metadata().ok().and_then(|meta| file_identity(&meta)) else {
             return false;
         };
-        if count == 0 {
+        if !current.same_file_with_at_least(&expected) {
+            return false;
+        }
+        if !matches_identity(&file, &expected) {
+            continue;
+        }
+        if file.rewind().is_err() {
+            return false;
+        }
+        let mut reader = (&file).take(snapshot.identity.size());
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut read = 0_u64;
+        loop {
+            let Ok(count) = reader.read(&mut buffer) else {
+                return false;
+            };
+            if count == 0 {
+                break;
+            }
+            read += count as u64;
+            digest.update(&buffer[..count]);
+            #[cfg(test)]
+            if read == count as u64 {
+                pause_root_verification(path, VerifyPausePoint::AfterFirstChunk);
+            }
+        }
+        #[cfg(test)]
+        pause_root_verification(path, VerifyPausePoint::AfterHash);
+        if matches_identity(&file, &expected) {
+            return read == snapshot.identity.size()
+                && <[u8; 32]>::from(digest.finalize()) == snapshot.digest;
+        }
+    }
+    false
+}
+
+/// Selects a new root snapshot if the root grew before it could be opened.
+pub(super) async fn indexed_sources_with_root(
+    store: &LocalThreadStore,
+    id: ThreadId,
+) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>, SourceScan)>> {
+    for _ in 0..16 {
+        let Some((graph, scan)) = indexed_sources(store, id).await? else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        {
+            let pause = ROOT_SCAN_PAUSES.lock().unwrap().remove(&id);
+            if let Some(pause) = pause {
+                pause.entered.notify_one();
+                pause.release.notified().await;
+            }
+        }
+        if let Some(root) = scan_root_index(&graph, None).await? {
+            return Ok(Some((graph, scan, root)));
+        }
+        let segment = graph.lineage.segments().last().expect("lineage has a root");
+        let identity = graph.identities.last().expect("root has an identity");
+        let current = leaf_identity(segment.rollout_path()).await;
+        if !current.as_ref().is_some_and(|current| {
+            identity.same_file_with_at_least(current) && current.size() > identity.size()
+        }) {
             break;
         }
-        read += count as u64;
-        digest.update(&buffer[..count]);
     }
-    read == snapshot.identity.size()
-        && <[u8; 32]>::from(digest.finalize()) == snapshot.digest
-        && matches_current()
+    Err(ThreadStoreError::Conflict {
+        message: "could not read the selected rollout".to_string(),
+    })
 }
 
 /// Reads the mutable root once for turn metadata, item anchors, and requested snapshots.
@@ -1052,6 +1250,8 @@ pub(super) async fn discover_cached(
         let Some(identity) = leaf_identity(walk.root_path()).await else {
             return Ok(None);
         };
+        #[cfg(test)]
+        pause_root_identity(id).await;
         let head = if let Some(head) =
             read_cached_compacted_head(walk.root_path(), cached.root.physical_size).await?
         {
