@@ -21,6 +21,7 @@ impl ThreadRequestProcessor {
     pub(super) async fn acquire_thread_resume_permit(
         &self,
         params: &ThreadResumeParams,
+        mut permit_duration: Option<&mut Duration>,
     ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
         let mut prepared = params.history.is_some();
         let requested_id = ThreadId::from_string(&params.thread_id).ok();
@@ -81,7 +82,12 @@ impl ThreadRequestProcessor {
                 }
                 prepared = true;
             }
-            let permit = self.acquire_thread_list_state_permit().await?;
+            let started = Instant::now();
+            let permit = self.acquire_thread_list_state_permit().await;
+            if let Some(duration) = permit_duration.as_deref_mut() {
+                *duration = duration.saturating_add(started.elapsed());
+            }
+            let permit = permit?;
             if !prepared
                 && let Some(thread_id) = requested_id
                 && get_loaded_thread_for_persistence(&self.thread_manager, thread_id)
