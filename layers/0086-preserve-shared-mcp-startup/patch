@@ -1,0 +1,556 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 1671cca8f4ddc3f18a9264533e0110f3ce17b937..ff39da5cfd2d768ecb9366823e98c8ec00005653 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -6,6 +6,7 @@ mod network_policy_tests;
+ use crate::McpBinding;
+ use crate::McpServerPermissions;
+ use crate::client_tool_catalog::ClientToolCatalog;
++use crate::connection_pool::TestRetirementEvent;
+ use crate::elicitation::ElicitationLifecycle;
+ use crate::elicitation::ElicitationRequestManager;
+ use crate::elicitation::ElicitationRequestRouter;
+@@ -3695,6 +3696,77 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+     );
+ }
+
++#[tokio::test(start_paused = true)]
++async fn optional_startup_grace_keeps_the_only_initializer_running() -> anyhow::Result<()> {
++    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
++    let permission_profile = Constrained::allow_any(PermissionProfile::default());
++    let mut manager = McpConnectionSet::new_uninitialized(
++        &approval_policy,
++        &permission_profile,
++        /*prefix_mcp_tool_names*/ true,
++    );
++    let (client, startup_started, release_startup) = create_gated_async_managed_client(
++        create_test_managed_client(vec![create_test_tool("optional", "echo")]).await,
++    );
++    manager.insert_test_client("optional", client);
++    let connection = manager.servers[&McpServerKey::unscoped("optional")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
++    config.optional_mcp_startup_grace = Duration::from_millis(250);
++    config.server_permissions.insert(
++        McpServerKey::unscoped("optional"),
++        McpServerPermissions::Thread,
++    );
++    let config = Arc::new(config);
++    let manager = Arc::new(manager);
++    let started = tokio::time::Instant::now();
++    let binding = tokio::time::timeout(
++        Duration::from_millis(500),
++        manager.capture_binding_with_metadata(
++            Arc::clone(&config),
++            /*plugins_available*/ false,
++            /*required_servers*/ &[],
++            /*required_plugins*/ &HashSet::new(),
++        ),
++    )
++    .await?;
++    assert_eq!(started.elapsed(), Duration::from_millis(250));
++    assert!(binding.tools().is_empty());
++    startup_started.await?;
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("startup wait abandonment"),
++        TestRetirementEvent::KeepRunningAbandoned
++    );
++    assert!(!cancelled.is_cancelled());
++
++    release_startup.send(()).expect("release client startup");
++    tokio::time::timeout(
++        Duration::from_secs(1),
++        connection.await_current_startup_preserving_connection(manager.session_route()),
++    )
++    .await??;
++    let binding = manager
++        .capture_binding_with_metadata(
++            config,
++            /*plugins_available*/ false,
++            /*required_servers*/ &[],
++            /*required_plugins*/ &HashSet::new(),
++        )
++        .await;
++    assert!(
++        binding
++            .prepare_call(&McpServerKey::unscoped("optional"), "echo")
++            .is_some()
++    );
++    assert!(!cancelled.is_cancelled());
++    Ok(())
++}
++
+ #[tokio::test(start_paused = true)]
+ async fn capture_binding_waits_for_optional_startup_when_shared_grace_is_disabled() {
+     let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+@@ -6854,6 +6926,305 @@ fn start_early_ema_request(
+     })
+ }
+
++fn assert_live_ema_routes(connection: &McpConnectionLease, expected: &[&Arc<McpSessionRoute>]) {
++    let actual = connection.live_routes_for_test();
++    assert_eq!(actual.len(), expected.len());
++    for route in expected {
++        assert!(actual.iter().any(|actual| Arc::ptr_eq(actual, route)));
++    }
++}
++
++#[tokio::test]
++async fn early_ema_lease_cancellation_preserves_refreshed_initializer() -> anyhow::Result<()> {
++    let owner = Arc::new(OnceLock::new());
++    let mut config = reusable_server_config("https://enterprise.example/mcp");
++    config.auth = McpServerAuth::EmaAuth;
++    let runtime_context = reusable_server_runtime_context();
++    let (previous, started, release) =
++        manager_with_pending_ema_server(Arc::clone(&owner), &config, &runtime_context).await;
++    let connection = previous.servers[&McpServerKey::unscoped("docs")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let initial_route = connection
++        .ema_startup_route()
++        .expect("initializer owner")
++        .route();
++    let physical_id = connection.connection_id();
++    let waiter_connection = connection.clone();
++    let waiter_route = Arc::clone(&initial_route);
++    let request =
++        tokio::spawn(async move { waiter_connection.await_current_startup(waiter_route).await });
++    tokio::time::timeout(Duration::from_secs(1), started).await??;
++
++    let refreshed = reconcile_ema_server(
++        &previous,
++        owner,
++        config,
++        runtime_context,
++        crate::McpConnectionPoolMode::Reuse,
++    )
++    .await;
++    assert_eq!(
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .connection_id(),
++        physical_id
++    );
++    // The waiter uses the initializer route, so closing the old route cannot wake it.
++    connection.unregister_route(&previous.session_route);
++    assert!(previous.session_route.is_closed());
++    let refreshed_route = refreshed.session_route();
++    assert_live_ema_routes(&connection, &[&initial_route, &refreshed_route]);
++    assert_eq!(connection.owner_count_for_test(), 2);
++    assert!(!connection.release(), "the refreshed view retains a lease");
++    assert_eq!(connection.owner_count_for_test(), 1);
++    assert!(
++        tokio::time::timeout(Duration::from_secs(1), request)
++            .await??
++            .is_err()
++    );
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("lease cancellation decision"),
++        TestRetirementEvent::LeaseCancelled
++    );
++    assert!(
++        !cancelled.is_cancelled(),
++        "the refreshed initializer must survive"
++    );
++
++    release.send(()).expect("release retained initializer");
++    tokio::time::timeout(
++        Duration::from_secs(1),
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .await_current_startup(initial_route),
++    )
++    .await??;
++    Ok(())
++}
++
++#[tokio::test]
++async fn ema_preserving_startup_waiter_release_keeps_refreshed_initializer() -> anyhow::Result<()> {
++    let owner = Arc::new(OnceLock::new());
++    let mut config = reusable_server_config("https://enterprise.example/mcp");
++    config.auth = McpServerAuth::EmaAuth;
++    let runtime_context = reusable_server_runtime_context();
++    let (previous, started, release) =
++        manager_with_pending_ema_server(Arc::clone(&owner), &config, &runtime_context).await;
++    let connection = previous.servers[&McpServerKey::unscoped("docs")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let initial_route = connection
++        .ema_startup_route()
++        .expect("initializer owner")
++        .route();
++    let physical_id = connection.connection_id();
++    let waiter_connection = connection.clone();
++    let waiter_route = Arc::clone(&initial_route);
++    let waiter = tokio::spawn(async move {
++        waiter_connection
++            .await_current_startup_preserving_connection(waiter_route)
++            .await
++    });
++    tokio::time::timeout(Duration::from_secs(1), started).await??;
++
++    let refreshed = reconcile_ema_server(
++        &previous,
++        owner,
++        config,
++        runtime_context,
++        crate::McpConnectionPoolMode::Reuse,
++    )
++    .await;
++    assert_eq!(
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .connection_id(),
++        physical_id
++    );
++    // The waiter uses the initializer route, so closing the old route cannot wake it.
++    connection.unregister_route(&previous.session_route);
++    assert!(previous.session_route.is_closed());
++    let refreshed_route = refreshed.session_route();
++    assert_live_ema_routes(&connection, &[&initial_route, &refreshed_route]);
++    assert_eq!(connection.owner_count_for_test(), 2);
++    assert!(!connection.release(), "the refreshed view retains a lease");
++    assert_eq!(connection.owner_count_for_test(), 1);
++    assert!(
++        tokio::time::timeout(Duration::from_secs(1), waiter)
++            .await??
++            .is_err()
++    );
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("lease cancellation decision"),
++        TestRetirementEvent::LeaseCancelled
++    );
++    assert!(!cancelled.is_cancelled());
++
++    release.send(()).expect("release retained initializer");
++    tokio::time::timeout(
++        Duration::from_secs(1),
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .await_current_startup(initial_route),
++    )
++    .await??;
++    Ok(())
++}
++
++#[tokio::test]
++async fn early_ema_abandoned_startup_preserves_refreshed_initializer() -> anyhow::Result<()> {
++    let owner = Arc::new(OnceLock::new());
++    let mut config = reusable_server_config("https://enterprise.example/mcp");
++    config.auth = McpServerAuth::EmaAuth;
++    let runtime_context = reusable_server_runtime_context();
++    let (previous, started, release) =
++        manager_with_pending_ema_server(Arc::clone(&owner), &config, &runtime_context).await;
++    let connection = previous.servers[&McpServerKey::unscoped("docs")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let initial_route = connection
++        .ema_startup_route()
++        .expect("initializer owner")
++        .route();
++    let physical_id = connection.connection_id();
++    let request = start_early_ema_request(&previous);
++    tokio::time::timeout(Duration::from_secs(1), started).await??;
++
++    let refreshed = reconcile_ema_server(
++        &previous,
++        owner,
++        config,
++        runtime_context,
++        crate::McpConnectionPoolMode::Reuse,
++    )
++    .await;
++    assert_eq!(
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .connection_id(),
++        physical_id
++    );
++    previous.session_route.close();
++    assert!(
++        tokio::time::timeout(Duration::from_secs(1), request)
++            .await??
++            .is_err()
++    );
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("sole-route decision"),
++        TestRetirementEvent::SoleRoute { cancelled: false }
++    );
++    assert!(!cancelled.is_cancelled());
++
++    release.send(()).expect("release retained initializer");
++    tokio::time::timeout(
++        Duration::from_secs(1),
++        refreshed.servers[&McpServerKey::unscoped("docs")]
++            .connection
++            .await_current_startup(initial_route),
++    )
++    .await??;
++    Ok(())
++}
++
++#[tokio::test]
++async fn early_ema_abandoned_startup_cancels_when_no_other_route_remains() -> anyhow::Result<()> {
++    let owner = Arc::new(OnceLock::new());
++    let mut config = reusable_server_config("https://enterprise.example/mcp");
++    config.auth = McpServerAuth::EmaAuth;
++    let runtime_context = reusable_server_runtime_context();
++    let (previous, started, _release) =
++        manager_with_pending_ema_server(owner, &config, &runtime_context).await;
++    let connection = previous.servers[&McpServerKey::unscoped("docs")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let initial_route = connection
++        .ema_startup_route()
++        .expect("initializer owner")
++        .route();
++    let request = start_early_ema_request(&previous);
++    tokio::time::timeout(Duration::from_secs(1), started).await??;
++
++    previous.session_route.close();
++    assert_live_ema_routes(&connection, &[&initial_route]);
++    assert_eq!(connection.owner_count_for_test(), 1);
++    assert!(
++        tokio::time::timeout(Duration::from_secs(1), request)
++            .await??
++            .is_err()
++    );
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("sole-route decision"),
++        TestRetirementEvent::SoleRoute { cancelled: true }
++    );
++    assert!(cancelled.is_cancelled());
++    assert!(connection.release(), "the old view held the final lease");
++    Ok(())
++}
++
++#[tokio::test]
++async fn early_ema_final_lease_cancellation_closes_initializer() -> anyhow::Result<()> {
++    let owner = Arc::new(OnceLock::new());
++    let mut config = reusable_server_config("https://enterprise.example/mcp");
++    config.auth = McpServerAuth::EmaAuth;
++    let runtime_context = reusable_server_runtime_context();
++    let (previous, started, _release) =
++        manager_with_pending_ema_server(owner, &config, &runtime_context).await;
++    let connection = previous.servers[&McpServerKey::unscoped("docs")]
++        .connection
++        .clone();
++    let mut events = connection.observe_retirement_events();
++    let cancelled = connection.connection_cancel_token();
++    let initial_route = connection
++        .ema_startup_route()
++        .expect("initializer owner")
++        .route();
++    let waiter_connection = connection.clone();
++    let waiter_route = Arc::clone(&initial_route);
++    let request =
++        tokio::spawn(async move { waiter_connection.await_current_startup(waiter_route).await });
++    tokio::time::timeout(Duration::from_secs(1), started).await??;
++
++    connection.unregister_route(&previous.session_route);
++    assert!(previous.session_route.is_closed());
++    assert_live_ema_routes(&connection, &[&initial_route]);
++    assert_eq!(connection.owner_count_for_test(), 1);
++    assert!(connection.release(), "the old view held the final lease");
++    assert_eq!(connection.owner_count_for_test(), 0);
++    assert_live_ema_routes(&connection, &[]);
++    assert!(
++        tokio::time::timeout(Duration::from_secs(1), request)
++            .await??
++            .is_err()
++    );
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), events.recv())
++            .await?
++            .expect("lease cancellation decision"),
++        TestRetirementEvent::LeaseCancelled
++    );
++    assert!(cancelled.is_cancelled());
++    assert!(initial_route.is_closed());
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn early_ema_request_uses_initializer_route_across_refresh() -> anyhow::Result<()> {
+     let owner = Arc::new(OnceLock::new());
+diff --git a/codex-rs/codex-mcp/src/connection_pool.rs b/codex-rs/codex-mcp/src/connection_pool.rs
+index 2dcb792271e2d93ebce8f9d31574d202bd6c8d28..74ccddd61b920db76ad120e324babcef10ff5b38 100644
+--- a/codex-rs/codex-mcp/src/connection_pool.rs
++++ b/codex-rs/codex-mcp/src/connection_pool.rs
+@@ -304,9 +304,21 @@ struct SharedConnection {
+     retirement: Mutex<RetirementCause>,
+     shutdown_tasks: TaskTracker,
+     shutdown_reservation: Mutex<Option<TaskTrackerToken>>,
++    #[cfg(test)]
++    retirement_events: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TestRetirementEvent>>>,
+     _diagnostics_guard: GaugeGuard,
+ }
+
++/// Records the cancellation decision taken for a pending operation.
++#[cfg(test)]
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum TestRetirementEvent {
++    LeaseCancelled,
++    RouteClosed,
++    SoleRoute { cancelled: bool },
++    KeepRunningAbandoned,
++}
++
+ impl SharedConnection {
+     fn new(mut client: AsyncManagedClient) -> Self {
+         let startup_permit = Arc::new(AtomicBool::new(true));
+@@ -336,10 +348,24 @@ impl SharedConnection {
+             retirement: Mutex::new(RetirementCause::Active),
+             shutdown_tasks,
+             shutdown_reservation: Mutex::new(Some(shutdown_reservation)),
++            #[cfg(test)]
++            retirement_events: Mutex::new(None),
+             _diagnostics_guard: LIVE_CONNECTIONS.track(),
+         }
+     }
+
++    #[cfg(test)]
++    fn record_retirement_event(&self, event: TestRetirementEvent) {
++        if let Some(sender) = self
++            .retirement_events
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++        {
++            let _ = sender.send(event);
++        }
++    }
++
+     fn check_new_request(&self) -> Result<()> {
+         if self.owners.load(Ordering::Acquire) == 0
+             || *self
+@@ -2316,6 +2342,21 @@ impl McpPooledClient {
+         self.connection.start_retired_shutdown();
+     }
+
++    fn handle_owner_cancellation(&self, action: AbandonedOperationAction) {
++        match action {
++            AbandonedOperationAction::RetireConnection => {
++                self.retire_after_route_close_in_background();
++            }
++            AbandonedOperationAction::CancelIfSoleRoute | AbandonedOperationAction::KeepRunning => {
++                // Startup waiters have not sent a wire request, and another session can still
++                // own the initializer.
++                if let Some(slot) = self.slot.upgrade() {
++                    slot.cancel_startup_if_sole_route(&self.connection, &self.route);
++                }
++            }
++        }
++    }
++
+     async fn retire_after_route_close(&self) {
+         self.prepare_retirement_after_route_close();
+         self.connection.start_retired_shutdown();
+@@ -2448,11 +2489,22 @@ impl Drop for RetireConnectionOnDrop {
+                     let Some(slot) = client.slot.upgrade() else {
+                         return;
+                     };
+-                    if slot.cancel_startup_if_sole_route(&client.connection, &client.route) {
++                    let cancelled =
++                        slot.cancel_startup_if_sole_route(&client.connection, &client.route);
++                    #[cfg(test)]
++                    client
++                        .connection
++                        .record_retirement_event(TestRetirementEvent::SoleRoute { cancelled });
++                    if cancelled {
+                         client.connection.shutdown().await;
+                     }
+                 }
+-                AbandonedOperationAction::KeepRunning => {}
++                AbandonedOperationAction::KeepRunning => {
++                    #[cfg(test)]
++                    client
++                        .connection
++                        .record_retirement_event(TestRetirementEvent::KeepRunningAbandoned);
++                }
+             }
+         });
+     }
+@@ -2646,7 +2698,9 @@ impl McpConnectionLease {
+                     tokio::select! {
+                         biased;
+                         () = lease_cancelled.cancelled() => {
+-                            task_client.retire_after_route_close_in_background();
++                            task_client.handle_owner_cancellation(abandoned_operation_action);
++                            #[cfg(test)]
++                            task_client.connection.record_retirement_event(TestRetirementEvent::LeaseCancelled);
+                             Err(anyhow!("MCP connection lease released"))
+                         }
+                         () = superseded => Err(anyhow!("shared MCP connection superseded")),
+@@ -2654,7 +2708,9 @@ impl McpConnectionLease {
+                             Err(anyhow!("shared MCP connection closed"))
+                         }
+                         () = route_for_task.closed() => {
+-                            task_client.retire_after_route_close_in_background();
++                            task_client.handle_owner_cancellation(abandoned_operation_action);
++                            #[cfg(test)]
++                            task_client.connection.record_retirement_event(TestRetirementEvent::RouteClosed);
+                             Err(anyhow!("MCP session route closed"))
+                         }
+                         value = operation(task_client.clone()) => Ok(value),
+@@ -3409,6 +3465,39 @@ impl McpConnectionLease {
+         self.inner.slot.current().client.cancel_token.clone()
+     }
+
++    #[cfg(test)]
++    pub(crate) fn observe_retirement_events(
++        &self,
++    ) -> tokio::sync::mpsc::UnboundedReceiver<TestRetirementEvent> {
++        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
++        *self
++            .inner
++            .slot
++            .current()
++            .retirement_events
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
++        receiver
++    }
++
++    #[cfg(test)]
++    pub(crate) fn live_routes_for_test(&self) -> Vec<Arc<McpSessionRoute>> {
++        self.inner
++            .slot
++            .routes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .iter()
++            .filter_map(Weak::upgrade)
++            .filter(|route| !route.is_closed())
++            .collect()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn owner_count_for_test(&self) -> usize {
++        self.inner.slot.active_leases.load(Ordering::Acquire)
++    }
++
+     #[cfg(test)]
+     pub(crate) fn test_client(&self) -> AsyncManagedClient {
+         self.inner.slot.current().client.as_ref().clone()
