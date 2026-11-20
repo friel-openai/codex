@@ -62,6 +62,7 @@ impl ThreadManager {
                 let start = manager.start_thread_inner(
                     options,
                     /*forked_from_thread_id*/ None,
+                    /*inherited_agent_control*/ None,
                     Some(Arc::clone(&startup)),
                     crate::session::ForkStartupItems::default(),
                 );
