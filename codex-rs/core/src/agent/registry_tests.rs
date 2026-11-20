@@ -430,10 +430,15 @@ async fn evicted_runtime_settings_retain_and_clear_ephemerality() {
     registry.register_root_thread(thread_id);
     assert_eq!(registry.evicted_ephemeral(thread_id), None);
 
-    let (session, _) = crate::session::tests::make_session_and_context().await;
-    let (config, snapshot, ..) = session.fork_config().await;
+    let home = tempfile::tempdir().expect("isolated config home");
+    let config = crate::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("test config");
     let environments = EvictedEnvironments {
-        history_mode: snapshot.history_mode,
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
         config: Arc::new(config),
         has_independent_service_tier: false,
         selections: Vec::new(),

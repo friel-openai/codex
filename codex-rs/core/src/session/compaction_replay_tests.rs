@@ -67,6 +67,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         message: String::new(),
         replacement_history: Some(replacement_history.clone()),
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(42),
@@ -76,6 +77,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: None,
+        segment_state_checkpoint: None,
     }))];
 
     let reconstructed = session

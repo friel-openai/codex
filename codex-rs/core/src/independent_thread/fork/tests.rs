@@ -3,7 +3,6 @@
 use super::*;
 use crate::CodexAppsToolsCache;
 use crate::ThreadManager;
-use crate::build_models_manager;
 use crate::init_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
@@ -151,8 +150,14 @@ fn fork_runs_from_completed_history_without_a_goal(
         let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
         let manager = Arc::new(ThreadManager::new(
             &config,
-            Arc::clone(&auth),
-            build_models_manager(&config, auth),
+            crate::build_startup_models(
+                &config,
+                auth,
+                "fork-test".to_string(),
+                Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                    config.codex_home.to_path_buf(),
+                )),
+            ),
             CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -162,7 +167,6 @@ fn fork_runs_from_completed_history_without_a_goal(
             crate::passthrough_image_store(),
             thread_store_from_config(&config, Some(Arc::clone(&state))),
             None,
-            "fork-test".to_string(),
             None,
             None,
         ));
@@ -366,8 +370,14 @@ fn rejected_start_returns_the_created_thread() -> anyhow::Result<()> {
         let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
         let manager = Arc::new(ThreadManager::new(
             &config,
-            Arc::clone(&auth),
-            build_models_manager(&config, auth),
+            crate::build_startup_models(
+                &config,
+                auth,
+                "fork-rejected-test".to_string(),
+                Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                    config.codex_home.to_path_buf(),
+                )),
+            ),
             CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -377,7 +387,6 @@ fn rejected_start_returns_the_created_thread() -> anyhow::Result<()> {
             crate::passthrough_image_store(),
             thread_store_from_config(&config, Some(state)),
             None,
-            "fork-rejected-test".to_string(),
             None,
             None,
         ));
