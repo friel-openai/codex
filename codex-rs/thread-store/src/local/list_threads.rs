@@ -90,14 +90,14 @@ pub(super) async fn list_threads(
 
     let page = match page {
         LocalThreadsPage::State(page) => {
-            let legacy_thread_ids = page
+            let indexed_thread_ids = page
                 .items
                 .iter()
-                .filter(|row| row.history_mode == ThreadHistoryMode::Legacy)
+                .filter(|row| row.history_mode == ThreadHistoryMode::Legacy || row.name.is_none())
                 .map(|row| row.id)
                 .collect();
             let indexed_names =
-                indexed_thread_names(store, &legacy_thread_ids, params.use_state_db_only).await?;
+                indexed_thread_names(store, &indexed_thread_ids, params.use_state_db_only).await?;
             return Ok(thread_page_from_state(
                 page,
                 &indexed_names,

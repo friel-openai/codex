@@ -90,6 +90,8 @@ fn message_line(role: &str, text: &str, ordinal: u64) -> RolloutLine {
                     text: text.to_string(),
                 }],
                 phase: None,
+                status: None,
+                encrypted_content: None,
                 internal_chat_message_metadata_passthrough: None,
             }
             .into(),
@@ -113,6 +115,7 @@ fn compacted_line(messages: &[&str], ordinal: u64) -> RolloutLine {
             message: "checkpoint".to_string(),
             replacement_history: Some(replacement_history),
             retained_context: None,
+            retained_context_replay: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
