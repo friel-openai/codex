@@ -1589,7 +1589,7 @@ async fn run_ratatui_app(
                 .await??;
             let mut server =
                 AppServerSession::new(backend_id, client, app_server_target.thread_params_mode())
-                    .with_local_codex_home(&selected.codex_home)
+                    .with_startup_config(&selected)
                     .with_remote_cwd_override(remote_cwd_override.clone());
             if let Err(err) = boxed_future!(onboarding::authenticate_gateway(
                 &mut tui,

@@ -1467,7 +1467,7 @@ impl AppServerSession {
                 bootstrap_request_error("thread/fork/import failed during TUI bootstrap", err)
             })?;
         let presentation = if config.ephemeral {
-            ForkPresentation::SideConversation
+            ForkPresentation::SideConversation(SideChatStorage::Temporary)
         } else {
             ForkPresentation::Regular
         };
@@ -1668,9 +1668,6 @@ impl AppServerSession {
             self.thread_params_mode(),
         )
         .await?;
-        if let Some(permissions) = selected_permissions {
-            started.session.permission_profile = permissions;
-        }
         if presentation != ForkPresentation::Regular {
             started.session.daybreak_enabled = false;
         }
