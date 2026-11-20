@@ -127,7 +127,6 @@ use serde_json::json;
 use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::timeout;
-use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -2403,6 +2402,7 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             }],
         });
         let draft_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            moderation: None,
             questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
@@ -2413,6 +2413,7 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             memory_citation: None,
         });
         let final_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            moderation: None,
             questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
@@ -2440,6 +2441,7 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             append_rollout_item_to_path(
                 source_path.as_path(),
                 &RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id: source_id,
                     turn_id: turn_id.clone(),
                     item,
@@ -2616,7 +2618,7 @@ enum IndexedForkPresentation {
 fn certified_indexed_fork_checkpoint(
     codex_home: &std::path::Path,
 ) -> CertifiedSegmentStateCheckpoint {
-    let window_id = Uuid::now_v7();
+    let window_id = codex_protocol::ContextWindowId::new_uuid_v7();
     let cwd = codex_home.abs();
     CertifiedSegmentStateCheckpoint::new(
         CompactedItem {
@@ -2640,9 +2642,9 @@ fn certified_indexed_fork_checkpoint(
             retained_context_replay: None,
             mcp_resource_origins: None,
             window_number: Some(1),
-            first_window_id: Some(window_id.to_string()),
+            first_window_id: Some(window_id.clone()),
             previous_window_id: None,
-            window_id: Some(window_id.to_string()),
+            window_id: Some(window_id),
             compaction_response_id: None,
             latest_token_usage_record: None,
             resume_metadata: None,
@@ -2664,6 +2666,7 @@ fn certified_indexed_fork_checkpoint(
                 service_tier: None,
                 approval_policy: ProtocolAskForApproval::Never,
                 approvals_reviewer: ProtocolApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),
@@ -2936,7 +2939,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         subagent_history_start_ordinal: None,
         persistence_mode: Default::default(),
         initial_rollout_ordinal: 0,
-        initial_window_id: Uuid::now_v7().to_string(),
+        initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
         runtime_workspace_roots: None,
         metadata: ThreadPersistenceMetadata {
             cwd: Some(codex_home.path().to_path_buf()),
@@ -2961,6 +2964,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             }],
         });
         let agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            moderation: None,
             questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
@@ -3006,6 +3010,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         for (item_index, item) in [user_item, agent_item].into_iter().enumerate() {
             items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
                 ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id: source_thread_id,
                     turn_id: turn_id.clone(),
                     item,
@@ -4328,6 +4333,8 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
     for archived in [false, true] {
         let list_id = mcp
             .send_thread_list_request(ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(50),

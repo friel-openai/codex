@@ -65,8 +65,8 @@ use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_feedback::CodexFeedback;
-use codex_protocol::ContextWindowId;
 use codex_protocol::AgentPath;
+use codex_protocol::ContextWindowId;
 use codex_protocol::SegmentId;
 use codex_protocol::config_types::ApprovalsReviewer as ProtocolApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -95,7 +95,6 @@ use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutReferenceItem;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -155,7 +154,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 mod warm;
 
 fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentStateCheckpoint {
-    let window_id = Uuid::now_v7();
+    let window_id = ContextWindowId::new_uuid_v7();
     let cwd = codex_home.abs();
     CertifiedSegmentStateCheckpoint::new(
         CompactedItem {
@@ -181,9 +180,9 @@ fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentSta
             retained_context_replay: None,
             mcp_resource_origins: None,
             window_number: Some(1),
-            first_window_id: Some(window_id.to_string()),
+            first_window_id: Some(window_id.clone()),
             previous_window_id: None,
-            window_id: Some(window_id.to_string()),
+            window_id: Some(window_id),
             resume_metadata: None,
             segment_state_checkpoint: None,
         },
@@ -203,6 +202,7 @@ fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentSta
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ProtocolApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),
@@ -719,7 +719,7 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -752,9 +752,11 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
                         }),
                     ),
                     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                        content_token_count: None,
                         thread_id,
                         turn_id: turn_id.clone(),
                         item: CoreTurnItem::AgentMessage(AgentMessageItem {
+                            moderation: None,
                             questions: None,
                             id: format!("agent-{index}"),
                             content: vec![AgentMessageContent::Text {
@@ -800,9 +802,11 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
                 thread_id,
                 items: vec![RolloutItem::EventMsg(EventMsg::ItemCompleted(
                     ItemCompletedEvent {
+                        content_token_count: None,
                         thread_id,
                         turn_id: format!("turn-{index}"),
                         item: CoreTurnItem::AgentMessage(AgentMessageItem {
+                            moderation: None,
                             questions: None,
                             id: format!("agent-{index}"),
                             content: vec![AgentMessageContent::Text {
@@ -958,6 +962,7 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
                     ThreadItemEntry {
                         turn_id: turn.id.clone(),
                         item,
+                        output_deferred: false,
                         started_at_ms,
                         completed_at_ms,
                     }
@@ -988,6 +993,7 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
 
     let anchor_params = ThreadItemsListParams {
         thread_id: thread_id.to_string(),
+        defer_output: None,
         turn_id: Some("turn-4".to_string()),
         cursor: None,
         limit: Some(1),
@@ -1173,6 +1179,7 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
             sort_direction: StoreSortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         })
         .await?;
     let continued_with_indexed_cursor = read_items_page(
@@ -1196,6 +1203,7 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
             sort_direction: StoreSortDirection::Desc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         })
         .await?;
     let continued_with_indexed_head = read_items_page(
@@ -1318,7 +1326,7 @@ async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> 
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1338,6 +1346,7 @@ async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> 
                 thread_id,
                 items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                     AgentMessageEvent {
+                        moderation: None,
                         questions: None,
                         message: format!("obsolete {index}"),
                         phase: None,
@@ -1371,6 +1380,7 @@ async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> 
             thread_id,
             "latest-turn",
             CoreTurnItem::AgentMessage(AgentMessageItem {
+                moderation: None,
                 questions: None,
                 id: "latest-agent".to_string(),
                 content: vec![AgentMessageContent::Text {
@@ -1563,7 +1573,7 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1580,6 +1590,7 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             thread_id,
             items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                 AgentMessageEvent {
+                    moderation: None,
                     questions: None,
                     message: "must not be read".to_string(),
                     phase: None,
@@ -1607,6 +1618,7 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             ..Default::default()
         })),
         RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+            moderation: None,
             questions: None,
             message: "previous answer".to_string(),
             phase: None,
@@ -1638,6 +1650,7 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             thread_id,
             items: vec![
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    moderation: None,
                     questions: None,
                     message: "latest answer".to_string(),
                     phase: None,
@@ -1808,7 +1821,7 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1833,6 +1846,7 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
                     ..Default::default()
                 })),
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    moderation: None,
                     questions: None,
                     message: "inherited parent answer".to_string(),
                     phase: None,
@@ -1938,7 +1952,7 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1955,6 +1969,7 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
             thread_id,
             items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                 AgentMessageEvent {
+                    moderation: None,
                     questions: None,
                     message: "must not be read".to_string(),
                     phase: None,
@@ -1982,6 +1997,7 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
                         ..Default::default()
                     })),
                     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                        moderation: None,
                         questions: None,
                         message: format!("answer {index}"),
                         phase: None,
@@ -2055,6 +2071,7 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
             .map(|item| ThreadItemEntry {
                 turn_id: newest_turn.id.clone(),
                 item,
+                output_deferred: false,
                 started_at_ms: None,
                 completed_at_ms: None,
             })
@@ -2268,6 +2285,7 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 questions: None,
                 message: format!("answer {index}"),
                 phase: None,
@@ -2411,6 +2429,7 @@ async fn frodex_history_apis_ignore_deleted_sixth_segment() -> Result<()> {
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 questions: None,
                 message: format!("answer {index}"),
                 phase: None,
@@ -2562,7 +2581,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -2603,15 +2622,14 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
             items.push(RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some(turn_id.clone()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cyber_access_program: None,
                 cwd: codex_home.path().abs(),
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                permission_profile: None,
+                permission_profile: PermissionProfile::read_only(),
                 active_permission_profile: None,
-                file_system_sandbox_policy: None,
                 model: "mock-model".to_string(),
                 comp_hash: None,
                 collaboration_mode: None,
@@ -2629,6 +2647,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 questions: None,
                 message: format!("{text} answer"),
                 phase: None,
@@ -3005,7 +3024,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -3032,6 +3051,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
                         ..Default::default()
                     })),
                     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                        moderation: None,
                         questions: None,
                         message: "x".repeat(1024),
                         phase: None,
@@ -4164,6 +4184,7 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
             .map(|item| ThreadItemEntry {
                 turn_id: turn.id.clone(),
                 item,
+                output_deferred: false,
                 started_at_ms: None,
                 completed_at_ms: None,
             })
@@ -5843,6 +5864,8 @@ async fn create_paginated_thread(
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
