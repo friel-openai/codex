@@ -54,11 +54,98 @@ pub(super) async fn load_latest_model_context(
     .ok_or_else(|| ThreadStoreError::InvalidRequest {
         message: format!("no rollout found for thread id {}", params.thread_id),
     })?;
-    let path = resolved.path;
-
+    let (path, _history_access) =
+        prepare_history_access(store, params.thread_id, resolved.path).await?;
     load_from_rollout_path(store, params.thread_id, &path).await
 }
 
+/// Retains repair ownership until the reader finishes or transfers the writer to a recorder.
+pub(super) async fn prepare_history_access(
+    store: &LocalThreadStore,
+    thread_id: codex_protocol::ThreadId,
+    mut path: std::path::PathBuf,
+) -> ThreadStoreResult<(
+    std::path::PathBuf,
+    super::goal_supervisor_runtime_repair::GoalSupervisorHistoryAccess,
+)> {
+    let mut session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to read session metadata {}: {err}", path.display()),
+        })?;
+    if session_meta.meta.id != thread_id {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "rollout at {} belongs to thread {}, not {}",
+                path.display(),
+                session_meta.meta.id,
+                thread_id
+            ),
+        });
+    }
+
+    let rollout_id =
+        super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+            &path,
+            thread_id,
+            session_meta.meta.id,
+        )?;
+    let projected_active =
+        scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?;
+    let used_active_checkpoint = projected_active.is_some();
+    let mut history_access = if used_active_checkpoint {
+        super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            store,
+            thread_id,
+            path.as_path(),
+        )
+        .await?
+    } else {
+        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+            store,
+            thread_id,
+            path.as_path(),
+        )
+        .await?
+    };
+    path = codex_rollout::existing_rollout_path(path.as_path())
+        .await
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: format!(
+                "rollout {} disappeared after history repair",
+                path.display()
+            ),
+        })?;
+    session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to read session metadata {}: {err}", path.display()),
+        })?;
+
+    let projected_after_repair =
+        scan_projected_active_model_context(store, rollout_id, &path, &session_meta).await?;
+    if used_active_checkpoint && projected_after_repair.is_none() {
+        drop(history_access);
+        history_access =
+            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+                store,
+                thread_id,
+                path.as_path(),
+            )
+            .await?;
+        path = codex_rollout::existing_rollout_path(path.as_path())
+            .await
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: format!(
+                    "rollout {} disappeared after compatibility repair",
+                    path.display()
+                ),
+            })?;
+    }
+    Ok((path, history_access))
+}
+
+/// Reads the exact selected rollout while the caller retains writer or repair ownership.
 pub(super) async fn load_from_rollout_path(
     store: &LocalThreadStore,
     thread_id: codex_protocol::ThreadId,
@@ -80,7 +167,6 @@ pub(super) async fn load_from_rollout_path(
             ),
         });
     }
-
     let rollout_id =
         super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
             path,
@@ -99,7 +185,7 @@ pub(super) async fn load_from_rollout_path(
             read_thread::load_history_items(store.config.codex_home.as_path(), path).await?
         } else {
             let lineage = store
-                .resolve_rollout_lineage_from_path(thread_id, path.to_path_buf())
+                .resolve_rollout_lineage_from_path(thread_id, path)
                 .await?;
             let mut items = lineage.read_with_fallback(store, scan_model_context_from_lineage).await?;
             items.insert(0, RolloutItem::SessionMeta(Box::new(session_meta)));
@@ -278,7 +364,7 @@ pub(super) async fn load_for_fork(
                 let file = source_lineage
                     .reads
                     .open(&segment.rollout_path, || stop.is_closed())?;
-                let mut scanner = match segment.end_byte_offset {
+                let mut scanner = match segment.jsonl_end_byte_offset {
                     Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
                     None => ReverseJsonlScanner::new(file)?,
                 };
@@ -312,7 +398,7 @@ pub(super) async fn load_for_fork(
     let mut items = match history_base {
         Some(history_base) => {
             let lineage = lineage.truncate_at(history_base).await?;
-            scan_model_context_from_lineage(lineage).await?
+            scan_model_context_from_lineage(lineage, session_meta.clone()).await?
         }
         None => Vec::new(),
     };
@@ -347,7 +433,7 @@ pub(super) async fn load_full_for_fork(
     let lineage = lineage.truncate_at(history_base).await?;
     let mut items = vec![RolloutItem::SessionMeta(Box::new(session_meta))];
     for segment in lineage.segments() {
-        let end = if let Some(end) = segment.end_byte_offset {
+        let end = if let Some(end) = segment.jsonl_end_byte_offset {
             end
         } else if let Some(ordinal) = segment.end_ordinal_exclusive {
             super::rollout_lineage::exact_byte_offset_for_ordinal(&segment.rollout_path, ordinal).await.map_err(|error| {
@@ -400,10 +486,11 @@ pub(super) async fn load_full_for_fork(
 
 async fn scan_model_context_from_lineage(
     lineage: RolloutLineage,
+    session_meta: SessionMetaLine,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
     let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
     let scan = tokio::task::spawn_blocking(move || {
-        scan_model_context_from_lineage_blocking(&lineage, || stop.is_closed())
+        scan_model_context_from_lineage_blocking(&lineage, &session_meta, || stop.is_closed())
     })
     .await
     .map_err(|err| ThreadStoreError::Internal {
@@ -420,6 +507,7 @@ async fn scan_model_context_from_lineage(
 
 fn scan_model_context_from_lineage_blocking(
     lineage: &RolloutLineage,
+    session_meta: &SessionMetaLine,
     is_cancelled: impl Fn() -> bool,
 ) -> io::Result<Vec<RolloutItem>> {
     let mut scan = ModelContextScan::default();
@@ -427,7 +515,7 @@ fn scan_model_context_from_lineage_blocking(
         session_meta.meta.source.get_agent_role().as_deref() == Some("goal_supervisor");
     'segments: for segment in lineage.segments().iter().rev() {
         let file = lineage.reads.open(&segment.rollout_path, &is_cancelled)?;
-        let mut scanner = match segment.end_byte_offset {
+        let mut scanner = match segment.jsonl_end_byte_offset {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
