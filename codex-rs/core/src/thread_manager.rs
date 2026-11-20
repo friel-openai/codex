@@ -236,6 +236,7 @@ fn capture_test_op(op: &Op) -> Option<Op> {
     match op {
         Op::Interrupt => Some(Op::Interrupt),
         Op::InterruptAgent => Some(Op::InterruptAgent),
+        Op::Compact => Some(Op::Compact),
         Op::InterAgentCommunication {
             communication,
             start_options,
@@ -428,6 +429,31 @@ pub(crate) enum FullHistorySourceReservation {
 // lifetime ownership Send + Sync without strengthening that backend contract.
 pub(crate) type SharedFullHistorySourceReservation =
     Arc<std::sync::Mutex<FullHistorySourceReservation>>;
+
+/// Selects which logical data a reference-backed FullHistory fork must load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FullHistoryLogicalMaterialization {
+    /// Ordinary children need every response turn in memory.
+    CompleteResponseHistory,
+    /// Goal supervisors persist the reference and need only model context plus
+    /// the latest parent completion time for continuity bookkeeping.
+    SupervisorContinuity,
+}
+
+fn last_turn_completed_at(items: &[RolloutItem]) -> Option<i64> {
+    items.iter().rev().find_map(|item| match item {
+        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
+        _ => None,
+    })
+}
+
+pub(crate) fn supervisor_last_parent_message_at(prepared: &PreparedFork) -> Option<i64> {
+    if let Some(turns) = prepared.projected_response_turns.as_deref() {
+        turns.iter().rev().find_map(|turn| turn.completed_at)
+    } else {
+        last_turn_completed_at(prepared.response_history.as_ref())
+    }
+}
 
 /// Preserve legacy `fork_legacy_thread(usize, ...)` callsites by mapping them to the
 /// existing truncate-before-nth-user-message snapshot mode.
@@ -2965,10 +2991,12 @@ impl ThreadManagerState {
         &self,
         source_thread_id: ThreadId,
         codex_home: &std::path::Path,
+        materialization: FullHistoryLogicalMaterialization,
     ) -> CodexResult<(
         InitialHistory,
         Vec<RolloutItem>,
         Vec<RolloutItem>,
+        Option<i64>,
         FullHistorySourceReservation,
         Option<u64>,
     )> {
@@ -3013,10 +3041,12 @@ impl ThreadManagerState {
                         .collect::<Vec<_>>();
                 let model_history =
                     materialize_model_context_rollout_items_from(codex_home, lines).await?;
+                let last_parent_message_at = last_turn_completed_at(&logical_history);
                 return Ok((
                     reference_history,
                     logical_history,
                     model_history,
+                    last_parent_message_at,
                     FullHistorySourceReservation::Referenced {
                         _reservation: reservation,
                     },
@@ -3038,10 +3068,12 @@ impl ThreadManagerState {
             if let Some(copied_history) = &prepared.copied_history {
                 let logical_history = copied_history.as_ref().clone();
                 let model_history = prepared.model_context.as_ref().clone();
+                let last_parent_message_at = last_turn_completed_at(&logical_history);
                 return Ok((
                     InitialHistory::Forked(logical_history.clone()),
                     logical_history,
                     model_history,
+                    last_parent_message_at,
                     FullHistorySourceReservation::Prepared {
                         _prepared: Box::new(prepared),
                     },
@@ -3056,27 +3088,41 @@ impl ThreadManagerState {
                 })?,
             );
             let model_history = prepared.model_context.as_ref().clone();
-            let logical_history = materialize_recent_rollout_lines_from(
-                codex_home,
-                reference_history
-                    .get_rollout_items()
-                    .iter()
-                    .cloned()
-                    .map(|item| RolloutLine {
-                        timestamp: String::new(),
-                        ordinal: None,
-                        item,
-                    })
-                    .collect(),
-            )
-            .await?
-            .into_iter()
-            .map(|line| line.item)
-            .collect();
+            let (logical_history, last_parent_message_at) = match materialization {
+                FullHistoryLogicalMaterialization::CompleteResponseHistory => {
+                    let logical_history = materialize_recent_rollout_lines_from(
+                        codex_home,
+                        reference_history
+                            .get_rollout_items()
+                            .iter()
+                            .cloned()
+                            .map(|item| RolloutLine {
+                                timestamp: String::new(),
+                                ordinal: None,
+                                item,
+                            })
+                            .collect(),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|line| line.item)
+                    .collect::<Vec<_>>();
+                    let last_parent_message_at = last_turn_completed_at(&logical_history);
+                    (logical_history, last_parent_message_at)
+                }
+                FullHistoryLogicalMaterialization::SupervisorContinuity => {
+                    let last_parent_message_at = supervisor_last_parent_message_at(&prepared);
+                    (
+                        prepared.response_history.as_ref().clone(),
+                        last_parent_message_at,
+                    )
+                }
+            };
             return Ok((
                 reference_history,
                 logical_history,
                 model_history,
+                last_parent_message_at,
                 FullHistorySourceReservation::Prepared {
                     _prepared: Box::new(prepared),
                 },
@@ -3100,10 +3146,12 @@ impl ThreadManagerState {
             .collect();
         let logical_history =
             materialize_model_context_rollout_items_from(codex_home, lines).await?;
+        let last_parent_message_at = last_turn_completed_at(&logical_history);
         Ok((
             reference_history,
             logical_history.clone(),
             logical_history,
+            last_parent_message_at,
             FullHistorySourceReservation::Referenced {
                 _reservation: reservation,
             },
@@ -3188,7 +3236,7 @@ impl ThreadManagerState {
                             "failed to prepare paginated fork source {source_thread_id}: {err}"
                         ))
                     })?;
-                    let (frozen, source_items) = match &prepared.history {
+                    let (frozen, mut source_items) = match &prepared.history {
                         codex_thread_store::PreparedForkHistory::FrozenRollout => (
                             prepared.frozen_segment.clone(),
                             prepared.response_history.as_ref().clone(),
@@ -3202,6 +3250,17 @@ impl ThreadManagerState {
                             ));
                         }
                     };
+                    // Explicit rollback boundaries were counted in the complete history. An
+                    // indexed fork response can contain only model context plus projected turns.
+                    if expected_source_items.is_some()
+                        && let Some(frozen) = frozen.as_ref()
+                    {
+                        source_items = codex_rollout::materialize_rollout_items(
+                            codex_home,
+                            &frozen.reference.rollout_path,
+                        )
+                        .await?;
+                    }
                     (
                         frozen,
                         source_items,
