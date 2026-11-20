@@ -1,0 +1,263 @@
+diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
+index ba08705c8af94f5cc8b347cca604a70ef7b60e9c..ec605b4e84b519a1a3ac015f62fcae097f7543ba 100644
+--- a/codex-rs/core/tests/suite/agent_control_tests.rs
++++ b/codex-rs/core/tests/suite/agent_control_tests.rs
+@@ -688,6 +688,7 @@ async fn hosted_child_persists_inherited_session_id(
+             manager
+                 .fork_prepared_thread(child_options, prepared)
+                 .await?
++                .0
+         }
+     };
+     assert_ne!(SessionId::from(child.thread_id), root_session_id);
+diff --git a/codex-rs/core/tests/suite/mcp_agent_tree.rs b/codex-rs/core/tests/suite/mcp_agent_tree.rs
+index 965ba89630ed6c9e8259527d0c76fbc190d44b8c..cd8f0527ddf293208985af3287c46f453ad320d5 100644
+--- a/codex-rs/core/tests/suite/mcp_agent_tree.rs
++++ b/codex-rs/core/tests/suite/mcp_agent_tree.rs
+@@ -380,6 +380,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             Some(json!({"codex/connectionLease": "forged"})),
+@@ -394,6 +395,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
+             test.session_configured.thread_id,
+             StartThreadOptions {
+                 config: test.config.clone(),
++                request_country: test.codex.config_snapshot().await.request_country,
+                 prompt_cache_key: codex_core::PromptCacheKey::SessionDerived,
+                 thread_instructions_provider: None,
+                 allow_provider_model_fallback: false,
+@@ -422,6 +424,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
+         .thread
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             Some(json!({"codex/connectionLease": "forged"})),
+@@ -445,7 +448,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
+     child.thread.shutdown_and_wait().await?;
+     let continued = test
+         .codex
+-        .call_mcp_tool(MCP_SERVER_NAME, "shared_counter", None, None)
++        .call_mcp_tool(MCP_SERVER_NAME, None, "shared_counter", None, None)
+         .await?;
+     assert_eq!(
+         continued
+@@ -1190,6 +1193,7 @@ async fn child_shutdown_cancels_unanswered_elicitation_and_recovers_root() -> Re
+             child_thread
+                 .call_mcp_tool(
+                     MCP_SERVER_NAME,
++                    /*environment_id*/ None,
+                     "request_elicitation",
+                     /*arguments*/ None,
+                     /*meta*/ None,
+@@ -1230,6 +1234,7 @@ async fn child_shutdown_cancels_unanswered_elicitation_and_recovers_root() -> Re
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1330,6 +1335,7 @@ async fn timed_out_child_call_recovers_tree_without_routing_late_elicitation_to_
+     let error = child_thread
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "delayed_elicitation",
+             Some(json!({ "delay_ms": 1_000 })),
+             /*meta*/ None,
+@@ -1367,6 +1373,7 @@ async fn timed_out_child_call_recovers_tree_without_routing_late_elicitation_to_
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1425,7 +1432,11 @@ async fn timed_out_child_resource_request_recovers_tree_without_late_elicitation
+     let old_pid = wait_for_pid_file(&pid_file).await?;
+
+     let error = child_thread
+-        .read_mcp_resource(MCP_SERVER_NAME, ReadResourceRequestParams::new(MEMO_URI))
++        .read_mcp_resource(
++            MCP_SERVER_NAME,
++            None,
++            ReadResourceRequestParams::new(MEMO_URI),
++        )
+         .await
+         .expect_err("the delayed resource request should exceed its configured timeout");
+     let error_chain = format!("{error:#}");
+@@ -1459,6 +1470,7 @@ async fn timed_out_child_resource_request_recovers_tree_without_late_elicitation
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1636,6 +1648,7 @@ async fn crashed_shared_server_can_be_replaced_for_the_tree() -> Result<()> {
+     child_thread
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "crash",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1649,6 +1662,7 @@ async fn crashed_shared_server_can_be_replaced_for_the_tree() -> Result<()> {
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1735,6 +1749,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1743,6 +1758,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
+     let child_before = child_thread
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1769,6 +1785,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
+         .codex
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1788,6 +1805,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
+     let child_after = child_thread
+         .call_mcp_tool(
+             MCP_SERVER_NAME,
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+@@ -1876,6 +1894,7 @@ async fn calls_from_different_agents_enter_the_shared_server_serially() -> Resul
+         async move {
+             root.call_mcp_tool(
+                 MCP_SERVER_NAME,
++                /*environment_id*/ None,
+                 "serialized_probe",
+                 Some(json!({
+                     "label": "root",
+@@ -1902,6 +1921,7 @@ async fn calls_from_different_agents_enter_the_shared_server_serially() -> Resul
+             child_thread
+                 .call_mcp_tool(
+                     MCP_SERVER_NAME,
++                    /*environment_id*/ None,
+                     "serialized_probe",
+                     Some(json!({
+                         "label": "child",
+diff --git a/codex-rs/core/tests/suite/mcp_turn_metadata.rs b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
+index ae274dbaf3c61f11bb60e028d50b1bbfb7ad0a4f..b3f7b3238ed520089a741f829dc0f2e6eba2c89a 100644
+--- a/codex-rs/core/tests/suite/mcp_turn_metadata.rs
++++ b/codex-rs/core/tests/suite/mcp_turn_metadata.rs
+@@ -50,7 +50,6 @@ use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
+ use core_test_support::apps_test_server::recorded_apps_tool_call_by_call_id;
+ use core_test_support::apps_test_server::recorded_apps_tool_calls;
+ use core_test_support::apps_test_server::search_capable_apps_builder;
+-use core_test_support::apps_test_server::set_default_app_approval_mode_and_reviewer;
+ use core_test_support::responses::assert_root_turn;
+ use core_test_support::responses::ev_assistant_message;
+ use core_test_support::responses::ev_completed;
+diff --git a/codex-rs/core/tests/suite/model_routing_profiles.rs b/codex-rs/core/tests/suite/model_routing_profiles.rs
+index a29602de624382615281face50004c26719fbe32..5f444ebf6cd1473d1abe4ae32b66313a0ece1671 100644
+--- a/codex-rs/core/tests/suite/model_routing_profiles.rs
++++ b/codex-rs/core/tests/suite/model_routing_profiles.rs
+@@ -9,7 +9,6 @@ use anyhow::Result;
+ use chrono::DateTime;
+ use chrono::Utc;
+ use codex_core::SleepFuture;
+-use codex_core::TimeFuture;
+ use codex_core::TimeProvider;
+ use codex_core::TurnInputRequest;
+ use codex_core::config::CurrentTimeReminderConfig;
+@@ -89,12 +88,9 @@ impl RoutingTimeProvider {
+ }
+
+ impl TimeProvider for RoutingTimeProvider {
+-    fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
++    fn current_time(&self, _thread_id: ThreadId) -> Result<DateTime<Utc>> {
+         let timestamp = self.current_time.load(Ordering::Relaxed);
+-        Box::pin(async move {
+-            Ok(DateTime::<Utc>::from_timestamp(timestamp, 0)
+-                .expect("test timestamp should be valid"))
+-        })
++        Ok(DateTime::<Utc>::from_timestamp(timestamp, 0).expect("test timestamp should be valid"))
+     }
+
+     fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
+@@ -141,12 +137,9 @@ impl BlockingRoutingTimeProvider {
+ }
+
+ impl TimeProvider for BlockingRoutingTimeProvider {
+-    fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
++    fn current_time(&self, _thread_id: ThreadId) -> Result<DateTime<Utc>> {
+         let timestamp = self.current_time.load(Ordering::Relaxed);
+-        Box::pin(async move {
+-            Ok(DateTime::<Utc>::from_timestamp(timestamp, 0)
+-                .expect("test timestamp should be valid"))
+-        })
++        Ok(DateTime::<Utc>::from_timestamp(timestamp, 0).expect("test timestamp should be valid"))
+     }
+
+     fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
+diff --git a/codex-rs/core/tests/suite/multi_agent_resume.rs b/codex-rs/core/tests/suite/multi_agent_resume.rs
+index 4e074544db71d96340f2ec8ee6c2b0b67a5e7238..09c317d8f70c4ac776a014651331686538afb2f7 100644
+--- a/codex-rs/core/tests/suite/multi_agent_resume.rs
++++ b/codex-rs/core/tests/suite/multi_agent_resume.rs
+@@ -485,7 +485,11 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
+     let resumed = resume_builder.restart(&server, &initial).await?;
+     resumed
+         .codex
+-        .set_app_server_client_info(Some("resume-test".to_string()), Some("1.0.0".to_string()))
++        .set_app_server_client_info(
++            Some("resume-test".to_string()),
++            Some("1.0.0".to_string()),
++            /*mcp_elicitations_auto_deny*/ false,
++        )
+         .await?;
+     drop(initial);
+     assert_eq!(
+diff --git a/codex-rs/core/tests/suite/runtime_auth.rs b/codex-rs/core/tests/suite/runtime_auth.rs
+index b2acc41b304fb76c24788ea0e74b686650a7c05d..fc6b5a5951dcbccbdaafeb85425edd3f6c0dc418 100644
+--- a/codex-rs/core/tests/suite/runtime_auth.rs
++++ b/codex-rs/core/tests/suite/runtime_auth.rs
+@@ -420,7 +420,7 @@ async fn exercise_harness(server_uri: String) -> Result<()> {
+             boundary: codex_thread_store::ForkBoundary::Latest,
+         })
+         .await?;
+-    let child = test
++    let (child, _) = test
+         .thread_manager
+         .fork_prepared_thread(
+             StartThreadOptions {
+diff --git a/codex-rs/core/tests/suite/scenarios.rs b/codex-rs/core/tests/suite/scenarios.rs
+index ff87eb5accc9e83745731923fd84b8874999ce56..fbcb240f063d22dab8f9e540c5ae498e3cba7966 100644
+--- a/codex-rs/core/tests/suite/scenarios.rs
++++ b/codex-rs/core/tests/suite/scenarios.rs
+@@ -3550,7 +3550,7 @@ async fn attached_side_chat_preserves_model_context_on_cold_resume() -> Result<(
+     );
+     let mut resume_options = StartThreadOptions::new(options.config.clone());
+     resume_options.environments = options.environments.clone();
+-    let child = test
++    let (child, _) = test
+         .thread_manager
+         .fork_prepared_thread(options, prepared)
+         .await?;
