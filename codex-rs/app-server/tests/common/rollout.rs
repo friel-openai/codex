@@ -130,6 +130,7 @@ pub async fn append_fake_paginated_user_message(
                     text_elements: Vec::new(),
                 }],
             }),
+            content_token_count: None,
             started_at_ms: Some(0),
             completed_at_ms: 1,
         })),
