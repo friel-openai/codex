@@ -1,12 +1,12 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 783957ec974175b7e793e9faa536f87d3107921f..d977615b514978c5caccba4b03bfaad4d85048ad 100644
+index 783957ec974175b7e793e9faa536f87d3107921f..c78c16fabfedeb152f87e9211f1d125a5fdbf94f 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2217,6 +2217,7 @@ dependencies = [
   "uuid",
   "wiremock",
   "zip",
-+ "zstd",
++ "zstd 0.13.3",
  ]
 
  [[package]]
