@@ -41,6 +41,7 @@ impl Session {
             .lock_checkpoint_admission("restore saved thread persistence")
             .await?;
         let _settings = self.thread_settings_persistence.acquire().await?;
+        let observation_clock_floor_ms = self.observation_clock_floor_ms().await;
         let mut state = self.state.lock().await;
         let _persistence = self.persistence_repair_lock.lock().await;
         anyhow::ensure!(
@@ -253,7 +254,7 @@ impl Session {
             // separately preserves exact current model state, including prior compaction.
             // Neither operation claims to reconstruct records the old runtime discarded.
             recovered.extend(
-                self.segment_state_checkpoint_from_state(&state)
+                self.segment_state_checkpoint_from_state(&state, observation_clock_floor_ms)
                     .into_items(),
             );
             live_thread.append_items(&recovered).await?;

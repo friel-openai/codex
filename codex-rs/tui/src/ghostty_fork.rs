@@ -178,7 +178,7 @@ fn build_ghostty_spawn_config(
         config,
         additional_writable_roots,
         handoff_socket,
-    );
+    )?;
     build_ghostty_spawn_config_for_command(command, config, placement)
 }
 
@@ -196,7 +196,7 @@ fn build_standalone_side_ghostty_spawn_config(
         config,
         additional_writable_roots,
         handoff_socket,
-    );
+    )?;
     build_ghostty_spawn_config_for_command(command, config, placement)
 }
 

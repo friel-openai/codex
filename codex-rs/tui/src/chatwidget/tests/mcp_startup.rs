@@ -433,8 +433,13 @@ async fn pending_mcp_startup_does_not_unblock_external_review() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(
-        std::iter::from_fn(|| rx.try_recv().ok())
-            .any(|event| matches!(event, AppEvent::ForkCurrentSession { name: None }))
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+            event,
+            AppEvent::ForkCurrentSession {
+                name: None,
+                placement: None
+            }
+        ))
     );
     assert_eq!(chat.bottom_pane.composer_text(), "");
 

@@ -29,12 +29,13 @@ use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadTraceContext;
+use codex_user_input::ResolvedUserInput;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -169,7 +170,7 @@ impl LocalAgentControl {
 
 /// Input whose submission remains paired with any required communication telemetry context.
 enum AgentDeliveryInput {
-    UserInput(Vec<UserInput>),
+    UserInput(Vec<ResolvedUserInput>),
     InterAgentCommunication {
         communication: Box<InterAgentCommunication>,
         context: AgentCommunicationContext,
@@ -191,7 +192,7 @@ impl LocalAgentControl {
         &self,
         config: Config,
         agent_id: ThreadId,
-        input: Vec<UserInput>,
+        input: Vec<ResolvedUserInput>,
         delivery: AgentInputDelivery,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
@@ -307,7 +308,7 @@ impl LocalAgentControl {
                     .await;
             }
             if delivery == AgentInputDelivery::Interrupt {
-                self.interrupt_agent(agent_id).await?;
+                self.interrupt_agent(agent_id, Op::Interrupt).await?;
             }
             return match &input {
                 AgentDeliveryInput::UserInput(input) => {

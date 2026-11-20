@@ -77,7 +77,7 @@ impl HookMcpExecutor for CoreHookMcpExecutor {
                                 move || {
                                     admit()?;
                                     anyhow::ensure!(
-                                        bundled_app_hook_connector(&admission_call) == Some(expected_connector.as_str()),
+                                        bundled_app_hook_connector(&admission_call) == Some(expected_connector),
                                         "App hook connector or approval policy does not permit automatic execution"
                                     );
                                     Ok(())

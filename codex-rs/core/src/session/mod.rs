@@ -3063,11 +3063,15 @@ impl Session {
         .expect("live session state constructs a complete segment-state checkpoint")
     }
 
-    async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
-        let observation_clock_floor_ms = match &self.realtime_history {
+    async fn observation_clock_floor_ms(&self) -> Option<i64> {
+        match &self.realtime_history {
             Some(history) => history.lock().await.observation_clock.floor_ms(),
             None => None,
-        };
+        }
+    }
+
+    async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
+        let observation_clock_floor_ms = self.observation_clock_floor_ms().await;
         let state = self.state.lock().await;
         self.segment_state_checkpoint_from_state(&state, observation_clock_floor_ms)
     }
@@ -5947,10 +5951,7 @@ impl Session {
         let has_durable_writer = self.live_thread().is_some();
         // Keep the settings snapshot ordered after accepted settings writes.
         let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
-        let observation_clock_floor_ms = match &self.realtime_history {
-            Some(history) => history.lock().await.observation_clock.floor_ms(),
-            None => None,
-        };
+        let observation_clock_floor_ms = self.observation_clock_floor_ms().await;
         let mut state = self.state.lock().await;
         let prior_state = state.checkpoint_mutation_snapshot();
         let complete_replacement =

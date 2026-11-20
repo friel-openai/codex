@@ -46,6 +46,8 @@ async fn migration_replays_large_native_checkpoint_with_finite_history_base() {
             ]);
             checkpoint.guardian_history = Some(guardian_history.clone());
             checkpoint.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+                next_item_ordinal: None,
+                observation_clock_floor_ms: None,
                 rejected_audio_file_ids: Default::default(),
                 multi_agent_version: None,
                 dynamic_tools: None,
