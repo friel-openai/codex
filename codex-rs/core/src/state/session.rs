@@ -229,7 +229,7 @@ impl SessionState {
             latest_rate_limits: self.latest_rate_limits.clone(),
             previous_turn_settings: self.previous_turn_settings.clone(),
             turn_attribution: self.turn_attribution.clone(),
-            auto_compact_window: self.auto_compact_window,
+            auto_compact_window: self.auto_compact_window.clone(),
         }
     }
 

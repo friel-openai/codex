@@ -3454,6 +3454,7 @@ async fn finalize_interrupted_assistant_item(
             sess,
             turn_context,
             finalized_turn_item.turn_item,
+            finalized_turn_item.content_token_count,
             previously_streamed_item,
             plan_mode_state,
         )
@@ -3598,21 +3599,6 @@ async fn drain_in_flight(
         }
     }
     Ok(terminal_no_response)
-}
-
-fn assign_missing_streamed_response_item_id(
-    item: &mut ResponseItem,
-    active_item: Option<&TurnItem>,
-) {
-    if item.id().is_some_and(|id| !id.is_empty()) {
-        return;
-    }
-
-    let active_item_id = active_item
-        .map(|item| ResponseItemId::from_server(item.id()))
-        .filter(|item_id| !item_id.is_empty());
-    item.set_id(active_item_id);
-    Session::assign_missing_response_item_id(item);
 }
 
 /// Extends the active assistant message with text already sent to the client.

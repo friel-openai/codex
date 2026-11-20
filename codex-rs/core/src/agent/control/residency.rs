@@ -207,7 +207,7 @@ impl LocalAgentControl {
         thread_id: ThreadId,
     ) {
         if let Ok(thread) = state.get_thread(thread_id).await {
-            let _ = self.runtime.pin_v2_residency(state, &thread).await;
+            let _ = self.runtime.pin_v2_residency(&thread).await;
         }
     }
 
@@ -430,7 +430,13 @@ impl LocalAgentControl {
         };
         thread.ensure_rollout_materialized().await;
         thread.flush_rollout().await?;
+        let (config, ..) = thread.session.fork_config().await;
         let environments = EvictedEnvironments {
+            config: Arc::new(config),
+            has_independent_service_tier: matches!(
+                &thread.session.agent_runtime,
+                AgentRuntimeServices::Host(services) if services.service_tier.is_none()
+            ),
             selections: thread.environment_selections().await,
             bindings: thread
                 .session

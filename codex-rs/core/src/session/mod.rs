@@ -516,7 +516,6 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -1487,7 +1486,7 @@ impl Session {
                         .filter(|selection| {
                             selection.config == EnvironmentConfigState::FromThread
                                 && environments.turn_environments().any(|admitted| {
-                                    admitted.environment.is_remote()
+                                    admitted.environment().is_remote()
                                         && admitted.selection.has_same_workspace(selection)
                                 })
                         })
@@ -2917,7 +2916,7 @@ impl Session {
                 state.history.set_world_state_baseline(world_state);
             }
             let fallback_ids = state.auto_compact_window_ids();
-            let window_id = window_id.unwrap_or(fallback_ids.window_id);
+            let window_id = window_id.unwrap_or_else(|| fallback_ids.window_id.clone());
             state.restore_auto_compact_window(
                 window_number,
                 AutoCompactWindowIds {
@@ -3004,9 +3003,9 @@ impl Session {
                 compaction_response_id: None,
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
                 window_number: Some(state.auto_compact_window_number()),
-                first_window_id: Some(window_ids.first_window_id),
-                previous_window_id: window_ids.previous_window_id,
-                window_id: Some(window_ids.window_id),
+                first_window_id: Some(window_ids.first_window_id.clone()),
+                previous_window_id: window_ids.previous_window_id.clone(),
+                window_id: Some(window_ids.window_id.clone()),
                 segment_state_checkpoint: None,
                 resume_metadata: Some(CompactionResumeMetadata {
                     rejected_audio_file_ids: state.history.rejected_audio_file_ids(),
@@ -6348,7 +6347,7 @@ impl Session {
         let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
             let auto_compact_window_ids = match auto_compact_window {
-                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids(),
+                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids().clone(),
                 InitialContextAutoCompactWindow::Prepared(ids) => ids,
             };
             (
@@ -6716,7 +6715,7 @@ impl Session {
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
                 latest_rate_limits: state.token_info_and_rate_limits().1,
                 window_number: state.auto_compact_window_number(),
-                window_ids: state.auto_compact_window_ids(),
+                window_ids: state.auto_compact_window_ids().clone(),
             }
         };
         if self.active_turn.lock().await.is_some() {
@@ -6733,7 +6732,7 @@ impl Session {
             || state.latest_token_usage_record != source_model_state.latest_token_usage_record
             || state.token_info_and_rate_limits().1 != source_model_state.latest_rate_limits
             || state.auto_compact_window_number() != source_model_state.window_number
-            || state.auto_compact_window_ids() != source_model_state.window_ids
+            || state.auto_compact_window_ids() != &source_model_state.window_ids
         {
             return None;
         }
