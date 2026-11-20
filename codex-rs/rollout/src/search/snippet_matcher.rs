@@ -43,6 +43,19 @@ impl<'a> RolloutSnippetMatcher<'a> {
     /// Opens the file before compiling so per-file I/O errors retain their priority.
     pub async fn first_match(&mut self, path: &Path) -> io::Result<Option<String>> {
         let lines = compression::open_rollout_line_reader(path).await?;
+        self.match_lines(lines).await
+    }
+
+    /// Searches only the selected physical file, without choosing a sibling representation.
+    pub async fn first_match_exact(&mut self, path: &Path) -> io::Result<Option<String>> {
+        let lines = compression::open_rollout_line_reader_exact(path).await?;
+        self.match_lines(lines).await
+    }
+
+    async fn match_lines(
+        &mut self,
+        lines: compression::RolloutLineReader,
+    ) -> io::Result<Option<String>> {
         // Share the regexes across file scans to reuse their scratch caches.
         let patterns = Arc::clone(self.compiled_patterns()?);
         lines
