@@ -1,5 +1,5 @@
 use super::*;
-use crate::compact::collect_annotated_user_messages;
+use crate::compact::collect_user_messages;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -53,11 +53,11 @@ fn compaction_retains_bounded_independent_messages_without_user_authority() {
             .iter()
             .all(|item| matches!(&item.item, ResponseItem::FunctionCallOutput { .. }))
     );
-    assert!(collect_annotated_user_messages(&compacted).is_empty());
     let items = compacted
         .iter()
-        .map(|envelope| &envelope.item)
+        .map(|envelope| envelope.item.clone())
         .collect::<Vec<_>>();
+    assert!(collect_user_messages(&items).is_empty());
     let serialized = serde_json::to_string(&items).unwrap();
     let restored: Vec<ResponseItem> = serde_json::from_str(&serialized).unwrap();
     let restored = restored
