@@ -83,6 +83,27 @@ pub(super) async fn maybe_start(
         return;
     }
 
+    // Do not repeatedly prepare the same compacted prefix when too little new
+    // history has arrived to justify another attempt under the same budget.
+    if let Some(baseline) = sess
+        .services
+        .thread_extension_data
+        .get::<super::auto_compaction_guard::CompactionBaseline>()
+    {
+        let key = super::turn::compaction_budget_key(sess, step_context, token_status).await;
+        if baseline.key == key
+            && let Some(current) = sess.get_estimated_token_count(turn_context).await
+            && super::auto_compaction_guard::no_compactable_progress(
+                baseline.estimated_history_tokens,
+                current,
+                baseline.required_reduction,
+                baseline.required_reduction,
+            )
+        {
+            return;
+        }
+    }
+
     let base_instructions = sess.get_prompt_base_instructions().await;
     let (prepared_input, tasks, shutdown_cancellation, launch, send) = {
         let mut state = sess.state.lock().await;
