@@ -150,7 +150,11 @@ impl AncestorReads {
                 let reference = references.get(&segment.rollout_path)?.clone();
                 let cutoff = segment
                     .byte_boundary_recorded
-                    .then_some(segment.end_ordinal_exclusive.zip(segment.end_byte_offset))
+                    .then_some(
+                        segment
+                            .end_ordinal_exclusive
+                            .zip(segment.jsonl_end_byte_offset),
+                    )
                     .flatten()
                     .map(|(end_ordinal_exclusive, end_byte_offset)| HistoryPosition {
                         thread_id: segment.rollout_id,
@@ -304,6 +308,8 @@ impl RolloutLineage {
                         && original.history_page_start == current.history_page_start
                         && original.end_ordinal_exclusive == current.end_ordinal_exclusive
                         && original.byte_boundary_recorded == current.byte_boundary_recorded
+                        && (!original.byte_boundary_recorded
+                            || original.jsonl_end_byte_offset == current.jsonl_end_byte_offset)
                         && (!(original.byte_boundary_recorded
                             || original.end_ordinal_exclusive.is_none())
                             || original.end_byte_offset == current.end_byte_offset)
@@ -388,6 +394,8 @@ impl RolloutLineage {
                             || original.history_page_start != current.history_page_start
                             || original.end_ordinal_exclusive != current.end_ordinal_exclusive
                             || original.byte_boundary_recorded != current.byte_boundary_recorded
+                            || (original.byte_boundary_recorded
+                                && original.jsonl_end_byte_offset != current.jsonl_end_byte_offset)
                             || ((original.byte_boundary_recorded
                                 || original.end_ordinal_exclusive.is_none())
                                 && original.end_byte_offset != current.end_byte_offset)

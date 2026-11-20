@@ -14,7 +14,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
 use codex_rollout::ScanOutcome;
-use codex_rollout::open_rollout_seekable_reader;
+use codex_rollout::open_rollout_seekable_reader_with_exact_path;
 use codex_rollout::parse_rollout_line_bytes;
 
 use super::LocalThreadStore;
@@ -44,7 +44,7 @@ pub(super) async fn read(
     }
     let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
     let result = tokio::task::spawn_blocking(move || {
-        let mut file = open_rollout_seekable_reader(&source.path, || stop.is_closed())?;
+        let mut file = open_rollout_seekable_reader_with_exact_path(&source.path, || stop.is_closed(), true)?;
         let mut header = Vec::new();
         BufReader::new(&mut file).read_until(b'\n', &mut header)?;
         let line = parse_rollout_line_bytes(&header).map_err(io::Error::other)?;
