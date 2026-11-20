@@ -3550,7 +3550,7 @@ async fn attached_side_chat_preserves_model_context_on_cold_resume() -> Result<(
     );
     let mut resume_options = StartThreadOptions::new(options.config.clone());
     resume_options.environments = options.environments.clone();
-    let child = test
+    let (child, _) = test
         .thread_manager
         .fork_prepared_thread(options, prepared)
         .await?;
