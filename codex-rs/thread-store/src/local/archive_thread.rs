@@ -1,14 +1,16 @@
 use super::LocalThreadStore;
-use super::helpers::owned_rollout_paths_from_index;
 use super::helpers::restore_rollout_moves;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::scoped_rollout_path;
 use super::helpers::validated_rollout_file_name;
+use super::rollout_migration::archive_gate;
 use crate::ArchiveThreadsParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use chrono::Utc;
-use codex_rollout::RolloutReferenceIndex;
+use codex_rollout::find_all_rollout_paths_by_thread_id;
+use codex_rollout::read_session_meta_line_exact;
+use std::sync::Arc;
 use tracing::warn;
 
 use super::thread_rollout_resolver;
@@ -39,21 +41,37 @@ pub(super) async fn archive_threads(
         }
     }
     let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
-    // Only inspect active files whose names belong to the threads being archived.
-    let reference_index = RolloutReferenceIndex::scan_unarchived_threads(
-        store.config.codex_home.as_path(),
-        &thread_ids,
-    )
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to scan thread rollout files: {err}"),
-    })?;
-
+    let ownership = Arc::new((_writer_guards, _live_writer_guards, _lifecycle_guards));
     let parent_thread_id = thread_ids[0];
     let mut archived_thread_ids = Vec::new();
     for thread_id in thread_ids {
-        let rollout_paths = owned_rollout_paths_from_index(&reference_index, thread_id);
-        match archive_thread_with_paths(store, thread_id, rollout_paths).await {
+        // Archive preserves references; it needs owned filenames, not a global reference index
+        // that opens unrelated rollouts and decodes their first history records.
+        let result =
+            match find_all_rollout_paths_by_thread_id(store.config.codex_home.as_path(), thread_id)
+                .await
+            {
+                Ok(paths) => {
+                    let store = store.clone();
+                    let ownership = Arc::clone(&ownership);
+                    // A cancelled request must not release publication or writer ownership
+                    // while the renamed files still await their SQLite commit or rollback.
+                    tokio::spawn(async move {
+                        let _ownership = ownership;
+                        archive_thread_with_paths(&store, thread_id, paths).await
+                    })
+                    .await
+                    .map_err(|error| ThreadStoreError::Internal {
+                        message: format!("archive transaction task failed: {error}"),
+                    })?
+                }
+                Err(err) => Err(ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to enumerate rollout files for thread {thread_id}: {err}"
+                    ),
+                }),
+            };
+        match result {
             Ok(()) => archived_thread_ids.push(thread_id),
             Err(err) if archived_thread_ids.is_empty() => return Err(err),
             Err(err) => warn!(
@@ -98,6 +116,15 @@ async fn archive_thread_with_paths(
             rollout_path.as_path(),
             "sessions",
         )?;
+        // Filenames select candidates, but session metadata determines ownership. Retain the
+        // separately resolved selected path, including SQLite aliases and damaged metadata.
+        if rollout_path != selected_rollout_path
+            && !read_session_meta_line_exact(canonical_rollout_path.as_path())
+                .await
+                .is_ok_and(|meta| meta.meta.id == thread_id)
+        {
+            continue;
+        }
         let file_name =
             validated_rollout_file_name(canonical_rollout_path.as_path(), rollout_path.as_path())?;
         let destination = archive_folder.join(&file_name);
@@ -115,6 +142,8 @@ async fn archive_thread_with_paths(
         message: format!("failed to archive selected rollout for thread {thread_id}"),
     })?;
 
+    let _publication_guard = archive_gate::try_acquire(&store.config.codex_home)?;
+    archive_gate::check_archive(store, thread_id, &rollout_moves).await?;
     for (index, (source, destination)) in rollout_moves.iter().enumerate() {
         if let Err(err) = std::fs::rename(source, destination) {
             if let Err(restore_err) = restore_rollout_moves(&rollout_moves[..index]) {
@@ -148,6 +177,14 @@ async fn archive_thread_with_paths(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "archive_discovery_tests.rs"]
+mod discovery_tests;
+
+#[cfg(all(test, unix))]
+#[path = "archive_inherited_writer_tests.rs"]
+mod inherited_writer_tests;
 
 #[cfg(test)]
 mod tests {
