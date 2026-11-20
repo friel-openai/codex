@@ -316,6 +316,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     if let Some(reporting) = &sess.outcome_reporting {
         reporting.handoffs.close();
     }
+    sess.close_persistence_repair().await;
     let startup_prewarm = {
         let mut state = sess.state.lock().await;
         // Stop admission and take the current warmup together so resume cannot replace it.
