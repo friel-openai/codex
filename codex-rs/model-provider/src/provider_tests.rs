@@ -876,6 +876,7 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
             model_context_window: None,
             routing_profile: None,
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]);
     let mut expected = configured_catalog.clone();
@@ -892,6 +893,9 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
     ] {
         let provider = create_model_provider(provider_info, /*auth_manager*/ None);
         let cache = Arc::new(crate::test_support::UnusedModelsCache);
+        let without_aliases = provider
+            .models_manager_without_cache(Some(configured_catalog.clone()), HashMap::new());
+        assert!(without_aliases.custom_models_snapshot().is_empty());
         for manager in [
             provider.models_manager(
                 test_codex_home(),
@@ -959,6 +963,7 @@ async fn configured_catalog_preserves_origins_and_custom_aliases() {
             model_context_window: Some(64_000),
             routing_profile: None,
             model_auto_compact_token_limit: Some(48_000),
+            trust_candidate_constraints: false,
         },
     )]);
     let home = tempfile::tempdir().unwrap();
