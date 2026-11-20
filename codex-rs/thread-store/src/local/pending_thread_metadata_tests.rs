@@ -657,6 +657,8 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
         history_mode: ThreadHistoryMode::Legacy,
         history_base: None,
         subagent_history_start_ordinal: None,
+        persistence_mode: Default::default(),
+        initial_rollout_ordinal: 0,
         initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
         runtime_workspace_roots: None,
         metadata: ThreadPersistenceMetadata {
