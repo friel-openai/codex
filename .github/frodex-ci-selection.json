@@ -1191,6 +1191,8 @@
         "local::tests::try_reserving_writers_retains_cloned_locks_and_reports_conflicts",
         "local::thread_history::bulk_projection::tests::bulk_projection_matches_ordered_sql_for_late_and_duplicate_events",
         "local::thread_history::read::tests::cold_index_retries_when_root_grows_during_all_identity_attempts",
+        "local::thread_history::read::tests::complete_root_search_finds_item_after_turn_start_segment",
+        "local::thread_history::read::tests::complete_root_search_preserves_latest_visible_duplicate_turn",
         "local::thread_history::read::tests::cursors_are_bound_to_the_selected_rollout_generation",
         "local::thread_history::read::tests::empty_active_root_turn_preserves_late_split_and_sqlite_items",
         "local::thread_history::read::tests::empty_active_turn_linearizes_at_sqlite_query",
