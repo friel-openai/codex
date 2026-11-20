@@ -1,8 +1,8 @@
 ---
 source: core/tests/suite/scenarios_mcp_sharing.rs
-expression: "context_snapshot::format_context_snapshot(\"Two chats share one MCP process, expose different tools, and answer simultaneous model-requested questions in reverse order.\",\n&entries,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
+expression: "context_snapshot::format_context_snapshot(\"Two unrelated roots isolate MCP processes, expose different tools, and answer simultaneous model-requested questions in reverse order.\",\n&entries,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
-Scenario: Two chats share one MCP process, expose different tools, and answer simultaneous model-requested questions in reverse order.
+Scenario: Two unrelated roots isolate MCP processes, expose different tools, and answer simultaneous model-requested questions in reverse order.
 
 ## Window 1
 Settings:
