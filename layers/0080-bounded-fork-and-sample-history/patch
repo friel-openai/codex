@@ -1,0 +1,1346 @@
+diff --git a/codex-rs/app-server/src/thread_sample.rs b/codex-rs/app-server/src/thread_sample.rs
+index 289190f7aeaf3d76f0d2e6c87256cc6f28e6fe94..c7f88c5be32c477ca93b65fb91cf2e618b6451fe 100644
+--- a/codex-rs/app-server/src/thread_sample.rs
++++ b/codex-rs/app-server/src/thread_sample.rs
+@@ -31,6 +31,7 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_protocol::protocol::ThreadSettingsOverrides;
+ use codex_protocol::protocol::ThreadSource;
++use codex_protocol::protocol::TurnStartedEvent;
+ use codex_protocol::protocol::W3cTraceContext;
+ use codex_protocol::turn_input::StartIfIdleSubmission;
+ use codex_protocol::turn_input::TurnInputRequest;
+@@ -40,6 +41,7 @@ use codex_rollout::InitialHistory;
+ use codex_rollout::ResumedHistory;
+ use codex_thread_store::ListTurnsParams;
+ use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::LocalThreadStore;
+ use codex_thread_store::SortDirection;
+ use codex_thread_store::StoredTurnItemsView;
+ use codex_thread_store::StoredTurnStatus;
+@@ -143,27 +145,33 @@ impl SampleTask {
+             })
+             .await
+             .map_err(|error| invalid_request(error.to_string()))?;
++        let mut paginated_source_turn = None;
+         let latest_turn_in_progress = match snapshot.history_mode {
+             ThreadHistoryMode::Legacy => build_legacy_api_turns_from_rollout_items(&history.items)
+                 .last()
+                 .filter(|turn| turn.id == params.expected_turn_id)
+                 .map(|turn| turn.status == TurnStatus::InProgress),
+             // Paginated context can omit the turn start. Use the status observed at admission.
+-            ThreadHistoryMode::Paginated => store
+-                .list_turns(ListTurnsParams {
+-                    thread_id: id,
+-                    include_archived: false,
+-                    cursor: None,
+-                    page_size: 1,
+-                    sort_direction: SortDirection::Desc,
+-                    items_view: StoredTurnItemsView::NotLoaded,
+-                })
+-                .await
+-                .map_err(|error| invalid_request(error.to_string()))?
+-                .turns
+-                .first()
+-                .filter(|turn| turn.turn_id == params.expected_turn_id)
+-                .map(|turn| turn.status == StoredTurnStatus::InProgress),
++            ThreadHistoryMode::Paginated => {
++                paginated_source_turn = store
++                    .list_turns(ListTurnsParams {
++                        thread_id: id,
++                        include_archived: false,
++                        cursor: None,
++                        page_size: 1,
++                        sort_direction: SortDirection::Desc,
++                        items_view: StoredTurnItemsView::NotLoaded,
++                    })
++                    .await
++                    .map_err(|error| invalid_request(error.to_string()))?
++                    .turns
++                    .into_iter()
++                    .next();
++                paginated_source_turn
++                    .as_ref()
++                    .filter(|turn| turn.turn_id == params.expected_turn_id)
++                    .map(|turn| turn.status == StoredTurnStatus::InProgress)
++            }
+         };
+         let Some(source_in_progress) =
+             latest_turn_in_progress.filter(|running| !running || params.allow_in_progress_turn)
+@@ -237,18 +245,88 @@ impl SampleTask {
+         if Instant::now() >= deadline {
+             return Err(internal_error("sample timed out"));
+         }
++        let prepared = if let (Some(local_store), Some(revision), Some(rollout_id)) = (
++            store.as_any().downcast_ref::<LocalThreadStore>(),
++            history.revision.as_ref(),
++            parent
++                .rollout_path()
++                .as_deref()
++                .and_then(codex_rollout::rollout_id_from_path),
++        ) && snapshot.history_mode == ThreadHistoryMode::Paginated
++        {
++            let mut prepared = local_store
++                .prepare_ephemeral_model_context_for_rollout(id, rollout_id)
++                .await
++                .map_err(|error| internal_error(format!("sample fork failed: {error}")))?;
++            if !store
++                .is_model_context_current(
++                    LoadThreadHistoryParams {
++                        thread_id: id,
++                        include_archived: false,
++                    },
++                    revision.clone(),
++                )
++                .await
++                .map_err(|error| internal_error(error.to_string()))?
++            {
++                return Err(invalid_request("sample source changed"));
++            }
++            if prepared.frozen_segment.is_none() && prepared.copied_history.is_none() {
++                let mut model_context = history.items.clone();
++                if let Some(meta) = model_context.iter_mut().find_map(|item| match item {
++                    codex_rollout::RolloutItem::SessionMeta(meta) => Some(meta),
++                    _ => None,
++                }) {
++                    // The captured model context already contains the inherited model history.
++                    meta.meta.history_base = None;
++                }
++                prepared.model_context = Arc::new(model_context);
++                prepared.latest_model_context = Arc::clone(&prepared.model_context);
++                prepared.response_history = Arc::clone(&prepared.model_context);
++                prepared.interrupt_if_open = source_in_progress;
++                if source_in_progress {
++                    let turn = paginated_source_turn
++                        .as_ref()
++                        .expect("paginated admission selected a source turn");
++                    Arc::make_mut(&mut prepared.response_history).push(
++                        codex_rollout::RolloutItem::EventMsg(EventMsg::TurnStarted(
++                            TurnStartedEvent {
++                                turn_id: turn.turn_id.clone(),
++                                root_turn_id: turn.root_turn_id.clone(),
++                                turn_attribution: None,
++                                trace_id: None,
++                                started_at: turn.started_at,
++                                model_context_window: None,
++                                collaboration_mode_kind: Default::default(),
++                            },
++                        )),
++                    );
++                }
++                Some(prepared)
++            } else {
++                None
++            }
++        } else {
++            None
++        };
+         // Do not cancel startup by dropping it: the owner must reclaim a partially initialized fork.
+-        let fork = Box::pin(manager.fork_thread_from_history(
+-            ForkSnapshot::Interrupted,
+-            *options,
+-            InitialHistory::Resumed(ResumedHistory {
+-                history_revision: history.revision,
+-                conversation_id: id,
+-                history: Arc::new(history.items),
+-                rollout_path: None,
+-            }),
+-        ))
+-        .await
++        let fork = if let Some(prepared) = prepared {
++            Box::pin(manager.fork_prepared_thread(*options, prepared))
++                .await
++                .map(|(fork, _)| fork)
++        } else {
++            Box::pin(manager.fork_thread_from_history(
++                ForkSnapshot::Interrupted,
++                *options,
++                InitialHistory::Resumed(ResumedHistory {
++                    history_revision: history.revision,
++                    conversation_id: id,
++                    history: Arc::new(history.items),
++                    rollout_path: None,
++                }),
++            ))
++            .await
++        }
+         .map_err(|error| internal_error(format!("sample fork failed: {error}")))?;
+         let (sender, mut receiver) = oneshot::channel();
+         samples
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_sample.rs b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
+index e3c40aa3e18535e4d577f8a24c55247a66d09f0b..f62b57b7a26dfa25eebf04d512c6593f18c03063 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_sample.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
+@@ -173,6 +173,252 @@ async fn prediction_fork(client: &mut TestAppServer, parent: &str) -> Result<Str
+     Ok(fork.thread.id)
+ }
+
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn sample_from_large_certified_history_does_not_materialize_parent_turns() -> Result<()> {
++    use codex_app_server_protocol::ThreadResumeParams;
++    use codex_app_server_protocol::ThreadResumeResponse;
++    use codex_protocol::ThreadId;
++    use codex_protocol::items::TurnItem as CoreTurnItem;
++    use codex_protocol::items::UserMessageItem;
++    use codex_protocol::models::BaseInstructions;
++    use codex_protocol::models::ContentItem;
++    use codex_protocol::models::ResponseItem;
++    use codex_protocol::protocol::EventMsg;
++    use codex_protocol::protocol::ItemCompletedEvent;
++    use codex_protocol::protocol::SessionSource;
++    use codex_protocol::protocol::ThreadMemoryMode;
++    use codex_protocol::protocol::TurnCompleteEvent;
++    use codex_protocol::protocol::TurnStartedEvent;
++    use codex_rollout::RolloutItem;
++    use codex_state::StateRuntime;
++    use codex_thread_store::AppendThreadItemsParams;
++    use codex_thread_store::CreateThreadParams;
++    use codex_thread_store::FreezeRolloutSegmentParams;
++    use codex_thread_store::LocalThreadStore;
++    use codex_thread_store::LocalThreadStoreConfig;
++    use codex_thread_store::PersistContext;
++    use codex_thread_store::ThreadPersistenceMetadata;
++    use codex_thread_store::ThreadStore;
++    use codex_utils_absolute_path::test_support::PathExt;
++
++    let server = responses::start_mock_server().await;
++    responses::mount_sse_sequence(
++        &server,
++        vec![responses::sse(vec![
++            responses::ev_assistant_message("prediction", "Continue"),
++            responses::ev_completed("sample-large"),
++        ])],
++    )
++    .await;
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
++    let state_db = StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig {
++            codex_home: home.path().to_path_buf(),
++            sqlite,
++            default_model_provider_id: "mock_provider".to_string(),
++        },
++        Some(state_db),
++    );
++    store
++        .create_thread(CreateThreadParams {
++            attached_thread: false,
++            creator_user_id: None,
++            creator_account_id: None,
++            session_id: thread_id.into(),
++            thread_id,
++            extra_config: None,
++            forked_from_id: None,
++            parent_thread_id: None,
++            source: SessionSource::Cli,
++            thread_source: None,
++            originator: "sample-test".to_string(),
++            base_instructions: BaseInstructions::default(),
++            dynamic_tools: Vec::new(),
++            selected_capability_roots: Vec::new(),
++            multi_agent_version: None,
++            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
++            history_base: None,
++            subagent_history_start_ordinal: None,
++            persistence_mode: Default::default(),
++            initial_rollout_ordinal: 0,
++            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
++            runtime_workspace_roots: None,
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(home.path().to_path_buf()),
++                model_provider: "mock_provider".to_string(),
++                memory_mode: ThreadMemoryMode::Enabled,
++            },
++        })
++        .await?;
++    store
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await?;
++    let start = |turn_id: &str| {
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: turn_id.to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(100),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        }))
++    };
++    let complete = |turn_id: &str| {
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: turn_id.to_string(),
++            root_turn_id: None,
++            last_agent_message: None,
++            error: None,
++            started_at: Some(100),
++            completed_at: Some(101),
++            duration_ms: Some(1_000),
++            time_to_first_token_ms: None,
++        }))
++    };
++    let mut old_turn = vec![start("large-parent")];
++    for index in 0..17 {
++        old_turn.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
++            ItemCompletedEvent {
++                content_token_count: None,
++                thread_id,
++                turn_id: "large-parent".to_string(),
++                item: CoreTurnItem::UserMessage(UserMessageItem {
++                    id: format!("large-item-{index}"),
++                    client_id: None,
++                    content: vec![codex_protocol::user_input::UserInput::Text {
++                        text: "x".repeat(4 * 1024 * 1024),
++                        text_elements: Vec::new(),
++                    }],
++                }),
++                started_at_ms: Some(100_000),
++                completed_at_ms: 101_000,
++            },
++        )));
++    }
++    old_turn.push(complete("large-parent"));
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: old_turn,
++        })
++        .await?;
++    let predecessor = store
++        .freeze_thread_segment(
++            thread_id,
++            FreezeRolloutSegmentParams::rotate_checkpoint(
++                super::thread_fork::certified_indexed_fork_checkpoint(home.path()),
++            ),
++        )
++        .await?;
++    assert!(std::fs::metadata(&predecessor.reference.rollout_path)?.len() > 64 * 1024 * 1024);
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![
++                start("current-turn"),
++                RolloutItem::ResponseItem(
++                    ResponseItem::Message {
++                        id: None,
++                        role: "user".to_string(),
++                        content: vec![ContentItem::InputText {
++                            text: "Current message".to_string(),
++                        }],
++                        phase: None,
++                        status: None,
++                        encrypted_content: None,
++                        internal_chat_message_metadata_passthrough: None,
++                    }
++                    .into(),
++                ),
++                complete("current-turn"),
++            ],
++        })
++        .await?;
++    store.shutdown_thread(thread_id).await?;
++    drop(store);
++
++    let mut client = client(&home, &server, /*overrides*/ true).await?;
++    let resume_id = client
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: thread_id.to_string(),
++            model: Some("gpt-5.4".to_string()),
++            exclude_turns: true,
++            ..Default::default()
++        })
++        .await?;
++    let _: ThreadResumeResponse = timeout(WAIT, client.read_response(resume_id)).await??;
++    let sample_id = client
++        .send_raw_request(
++            "thread/sample",
++            Some(json!({
++                "threadId": thread_id.to_string(),
++                "expectedTurnId": "current-turn",
++                "prompt": "Continue",
++                "disableMcp": true,
++            })),
++        )
++        .await?;
++    let concurrent_resume_id = client
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: thread_id.to_string(),
++            exclude_turns: true,
++            ..Default::default()
++        })
++        .await?;
++    let result: ThreadSampleResponse = timeout(WAIT, client.read_response(sample_id)).await??;
++    let _: ThreadResumeResponse =
++        timeout(WAIT, client.read_response(concurrent_resume_id)).await??;
++    assert_eq!(result.source_turn_id, "current-turn");
++    assert_eq!(result.text.as_deref(), Some("Continue"));
++    Ok(())
++}
++
++#[tokio::test]
++async fn short_paginated_sample_returns_text() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    responses::mount_sse_sequence(
++        &server,
++        vec![
++            responses::sse(vec![
++                responses::ev_assistant_message("parent-answer", "Done"),
++                responses::ev_completed("parent"),
++            ]),
++            responses::sse(vec![
++                responses::ev_assistant_message("sample-answer", "Continue"),
++                responses::ev_completed("short-sample"),
++            ]),
++        ],
++    )
++    .await;
++    let home = TempDir::new()?;
++    let mut client = client(&home, &server, /*overrides*/ true).await?;
++    let (thread_id, turn_id) = ready_parent(
++        &mut client,
++        ThreadStartParams {
++            history_mode: Some(ThreadHistoryMode::Paginated),
++            ..Default::default()
++        },
++    )
++    .await?;
++    let result = sample(
++        &mut client,
++        ThreadSampleParams {
++            thread_id,
++            expected_turn_id: turn_id,
++            prompt: "Continue".to_string(),
++            ..Default::default()
++        },
++    )
++    .await?;
++    assert_eq!(result.text.as_deref(), Some("Continue"));
++    Ok(())
++}
++
+ #[test_matrix(
+     [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated],
+     [TurnStatus::Completed, TurnStatus::Failed, TurnStatus::Interrupted],
+diff --git a/codex-rs/core/src/agent/history.rs b/codex-rs/core/src/agent/history.rs
+index 298fab20205dbb236d76e51d947078edf3b8ef38..2ed43d314d8b74377e4d71b56081dc2e52b940f7 100644
+--- a/codex-rs/core/src/agent/history.rs
++++ b/codex-rs/core/src/agent/history.rs
+@@ -310,14 +310,7 @@ pub(super) async fn prepare_forked_history(
+             // Ephemeral helpers never publish a child reference. Freezing their source
+             // would retain a full snapshot after every check-in, including failed spawns.
+             let prepared = store
+-                .prepare_fork_without_response_history_for_rollout(
+-                    codex_thread_store::PrepareForkParams {
+-                        thread_id: parent_thread_id,
+-                        boundary: codex_thread_store::ForkBoundary::Latest,
+-                    },
+-                    rollout_id,
+-                    /*ephemeral_context_only*/ true,
+-                )
++                .prepare_ephemeral_model_context_for_rollout(parent_thread_id, rollout_id)
+                 .await
+                 .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+             let mut cursor = None;
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 7c0bea2ee7d15a904648d102fb959976652ef20b..f32105cc02ec99c32ca363b7cf900428250a4c08 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1019,6 +1019,27 @@ impl LocalThreadStore {
+         .await
+     }
+
++    /// Captures model context for an ephemeral child without preparing response history.
++    ///
++    /// The caller must not use `response_history` to synthesize a fork interruption or persist a
++    /// child reference. The returned reservation keeps the source alive while it starts.
++    pub async fn prepare_ephemeral_model_context_for_rollout(
++        &self,
++        thread_id: ThreadId,
++        expected_rollout_id: codex_protocol::RolloutId,
++    ) -> ThreadStoreResult<PreparedFork> {
++        self.await_automatic_rollout_migration(thread_id).await?;
++        paginated_fork::prepare_ephemeral_model_context_for_rollout(
++            self,
++            PrepareForkParams {
++                thread_id,
++                boundary: crate::ForkBoundary::Latest,
++            },
++            expected_rollout_id,
++        )
++        .await
++    }
++
+     /// Prepares a latest fork using a verified complete, in-memory source model context.
+     pub async fn prepare_fork_with_model_context(
+         &self,
+diff --git a/codex-rs/thread-store/src/local/model_context.rs b/codex-rs/thread-store/src/local/model_context.rs
+index 994f5f0dbb76d1787c9d166b809ba7220fff421d..ef6c1b3b541561802328bb21622f3cda00b30c70 100644
+--- a/codex-rs/thread-store/src/local/model_context.rs
++++ b/codex-rs/thread-store/src/local/model_context.rs
+@@ -544,7 +544,7 @@ pub(super) async fn scan_active_model_context_snapshot(
+     active_model_context_scan_or_fallback(result)
+ }
+
+-fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
++pub(super) fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
+     if before.len() != after.len() || before.modified()? != after.modified()? {
+         return Ok(false);
+     }
+diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
+index c8ad1d52e31d42139d3552208895b4bed81fb3a7..5fb44c23da0fe9374604cbff2a03fbf21ec9f493 100644
+--- a/codex-rs/thread-store/src/local/paginated_fork.rs
++++ b/codex-rs/thread-store/src/local/paginated_fork.rs
+@@ -48,6 +48,8 @@ use crate::ThreadStoreResult;
+ enum ForkResponseHistory {
+     Full,
+     ModelContext,
++    /// The caller consumes only model_context, not the fork interruption state.
++    BoundedModelContext,
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -79,6 +81,11 @@ static LINEAGE_PERSISTENCE_PAUSES: LazyLock<
+     StdMutex<HashMap<codex_protocol::ThreadId, Arc<LineagePersistencePause>>>,
+ > = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
++#[cfg(test)]
++static CERTIFIED_CONTEXT_PAUSES: LazyLock<
++    StdMutex<HashMap<codex_protocol::ThreadId, Arc<LineagePersistencePause>>>,
++> = LazyLock::new(|| StdMutex::new(HashMap::new()));
++
+ #[cfg(test)]
+ pub(super) struct LineagePersistencePause {
+     pub(super) entered: Notify,
+@@ -100,6 +107,21 @@ pub(super) fn inject_lineage_persistence_pause(
+     pause
+ }
+
++#[cfg(test)]
++pub(super) fn inject_certified_context_pause(
++    thread_id: codex_protocol::ThreadId,
++) -> Arc<LineagePersistencePause> {
++    let pause = Arc::new(LineagePersistencePause {
++        entered: Notify::new(),
++        release: Notify::new(),
++    });
++    CERTIFIED_CONTEXT_PAUSES
++        .lock()
++        .expect("certified context pause mutex")
++        .insert(thread_id, Arc::clone(&pause));
++    pause
++}
++
+ pub(super) async fn prepare(
+     store: &LocalThreadStore,
+     params: PrepareForkParams,
+@@ -167,6 +189,22 @@ pub(super) async fn prepare_without_response_history_for_rollout(
+     .await
+ }
+
++pub(super) async fn prepare_ephemeral_model_context_for_rollout(
++    store: &LocalThreadStore,
++    params: PrepareForkParams,
++    expected_rollout_id: RolloutId,
++) -> ThreadStoreResult<PreparedFork> {
++    prepare_with_response_history(
++        store,
++        params,
++        ForkResponseHistory::BoundedModelContext,
++        /*supplied_context*/ None,
++        Some(expected_rollout_id),
++        ForkPersistence::EphemeralContext,
++    )
++    .await
++}
++
+ pub(super) async fn prepare_with_model_context(
+     store: &LocalThreadStore,
+     params: PrepareForkParams,
+@@ -403,6 +441,28 @@ async fn prepare_with_response_history_once(
+             _lifecycle: lifecycle,
+             history_access,
+         };
++        let repair_reservation =
++            if matches!(response_history, ForkResponseHistory::BoundedModelContext) {
++                match try_prepare_certified_latest_model_context_fork(
++                    store,
++                    thread_id,
++                    expected_rollout_id,
++                    repair_reservation,
++                    persistence,
++                    /*require_stable_source*/ true,
++                )
++                .await?
++                {
++                    IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
++                    IndexedForkAttempt::Fallback(reservation) => *reservation,
++                }
++            } else {
++                repair_reservation
++            };
++        let response_history = match response_history {
++            ForkResponseHistory::BoundedModelContext => ForkResponseHistory::ModelContext,
++            other => other,
++        };
+         let indexed_store = store.clone();
+         let attempt = tokio::spawn(async move {
+             try_prepare_indexed_latest_fork(
+@@ -430,6 +490,7 @@ async fn prepare_with_response_history_once(
+                         expected_rollout_id,
+                         *reservation,
+                         persistence,
++                        /*require_stable_source*/ false,
+                     )
+                     .await?
+                     {
+@@ -627,7 +688,10 @@ async fn prepare_with_response_history_once(
+         .await?;
+     }
+     if matches!(boundary, ForkBoundary::Latest)
+-        && matches!(response_history, ForkResponseHistory::ModelContext)
++        && matches!(
++            response_history,
++            ForkResponseHistory::ModelContext | ForkResponseHistory::BoundedModelContext
++        )
+         && !lineage.requires_copied_history().await?
+         && let Some(context) = prepared_clean_model_context.as_ref()
+     {
+@@ -886,7 +950,9 @@ async fn prepare_with_response_history_once(
+             }),
+             None,
+         ),
+-        (ForkResponseHistory::ModelContext, _, _) => (Arc::clone(&model_context), None),
++        (ForkResponseHistory::ModelContext | ForkResponseHistory::BoundedModelContext, _, _) => {
++            (Arc::clone(&model_context), None)
++        }
+     };
+     if has_fallback && let Some(copied_history) = copied_history.as_ref() {
+         // The copied child does not depend on a reference that stabilization might re-resolve.
+@@ -1618,7 +1684,40 @@ async fn try_prepare_indexed_latest_fork(
+         }
+     }
+
+-    if !store.has_history_projection(thread_id).await? {
++    let latest_turn_params = ListTurnsParams {
++        thread_id,
++        include_archived: false,
++        cursor: None,
++        page_size: 1,
++        sort_direction: SortDirection::Desc,
++        items_view: StoredTurnItemsView::NotLoaded,
++    };
++    #[cfg(test)]
++    {
++        let pause = CERTIFIED_CONTEXT_PAUSES
++            .lock()
++            .expect("certified context pause mutex")
++            .remove(&thread_id);
++        if let Some(pause) = pause {
++            pause.entered.notify_one();
++            pause.release.notified().await;
++        }
++    }
++    // A model-context fork needs a source-verified latest turn, not a complete response
++    // projection. Use a current certificate or the source-backed reader before attempting the
++    // complete projection, which can reopen every predecessor under the writer reservation.
++    let mut source_latest_turn = None;
++    let projection_is_current = if matches!(response_history, ForkResponseHistory::Full) {
++        store.has_history_projection(thread_id).await?
++    } else if store.has_current_history_certificate(thread_id).await? {
++        true
++    } else {
++        source_latest_turn = store
++            .try_list_projected_source_turns(&latest_turn_params)
++            .await?;
++        source_latest_turn.is_some() || store.has_history_projection(thread_id).await?
++    };
++    if !projection_is_current {
+         fallback!("complete_history_projection_unavailable");
+     }
+
+@@ -1661,18 +1760,10 @@ async fn try_prepare_indexed_latest_fork(
+             )
+         })
+     } else {
+-        let latest = super::thread_history::list_turns(
+-            store,
+-            ListTurnsParams {
+-                thread_id,
+-                include_archived: false,
+-                cursor: None,
+-                page_size: 1,
+-                sort_direction: SortDirection::Desc,
+-                items_view: StoredTurnItemsView::NotLoaded,
+-            },
+-        )
+-        .await?;
++        let latest = match source_latest_turn {
++            Some(latest) => latest,
++            None => super::thread_history::list_turns(store, latest_turn_params).await?,
++        };
+         latest.turns.first().map(|turn| {
+             (
+                 turn.status,
+@@ -1682,6 +1773,23 @@ async fn try_prepare_indexed_latest_fork(
+             )
+         })
+     };
++    if !matches!(response_history, ForkResponseHistory::Full) {
++        let after = tokio::fs::metadata(metadata.rollout_path.as_path())
++            .await
++            .map_err(|error| ThreadStoreError::Conflict {
++                message: format!("selected fork source changed while preparing context: {error}"),
++            })?;
++        let selected = super::thread_rollout_resolver::resolve_current(store, thread_id).await?;
++        if !model_context::unchanged_active_rollout(&file_metadata, &after).unwrap_or(false)
++            || !selected.is_some_and(|selected| {
++                selected.rollout_id == resolved.rollout_id && selected.path == resolved.path
++            })
++        {
++            return Err(ThreadStoreError::Conflict {
++                message: "selected fork source changed while preparing context".to_string(),
++            });
++        }
++    }
+     let fork_response_history = if let Some((
+         StoredTurnStatus::InProgress,
+         turn_id,
+@@ -1732,6 +1840,18 @@ async fn try_prepare_indexed_latest_fork(
+     } else {
+         None
+     };
++    if frozen_segment.is_some() && !matches!(response_history, ForkResponseHistory::Full) {
++        let after = tokio::fs::metadata(metadata.rollout_path.as_path())
++            .await
++            .map_err(|error| ThreadStoreError::Conflict {
++                message: format!("selected fork source changed while freezing context: {error}"),
++            })?;
++        if !model_context::unchanged_active_rollout(&file_metadata, &after).unwrap_or(false) {
++            return Err(ThreadStoreError::Conflict {
++                message: "selected fork source changed while freezing context".to_string(),
++            });
++        }
++    }
+     let ForkHistoryReservation {
+         _lifecycle: source_reservation,
+         history_access,
+@@ -1765,6 +1885,7 @@ async fn try_prepare_certified_latest_model_context_fork(
+     expected_rollout_id: Option<RolloutId>,
+     repair_reservation: ForkHistoryReservation,
+     persistence: ForkPersistence,
++    require_stable_source: bool,
+ ) -> ThreadStoreResult<IndexedForkAttempt> {
+     macro_rules! fallback {
+         ($reason:literal) => {{
+@@ -1801,8 +1922,68 @@ async fn try_prepare_certified_latest_model_context_fork(
+     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+         fallback!("active_rollout_not_plain");
+     }
+-    let Ok(session_meta) = codex_rollout::read_session_meta_line(path.as_path()).await else {
+-        fallback!("session_metadata_unreadable");
++    let before = if require_stable_source {
++        Some(tokio::fs::metadata(path.as_path()).await.map_err(|error| {
++            ThreadStoreError::Conflict {
++                message: format!("selected fork source is unavailable: {error}"),
++            }
++        })?)
++    } else {
++        None
++    };
++    let session_meta = if require_stable_source {
++        let Ok(active_head) = super::rollout_lineage::read_rollout_head(path.as_path()).await
++        else {
++            fallback!("session_metadata_unreadable");
++        };
++        if active_head.leading_reference.is_some() && !active_head.has_local_history
++            || active_head
++                .leading_reference
++                .as_ref()
++                .is_some_and(|(_, reference)| {
++                    !super::rollout_lineage::canonical_same_thread_reference(
++                        store.config.codex_home.as_path(),
++                        path.as_path(),
++                        thread_id,
++                        resolved.rollout_id,
++                        reference,
++                    )
++                })
++        {
++            fallback!("active_rollout_reference_layout_ineligible");
++        }
++        if let Some((_, reference)) = active_head.leading_reference.as_ref() {
++            if codex_rollout::existing_rollout_path(reference.rollout_path.as_path()).await
++                != Some(reference.rollout_path.clone())
++                || super::helpers::scoped_reference_rollout_path(
++                    store.config.codex_home.as_path(),
++                    reference.rollout_path.as_path(),
++                )
++                .is_err()
++            {
++                fallback!("referenced_rollout_unavailable");
++            }
++            let Ok(reference_meta) =
++                codex_rollout::read_session_meta_line(reference.rollout_path.as_path()).await
++            else {
++                fallback!("referenced_session_metadata_unreadable");
++            };
++            if reference_meta.meta.id != thread_id
++                || reference_meta.meta.segment_id != reference.segment_id
++                || reference_meta.meta.history_mode != ThreadHistoryMode::Paginated
++                || reference_meta.meta.forked_from_id.is_some()
++                || reference_meta.meta.history_base.is_some()
++                || reference_meta.meta.subagent_history_start_ordinal.is_some()
++            {
++                fallback!("referenced_session_metadata_ineligible");
++            }
++        }
++        active_head.session_meta
++    } else {
++        let Ok(session_meta) = codex_rollout::read_session_meta_line(path.as_path()).await else {
++            fallback!("session_metadata_unreadable");
++        };
++        session_meta
+     };
+     let same_thread_history_base =
+         history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
+@@ -1823,18 +2004,51 @@ async fn try_prepare_certified_latest_model_context_fork(
+     if !active_scan.segment_checkpoint {
+         fallback!("active_checkpoint_missing");
+     }
++    if require_stable_source
++        && active_scan
++            .suffix_lines
++            .iter()
++            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
++    {
++        fallback!("active_rollout_reference_layout_ineligible");
++    }
++    #[cfg(test)]
++    if require_stable_source {
++        let pause = CERTIFIED_CONTEXT_PAUSES
++            .lock()
++            .expect("certified context pause mutex")
++            .remove(&thread_id);
++        if let Some(pause) = pause {
++            pause.entered.notify_one();
++            pause.release.notified().await;
++        }
++    }
+     let Some(end_ordinal_exclusive) = active_scan
+         .latest_ordinal
+         .and_then(|ordinal| ordinal.checked_add(1))
+     else {
+         fallback!("active_ordinal_missing");
+     };
+-    let end_byte_offset = tokio::fs::metadata(path.as_path())
+-        .await
+-        .map_err(|error| ThreadStoreError::Internal {
+-            message: format!("failed to read active rollout metadata: {error}"),
+-        })?
+-        .len();
++    let after =
++        tokio::fs::metadata(path.as_path())
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to read active rollout metadata: {error}"),
++            })?;
++    if let Some(before) = before.as_ref() {
++        let selected = super::thread_rollout_resolver::resolve_current(store, thread_id).await?;
++        if !super::model_context::unchanged_active_rollout(before, &after).unwrap_or(false)
++            || active_scan.source_end_byte_offset != Some(before.len())
++            || !selected.is_some_and(|selected| {
++                selected.rollout_id == resolved.rollout_id && selected.path == resolved.path
++            })
++        {
++            return Err(ThreadStoreError::Conflict {
++                message: "selected fork source changed while reading model context".to_string(),
++            });
++        }
++    }
++    let end_byte_offset = after.len();
+     let position = HistoryPosition {
+         thread_id: resolved.rollout_id,
+         end_ordinal_exclusive,
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index 478322028345ed811f9aee0fe89dd01a254623ad..9a3c7248b1f06ca848f768fb1098c16b70def8f3 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -77,6 +77,7 @@ use tempfile::TempDir;
+
+ use super::super::LocalThreadStore;
+ use super::super::LocalThreadStoreConfig;
++use super::super::paginated_fork::inject_certified_context_pause;
+ use super::super::paginated_fork::inject_lineage_persistence_pause;
+ use super::super::test_support::test_config;
+ use crate::AppendThreadItemsParams;
+@@ -86,6 +87,7 @@ use crate::ForkBoundary;
+ use crate::FreezeRolloutSegmentParams;
+ use crate::ListThreadsParams;
+ use crate::ListTurnsParams;
++use crate::LoadThreadHistoryParams;
+ use crate::PersistContext;
+ use crate::PrepareForkParams;
+ use crate::PreparedFork;
+@@ -3842,6 +3844,459 @@ async fn ephemeral_latest_side_uses_certified_active_context_without_freezing_so
+     );
+ }
+
++async fn certified_supervisor_source(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++) -> (codex_protocol::RolloutId, Vec<std::path::PathBuf>) {
++    create_paginated_thread(store, thread_id).await;
++    store
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await
++        .expect("persist source metadata");
++    let mut predecessors = Vec::new();
++    for index in 0..8 {
++        let turn = format!("turn-{index}");
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![
++                    turn_started(&turn),
++                    user_message(&format!("ancestor message {index}")),
++                    turn_completed(&turn),
++                ],
++            })
++            .await
++            .expect("append ancestor turn");
++        predecessors.push(
++            store
++                .freeze_thread_segment(
++                    thread_id,
++                    FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
++                        &format!("checkpoint {index}"),
++                    )),
++                )
++                .await
++                .expect("rotate certified source")
++                .reference
++                .rollout_path,
++        );
++    }
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![
++                turn_started("current-turn"),
++                user_message("current message"),
++            ],
++        })
++        .await
++        .expect("append open current turn");
++    index_paginated_source_metadata(store, thread_id).await;
++    let path = store
++        .live_rollout_path(thread_id)
++        .await
++        .expect("active source path");
++    (
++        codex_rollout::rollout_id_from_path(&path).expect("active source rollout ID"),
++        predecessors,
++    )
++}
++
++#[cfg(target_os = "linux")]
++/// Counts opens of selected rollout files without instrumenting the production readers.
++struct RolloutOpenWatch(std::fs::File);
++
++#[cfg(target_os = "linux")]
++impl RolloutOpenWatch {
++    fn new(paths: &[std::path::PathBuf]) -> Self {
++        use std::os::fd::AsRawFd;
++        use std::os::fd::FromRawFd;
++        use std::os::unix::ffi::OsStrExt;
++
++        // The descriptor is immediately owned by File and closed on drop.
++        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
++        assert!(
++            fd >= 0,
++            "create inotify descriptor: {}",
++            std::io::Error::last_os_error()
++        );
++        // inotify_init1 returned a new owned descriptor.
++        let file = unsafe { std::fs::File::from_raw_fd(fd) };
++        for path in paths {
++            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("rollout path");
++            // The C string is NUL-terminated and lives through the call.
++            let watch =
++                unsafe { libc::inotify_add_watch(file.as_raw_fd(), path.as_ptr(), libc::IN_OPEN) };
++            assert!(
++                watch >= 0,
++                "watch rollout opens: {}",
++                std::io::Error::last_os_error()
++            );
++        }
++        Self(file)
++    }
++
++    fn open_events(&mut self) -> usize {
++        use std::io::Read;
++        let mut buffer = [0_u8; 4096];
++        let mut count = 0;
++        loop {
++            match self.0.read(&mut buffer) {
++                Ok(0) => break,
++                Ok(bytes) => {
++                    let event_size = std::mem::size_of::<libc::inotify_event>();
++                    assert_eq!(bytes % event_size, 0, "file-watch events have no names");
++                    count += bytes / event_size;
++                }
++                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
++                Err(error) => panic!("read rollout open events: {error}"),
++            }
++        }
++        count
++    }
++}
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn ephemeral_supervisor_context_does_not_open_older_predecessors() {
++    let home = TempDir::new().expect("temp dir");
++    let store = projection_store(home.path()).await;
++    let thread_id = ThreadId::new();
++    let (rollout_id, predecessors) = certified_supervisor_source(&store, thread_id).await;
++    let latest = store
++        .list_turns(ListTurnsParams {
++            thread_id,
++            include_archived: false,
++            cursor: None,
++            page_size: 1,
++            sort_direction: SortDirection::Desc,
++            items_view: StoredTurnItemsView::NotLoaded,
++        })
++        .await
++        .expect("warm source-backed latest-turn read");
++    assert_eq!(latest.turns[0].turn_id, "current-turn");
++    let mut watch = RolloutOpenWatch::new(&predecessors[..predecessors.len() - 1]);
++
++    let prepared = store
++        .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
++        .await
++        .expect("prepare supervisor model context");
++    assert_eq!(
++        watch.open_events(),
++        0,
++        "certified context must not open older predecessors"
++    );
++    assert!(prepared.frozen_segment.is_none());
++    assert!(contains_user_message(
++        prepared.model_context.as_slice(),
++        "current message"
++    ));
++    assert!(prepared.model_context.iter().any(|item| {
++        matches!(item, RolloutItem::Compacted(checkpoint) if checkpoint.message == "checkpoint 7")
++    }));
++    drop(prepared);
++
++    let ordinary = store
++        .prepare_fork_without_response_history_for_rollout(
++            PrepareForkParams {
++                thread_id,
++                boundary: ForkBoundary::Latest,
++            },
++            rollout_id,
++            /*ephemeral_context_only*/ true,
++        )
++        .await
++        .expect("prepare ordinary ephemeral fork");
++    assert_eq!(
++        watch.open_events(),
++        0,
++        "ephemeral fork must reuse the source-backed latest turn"
++    );
++    assert!(ordinary.response_history.iter().any(|item| {
++        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == "current-turn")
++    }), "ordinary forks retain the in-progress-turn seed");
++    drop(ordinary);
++
++    let durable = store
++        .prepare_fork_without_response_history_for_rollout(
++            PrepareForkParams {
++                thread_id,
++                boundary: ForkBoundary::Latest,
++            },
++            rollout_id,
++            /*ephemeral_context_only*/ false,
++        )
++        .await
++        .expect("prepare durable fork");
++    assert_eq!(
++        watch.open_events(),
++        0,
++        "durable fork must reuse the source-backed latest turn"
++    );
++    assert!(durable.frozen_segment.is_some());
++    assert!(durable.response_history.iter().any(|item| {
++        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == "current-turn")
++    }));
++    drop(durable);
++
++    assert!(
++        store
++            .has_history_projection(thread_id)
++            .await
++            .expect("check complete projection")
++    );
++    assert!(
++        watch.open_events() > 0,
++        "complete-projection control must open older predecessors"
++    );
++}
++
++#[tokio::test]
++async fn latest_context_snapshots_release_writer_and_retain_lifecycle_reservation() {
++    for mode in ["helper", "ephemeral", "durable"] {
++        let home = TempDir::new().expect("temp dir");
++        let store = projection_store(home.path()).await;
++        let thread_id = ThreadId::new();
++        let (rollout_id, _) = certified_supervisor_source(&store, thread_id).await;
++        store
++            .list_turns(ListTurnsParams {
++                thread_id,
++                include_archived: false,
++                cursor: None,
++                page_size: 1,
++                sort_direction: SortDirection::Desc,
++                items_view: StoredTurnItemsView::NotLoaded,
++            })
++            .await
++            .expect("warm source-backed latest turn");
++        let pause = inject_certified_context_pause(thread_id);
++        let preparation_store = store.clone();
++        let preparation = tokio::spawn(async move {
++            if mode == "helper" {
++                preparation_store
++                    .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
++                    .await
++            } else {
++                preparation_store
++                    .prepare_fork_without_response_history_for_rollout(
++                        PrepareForkParams {
++                            thread_id,
++                            boundary: ForkBoundary::Latest,
++                        },
++                        rollout_id,
++                        mode == "ephemeral",
++                    )
++                    .await
++            }
++        });
++        tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
++            .await
++            .expect("preparation reaches the reserved snapshot");
++        let mut append = Box::pin(store.append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![user_message("after snapshot")],
++        }));
++        tokio::select! {
++            biased;
++            result = &mut append => panic!("writer passed the snapshot reservation: {result:?}"),
++            _ = tokio::task::yield_now() => {}
++        }
++        let mut resume = Box::pin(store.load_latest_model_context(LoadThreadHistoryParams {
++            thread_id,
++            include_archived: false,
++        }));
++        tokio::select! {
++            biased;
++            result = &mut resume => panic!("resume passed the snapshot reservation: {result:?}"),
++            _ = tokio::task::yield_now() => {}
++        }
++        pause.release.notify_one();
++        let prepared = preparation
++            .await
++            .expect("join preparation")
++            .expect("capture snapshot");
++        tokio::time::timeout(Duration::from_secs(10), append)
++            .await
++            .expect("writer must resume after snapshot capture")
++            .expect("append after snapshot");
++        tokio::time::timeout(Duration::from_secs(10), resume)
++            .await
++            .expect("resume must not wait for the prepared child")
++            .expect("resume source after snapshot");
++        assert!(!contains_user_message(
++            prepared.model_context.as_slice(),
++            "after snapshot"
++        ));
++
++        let mut delete = Box::pin(store.delete_thread(DeleteThreadParams { thread_id }));
++        tokio::select! {
++            biased;
++            result = &mut delete => panic!("source deletion outlived no reservation: {result:?}"),
++            _ = tokio::task::yield_now() => {}
++        }
++        drop(prepared);
++        delete
++            .await
++            .expect("delete after releasing the prepared snapshot");
++    }
++}
++
++#[tokio::test]
++async fn latest_context_forks_preserve_turn_started_before_checkpoint_and_child_boundary() {
++    let home = TempDir::new().expect("temp dir");
++    let store = projection_store(home.path()).await;
++    let thread_id = ThreadId::new();
++    create_paginated_thread(&store, thread_id).await;
++    store
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await
++        .expect("persist source");
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![
++                turn_started("ancestor-turn"),
++                user_message("ancestor"),
++                turn_completed("ancestor-turn"),
++                turn_started_with_root("open-turn", "root-turn"),
++                user_message("open message"),
++            ],
++        })
++        .await
++        .expect("append inherited and open turns");
++    store
++        .freeze_thread_segment(
++            thread_id,
++            FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
++                "open checkpoint",
++            )),
++        )
++        .await
++        .expect("rotate after open turn started");
++    index_paginated_source_metadata(&store, thread_id).await;
++    let path = store
++        .live_rollout_path(thread_id)
++        .await
++        .expect("active path");
++    let rollout_id = codex_rollout::rollout_id_from_path(&path).expect("active rollout ID");
++    let mut frozen_base = None;
++    for ephemeral in [true, false] {
++        let prepared = store
++            .prepare_fork_without_response_history_for_rollout(
++                PrepareForkParams {
++                    thread_id,
++                    boundary: ForkBoundary::Latest,
++                },
++                rollout_id,
++                ephemeral,
++            )
++            .await
++            .expect("prepare latest context fork");
++        assert!(prepared.response_history.iter().any(|item| matches!(item,
++            RolloutItem::EventMsg(EventMsg::TurnStarted(event))
++                if event.turn_id == "open-turn" && event.root_turn_id.as_deref() == Some("root-turn")
++        )), "fork must seed the open turn even when its start precedes the checkpoint");
++        if !ephemeral {
++            frozen_base = prepared
++                .frozen_segment
++                .as_ref()
++                .and_then(|frozen| frozen.history_base);
++        }
++    }
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![
++                turn_completed("open-turn"),
++                turn_started("later-turn"),
++                user_message("later"),
++            ],
++        })
++        .await
++        .expect("append after durable fork snapshot");
++    let child_id = ThreadId::new();
++    create_paginated_subagent_thread(&store, child_id, frozen_base, None).await;
++    store
++        .persist_thread(child_id, PersistContext::Standard)
++        .await
++        .expect("persist child");
++    index_paginated_source_metadata(&store, child_id).await;
++    let child = store
++        .list_turns(ListTurnsParams {
++            thread_id: child_id,
++            include_archived: false,
++            cursor: None,
++            page_size: 10,
++            sort_direction: SortDirection::Desc,
++            items_view: StoredTurnItemsView::NotLoaded,
++        })
++        .await
++        .expect("read inherited child turns");
++    let ids = child
++        .turns
++        .iter()
++        .map(|turn| turn.turn_id.as_str())
++        .collect::<Vec<_>>();
++    assert!(ids.contains(&"ancestor-turn"));
++    assert!(ids.contains(&"open-turn"));
++    assert!(
++        !ids.contains(&"later-turn"),
++        "parent appends after the snapshot must not leak into the child"
++    );
++}
++
++#[tokio::test]
++async fn latest_context_snapshot_rejects_replaced_or_deleted_active_source() {
++    for mode in ["helper", "ephemeral", "durable"] {
++        for replace in [true, false] {
++            let home = TempDir::new().expect("temp dir");
++            let store = projection_store(home.path()).await;
++            let thread_id = ThreadId::new();
++            let (rollout_id, _) = certified_supervisor_source(&store, thread_id).await;
++            let path = store
++                .live_rollout_path(thread_id)
++                .await
++                .expect("active source path");
++            let pause = inject_certified_context_pause(thread_id);
++            let preparation_store = store.clone();
++            let preparation = tokio::spawn(async move {
++                if mode == "helper" {
++                    preparation_store
++                        .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
++                        .await
++                } else {
++                    preparation_store
++                        .prepare_fork_without_response_history_for_rollout(
++                            PrepareForkParams {
++                                thread_id,
++                                boundary: ForkBoundary::Latest,
++                            },
++                            rollout_id,
++                            mode == "ephemeral",
++                        )
++                        .await
++                }
++            });
++            tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
++                .await
++                .expect("preparation reaches the reserved snapshot");
++            if replace {
++                let replacement = path.with_extension("replacement");
++                fs::copy(&path, &replacement).expect("copy same-size replacement");
++                fs::rename(replacement, &path).expect("replace selected source");
++            } else {
++                fs::remove_file(&path).expect("delete selected source");
++            }
++            pause.release.notify_one();
++            let result = preparation.await.expect("join preparation");
++            assert!(
++                result.is_err(),
++                "changed source must not produce a snapshot"
++            );
++        }
++    }
++}
++
+ fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+     let window_id = codex_protocol::ContextWindowId::new_uuid_v7();
+     let cwd: AbsolutePathBuf =
