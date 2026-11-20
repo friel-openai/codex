@@ -1723,8 +1723,6 @@ impl ThreadStore for LocalThreadStore {
 
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
-            self.await_automatic_rollout_migration(params.thread_id)
-                .await?;
             archive_thread::archive_threads(
                 self,
                 ArchiveThreadsParams {
@@ -1741,12 +1739,7 @@ impl ThreadStore for LocalThreadStore {
         &self,
         params: ArchiveThreadsParams,
     ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
-        Box::pin(async move {
-            if let Some(thread_id) = params.thread_ids.first().copied() {
-                self.await_automatic_rollout_migration(thread_id).await?;
-            }
-            archive_thread::archive_threads(self, params).await
-        })
+        Box::pin(async move { archive_thread::archive_threads(self, params).await })
     }
 
     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
