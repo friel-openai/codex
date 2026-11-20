@@ -10,6 +10,7 @@ use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -330,8 +331,10 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
                         .params
                         .ok_or_else(|| anyhow::anyhow!("item/started is missing params"))?,
                 )?;
-                if matches!(&payload.item, ThreadItem::AgentMessage { id, .. } if id == PARTIAL_MESSAGE_ID)
+                if matches!(&payload.item.payload, ThreadItemPayload::AgentMessage { id, .. } if id == PARTIAL_MESSAGE_ID)
                 {
+                    assert_eq!(payload.item.started_at_ms, Some(payload.started_at_ms));
+                    assert_eq!(payload.item.completed_at_ms, None);
                     relevant_order.push("partial-started");
                     partial_started.push(payload.item);
                 }
@@ -352,8 +355,9 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
                         .params
                         .ok_or_else(|| anyhow::anyhow!("item/completed is missing params"))?,
                 )?;
-                if matches!(&payload.item, ThreadItem::AgentMessage { id, .. } if id == PARTIAL_MESSAGE_ID)
+                if matches!(&payload.item.payload, ThreadItemPayload::AgentMessage { id, .. } if id == PARTIAL_MESSAGE_ID)
                 {
+                    assert_eq!(payload.item.completed_at_ms, Some(payload.completed_at_ms));
                     relevant_order.push("partial-completed");
                     partial_completed.push(payload.item);
                 }
@@ -367,23 +371,45 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
         }
     }
 
+    let partial_started_at_ms = partial_started
+        .first()
+        .expect("partial message start")
+        .started_at_ms
+        .expect("recorded partial message start time");
+    let partial_completed_at_ms = partial_completed
+        .first()
+        .expect("partial message completion")
+        .completed_at_ms
+        .expect("recorded partial message completion time");
     assert_eq!(
         partial_started,
-        vec![ThreadItem::AgentMessage {
-            id: PARTIAL_MESSAGE_ID.to_string(),
-            text: String::new(),
-            phase: None,
-            memory_citation: None,
+        vec![ThreadItem {
+            payload: ThreadItemPayload::AgentMessage {
+                id: PARTIAL_MESSAGE_ID.to_string(),
+                text: String::new(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+            started_at_ms: Some(partial_started_at_ms),
+            completed_at_ms: None,
         }]
     );
     assert_eq!(partial_deltas, vec!["partial ", "answer"]);
     assert_eq!(
         partial_completed,
-        vec![ThreadItem::AgentMessage {
-            id: PARTIAL_MESSAGE_ID.to_string(),
-            text: PARTIAL_TEXT.to_string(),
-            phase: None,
-            memory_citation: None,
+        vec![ThreadItem {
+            payload: ThreadItemPayload::AgentMessage {
+                id: PARTIAL_MESSAGE_ID.to_string(),
+                text: PARTIAL_TEXT.to_string(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+            started_at_ms: Some(partial_started_at_ms),
+            completed_at_ms: Some(partial_completed_at_ms),
         }]
     );
     assert_eq!(
