@@ -240,11 +240,11 @@ impl StateRuntime {
         .await;
         if let Err(err) = thread_goals_init_result {
             close_sqlite_pools(&[
-                pool.as_ref(),
-                logs_pool.as_ref(),
-                goals_pool.as_ref(),
-                memories_pool.as_ref(),
-                queue_pool.as_ref(),
+                Some(pool.as_ref()),
+                logs_pool.as_deref(),
+                Some(goals_pool.as_ref()),
+                Some(memories_pool.as_ref()),
+                Some(queue_pool.as_ref()),
             ])
             .await;
             return Err(err);
