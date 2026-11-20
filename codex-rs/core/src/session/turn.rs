@@ -79,6 +79,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::router::record_registration_metrics;
 use crate::tools::spec_plan::build_tool_router;
+use crate::tools::spec_plan::model_catalog_unavailable;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::util::error_or_panic;
 use codex_analytics::AppInvocation;
@@ -2900,13 +2901,21 @@ impl PreparedToolRecommendations {
 pub(super) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
-    model_info: &codex_protocol::openai_models::ModelInfo,
+    model_info: &codex_protocol::openai_models::CatalogModel,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
     prepared_recommendations: Option<PreparedToolRecommendations>,
     dynamic_tools: &[codex_protocol::dynamic_tools::DynamicToolSpec],
 ) -> CodexResult<Arc<ToolRouter>> {
+    if sess
+        .services
+        .models_manager
+        .fallback_snapshot_requires_refresh(model_info)
+        .await
+    {
+        return Err(model_catalog_unavailable());
+    }
     let apps_enabled = turn_context.apps_enabled();
     let tool_suggest_candidates = match prepared_recommendations {
         Some(PreparedToolRecommendations::Endpoint(tools)) => Some(ToolSuggestCandidates {
@@ -3997,6 +4006,14 @@ async fn try_run_sampling_request(
     let prompt = Arc::new(prompt);
     let interrupt_at_boundary = SamplingInterrupt::enabled(&turn_context);
     let mut stream_request = async |prompt: &Arc<Prompt>| {
+        if sess
+            .services
+            .models_manager
+            .fallback_snapshot_requires_refresh(&step_context.settings.model_info)
+            .await
+        {
+            return Err(model_catalog_unavailable());
+        }
         let send = client_session
             .open_model_response(
                 prompt,
