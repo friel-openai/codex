@@ -1,0 +1,152 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
+index c0a2d6dace5b55541d9db88c82119d0b2f888c3c..d0b76d03f8d91702ab5bed081dfb3db469e63bd5 100644
+--- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
++++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
+@@ -1114,6 +1114,7 @@ async fn automatic_migration_keeps_list_nonblocking_and_gates_resume() -> Result
+         .send_thread_list_request(ThreadListParams {
+             include_attached_threads: false,
+             current_account_only: false,
++            included_thread_ids: None,
+             excluded_thread_ids: None,
+             cursor: None,
+             limit: Some(10),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+index d4f98f635c1e95978a698baa3d4dc5df6aecfcfb..194a8e1a229a0dc2ff3be9ab17359b84e07db9e4 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+@@ -4335,6 +4335,7 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
+             .send_thread_list_request(ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 cursor: None,
+                 limit: Some(50),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_list.rs b/codex-rs/app-server/tests/suite/v2/thread_list.rs
+index 0f2e346d01f57e30800df46c92a32de777810873..f1a50157ad59844903c3480348d9449409ab6722 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_list.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_list.rs
+@@ -2125,6 +2125,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
+             params: codex_app_server_protocol::ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: Some(vec![expected_current[0].0.clone()]),
+                 attached_to_thread_id: None,
+                 originators: None,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
+index 9ad1f6cd14771284e6c79e2e79381362b512df68..13756f73047fbe72c7b5aeae1f86a9060300b738 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
+@@ -272,6 +272,7 @@ async fn list_threads_for_relation_with_archived(
+         params: codex_app_server_protocol::ThreadListParams {
+             include_attached_threads: false,
+             current_account_only: false,
++            included_thread_ids: None,
+             excluded_thread_ids: None,
+             cursor,
+             limit: Some(limit),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
+index 27860b33ae43d019dd85aaa0c2e95b701760f719..98816c946f8058f0128ef326d1982ff27908d22e 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
+@@ -250,6 +250,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+             params: codex_app_server_protocol::ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 originators: None,
+                 cursor: None,
+@@ -285,6 +286,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+             params: codex_app_server_protocol::ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 originators: None,
+                 cursor: None,
+@@ -350,6 +352,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+             params: codex_app_server_protocol::ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 cursor: None,
+                 limit: Some(10),
+@@ -415,6 +418,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+             params: codex_app_server_protocol::ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 cursor: first_page.backwards_cursor.clone(),
+                 limit: Some(10),
+@@ -566,6 +570,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
+         .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+             include_attached_threads: false,
+             current_account_only: false,
++            included_thread_ids: None,
+             excluded_thread_ids: None,
+             cursor: None,
+             limit: Some(10),
+@@ -597,6 +602,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
+         .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+             include_attached_threads: false,
+             current_account_only: false,
++            included_thread_ids: None,
+             excluded_thread_ids: None,
+             cursor: None,
+             limit: Some(10),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs b/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
+index 8e703715a8c41b6704128b6cbca6a18f09f58dae..96060fe2c01c6d3b0861787851f40f3741df4c75 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
+@@ -246,6 +246,7 @@ async fn list_current_members(
+             params: ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 cursor: None,
+                 limit: Some(200),
+@@ -298,6 +299,7 @@ async fn wait_for_completed_current_tree(
+                 params: ThreadListParams {
+                     include_attached_threads: false,
+                     current_account_only: false,
++                    included_thread_ids: None,
+                     excluded_thread_ids: None,
+                     cursor: None,
+                     limit: Some(200),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_start.rs b/codex-rs/app-server/tests/suite/v2/thread_start.rs
+index 66b0096ccba2e89ae81d164f8d082c27b7387e13..c7ac8a0552613a50eab7814d1cba809ae9f7e06a 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_start.rs
+@@ -1218,6 +1218,7 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
+             .send_thread_list_request(ThreadListParams {
+                 include_attached_threads: false,
+                 current_account_only: false,
++                included_thread_ids: None,
+                 excluded_thread_ids: None,
+                 cursor: None,
+                 limit: Some(50),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
+index 6fa2d533f0a9f9f07b3efb9dfb71849c7d3814a3..3b61fbf9edbb6a3fd4ce1458ec19054c4262441b 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
+@@ -446,7 +446,6 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
+             TurnItem::AgentMessage(AgentMessageItem {
+                 moderation: None,
+                 id: format!("agent-{index}"),
+-                moderation: None,
+                 questions: None,
+                 content: vec![AgentMessageContent::Text {
+                     text: format!("recent answer {index}"),
+@@ -566,7 +565,6 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
+                     cursor: None,
+                     limit: Some(10),
+                     sort_direction: Some(SortDirection::Asc),
+-                    defer_output: None,
+                 },
+             })
+             .await?;
