@@ -167,6 +167,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
         /*started_item*/ None,
         Some(candidate),
         fallback,
+        CompactionReporting::Immediate,
     ));
     if matches!(change, HistoryChange::Replacement) {
         tokio::select! {

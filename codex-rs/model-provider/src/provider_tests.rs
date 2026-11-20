@@ -880,6 +880,7 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
         CustomModelConfig {
             model: "gpt-5.5".to_string(),
             model_context_window: None,
+            routing_profile: None,
             model_auto_compact_token_limit: None,
         },
     )]);
@@ -929,7 +930,7 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
                 sourced_catalog[0].origin,
                 codex_models_manager::ModelOrigin::ExplicitConfig
             );
-            assert_eq!(manager.custom_models(), &aliases);
+            assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
             let alias = manager
                 .get_model_info("local-reviewer", &ModelsManagerConfig::default())
                 .await;
@@ -962,6 +963,7 @@ async fn configured_catalog_preserves_origins_and_custom_aliases() {
         CustomModelConfig {
             model: "gpt-5.5".to_string(),
             model_context_window: Some(64_000),
+            routing_profile: None,
             model_auto_compact_token_limit: Some(48_000),
         },
     )]);
@@ -977,7 +979,7 @@ async fn configured_catalog_preserves_origins_and_custom_aliases() {
             aliases.clone(),
         ),
     ] {
-        assert_eq!(manager.custom_models(), &aliases);
+        assert_eq!(manager.custom_models_snapshot().as_ref(), &aliases);
         let sourced = manager
             .model_catalog_with_origins(
                 RefreshStrategy::InMemory,
