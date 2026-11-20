@@ -1,0 +1,12 @@
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index c4ab97561c69f335e168a197d51e23f00a5b7a2c..4e5698546b20d5d43adb9860276ebedd46fcc46d 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -5262,6 +5262,7 @@ mod tests {
+             service_tier: None,
+             approval_policy: AskForApproval::OnRequest,
+             approvals_reviewer: ApprovalsReviewer::User,
++            requested_approvals_reviewer: None,
+             permission_profile: PermissionProfile::read_only(),
+             active_permission_profile: Some(ActivePermissionProfile::read_only()),
+             cwd: cwd.clone(),
