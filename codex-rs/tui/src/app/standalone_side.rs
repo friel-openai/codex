@@ -4,6 +4,7 @@
 //! inherited history from the child UI. It never attaches to or controls the parent runtime.
 
 use super::*;
+use crate::app_server_session::SideChatStorage;
 use crate::chatwidget::InterruptedTurnNoticeMode;
 use codex_context_fragments::ContextualUserFragment;
 use codex_context_fragments::StandaloneSideBoundary;
@@ -50,6 +51,7 @@ impl App {
                         config,
                         target_session.thread_id,
                         /*selected_profile*/ None,
+                        SideChatStorage::Temporary,
                     )
                     .await
             }
