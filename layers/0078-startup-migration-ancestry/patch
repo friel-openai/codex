@@ -1,0 +1,861 @@
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index f3ae8b19180c9a53ba8d66e782762dbcef8ba7ab..5f1c2e641b5240e64237c0137b99f3938405ad7d 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -183,6 +183,7 @@ pub use list::read_session_meta_line_exact;
+ pub use list::read_thread_item_from_rollout;
+ pub use list::read_thread_item_from_rollout_with_indexed_preview;
+ pub use list::rollout_date_parts;
++pub use list::snapshot_all_rollout_paths_by_rollout_id;
+ pub use list::snapshot_rollout_paths_by_rollout_id;
+ pub use maintenance::MAX_CONCURRENT_ROLLOUT_MIGRATIONS;
+ pub use maintenance::RolloutMaintenanceGuard;
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index 8207c18cf4d7a96ee8ec62ea5a3de7de7c31e4ef..1736b1a3e1da7786f979325328d7eba9334bb1ef 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -2280,8 +2280,27 @@ pub async fn index_rollout_paths_by_rollout_id(
+ pub async fn snapshot_rollout_paths_by_rollout_id(
+     codex_home: &Path,
+     rollout_ids: &HashSet<RolloutId>,
++) -> io::Result<Option<RolloutPathSnapshot>> {
++    snapshot_rollout_paths(codex_home, Some(rollout_ids), false).await
++}
++
++/// Captures unambiguous rollout paths for a migration pass.
++///
++/// IDs with multiple physical files are omitted because a later directory traversal could select
++/// a different file. Callers must fall back to a fresh traversal for omitted IDs.
++pub async fn snapshot_all_rollout_paths_by_rollout_id(
++    codex_home: &Path,
++) -> io::Result<Option<RolloutPathSnapshot>> {
++    snapshot_rollout_paths(codex_home, None, true).await
++}
++
++async fn snapshot_rollout_paths(
++    codex_home: &Path,
++    rollout_ids: Option<&HashSet<RolloutId>>,
++    reject_ambiguous: bool,
+ ) -> io::Result<Option<RolloutPathSnapshot>> {
+     let mut paths = HashMap::new();
++    let mut ambiguous = HashSet::new();
+     let mut directories = DirectorySnapshot {
+         directories: Vec::new(),
+         valid: true,
+@@ -2290,9 +2309,18 @@ pub async fn snapshot_rollout_paths_by_rollout_id(
+         visit_rollout_filenames_recording::<()>(
+             codex_home.join(subdir).as_path(),
+             /*excluded_path*/ None,
+-            |file_name| rollout_ids.contains(&file_name.rollout_id()),
++            |file_name| rollout_ids.is_none_or(|ids| ids.contains(&file_name.rollout_id())),
+             |file_name, path| {
+-                paths.entry(file_name.rollout_id()).or_insert(path);
++                match paths.entry(file_name.rollout_id()) {
++                    std::collections::hash_map::Entry::Vacant(entry) => {
++                        entry.insert(path);
++                    }
++                    std::collections::hash_map::Entry::Occupied(entry) => {
++                        if entry.get() != &path {
++                            ambiguous.insert(*entry.key());
++                        }
++                    }
++                }
+                 ControlFlow::Continue(())
+             },
+             Some(&mut directories),
+@@ -2302,6 +2330,9 @@ pub async fn snapshot_rollout_paths_by_rollout_id(
+     if !directories.valid {
+         return Ok(None);
+     }
++    if reject_ambiguous {
++        paths.retain(|id, _| !ambiguous.contains(id));
++    }
+     if !directories.is_current().await {
+         return Err(io::Error::new(
+             io::ErrorKind::Interrupted,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
+index 1e79b7dfe69284e2e93d918e6c883e2644b54e3e..7496348f49d6152970a4d84a8caccd79b1396607 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration.rs
+@@ -108,7 +108,8 @@ mod lineage_projection_tests;
+ use canonicalizer::LegacyRolloutCanonicalizer;
+ use dependencies::MigrationAdmission;
+ use lineage::LegacyLineageMigrationPlan;
+-use lineage::contains_convertible_rollout_reference;
++use lineage::LineageInspectionCache;
++use lineage::contains_convertible_rollout_reference_with_cache;
+ use lineage::plan_legacy_lineage;
+ pub use lineage_manifest::RolloutMigrationAdditionalFreeSpace;
+ pub use lineage_manifest::RolloutMigrationHistoryBaseDependency;
+@@ -448,6 +449,7 @@ impl LocalThreadStore {
+                     &mut limiter,
+                     admission,
+                     Some(guard),
++                    None,
+                 )
+                 .await;
+             if matches!(admission, MigrationAdmission::RequiresExclusive) {
+@@ -596,6 +598,7 @@ impl LocalThreadStore {
+         };
+         let total_paths = paths.len();
+         let mut report = RolloutMigrationReport::default();
++        let mut lineage_cache = LineageInspectionCache::default();
+
+         for (index, path) in paths.into_iter().enumerate() {
+             let job_guard = match options.mode {
+@@ -614,6 +617,7 @@ impl LocalThreadStore {
+                     &mut limiter,
+                     &mut MigrationAdmission::Manual,
+                     job_guard,
++                    Some(&mut lineage_cache),
+                 )
+                 .await?;
+             let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
+@@ -638,6 +642,7 @@ impl LocalThreadStore {
+         limiter: &mut RolloutMigrationRateLimiter,
+         admission: &mut MigrationAdmission,
+         job_guard: Option<RolloutMaintenanceJobGuard>,
++        mut lineage_cache: Option<&mut LineageInspectionCache>,
+     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
+         let job_guard = job_guard.map(Arc::new);
+         let mut retried_moved_path = false;
+@@ -759,9 +764,10 @@ impl LocalThreadStore {
+                 .map_err(migration_error)?;
+         let paginated_reference_lineage = metadata.meta.history_mode
+             == ThreadHistoryMode::Paginated
+-            && contains_convertible_rollout_reference(
++            && contains_convertible_rollout_reference_with_cache(
+                 self.config.codex_home.as_path(),
+                 path.as_path(),
++                lineage_cache.as_deref_mut(),
+             )
+             .await?;
+         if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+@@ -1009,9 +1015,10 @@ impl LocalThreadStore {
+         }
+         let locked_reference_lineage = locked_metadata.meta.history_mode
+             == ThreadHistoryMode::Paginated
+-            && contains_convertible_rollout_reference(
++            && contains_convertible_rollout_reference_with_cache(
+                 self.config.codex_home.as_path(),
+                 path.as_path(),
++                lineage_cache,
+             )
+             .await?;
+         if locked_metadata.meta.id != thread_id
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
+index 171ee72311325c30cee0b88df3da0172030468c5..f6b41b483d999f1c1b8ac4b53264da38817aa53b 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
+@@ -21,6 +21,7 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_rollout::RolloutItem;
+ use codex_rollout::RolloutLine;
++use futures::StreamExt;
+ use sha2::Digest;
+ use sha2::Sha256;
+ use tokio::io::AsyncReadExt;
+@@ -31,6 +32,8 @@ use super::parse_rollout_timestamp;
+ use super::turn_context_cache::DecodeMode;
+ use super::turn_context_cache::TurnContextCache;
+ use crate::ThreadStoreResult;
++use crate::local::thread_history::ProjectionLeafIdentity as FileIdentity;
++use crate::local::thread_history::projection_leaf_identity as leaf_identity;
+
+ #[path = "review_input_auth.rs"]
+ mod review_input_auth;
+@@ -572,6 +575,283 @@ pub(super) async fn contains_convertible_rollout_reference(
+     }
+ }
+
++/// Parsed ancestry shared only within one explicit migration pass.
++#[derive(Default)]
++pub(super) struct LineageInspectionCache {
++    codex_home: Option<PathBuf>,
++    paths: Option<codex_rollout::RolloutPathSnapshot>,
++    sources: HashMap<PathBuf, usize>,
++    nodes: Vec<CachedLineageInspection>,
++    #[cfg(test)]
++    stats: LineageInspectionStats,
++}
++
++/// One source and the cached ancestry following it, with file identity for revalidation.
++struct CachedLineageInspection {
++    source: InspectedLineageSource,
++    convertible: bool,
++    predecessor: Option<usize>,
++}
++
++/// The source metadata needed to validate a `history_base` edge and detect changes.
++struct InspectedLineageSource {
++    path: PathBuf,
++    canonical_path: PathBuf,
++    identity: FileIdentity,
++    thread_id: ThreadId,
++    history_mode: ThreadHistoryMode,
++}
++
++/// Counts the work performed by cached startup inspection in synthetic tests.
++#[cfg(test)]
++#[derive(Default, Debug)]
++pub(super) struct LineageInspectionStats {
++    pub(super) path_indexes: usize,
++    pub(super) source_reads: usize,
++    pub(super) walk_steps: usize,
++    pub(super) source_validations: usize,
++}
++
++impl LineageInspectionCache {
++    fn clear(&mut self) {
++        self.paths = None;
++        self.sources.clear();
++        self.nodes.clear();
++    }
++
++    #[cfg(test)]
++    pub(super) fn stats(&self) -> &LineageInspectionStats {
++        &self.stats
++    }
++}
++
++pub(super) async fn contains_convertible_rollout_reference_cached(
++    codex_home: &Path,
++    selected_path: &Path,
++    cache: &mut LineageInspectionCache,
++) -> ThreadStoreResult<bool> {
++    if cache.codex_home.as_deref() != Some(codex_home) {
++        cache.clear();
++        cache.codex_home = Some(codex_home.to_path_buf());
++    }
++    if let Some(paths) = &cache.paths
++        && !paths.is_current().await
++    {
++        cache.clear();
++    }
++    let result = inspect_cached_lineage(codex_home, selected_path, cache).await;
++    if let Some(paths) = &cache.paths
++        && !paths.is_current().await
++    {
++        cache.clear();
++        return contains_convertible_rollout_reference(codex_home, selected_path).await;
++    }
++    match result {
++        Ok(Some(convertible)) => Ok(convertible),
++        Ok(None) => {
++            cache.clear();
++            contains_convertible_rollout_reference(codex_home, selected_path).await
++        }
++        Err(error) => Err(error),
++    }
++}
++
++pub(super) async fn contains_convertible_rollout_reference_with_cache(
++    codex_home: &Path,
++    selected_path: &Path,
++    cache: Option<&mut LineageInspectionCache>,
++) -> ThreadStoreResult<bool> {
++    match cache {
++        Some(cache) => {
++            contains_convertible_rollout_reference_cached(codex_home, selected_path, cache).await
++        }
++        None => contains_convertible_rollout_reference(codex_home, selected_path).await,
++    }
++}
++
++/// Returns `None` when a filesystem cannot support identity-checked reuse.
++async fn inspect_cached_lineage(
++    codex_home: &Path,
++    selected_path: &Path,
++    cache: &mut LineageInspectionCache,
++) -> ThreadStoreResult<Option<bool>> {
++    let mut source_path = codex_rollout::existing_rollout_path(selected_path)
++        .await
++        .ok_or_else(|| migration_error("selected rollout does not exist"))?;
++    let mut expected_id = None;
++    let mut active = HashSet::new();
++    let mut pending = Vec::new();
++
++    loop {
++        #[cfg(test)]
++        {
++            cache.stats.walk_steps += 1;
++        }
++        if let Some(index) = cache.sources.get(&source_path).copied() {
++            if !validate_cached_sources(&pending, Some(index), cache).await {
++                return Ok(None);
++            }
++            let cached = &cache.nodes[index];
++            validate_history_base_source(&cached.source, expected_id)?;
++            let mut next = Some(index);
++            while let Some(index) = next {
++                let source = &cache.nodes[index];
++                if active.contains(&source.source.canonical_path) {
++                    return Err(migration_error(format!(
++                        "rollout migration lineage contains a cycle at {}",
++                        source.source.path.display()
++                    )));
++                }
++                next = source.predecessor;
++            }
++            let convertible = cached.convertible;
++            remember_inspected_sources(cache, pending, Some(index), convertible);
++            return Ok(Some(convertible));
++        }
++
++        let canonical_path = tokio::fs::canonicalize(&source_path)
++            .await
++            .map_err(migration_error)?;
++        if !active.insert(canonical_path.clone()) {
++            return Err(migration_error(format!(
++                "rollout migration lineage contains a cycle at {}",
++                source_path.display()
++            )));
++        }
++        let Some(identity) = leaf_identity(&source_path).await else {
++            return Ok(None);
++        };
++        #[cfg(test)]
++        {
++            cache.stats.source_reads += 1;
++        }
++        let metadata = codex_rollout::read_session_meta_line(&source_path)
++            .await
++            .map_err(migration_error)?;
++        let source = InspectedLineageSource {
++            path: source_path.clone(),
++            canonical_path,
++            identity,
++            thread_id: metadata.meta.id,
++            history_mode: metadata.meta.history_mode,
++        };
++        validate_history_base_source(&source, expected_id)?;
++        let predecessor = inspect_predecessor_with_metadata(&source_path, metadata).await?;
++        pending.push(source);
++        match predecessor {
++            Some(LegacyLineagePredecessor::HistoryBase(position)) => {
++                if cache.paths.is_none() {
++                    #[cfg(test)]
++                    {
++                        cache.stats.path_indexes += 1;
++                    }
++                    cache.paths =
++                        codex_rollout::snapshot_all_rollout_paths_by_rollout_id(codex_home)
++                            .await
++                            .ok()
++                            .flatten();
++                    if cache.paths.is_none() {
++                        return Ok(None);
++                    }
++                }
++                let Some(path) = cache
++                    .paths
++                    .as_ref()
++                    .and_then(|paths| paths.get(&position.thread_id))
++                    .cloned()
++                else {
++                    return Ok(None);
++                };
++                source_path = path;
++                expected_id = Some(position.thread_id);
++            }
++            predecessor => {
++                let convertible = matches!(
++                    predecessor,
++                    Some(LegacyLineagePredecessor::RolloutReference(reference))
++                        if reference_is_history_base_compatible(&reference)
++                );
++                if cache.paths.is_some() {
++                    if !validate_cached_sources(&pending, None, cache).await {
++                        return Ok(None);
++                    }
++                    remember_inspected_sources(cache, pending, None, convertible);
++                }
++                return Ok(Some(convertible));
++            }
++        }
++    }
++}
++
++fn validate_history_base_source(
++    source: &InspectedLineageSource,
++    expected_id: Option<RolloutId>,
++) -> ThreadStoreResult<()> {
++    let Some(expected_id) = expected_id else {
++        return Ok(());
++    };
++    let rollout_id = codex_rollout::rollout_id_from_path(
++        codex_rollout::plain_rollout_path(&source.path).as_path(),
++    )
++    .unwrap_or(source.thread_id);
++    if rollout_id != expected_id {
++        return Err(migration_error(
++            "rollout migration history_base resolved another physical rollout",
++        ));
++    }
++    if source.history_mode != ThreadHistoryMode::Paginated {
++        return Err(migration_error(
++            "rollout migration history_base source is not Paginated",
++        ));
++    }
++    Ok(())
++}
++
++async fn validate_cached_sources(
++    pending: &[InspectedLineageSource],
++    cached: Option<usize>,
++    cache: &mut LineageInspectionCache,
++) -> bool {
++    let mut identities = pending
++        .iter()
++        .map(|source| (source.path.clone(), source.identity.clone()))
++        .collect::<Vec<_>>();
++    let mut next = cached;
++    while let Some(index) = next {
++        let source = &cache.nodes[index];
++        identities.push((source.source.path.clone(), source.source.identity.clone()));
++        next = source.predecessor;
++    }
++    #[cfg(test)]
++    {
++        cache.stats.source_validations += identities.len();
++    }
++    futures::stream::iter(identities)
++        .map(|(path, identity)| async move { leaf_identity(&path).await == Some(identity) })
++        .buffer_unordered(16)
++        .all(|current| async move { current })
++        .await
++}
++
++fn remember_inspected_sources(
++    cache: &mut LineageInspectionCache,
++    pending: Vec<InspectedLineageSource>,
++    mut predecessor: Option<usize>,
++    convertible: bool,
++) {
++    for source in pending.into_iter().rev() {
++        let path = source.path.clone();
++        let index = cache.nodes.len();
++        cache.nodes.push(CachedLineageInspection {
++            source,
++            convertible,
++            predecessor,
++        });
++        cache.sources.insert(path, index);
++        predecessor = Some(index);
++    }
++}
++
+ pub(super) async fn has_leading_filtered_rollout_reference(path: &Path) -> ThreadStoreResult<bool> {
+     Ok(matches!(
+         inspect_predecessor(path).await?,
+@@ -584,6 +864,13 @@ async fn inspect_predecessor(path: &Path) -> ThreadStoreResult<Option<LegacyLine
+     let session_meta = codex_rollout::read_session_meta_line(path)
+         .await
+         .map_err(migration_error)?;
++    inspect_predecessor_with_metadata(path, session_meta).await
++}
++
++async fn inspect_predecessor_with_metadata(
++    path: &Path,
++    session_meta: SessionMetaLine,
++) -> ThreadStoreResult<Option<LegacyLineagePredecessor>> {
+     if let Some(position) = session_meta.meta.history_base {
+         return Ok(Some(LegacyLineagePredecessor::HistoryBase(position)));
+     }
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup.rs b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
+index 6ac3a642a1fdfa997a3892853efc246b24a2f29c..f8e18b9a057a6e6f3b93e67f4e5aeee0d79cd380 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/startup.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
+@@ -41,7 +41,8 @@ use super::RolloutMigrationStatus;
+ use super::dependencies::MigrationAdmission;
+ use super::dependencies::discover_dependencies;
+ use super::find_all_rollout_paths;
+-use super::lineage::contains_convertible_rollout_reference;
++use super::lineage::LineageInspectionCache;
++use super::lineage::contains_convertible_rollout_reference_with_cache;
+ use super::lineage::has_leading_filtered_rollout_reference;
+ use super::migration_error;
+ use super::publish::migration_journal_path;
+@@ -711,8 +712,9 @@ pub(super) async fn migrate_rollouts_on_startup(store: &LocalThreadStore) -> Thr
+     }
+
+     let mut unresolved = false;
++    let mut lineage_cache = LineageInspectionCache::default();
+     for path in candidates {
+-        match inspect_rollout_path(store, path).await? {
++        match inspect_rollout_path_with_cache(store, path, Some(&mut lineage_cache)).await? {
+             StartupInspection::Paginated
+             | StartupInspection::Compatible
+             | StartupInspection::Skipped => {}
+@@ -887,6 +889,14 @@ async fn update_skip_after_outcome(
+ async fn inspect_rollout_path(
+     store: &LocalThreadStore,
+     path: &Path,
++) -> ThreadStoreResult<StartupInspection> {
++    inspect_rollout_path_with_cache(store, path, None).await
++}
++
++async fn inspect_rollout_path_with_cache(
++    store: &LocalThreadStore,
++    path: &Path,
++    cache: Option<&mut LineageInspectionCache>,
+ ) -> ThreadStoreResult<StartupInspection> {
+     let before = rollout_fingerprint(path).await?;
+     match codex_rollout::read_session_meta_line(path).await {
+@@ -894,8 +904,12 @@ async fn inspect_rollout_path(
+             Ok(StartupInspection::Legacy)
+         }
+         Ok(_) => {
+-            if contains_convertible_rollout_reference(store.config.codex_home.as_path(), path)
+-                .await?
++            if contains_convertible_rollout_reference_with_cache(
++                store.config.codex_home.as_path(),
++                path,
++                cache,
++            )
++            .await?
+             {
+                 Ok(StartupInspection::ReferenceBacked)
+             } else if has_leading_filtered_rollout_reference(path).await? {
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
+index 9166edaf9989b0ec9fe04e4fbc74f6b5ce59919d..011db4cb4442f2bfde1b77c8abd021f7844d34ff 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
+@@ -180,6 +180,337 @@ async fn indexed_store(home: &Path) -> LocalThreadStore {
+     LocalThreadStore::new(config, Some(state_db))
+ }
+
++#[cfg(unix)]
++async fn inspect_cached(
++    home: &Path,
++    path: &Path,
++    cache: &mut super::super::lineage::LineageInspectionCache,
++) -> crate::ThreadStoreResult<bool> {
++    super::super::lineage::contains_convertible_rollout_reference_cached(home, path, cache).await
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn shared_paginated_ancestors_are_inspected_once_per_startup_pass() {
++    const ANCESTORS: usize = 16;
++    const THREADS: usize = 48;
++
++    let home = TempDir::new().expect("create Codex home");
++    let mut predecessor = ThreadId::new();
++    write_rollout(home.path(), predecessor, ThreadHistoryMode::Paginated);
++    for ordinal in 1..ANCESTORS {
++        let thread_id = ThreadId::new();
++        let path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
++        set_history_base(
++            &path,
++            HistoryPosition {
++                thread_id: predecessor,
++                end_ordinal_exclusive: ordinal as u64,
++                end_byte_offset: ordinal as u64,
++            },
++        );
++        predecessor = thread_id;
++    }
++    let mut paths = Vec::new();
++    for _ in 0..THREADS {
++        let path = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
++        set_history_base(
++            &path,
++            HistoryPosition {
++                thread_id: predecessor,
++                end_ordinal_exclusive: ANCESTORS as u64,
++                end_byte_offset: ANCESTORS as u64,
++            },
++        );
++        paths.push(path);
++    }
++
++    let mut cache = super::super::lineage::LineageInspectionCache::default();
++    for path in &paths {
++        assert!(
++            !super::super::lineage::contains_convertible_rollout_reference_cached(
++                home.path(),
++                path,
++                &mut cache,
++            )
++            .await
++            .expect("inspect paginated ancestry")
++        );
++    }
++    let stats = cache.stats();
++    eprintln!("shared ancestry inspection: {stats:?}");
++    assert_eq!(stats.path_indexes, 1);
++    assert_eq!(stats.source_reads, ANCESTORS + THREADS);
++    assert!(stats.walk_steps <= ANCESTORS + 2 * THREADS);
++    assert_eq!(stats.source_validations, THREADS * (ANCESTORS + 1));
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn cached_startup_inspection_detects_in_place_edits_and_replacements() {
++    let home = TempDir::new().expect("create Codex home");
++    let ancestor_id = ThreadId::new();
++    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
++    let original = fs::read(&ancestor).expect("read original ancestor");
++    prepend_rollout_reference(
++        &ancestor,
++        RolloutReferenceItem {
++            rollout_id: Some(ThreadId::new()),
++            rollout_path: home.path().join("legacy-parent.jsonl"),
++            thread_id: Some(ThreadId::new()),
++            rollout_timestamp: None,
++            segment_id: Some(SegmentId::new()),
++            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        },
++    );
++    let reference = fs::read(&ancestor).expect("read reference-backed ancestor");
++    assert!(reference.len() > original.len());
++    let mut padded_original = original;
++    padded_original.resize(reference.len(), b' ');
++    fs::write(&ancestor, &padded_original).expect("restore equal-length ancestor");
++    let descendant_id = ThreadId::new();
++    let descendant = write_rollout(home.path(), descendant_id, ThreadHistoryMode::Paginated);
++    set_history_base(
++        &descendant,
++        HistoryPosition {
++            thread_id: ancestor_id,
++            end_ordinal_exclusive: 2,
++            end_byte_offset: 1,
++        },
++    );
++    let mut cache = super::super::lineage::LineageInspectionCache::default();
++    assert!(
++        !inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("inspect original")
++    );
++
++    // An older process can edit a predecessor without changing any directory entry.
++    fs::write(&ancestor, &reference).expect("rewrite ancestor in place");
++    assert_eq!(
++        fs::metadata(&ancestor).expect("metadata").len(),
++        reference.len() as u64
++    );
++    assert!(
++        inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("detect in-place rewrite")
++    );
++    assert!(
++        inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("cache rewritten lineage")
++    );
++
++    let replacement = ancestor.with_extension("replacement");
++    fs::write(&replacement, &padded_original).expect("write replacement");
++    fs::rename(&replacement, &ancestor).expect("replace ancestor");
++    assert!(
++        !inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("detect replacement")
++    );
++    fs::remove_file(&ancestor).expect("remove ancestor");
++    assert!(
++        inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .is_err()
++    );
++    fs::write(&ancestor, &reference).expect("restore ancestor");
++    assert!(
++        inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("detect restored ancestor")
++    );
++
++    let reference_text = String::from_utf8(reference).expect("reference is UTF-8");
++    let mut lines = reference_text.lines();
++    let metadata = lines.next().expect("session metadata");
++    let mut reference_line =
++        codex_rollout::parse_rollout_line(lines.next().expect("reference record"))
++            .expect("parse reference");
++    let RolloutItem::RolloutReference(reference) = &mut reference_line.item else {
++        panic!("expected a rollout reference");
++    };
++    reference.nth_user_message = Some(1);
++    let mut filtered = format!(
++        "{metadata}\n{}\n",
++        serde_json::to_string(&reference_line).expect("serialize filtered reference")
++    );
++    for line in lines {
++        filtered.push_str(line);
++        filtered.push('\n');
++    }
++    fs::write(&ancestor, filtered).expect("write filtered reference");
++    assert!(
++        !inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("filtered reference remains compatible")
++    );
++    assert!(
++        !inspect_cached(home.path(), &descendant, &mut cache)
++            .await
++            .expect("cache filtered reference")
++    );
++
++    write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Legacy);
++    let error = inspect_cached(home.path(), &descendant, &mut cache)
++        .await
++        .expect_err("a legacy history_base source is invalid");
++    assert!(error.to_string().contains("source is not Paginated"));
++
++    write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
++    set_history_base(
++        &ancestor,
++        HistoryPosition {
++            thread_id: descendant_id,
++            end_ordinal_exclusive: 2,
++            end_byte_offset: 1,
++        },
++    );
++    let error = inspect_cached(home.path(), &descendant, &mut cache)
++        .await
++        .expect_err("a cyclic history_base is invalid");
++    assert!(error.to_string().contains("contains a cycle"));
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn cached_startup_inspection_falls_back_for_ambiguous_rollout_ids() {
++    let home = TempDir::new().expect("create Codex home");
++    let ancestor_id = ThreadId::new();
++    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
++    let archived = home.path().join("archived_sessions");
++    fs::create_dir_all(&archived).expect("create archive directory");
++    fs::copy(
++        &ancestor,
++        archived.join(ancestor.file_name().expect("filename")),
++    )
++    .expect("duplicate physical rollout ID");
++    let descendant = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
++    set_history_base(
++        &descendant,
++        HistoryPosition {
++            thread_id: ancestor_id,
++            end_ordinal_exclusive: 2,
++            end_byte_offset: 1,
++        },
++    );
++    let mut cache = super::super::lineage::LineageInspectionCache::default();
++    for _ in 0..2 {
++        assert!(
++            !super::super::lineage::contains_convertible_rollout_reference_cached(
++                home.path(),
++                &descendant,
++                &mut cache,
++            )
++            .await
++            .expect("inspect ambiguous lineage with the original traversal")
++        );
++    }
++    assert_eq!(cache.stats().path_indexes, 2);
++
++    let unique_id = ThreadId::new();
++    write_rollout(home.path(), unique_id, ThreadHistoryMode::Paginated);
++    let mut unique_descendants = Vec::new();
++    for _ in 0..2 {
++        let path = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
++        set_history_base(
++            &path,
++            HistoryPosition {
++                thread_id: unique_id,
++                end_ordinal_exclusive: 2,
++                end_byte_offset: 1,
++            },
++        );
++        unique_descendants.push(path);
++    }
++    for path in &unique_descendants {
++        assert!(
++            !inspect_cached(home.path(), path, &mut cache)
++                .await
++                .expect("inspect an unambiguous lineage")
++        );
++    }
++    assert_eq!(cache.stats().path_indexes, 3);
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn batch_migration_rechecks_a_shared_ancestor_between_threads() {
++    let home = TempDir::new().expect("create Codex home");
++    let ancestor_id = ThreadId::new();
++    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
++    let mut original = fs::read(&ancestor).expect("read original ancestor");
++    prepend_rollout_reference(
++        &ancestor,
++        RolloutReferenceItem {
++            rollout_id: Some(ThreadId::new()),
++            rollout_path: home.path().join("missing-legacy-parent.jsonl"),
++            thread_id: Some(ThreadId::new()),
++            rollout_timestamp: None,
++            segment_id: Some(SegmentId::new()),
++            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        },
++    );
++    let reference = fs::read(&ancestor).expect("read reference-backed ancestor");
++    assert!(reference.len() > original.len());
++    original.resize(reference.len(), b' ');
++    fs::write(&ancestor, original).expect("restore equal-length ancestor");
++    let threads = [ThreadId::new(), ThreadId::new()];
++    for thread_id in threads {
++        let path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
++        set_history_base(
++            &path,
++            HistoryPosition {
++                thread_id: ancestor_id,
++                end_ordinal_exclusive: 2,
++                end_byte_offset: 1,
++            },
++        );
++    }
++    let store = indexed_store(home.path()).await;
++    let mut replaced = false;
++    let report = store
++        .migrate_rollouts_with_progress(
++            super::super::RolloutMigrationOptions {
++                thread_ids: threads.to_vec(),
++                ..Default::default()
++            },
++            |progress| {
++                if !replaced
++                    && progress.outcome_status
++                        == Some(super::super::RolloutMigrationStatus::AlreadyPaginated)
++                {
++                    fs::write(&ancestor, &reference).expect("rewrite shared ancestor");
++                    replaced = true;
++                }
++            },
++        )
++        .await
++        .expect("inspect both threads");
++    assert!(replaced);
++    assert_eq!(report.outcomes.len(), 2);
++    assert_eq!(
++        report.outcomes[0].status,
++        super::super::RolloutMigrationStatus::AlreadyPaginated
++    );
++    // The reference intentionally names a missing parent. A failed conversion plan proves the
++    // second thread was not incorrectly reported as already native using the cached ancestor.
++    assert_eq!(
++        report.outcomes[1].status,
++        super::super::RolloutMigrationStatus::Failed
++    );
++    assert_eq!(
++        report.outcomes[1].failure_reason,
++        Some(super::super::RolloutMigrationFailureReason::LegacyRolloutConversionFailed)
++    );
++}
++
+ #[tokio::test]
+ async fn records_and_advances_checked_thread() {
+     let home = TempDir::new().expect("create Codex home");
