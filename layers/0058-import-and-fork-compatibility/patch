@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index 71fe0bc223353f6aedfd07b796fe56ff3c3d719d..e2f7dc14ffb20675736ddd56104dc211d00dec16 100644
+index c2bcf7b1057e6f60224623c0868c40665dcb1235..356ea8e2475b8fac3ab4f42598c9da69bfb6ecf3 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
-@@ -1574,6 +1574,7 @@ fn raw_response_item_completed_notification(
+@@ -1589,6 +1589,7 @@ fn raw_response_item_completed_notification(
              thread_id: conversation_id.to_string(),
              turn_id: turn_id.to_string(),
              item: thread_item,
@@ -10,7 +10,7 @@ index 71fe0bc223353f6aedfd07b796fe56ff3c3d719d..e2f7dc14ffb20675736ddd56104dc211
              completed_at_ms: now_unix_timestamp_ms(),
          };
          return ServerNotification::ItemCompleted(notification);
-@@ -1600,6 +1601,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
+@@ -1615,6 +1616,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
              .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
          text,
          phase: Some(MessagePhase::Commentary),
@@ -19,10 +19,10 @@ index 71fe0bc223353f6aedfd07b796fe56ff3c3d719d..e2f7dc14ffb20675736ddd56104dc211
          questions: None,
          memory_citation: None,
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 83af859b6a7a6f5e24083032f48a27333acf8553..5c298a11419cbb174d517d37e2f435e4d83a66b4 100644
+index b270fd081b4e9e698c3c91e8b6b91f0a430024af..3da75958cc9cc8d336fd8de3255515be0cff628e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -52,7 +52,6 @@ use codex_protocol::error::CodexErrorDetails;
+@@ -58,7 +58,6 @@ use codex_protocol::error::CodexErrorDetails;
  use codex_protocol::mcp::ClientMcpExtensions;
  use codex_protocol::mcp::plain_output_text;
  use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
@@ -30,7 +30,7 @@ index 83af859b6a7a6f5e24083032f48a27333acf8553..5c298a11419cbb174d517d37e2f435e4
  use codex_protocol::protocol::SubAgentSource;
  use codex_protocol::protocol::ThreadHistoryMode;
  use codex_rollout::ReverseJsonlScanner;
-@@ -4562,6 +4561,7 @@ impl ThreadRequestProcessor {
+@@ -4620,6 +4619,7 @@ impl ThreadRequestProcessor {
                      ThreadItemEntry {
                          turn_id: turn.id.clone(),
                          item,
@@ -38,7 +38,7 @@ index 83af859b6a7a6f5e24083032f48a27333acf8553..5c298a11419cbb174d517d37e2f435e4
                          started_at_ms: timestamps.started_at_ms,
                          completed_at_ms: timestamps.completed_at_ms,
                      }
-@@ -8235,8 +8235,10 @@ impl ThreadRequestProcessor {
+@@ -8300,8 +8300,10 @@ impl ThreadRequestProcessor {
              .and_then(|fork| fork.preview_before_compaction.take())
          {
              preview

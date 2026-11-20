@@ -14,10 +14,10 @@ index f185a4371815992bbdf1b154a0c4509e63346c5f..b09f67f87fda05754fe26477ee9c514e
 + */
 +allowRetryableError?: boolean, };
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 8a9aac9034998bca88063a9cf1c17596d1f8f07b..25a3ce568dc38b6a086dabeb335e7ffeb5431150 100644
+index 4e911475d45c78d88553d6c1632233d1e7aadf81..56a08ae1ce7b70841a1e88e885512ac554914849 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
-@@ -3040,6 +3040,33 @@ mod tests {
+@@ -3073,6 +3073,33 @@ mod tests {
          Ok(())
      }
 
@@ -67,10 +67,10 @@ index cdf6ca20a48c9c23447cf17311f0762c846d9281..a361090a4f71d65360ffbd882e0835bf
 
  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 1467e13752d2de7020a02d7f810ef955d5d9e50a..cb92318e64d74c53afc508ff2a1040a5e48aad4e 100644
+index 231e08597d469988758811278b8d42b75632e653..3ae55af3979a7817b0d7bc8277cd9148d6559315 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
-@@ -654,6 +654,16 @@ API-key and explicitly external-auth providers bypass discovery. Custom ChatGPT-
+@@ -686,6 +686,16 @@ API-key and explicitly external-auth providers bypass discovery. Custom ChatGPT-
  require discovery before being treated as independent. Changing a workspace-bound thread's
  bootstrap origin requires a new thread.
 
@@ -108,26 +108,26 @@ index ce5e1947d2fdce7ddbe0acba5820071ed6049a99..3eecaca2ae1612a6f9531a8a1c301a89
      error(INVALID_REQUEST_ERROR_CODE, message)
  }
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index bdf7063975741b2d664e8c21d0c80c1b606e25b7..1537f31b97ef43dcee0fd084f24b189259e52374 100644
+index 6c21d98aeddb0261ba74ab717f9faf9d11d74a03..15178fe84585ee590534812081da7059c4faac8a 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
-@@ -10,6 +10,7 @@ use crate::attestation::app_server_attestation_provider;
+@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
+ use crate::attestation::app_server_attestation_provider;
  use crate::config_manager::ConfigManager;
  use crate::connection_rpc_gate::ConnectionRpcGate;
- use crate::current_time::app_server_time_provider;
 +use crate::error_code::auth_status_unavailable;
  use crate::error_code::internal_error;
  use crate::error_code::invalid_params;
  use crate::error_code::invalid_request;
-@@ -54,6 +55,7 @@ use crate::request_processors::WindowsSandboxRequestProcessor;
- use crate::request_processors::account_processor::handle_gcp_setup;
+@@ -55,6 +56,7 @@ use crate::request_processors::account_processor::handle_gcp_setup;
  use crate::request_processors::read_server_diagnostics;
+ use crate::request_processors::thread_list_state::ThreadListState;
  use crate::request_serialization::QueuedInitializedRequest;
 +use crate::request_serialization::RequestSerializationAccess;
  use crate::request_serialization::RequestSerializationQueueKey;
  use crate::request_serialization::RequestSerializationQueues;
  use crate::skills_watcher::SkillsWatcher;
-@@ -70,6 +72,7 @@ use codex_app_server_protocol::ClientRequest;
+@@ -71,6 +73,7 @@ use codex_app_server_protocol::ClientRequest;
  use codex_app_server_protocol::ClientResponsePayload;
  use codex_app_server_protocol::ConfigWarningNotification;
  use codex_app_server_protocol::ExperimentalApi;
@@ -135,15 +135,15 @@ index bdf7063975741b2d664e8c21d0c80c1b606e25b7..1537f31b97ef43dcee0fd084f24b1892
  use codex_app_server_protocol::JSONRPCError;
  use codex_app_server_protocol::JSONRPCErrorError;
  use codex_app_server_protocol::JSONRPCNotification;
-@@ -110,6 +113,7 @@ use tokio::sync::Mutex;
- use tokio::sync::RwLock;
+@@ -112,6 +115,7 @@ use codex_thread_store::ThreadStoreError;
+ use tokio::sync::Mutex;
  use tokio::sync::broadcast;
  use tokio::sync::mpsc;
 +use tokio::sync::oneshot;
  use tokio::sync::watch;
  use tokio::time::Duration;
  use tokio::time::timeout;
-@@ -120,6 +124,7 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
+@@ -122,6 +126,7 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
  use crate::turn_admission::TurnAdmission;
 
  const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
@@ -151,7 +151,7 @@ index bdf7063975741b2d664e8c21d0c80c1b606e25b7..1537f31b97ef43dcee0fd084f24b1892
 
  /// Erases a selected handler's future so the dispatcher does not retain every request variant.
  type InitializedRequestFuture = Pin<
-@@ -1113,6 +1118,21 @@ impl MessageProcessor {
+@@ -1111,6 +1116,21 @@ impl MessageProcessor {
              &codex_request,
          );
 
@@ -173,8 +173,8 @@ index bdf7063975741b2d664e8c21d0c80c1b606e25b7..1537f31b97ef43dcee0fd084f24b1892
          let (turn_admission, recheck_turn_admission) = match &codex_request {
              ClientRequest::ThreadStart { .. }
              | ClientRequest::ThreadFork { .. }
-@@ -1200,6 +1220,82 @@ impl MessageProcessor {
-         Ok(())
+@@ -1250,6 +1270,82 @@ impl MessageProcessor {
+         }))
      }
 
 +    async fn dispatch_retryable_auth_status(
@@ -1238,10 +1238,10 @@ index 4f8118ec2b8053041f1c75bbb04011fb57b4886d..955c6476cf2357534e5aa041f356e348
          .await?;
 
 diff --git a/codex-rs/app-server/tests/suite/v2/account.rs b/codex-rs/app-server/tests/suite/v2/account.rs
-index c8bb9eccbe9ff1654f9521ed53b2eb65a7c6fb4b..b8a20089e2524b07d3cbd9d106bc3e333e09004b 100644
+index 64667017d347b4e8d954faac681b6cc9844be2b6..a9be1e3b53cafb99c796826ca93dec6ec7197692 100644
 --- a/codex-rs/app-server/tests/suite/v2/account.rs
 +++ b/codex-rs/app-server/tests/suite/v2/account.rs
-@@ -2533,6 +2533,7 @@ async fn login_survives_same_owner_token_refresh(
+@@ -2566,6 +2566,7 @@ async fn login_survives_same_owner_token_refresh(
                  .send_get_auth_status_request(GetAuthStatusParams {
                      include_token: Some(true),
                      refresh_token: Some(true),
@@ -1249,7 +1249,7 @@ index c8bb9eccbe9ff1654f9521ed53b2eb65a7c6fb4b..b8a20089e2524b07d3cbd9d106bc3e33
                  })
                  .await?;
              // getAuthStatus reloads config before replying, which can wait for
-@@ -3473,6 +3474,7 @@ region = "us-west-2"
+@@ -3507,6 +3508,7 @@ region = "us-west-2"
          .send_get_auth_status_request(GetAuthStatusParams {
              include_token: Some(false),
              refresh_token: Some(false),
@@ -1257,7 +1257,7 @@ index c8bb9eccbe9ff1654f9521ed53b2eb65a7c6fb4b..b8a20089e2524b07d3cbd9d106bc3e33
          })
          .await?;
      let response = timeout(
-@@ -3746,6 +3748,7 @@ async fn get_account_omits_chatgpt_after_permanent_refresh_failure() -> Result<(
+@@ -3780,6 +3782,7 @@ async fn get_account_omits_chatgpt_after_permanent_refresh_failure() -> Result<(
          .send_get_auth_status_request(GetAuthStatusParams {
              include_token: Some(true),
              refresh_token: Some(true),

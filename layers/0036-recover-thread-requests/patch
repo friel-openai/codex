@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
-index 2d9ea24ce458235e0e4dcee560f8ccb131aa629f..3d84b764503509c535280356208df78b7f101b5b 100644
+index aff0f062414699d197c2d79f7254ddc6d5737df8..c65eeae5146a94e1056f945296121a151314cb1e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 @@ -13,6 +13,7 @@ use codex_protocol::protocol::SessionSource;
@@ -51,18 +51,18 @@ index 2d9ea24ce458235e0e4dcee560f8ccb131aa629f..3d84b764503509c535280356208df78b
              .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
              .await?;
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index a1abf98bf28b68d55c3eca6abb8c35b3033d6dc2..bb56b72c5073d81bb5de239bd597aa35c3188b3e 100644
+index 42ff1d3f8021eac2f9b4c6d21f0a98257557ce44..997298bb281c920a1a58a10434e1113594e06aab 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -69,6 +69,7 @@ pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
- const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
+@@ -88,6 +88,7 @@ pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+ const THREAD_LIST_MAX_FILTER_IDS: usize = 100;
  const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
  const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 +const THREAD_LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
  const MAX_LEGACY_PAGE_DEPTH_HINTS: usize = 256;
  const MAX_LEGACY_PAGE_DEPTH_HINT_BYTES: usize = 512 * 1024;
  const MAX_LEGACY_DISPLAYED_TURNS: usize = 256;
-@@ -2733,7 +2734,7 @@ impl ThreadRequestProcessor {
+@@ -2783,7 +2784,7 @@ impl ThreadRequestProcessor {
              }
          }
          tokio::time::timeout(
@@ -71,7 +71,7 @@ index a1abf98bf28b68d55c3eca6abb8c35b3033d6dc2..bb56b72c5073d81bb5de239bd597aa35
              shutdown_drain.wait_for(|drained| *drained),
          )
          .await
-@@ -5661,9 +5662,9 @@ impl ThreadRequestProcessor {
+@@ -5805,9 +5806,9 @@ impl ThreadRequestProcessor {
                  .thread_state(resumed.conversation_id)
                  .await;
              let drain = state.lock().await.pending_shutdown_drain();

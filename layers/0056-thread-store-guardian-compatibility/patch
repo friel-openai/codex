@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 4dad82b40644f70f557262b76cc7e66447c200af..83af859b6a7a6f5e24083032f48a27333acf8553 100644
+index 24e4e32fe9a042a6ef17a64e05a8bfded29265a5..b270fd081b4e9e698c3c91e8b6b91f0a430024af 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -4799,6 +4799,7 @@ impl ThreadRequestProcessor {
+@@ -4857,6 +4857,7 @@ impl ThreadRequestProcessor {
                      sort_direction: StoreSortDirection::Asc,
                      sort_key: StoreItemSortKey::CreatedAtOrdinal,
                      after_updated_at_ordinal: None,
@@ -10,7 +10,7 @@ index 4dad82b40644f70f557262b76cc7e66447c200af..83af859b6a7a6f5e24083032f48a2733
                  })
                  .await
                  .map_err(paginated_history_list_error)?
-@@ -4854,6 +4855,7 @@ impl ThreadRequestProcessor {
+@@ -4912,6 +4913,7 @@ impl ThreadRequestProcessor {
                      sort_direction: StoreSortDirection::Asc,
                      sort_key: StoreItemSortKey::CreatedAtOrdinal,
                      after_updated_at_ordinal: None,
@@ -19,12 +19,12 @@ index 4dad82b40644f70f557262b76cc7e66447c200af..83af859b6a7a6f5e24083032f48a2733
                  .await
                  .map_err(paginated_history_list_error)?;
 diff --git a/codex-rs/ext/guardian-v3/src/evidence.rs b/codex-rs/ext/guardian-v3/src/evidence.rs
-index 5e42cf97d743864416cfcbcaf93462830bc8acc0..3c6d5432b221c62e544caf0f376ecb8d3893e50c 100644
+index a93d587aaeb98128b6faca3b0bb845e328f3e568..f5ea184e9b6de6429f3bc0e193a55dbea51e0b52 100644
 --- a/codex-rs/ext/guardian-v3/src/evidence.rs
 +++ b/codex-rs/ext/guardian-v3/src/evidence.rs
-@@ -321,7 +321,9 @@ fn review_original(mut item: RolloutItem) -> anyhow::Result<Option<RolloutItem>>
-             ensure!(message.complete, "incomplete delivered assistant message");
-             true
+@@ -341,7 +341,9 @@ fn review_original(
+             }
+             message.complete
          }
 -        RolloutItem::SessionMeta(_) | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
 +        RolloutItem::SessionMeta(_)
@@ -33,7 +33,7 @@ index 5e42cf97d743864416cfcbcaf93462830bc8acc0..3c6d5432b221c62e544caf0f376ecb8d
              anyhow::bail!("evidence history was replaced");
          }
          RolloutItem::RetainedContext(RetainedContextEvent::AcceptedFileAudio { .. })
-@@ -353,3 +355,24 @@ fn review_original(mut item: RolloutItem) -> anyhow::Result<Option<RolloutItem>>
+@@ -373,3 +375,24 @@ fn review_original(
      }
      Ok(Some(item))
  }
@@ -59,7 +59,7 @@ index 5e42cf97d743864416cfcbcaf93462830bc8acc0..3c6d5432b221c62e544caf0f376ecb8d
 +    }
 +}
 diff --git a/codex-rs/ext/guardian-v3/tests/evidence.rs b/codex-rs/ext/guardian-v3/tests/evidence.rs
-index 0ca967a66138ca9165fd76a41abb85568091fd95..f654579fa234455bb337f2e8d60f4d2a65e8c21a 100644
+index 7e38340bb2fabc0f1852ca5192258a6ce03e5ea5..feb3400216daad787482dd0772c6455301007c84 100644
 --- a/codex-rs/ext/guardian-v3/tests/evidence.rs
 +++ b/codex-rs/ext/guardian-v3/tests/evidence.rs
 @@ -20,6 +20,7 @@ use codex_protocol::ThreadId;
@@ -267,24 +267,8 @@ index 8eeeea24609381fe76721a557fc0ce98d423b331..c8ad1d52e31d42139d3552208895b4be
          },
      )
      .await?
-diff --git a/codex-rs/thread-store/src/local/projection_rebuild.rs b/codex-rs/thread-store/src/local/projection_rebuild.rs
-index 3cd1807f52962cd630e19ba83f65276de0858670..f2f7d51ace0679b5cfde5e78ebd8a3d5c9d52a28 100644
---- a/codex-rs/thread-store/src/local/projection_rebuild.rs
-+++ b/codex-rs/thread-store/src/local/projection_rebuild.rs
-@@ -304,7 +304,10 @@ async fn rebuild_registered(
-             }
-         }
-         let current = store.resolve_rollout_lineage(thread_id).await?;
--        if current != lineage {
-+        if current.root_rollout_id != lineage.root_rollout_id
-+            || current.segments != lineage.segments
-+            || current.has_attached_visibility != lineage.has_attached_visibility
-+        {
-             discard_staging(store, staging_thread_id, staging_guard).await?;
-             continue;
-         }
 diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
-index 344f85b46a73ebda6182d7dde84e2f98d2d22962..697e390e0c4caeaf46e3d21dfcc50de0f1defcb2 100644
+index 3163f079bf8418dec5ee0c9db87e449576374c31..c531f5258eba33347a558c880d6201d432569048 100644
 --- a/codex-rs/thread-store/src/local/rollout_lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
 @@ -92,6 +92,7 @@ pub(super) struct RolloutLineage {
@@ -354,7 +338,16 @@ index 344f85b46a73ebda6182d7dde84e2f98d2d22962..697e390e0c4caeaf46e3d21dfcc50de0
                      filter_texts: Vec::new(),
                      goal_supervisor_provenance: GoalSupervisorLineageProvenance::Untrusted,
                      uses_history_base: false,
-@@ -1585,6 +1599,7 @@ impl RolloutLineage {
+@@ -1565,6 +1579,8 @@ impl RolloutLineage {
+         self.root_rollout_id == other.root_rollout_id
+             && self.requested_thread_id == other.requested_thread_id
+             && self.mode == other.mode
++            && self.offset_mode == other.offset_mode
++            && self.has_attached_visibility == other.has_attached_visibility
+             && self.leaf_path == other.leaf_path
+             && self.leaf_cutoff == other.leaf_cutoff
+             && self.segments == other.segments
+@@ -1608,6 +1624,7 @@ impl RolloutLineage {
              reads: AncestorReads::default(),
              requested_thread_id,
              mode: LineageResolutionMode::ModelContext,
@@ -362,7 +355,7 @@ index 344f85b46a73ebda6182d7dde84e2f98d2d22962..697e390e0c4caeaf46e3d21dfcc50de0
              leaf_path,
              leaf_cutoff: None,
              excluded: Vec::new(),
-@@ -2177,7 +2192,7 @@ async fn resolve_path_iteratively(
+@@ -2204,7 +2221,7 @@ async fn resolve_path_iteratively(
          break;
      }
 
@@ -446,10 +439,10 @@ index 0d222ad6763fa08ddbd1d20a18ce537604a17727..5bf93422fa528ae7f0ca22d52dd2dd97
      )
      .await?;
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 9325c89482ac1efa5b6516e8abf69110ddb6d039..b06ba690060285d168f82647ed63300762c6c20d 100644
+index 081f54504f824878f2ab5ede621706d5dc553d8a..43380e1c4ebf06eab8af40ae1edfb5ce402d8a58 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-@@ -3303,6 +3303,28 @@ async fn segmented_legacy_projection_pages_full_turn_items() {
+@@ -3487,6 +3487,28 @@ async fn segmented_legacy_projection_pages_full_turn_items() {
      assert_eq!(item_ids(&second_page), vec!["item-3"]);
      assert_eq!(second_page.items[0].started_at_ms, Some(13_100));
      assert_eq!(second_page.items[0].completed_at_ms, Some(13_200));

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index bb56b72c5073d81bb5de239bd597aa35c3188b3e..f51a1a9432e6ef8c1378e46127b65a1c172943f8 100644
+index 997298bb281c920a1a58a10434e1113594e06aab..7a1fe6afe1b9668c3813f1cc3e349b8c5e90e061 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -97,9 +97,19 @@ struct LegacyRolloutGeneration {
+@@ -116,9 +116,19 @@ struct LegacyRolloutGeneration {
 
  impl LegacyRolloutGeneration {
      async fn capture(path: &Path) -> std::io::Result<Self> {
@@ -24,7 +24,7 @@ index bb56b72c5073d81bb5de239bd597aa35c3188b3e..f51a1a9432e6ef8c1378e46127b65a1c
              len: metadata.len(),
              modified_at: metadata.modified().ok(),
              #[cfg(unix)]
-@@ -5196,7 +5206,14 @@ impl ThreadRequestProcessor {
+@@ -5309,7 +5319,14 @@ impl ThreadRequestProcessor {
          let page_size = thread_turns_page_size(limit);
 
          tokio::task::spawn_blocking(move || {
@@ -41,10 +41,10 @@ index bb56b72c5073d81bb5de239bd597aa35c3188b3e..f51a1a9432e6ef8c1378e46127b65a1c
              let mut started_turns = 0;
 
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-index eefa2fc6a9f2a02652ca97e09375a8c166e92fd2..1b903b42b82d45aad1909e16046ccec37a6b8914 100644
+index 234e420d0b90b94cb76e5129baf5c80b70799cf6..8ff5cf460d91eef2707b067a63bcb5271dd1adc9 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
-@@ -602,6 +602,75 @@ async fn paginated_stored_thread_reads_unprojected_turns_through_read_apis() ->
+@@ -608,6 +608,75 @@ async fn paginated_stored_thread_reads_unprojected_turns_through_read_apis() ->
      Ok(())
  }
 

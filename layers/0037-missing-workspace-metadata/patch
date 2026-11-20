@@ -1,8 +1,8 @@
 diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
-index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5eed724f7a0 100644
+index f822a6daec315aef18fe58e662b2ab3c22cf600d..6ac214af055d32fc95d63d63523c350f29bc662a 100644
 --- a/codex-rs/linux-sandbox/src/bwrap.rs
 +++ b/codex-rs/linux-sandbox/src/bwrap.rs
-@@ -619,8 +619,14 @@ fn create_filesystem_args(
+@@ -603,8 +603,14 @@ fn create_filesystem_args(
          .collect();
      unreadable_ancestors_of_writable_roots.sort_by_key(|path| path_depth(path));
 
@@ -18,7 +18,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
      }
 
      for writable_root in &sorted_writable_roots {
-@@ -697,6 +703,9 @@ fn create_filesystem_args(
+@@ -681,6 +687,9 @@ fn create_filesystem_args(
                  remap_paths_for_symlink_target(deferred_read_only_subpaths, root, target);
          }
          read_only_subpaths.sort_by_key(|path| path_depth(path));
@@ -28,7 +28,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
          for subpath in read_only_subpaths {
              if let Some(symlink) =
                  first_writable_symlink_component_in_path(&subpath, &allowed_write_paths)
-@@ -722,6 +731,7 @@ fn create_filesystem_args(
+@@ -706,6 +715,7 @@ fn create_filesystem_args(
                  &subpath,
                  &allowed_write_paths,
                  &daemon_directories,
@@ -36,7 +36,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
              )?;
          }
          // Protect the registry only where a writable bind exposes it. Apply
-@@ -736,6 +746,8 @@ fn create_filesystem_args(
+@@ -720,6 +730,8 @@ fn create_filesystem_args(
              None
          };
          if let Some(registry_mount) = registry_mount {
@@ -45,7 +45,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
              fs::create_dir_all(&registry_root)?;
              bwrap_args.args.push("--ro-bind".to_string());
              bwrap_args.args.push(path_to_string(registry_mount));
-@@ -753,7 +765,12 @@ fn create_filesystem_args(
+@@ -737,7 +749,12 @@ fn create_filesystem_args(
          }
          nested_unreadable_roots.sort_by_key(|path| path_depth(path));
          for unreadable_root in nested_unreadable_roots {
@@ -59,7 +59,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
          }
      }
 
-@@ -769,7 +786,12 @@ fn create_filesystem_args(
+@@ -753,7 +770,12 @@ fn create_filesystem_args(
          .collect();
      rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
      for unreadable_root in rootless_unreadable_roots {
@@ -73,7 +73,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
      }
 
      if options.mask_wslg_distro
-@@ -1240,6 +1262,7 @@ fn append_read_only_subpath_args(
+@@ -1102,6 +1124,7 @@ fn append_read_only_subpath_args(
      subpath: &Path,
      allowed_write_paths: &[PathBuf],
      daemon_directories: &BTreeSet<PathBuf>,
@@ -81,7 +81,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
  ) -> Result<()> {
      if let Some(metadata) = transient_empty_metadata_path(subpath)
          && is_within_allowed_write_paths(subpath, allowed_write_paths)
-@@ -1262,7 +1285,11 @@ fn append_read_only_subpath_args(
+@@ -1124,7 +1147,11 @@ fn append_read_only_subpath_args(
          if let Some(first_missing_component) = find_first_non_existent_component(subpath)
              && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
          {
@@ -94,7 +94,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
          }
          return Ok(());
      }
-@@ -1296,7 +1323,11 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
+@@ -1158,7 +1185,11 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
      bwrap_args.args.push(path_to_string(path));
  }
 
@@ -107,7 +107,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
      if path.file_name().is_some_and(is_protected_metadata_name) {
          append_empty_directory_args(bwrap_args, path);
          bwrap_args
-@@ -1305,10 +1336,19 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
+@@ -1167,10 +1198,19 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
          return Ok(());
      }
 
@@ -129,7 +129,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
      append_empty_file_bind_data_args(bwrap_args, path)?;
      bwrap_args
          .synthetic_mount_targets
-@@ -1345,6 +1385,7 @@ fn append_unreadable_root_args(
+@@ -1207,6 +1247,7 @@ fn append_unreadable_root_args(
      bwrap_args: &mut BwrapArgs,
      unreadable_root: &Path,
      allowed_write_paths: &[PathBuf],
@@ -137,7 +137,7 @@ index 11959d0c02248f090a568efd5b53ee1fa0e6ad9c..21f879430d1bbf5647798a227533f5ee
  ) -> Result<()> {
      if let Some(symlink) =
          first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
-@@ -1367,7 +1408,11 @@ fn append_unreadable_root_args(
+@@ -1229,7 +1270,11 @@ fn append_unreadable_root_args(
          if let Some(first_missing_component) = find_first_non_existent_component(unreadable_root)
              && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
          {

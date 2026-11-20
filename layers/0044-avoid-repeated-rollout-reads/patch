@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index c1ce09f2e39b9b151f71790ac16fd016d26a28a2..5b980a815f0df1a92605ab0905808fee14d94628 100644
+index 55f123589ce52515e711ac46f6cb2564c058e8cd..6c21d98aeddb0261ba74ab717f9faf9d11d74a03 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
-@@ -1116,6 +1116,7 @@ impl MessageProcessor {
+@@ -1171,6 +1171,7 @@ impl MessageProcessor {
              _ => None,
          };
          let serialization_scope = codex_request.serialization_scope();
@@ -10,7 +10,7 @@ index c1ce09f2e39b9b151f71790ac16fd016d26a28a2..5b980a815f0df1a92605ab0905808fee
          let error_request_id = connection_request_id.clone();
          let rpc_gate = Arc::clone(&session.rpc_gate);
          let processor = Arc::clone(self);
-@@ -1151,7 +1152,8 @@ impl MessageProcessor {
+@@ -1207,7 +1208,8 @@ impl MessageProcessor {
                  }
              }
              .instrument(span),
@@ -21,51 +21,49 @@ index c1ce09f2e39b9b151f71790ac16fd016d26a28a2..5b980a815f0df1a92605ab0905808fee
          if let Some(scope) = serialization_scope {
              let (key, access) = RequestSerializationQueueKey::from_scope(connection_id, scope);
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index d6e181e72a125c04c39cb2b4f250bd7ea3ddb40a..23adfb345d3de2e1041c2a283b96fd7628c4b162 100644
+index 49dc2d47e8704948967ca69abdf7ee373e2dc732..272926b5121439b4dfe766627ea48b46462c310c 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -3814,6 +3814,7 @@ impl ThreadRequestProcessor {
+@@ -3916,17 +3916,19 @@ impl ThreadRequestProcessor {
+                 "ephemeral threads do not support includeTurns".to_string(),
+             ));
          }
-         let fallback_thread =
-             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
-+        let needs_name_lookup = include_turns || persisted_thread.is_none();
-         let mut thread = if let Some(mut thread) = persisted_thread {
-             if thread.path.is_none() {
-                 thread.path = fallback_thread.path.clone();
-@@ -3830,6 +3831,23 @@ impl ThreadRequestProcessor {
-             fallback_thread
-         };
-         apply_live_thread_settings(&mut thread, &config_snapshot);
-+        if needs_name_lookup {
-+            self.attach_thread_name(thread_id, &mut thread).await;
-+        } else if let Some(title) = thread
-+            .name
-+            .as_deref()
-+            .map(str::trim)
-+            .filter(|s| !s.is_empty())
-+            .map(str::to_owned)
-+        {
-+            // The same persisted snapshot already supplied the name. Reopening the
-+            // rollout here can block the serialized read after its data is available.
-+            if thread.history_mode == ApiThreadHistoryMode::Paginated {
-+                thread.name = Some(title);
-+            } else {
-+                set_thread_name_from_title(&mut thread, title);
-+            }
-+        }
-         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
-             .await?;
-         Ok(thread)
-@@ -3842,8 +3860,6 @@ impl ThreadRequestProcessor {
-         include_turns: bool,
-         loaded_thread: &CodexThread,
-     ) -> Result<(), ThreadReadViewError> {
--        self.attach_thread_name(thread_id, thread).await;
 -
++        let fallback_thread =
++            build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
+         let mut thread = if let Some(mut thread) = persisted {
+             if thread.path.is_none() {
+-                thread.path = loaded_thread.rollout_path();
++                thread.path = fallback_thread.path.clone();
+             }
+-            thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
+-            thread.ephemeral = config_snapshot.ephemeral;
+-            thread.can_accept_direct_input = Some(can_accept_direct_input(
+-                loaded_thread.multi_agent_version(),
+-                &config_snapshot.session_source,
+-            ));
++            thread.session_id.clone_from(&fallback_thread.session_id);
++            // Adoption can change the live parent without rewriting the rollout head.
++            thread
++                .parent_thread_id
++                .clone_from(&fallback_thread.parent_thread_id);
++            thread.ephemeral = fallback_thread.ephemeral;
++            thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
+             apply_live_thread_settings(&mut thread, &config_snapshot);
+             if !include_turns {
+                 if let Some(title) = display_thread_title(
+@@ -3940,8 +3942,9 @@ impl ThreadRequestProcessor {
+             }
+             thread
+         } else {
+-            build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread)
++            fallback_thread
+         };
++        apply_live_thread_settings(&mut thread, &config_snapshot);
+         self.attach_thread_name(thread_id, &mut thread).await;
          if include_turns {
-             let config_snapshot = loaded_thread.config_snapshot().await;
-             if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
-@@ -4920,6 +4936,15 @@ impl ThreadRequestProcessor {
+             thread.turns = match thread.history_mode {
+@@ -5019,6 +5022,15 @@ impl ThreadRequestProcessor {
          thread_store: &dyn ThreadStore,
          thread_id: ThreadId,
      ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
@@ -154,10 +152,10 @@ index b520927c25671ecb23944416e1cea9671748b7fb..18b61b46a2a708dc88a9828c7770b0f0
                  RequestSerializationQueueKey::Thread { thread_id } => Some(thread_id.as_str()),
                  _ => None,
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index b58ef320c1aa6b9c12ece735559c6f709fc35eed..eacff3819dca2efacfd91c318714c2e917396cd1 100644
+index bd1a63db85569cb4ae75a7470f0966c4c3cafb41..29363cea23afc22777850540fa22097380145291 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -1262,6 +1262,16 @@ impl LocalThreadStore {
+@@ -1287,6 +1287,16 @@ impl LocalThreadStore {
          .await
      }
 
@@ -175,19 +173,19 @@ index b58ef320c1aa6b9c12ece735559c6f709fc35eed..eacff3819dca2efacfd91c318714c2e9
      pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
          self.await_automatic_rollout_migration(params.thread_id)
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 1dd130cccc9528662132f5c3bae22fb389039764..d4b8e295d8ce3109fcd698ef0e2e2f9dcf319cc9 100644
+index 20c07bf969e68bd046d8013d963a7341aff9555b..d8f191c1348806a426bcc6af9058be2477ee2afa 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
-@@ -26,6 +26,7 @@ pub(super) use read::list_items;
+@@ -27,6 +27,7 @@ pub(super) use read::list_items;
  pub(super) use read::list_segmented_legacy_items;
  pub(super) use read::list_segmented_legacy_turns;
  pub(super) use read::list_turns;
 +pub(super) use read::resume_backwards_cursors;
  pub(super) use read::validate_thread_for_paginated_reads;
  pub(super) use realtime::list_timeline;
- pub(super) use search::search_thread_occurrences;
+ pub(super) use realtime_stream::list_realtime;
 diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
-index e8f3069cb3134ebca673e659878b1de21fe74f98..b586b2e05ec8c364678e906b0fd33263afd871ca 100644
+index 35cdacfffcf1cc05eeafa750be262f3f669c0ea6..0d222ad6763fa08ddbd1d20a18ce537604a17727 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read.rs
 @@ -143,6 +143,49 @@ pub(in crate::local) async fn list_turns(
@@ -241,10 +239,10 @@ index e8f3069cb3134ebca673e659878b1de21fe74f98..b586b2e05ec8c364678e906b0fd33263
      store: &LocalThreadStore,
      params: ListTurnsParams,
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index d2cd9dfd6287637c0466495ea10f21132d047447..38c62d975538fd54bc637d8c00aad414a388c6a2 100644
+index 87e06be91b048d88dddfeaab8892956a6b16397c..081f54504f824878f2ab5ede621706d5dc553d8a 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-@@ -2637,6 +2637,27 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
+@@ -2891,6 +2891,27 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
 
  #[tokio::test]
  async fn cursors_are_bound_to_the_selected_rollout_generation() {
@@ -272,7 +270,7 @@ index d2cd9dfd6287637c0466495ea10f21132d047447..38c62d975538fd54bc637d8c00aad414
      let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
      let first_rollout_id = ThreadId::new();
      let second_rollout_id = ThreadId::new();
-@@ -2645,6 +2666,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+@@ -2899,6 +2920,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
      write_rollout(first_path.as_path(), thread_id, /*history_base*/ None);
      write_rollout(second_path.as_path(), thread_id, /*history_base*/ None);
      select_rollout_path(&store, thread_id, first_path).await;
@@ -280,7 +278,7 @@ index d2cd9dfd6287637c0466495ea10f21132d047447..38c62d975538fd54bc637d8c00aad414
 
      let db = history_db(&store).await;
      for (rollout_id, prefix) in [(first_rollout_id, "first"), (second_rollout_id, "second")] {
-@@ -2673,6 +2695,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+@@ -2927,6 +2949,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
          }
      }
 
@@ -288,7 +286,7 @@ index d2cd9dfd6287637c0466495ea10f21132d047447..38c62d975538fd54bc637d8c00aad414
      let first_turn_page = store
          .list_turns(turn_params(
              thread_id,
-@@ -2851,6 +2874,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
+@@ -3105,6 +3128,7 @@ async fn cursors_are_bound_to_the_selected_rollout_generation() {
      assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
 
      select_rollout_path(&store, thread_id, second_path).await;

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
-index f561a28028f14d7e5f0698c36a381676c4468866..7a1c6f214c58b8e75ff4c35e617b9de0b1ade0a7 100644
+index 692f7d03d70f25369edc76fe2bd566e47f20eb3a..86e28de7bdb3018a382fcda14f6ffbd16bf60142 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
 @@ -308,7 +308,7 @@ impl LegacyRolloutCanonicalizer {
@@ -121,7 +121,7 @@ index f561a28028f14d7e5f0698c36a381676c4468866..7a1c6f214c58b8e75ff4c35e617b9de0
      ) -> ThreadStoreResult<()>
      where
          W: AsyncWrite + Unpin,
-@@ -636,8 +668,7 @@ impl LegacyRolloutCanonicalizer {
+@@ -637,8 +669,7 @@ impl LegacyRolloutCanonicalizer {
                  turn_id,
                  item,
                  started_at_ms: None,
@@ -131,7 +131,7 @@ index f561a28028f14d7e5f0698c36a381676c4468866..7a1c6f214c58b8e75ff4c35e617b9de0
              })),
          )
          .await
-@@ -674,7 +705,7 @@ impl LegacyRolloutCanonicalizer {
+@@ -675,7 +706,7 @@ impl LegacyRolloutCanonicalizer {
          if self.record_generated_items {
              self.pending_generated_item_id = Some(item.id.clone());
          }
@@ -141,10 +141,10 @@ index f561a28028f14d7e5f0698c36a381676c4468866..7a1c6f214c58b8e75ff4c35e617b9de0
      }
 
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index aeaa1183e8345b4b28611e7b3f4027bd61bf5654..98cfaf14b338560382812a0ba8a10fb4a3d672e0 100644
+index f428c2b8790caa5dc6523dd563a37fa90a033679..8e06697f243a8a174b720902ed873eeeb2378679 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -7644,6 +7644,86 @@ async fn migration_refuses_archived_compressed_malformed_reference_without_mater
+@@ -7647,6 +7647,86 @@ async fn migration_refuses_archived_compressed_malformed_reference_without_mater
      assert_no_migration_artifacts(home.path(), &compressed, thread_id).await;
  }
 

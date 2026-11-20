@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/session/async_compaction.rs b/codex-rs/core/src/session/async_compaction.rs
-index 98a28dba875830cc9b8ea76f9935ba65e9163dac..b95909a142ee96c5bd5c54d6bc3acde740f2f0ce 100644
+index f9e4f29418e3c6b093e6483cf5c50da5e85fafcc..c5261aeb6e3f76378aebc7de509e9a369aab6161 100644
 --- a/codex-rs/core/src/session/async_compaction.rs
 +++ b/codex-rs/core/src/session/async_compaction.rs
-@@ -82,6 +82,27 @@ pub(super) async fn maybe_start(
+@@ -83,6 +83,27 @@ pub(super) async fn maybe_start(
          return;
      }
 
@@ -169,7 +169,7 @@ index 0000000000000000000000000000000000000000..01af73336a1252086ba3dacea298209b
 +    }
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index d2722f7a6efbb11a0addd0b204690f60157ec770..048a08135072cf66b84c7ada1a093d7686b73b1d 100644
+index 733061d1e6e7a4fe90eda08b5691e0097a3aa827..8aeb145004e5c0e3117bd8607d75117b4ea9539e 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -275,6 +275,7 @@ pub(crate) mod file_audio;
@@ -178,13 +178,13 @@ index d2722f7a6efbb11a0addd0b204690f60157ec770..048a08135072cf66b84c7ada1a093d76
  mod approved_plan;
 +mod auto_compaction_guard;
  mod code_mode_warning;
+ mod compaction_replacement;
  mod config_refresh;
- pub(crate) mod context_window;
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb4b4309e7 100644
+index c466927ca8b06d4e886a2fca7185d0cf7968e369..c790888cb5f1f81c3578182a7a8c4a465792b503 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -2201,6 +2201,44 @@ async fn run_auto_compact(
+@@ -2252,6 +2252,44 @@ async fn run_auto_compact(
      {
          return Ok(false);
      }
@@ -229,7 +229,7 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
      let world_state = Arc::new(
          sess.build_world_state_for_step(&replacement_step_context, /*new_window*/ true)
              .await?,
-@@ -2217,15 +2255,29 @@ async fn run_auto_compact(
+@@ -2272,15 +2310,29 @@ async fn run_auto_compact(
          // instead of consuming a pending `new_context` tool request.
          crate::compact_token_budget::run_inline_auto_compact_task(
              Arc::clone(sess),
@@ -261,7 +261,7 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
          RemoteCompactionSupport::V2 => {
              let has_candidate = candidate.is_some();
              if !has_candidate {
-@@ -2255,7 +2307,7 @@ async fn run_auto_compact(
+@@ -2310,7 +2362,7 @@ async fn run_auto_compact(
              let installed = run_inline_remote_auto_compact_task_v2(
                  Arc::clone(sess),
                  step_context,
@@ -270,7 +270,7 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
                  client_session,
                  world_state,
                  reason,
-@@ -2272,7 +2324,7 @@ async fn run_auto_compact(
+@@ -2327,7 +2379,7 @@ async fn run_auto_compact(
                      /*manual*/ false,
                  );
              }
@@ -279,22 +279,21 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
          }
          RemoteCompactionSupport::Unsupported => {
              emit_compact_metric(
-@@ -2283,7 +2335,7 @@ async fn run_auto_compact(
+@@ -2338,16 +2390,103 @@ async fn run_auto_compact(
              run_inline_auto_compact_task(
                  Arc::clone(sess),
-                 Arc::clone(turn_context),
+                 step_context,
 -                replacement_step_context,
 +                Arc::clone(&replacement_step_context),
                  client_session,
                  world_state,
                  reason,
-@@ -2291,8 +2343,95 @@ async fn run_auto_compact(
+                 phase,
                  reporting,
              )
-             .await?;
--            Ok(true)
-+            true
-         }
+-            .await
++            .await?
++        }
 +    };
 +    if installed {
 +        let replacement_turn = &replacement_step_context.turn;
@@ -336,8 +335,8 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
 +                "The retained context is still above the model's context window after compaction. Reduce context or use a model with a larger context window before retrying.".to_string(),
 +            )
 +            .await);
-+        }
-+    }
+         }
+     }
 +    Ok(installed)
 +}
 +
@@ -382,6 +381,7 @@ index 89deb29ed02c4050807edd7bf337e09ad6c62c49..e17b1c4700a1ee3665067588ba9523cb
 +        post_turn_percent: config.model_post_turn_compact_threshold_percent,
 +        window_number: sess.current_auto_compact_window_number().await,
 +        tools: step.tool_router.model_visible_specs(),
-     }
++    }
  }
 
+ pub(super) fn collect_explicit_app_ids_from_skill_items(

@@ -1870,10 +1870,10 @@ index e1363da5ef175f3b6faab0164d6d1d0b35601476..eb54993195ab0b6eff0f1bfdb307de6f
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index e5b66669b9cb10ceb56656d082c8b2ab5660a80f..d9044baff99aff3d3897f01c7621570764ec9178 100644
+index 9379cda25b5b7affbbcf518d47dd64bd56c0277b..6f58cacb08e33031cc85beb5072c1dd44ec40df1 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1297,6 +1297,11 @@ impl ThreadManager {
+@@ -1541,6 +1541,11 @@ impl ThreadManager {
          self.state.thread_created_tx.subscribe()
      }
 
@@ -1899,7 +1899,7 @@ index 0eac846e05187ab469d9ecc33f295b75e06f7a48..5e5beef1e477f4f265c82d9a2e9dae59
      turn_context: &TurnContext,
      call_id: String,
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 8c1654a2937652ff7ef1b3670dcd90a8d948d572..4a15e4c6de4a5868f72ba6e1c37f5e100264dc65 100644
+index 61537ac231355cd9e78b6f70966fe6a0d1c63234..eb2fef9015ccb60ebb948d7949174ed9b0ee6c75 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -1,7 +1,7 @@
@@ -1912,10 +1912,10 @@ index 8c1654a2937652ff7ef1b3670dcd90a8d948d572..4a15e4c6de4a5868f72ba6e1c37f5e10
  mod get_context_remaining;
  pub(crate) mod get_context_remaining_spec;
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index eb4fe07201c84956093a623d443b98c23b56645f..0a1061f0411290b56e656ad72bb07824dd98a217 100644
+index a149e65155656587882226391a157c7d872b70c4..d9418abe2b6d8585f41074f8f9c80d3c643e9de1 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
-@@ -1447,10 +1447,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1483,10 +1483,15 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
      // A canonical persisted turn begins at `TurnStarted`, before its user response item. Record
      // that boundary so truncation cannot retain the opening event for an excluded turn.
      let mut active_turn_start = None;
@@ -1932,7 +1932,7 @@ index eb4fe07201c84956093a623d443b98c23b56645f..0a1061f0411290b56e656ad72bb07824
              }
              RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                  event_user_positions.push(active_turn_start.unwrap_or(index));
-@@ -1463,11 +1468,27 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1499,11 +1504,27 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
              RolloutItem::ResponseItem(item) if item.is_user_message() => {
                  response_user_positions.push(active_turn_start.unwrap_or(index));
              }
@@ -1962,7 +1962,7 @@ index eb4fe07201c84956093a623d443b98c23b56645f..0a1061f0411290b56e656ad72bb07824
                  event_user_positions.truncate(event_user_positions.len().saturating_sub(count));
                  response_user_positions
                      .truncate(response_user_positions.len().saturating_sub(count));
-@@ -1496,7 +1517,14 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1532,7 +1553,14 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
      } else {
          event_user_positions
      };
@@ -1979,7 +1979,7 @@ index eb4fe07201c84956093a623d443b98c23b56645f..0a1061f0411290b56e656ad72bb07824
      }
  }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 69aaccf38723d422cfaf281db5152e06346e3ad6..4932fb82f9bd2e09949c8198de4252dab2637251 100644
+index 7dd8323c38e79ea048cda8918973b54f9e6b7577..630636ba0a4a40ef3ea49ea2374785a98a0e4c14 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
 @@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -1991,7 +1991,7 @@ index 69aaccf38723d422cfaf281db5152e06346e3ad6..4932fb82f9bd2e09949c8198de4252da
  use codex_protocol::protocol::TurnCompleteEvent;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentSelections;
-@@ -1679,6 +1681,182 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
+@@ -1682,6 +1684,182 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
      assert_nth_user_message_ignores_contextual_user_items(/*use_completed_user_items*/ false).await
  }
 

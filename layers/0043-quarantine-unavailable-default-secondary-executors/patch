@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 0aed6bb710a8ced50ea146f076b2655ccc6c85a9..ce0fc539a2064c1c81d4f6670077b32d96602810 100644
+index dc3cd8a3952aa54bd9d93fe956415821eeaed696..76e3ba9e208ffaf095fd05b2e8245f28bc46ea75 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
-@@ -529,28 +529,31 @@ thread or connecting to its executors. To page through the messages, use
+@@ -561,28 +561,31 @@ thread or connecting to its executors. To page through the messages, use
  `thread/turns/list` with `itemsView: "full"`. Reading the history does not make
  the thread available to `turn/start`.
 
@@ -51,10 +51,10 @@ index 0aed6bb710a8ced50ea146f076b2655ccc6c85a9..ce0fc539a2064c1c81d4f6670077b32d
  To make the reviewed selection permanent, supply the retained executor IDs,
  working directories, and workspace roots in `turn/start.environments` on the
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 0ad83210142456ef49172438846d91b7980bdebf..61b681d8d6e8ab2ba1b91af29d9c78a7c22ee01e 100644
+index c4593ccfe4f9b0f85a6a3e6760d3207ad5929d7b..55c9bc48694d90c7908d15c0213634f342558f2c 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
-@@ -669,6 +669,22 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
+@@ -671,6 +671,22 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
  fn resolve_turn_environment_requests(
      thread_manager: &ThreadManager,
      environments: Option<Vec<TurnEnvironmentParams>>,
@@ -77,7 +77,7 @@ index 0ad83210142456ef49172438846d91b7980bdebf..61b681d8d6e8ab2ba1b91af29d9c78a7
  ) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
      let Some(environments) = environments else {
          return Ok(None);
-@@ -710,13 +726,6 @@ fn resolve_turn_environment_requests(
+@@ -712,13 +728,6 @@ fn resolve_turn_environment_requests(
              config: EnvironmentConfigState::FromThread,
          });
      }
@@ -92,10 +92,10 @@ index 0ad83210142456ef49172438846d91b7980bdebf..61b681d8d6e8ab2ba1b91af29d9c78a7
  }
 
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a59195c75 100644
+index a6cc38612c5b8b602696956318e0034e38e07c70..49dc2d47e8704948967ca69abdf7ee373e2dc732 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -1933,12 +1933,6 @@ impl ThreadRequestProcessor {
+@@ -1962,12 +1962,6 @@ impl ThreadRequestProcessor {
              }
          }
 
@@ -108,7 +108,7 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
          let dynamic_tools = dynamic_tools.unwrap_or_default();
          if !dynamic_tools.is_empty() {
              validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
-@@ -1961,7 +1955,10 @@ impl ThreadRequestProcessor {
+@@ -1990,7 +1984,10 @@ impl ThreadRequestProcessor {
          }
          let mut start_options = StartThreadOptions::new(config);
          start_options.thread_extension_init = thread_extension_init;
@@ -120,7 +120,7 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
          let reserved_thread_id = if start_options.config.ephemeral {
              None
          } else {
-@@ -2002,7 +1999,6 @@ impl ThreadRequestProcessor {
+@@ -2031,7 +2028,6 @@ impl ThreadRequestProcessor {
                  dynamic_tools,
                  metrics_service_name: service_name,
                  parent_trace: request_trace,
@@ -128,8 +128,8 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
                  client_mcp_extensions,
                  ..start_options
              })
-@@ -5686,38 +5682,52 @@ impl ThreadRequestProcessor {
-         let prepared_model_context = prepared_config
+@@ -5766,48 +5762,62 @@ impl ThreadRequestProcessor {
+             .prepared_config
              .as_mut()
              .and_then(|prepared| prepared.model_context.take());
 -        let (mut thread_history, resume_source_thread) = if let Some(history) = history {
@@ -164,6 +164,11 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
 +                        .await?
 +                    }
 +                };
++                permit.check_id(stored_thread.thread_id)?;
++                if permit.is_shared() && !resume_permit::source_can_share(&stored_thread) {
++                    retry.upgrade(permit).await?;
++                    return Ok(ControlFlow::Continue(()));
++                }
 +                thread_resume_account::check(
 +                    &self.config.features,
 +                    app_server_client_name.as_deref(),
@@ -183,8 +188,12 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
 +                        include_turns,
                      )
 -                    .await?
--                }
 +                    .await?;
++                permit.check_id(stored_thread.thread_id)?;
++                if permit.is_shared() && !resume_permit::source_can_share(&stored_thread) {
++                    retry.upgrade(permit).await?;
++                    return Ok(ControlFlow::Continue(()));
+                 }
 +                // The loader checks the selected rollout for in-home paths. A full Legacy
 +                // reread must retain that ID and path to use the same deferral as an ID resume.
 +                let selected_home_rollout = resolved_path.is_some_and(|resolved_path| {
@@ -193,6 +202,11 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
 +                });
 +                (history, Some(stored_thread), selected_home_rollout)
              };
+-            permit.check_id(stored_thread.thread_id)?;
+-            if permit.is_shared() && !resume_permit::source_can_share(&stored_thread) {
+-                retry.upgrade(permit).await?;
+-                return Ok(ControlFlow::Continue(()));
+-            }
 -            thread_resume_account::check(
 -                &self.config.features,
 -                app_server_client_name.as_deref(),
@@ -206,12 +220,17 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
 -                    include_turns,
 -                )
 -                .await?;
+-            permit.check_id(stored_thread.thread_id)?;
+-            if permit.is_shared() && !resume_permit::source_can_share(&stored_thread) {
+-                retry.upgrade(permit).await?;
+-                return Ok(ControlFlow::Continue(()));
+-            }
 -            (thread_history, Some(stored_thread))
 -        };
-         // Path-based resume can use an empty request thread ID. Coordinate once its real
-         // identity is known; unrelated loaded threads never wait for this cold startup.
-         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
-@@ -6122,6 +6132,9 @@ impl ThreadRequestProcessor {
+         if let InitialHistory::Resumed(resumed) = &thread_history {
+             permit.check_id(resumed.conversation_id)?;
+         }
+@@ -6231,6 +6241,9 @@ impl ThreadRequestProcessor {
                  override_local_cwd,
                  override_local_roots,
                  optional_environment_ids,
@@ -222,7 +241,7 @@ index f52d391dedca78e5cf7cde38706ec11d3c103261..c89fd2a9eedbdf9a0de4bd20f5de113a
              .map_err(|err| invalid_request(err.to_string()))?;
          start_options.initial_history = thread_history;
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f7405c62f9f 100644
+index 969adf2f4acf49a71531b443019d91103818d1aa..e1f08c02289445f0f988ab2cf6325106cd8687c6 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
 @@ -7,6 +7,7 @@ use codex_app_server_protocol::ThreadGuardianReviewResponse;
@@ -233,7 +252,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
  use codex_protocol::error::CodexErrorDetails;
  use codex_protocol::models::ContentItem;
  use codex_protocol::models::FunctionCallOutputBody;
-@@ -194,7 +195,7 @@ struct ThreadEnvironmentOverride {
+@@ -196,7 +197,7 @@ struct ThreadEnvironmentOverride {
      runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
  }
 
@@ -242,7 +261,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
      current: &TurnEnvironmentRequests,
      requested: &TurnEnvironmentRequests,
  ) -> bool {
-@@ -210,9 +211,6 @@ fn restates_unavailable_startup_secondaries(
+@@ -212,9 +213,6 @@ fn restates_unavailable_startup_secondaries(
          && primary.config == EnvironmentConfigState::FromThread
          && requested_primary.environment_id == LOCAL_ENVIRONMENT_ID
          && requested_primary.config == EnvironmentConfigState::FromThread
@@ -252,7 +271,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
          && secondaries.len() == requested_secondaries.len()
          && secondaries
              .iter()
-@@ -759,8 +757,7 @@ impl TurnRequestProcessor {
+@@ -762,8 +760,7 @@ impl TurnRequestProcessor {
          let runtime_workspace_roots = params
              .runtime_workspace_roots
              .map(resolve_runtime_workspace_roots);
@@ -262,7 +281,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
 
          let turn_has_input = !params.input.is_empty();
          let input = if let Some(tool_output) = params.tool_output {
-@@ -802,7 +799,7 @@ impl TurnRequestProcessor {
+@@ -805,7 +802,7 @@ impl TurnRequestProcessor {
                  runtime_workspace_roots,
                  environment_requests,
              )
@@ -271,7 +290,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
          let thread_settings = self
              .build_thread_settings_overrides(
                  thread.as_ref(),
-@@ -915,9 +912,9 @@ impl TurnRequestProcessor {
+@@ -918,9 +915,9 @@ impl TurnRequestProcessor {
          cwd: Option<AbsolutePathBuf>,
          workspace_roots: Option<Vec<AbsolutePathBuf>>,
          environment_requests: Option<Vec<TurnEnvironmentRequest>>,
@@ -283,7 +302,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
          }
 
          // Explicit environment requests own their workspace roots. Top-level
-@@ -936,19 +933,18 @@ impl TurnRequestProcessor {
+@@ -939,19 +936,18 @@ impl TurnRequestProcessor {
              };
              let mut requested =
                  TurnEnvironmentRequests::new(legacy_fallback_cwd, environment_requests);
@@ -309,7 +328,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
                  if local_changed
                      && (same_fallback
                          || local.cwd.to_abs_path().ok().as_ref()
-@@ -957,10 +953,24 @@ impl TurnRequestProcessor {
+@@ -960,10 +956,24 @@ impl TurnRequestProcessor {
                      requested.preserve_secondary_workspaces = true;
                  }
              }
@@ -336,7 +355,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
          }
 
          // Default-environment updates retain the task's fallback roots, not its active roots.
-@@ -990,13 +1000,14 @@ impl TurnRequestProcessor {
+@@ -993,13 +1003,14 @@ impl TurnRequestProcessor {
              request.cwd = PathUri::from_abs_path(&legacy_fallback_cwd);
              request.workspace_roots = workspace_roots.iter().map(PathUri::from_abs_path).collect();
          }
@@ -357,7 +376,7 @@ index 9cdc6f2a656bdcf20f3fd1bcd9f509ac4066d8ca..c737e49eb6896ba344879623826f4f74
      }
 
      async fn build_thread_settings_overrides(
-@@ -1160,7 +1171,7 @@ impl TurnRequestProcessor {
+@@ -1165,7 +1176,7 @@ impl TurnRequestProcessor {
                  /*workspace_roots*/ None,
                  environments,
              )
@@ -2917,10 +2936,10 @@ index e7fb92c215a595f3d8da6427895c1b4c2e160958..d4a4e9c24ca5831b3a84f394a7cdd65f
 
      pub(crate) async fn inherited_instructions(&self) -> SessionInstructions {
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index d23ff3fc5299f1ca7a19f33f3f8f98673aed800b..37960e5849379066ddb08ee2eeed99d9ea725f33 100644
+index 9e0c89e2493ba24c2e2d62c25a362b000e767303..6df8d2aa7f7e2df17ed626e688ea08959ae89499 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -1001,6 +1001,9 @@ impl CodexThread {
+@@ -1107,6 +1107,9 @@ impl CodexThread {
              preserve_secondary_workspaces: environment_requests
                  .as_ref()
                  .is_some_and(|requests| requests.preserve_secondary_workspaces),
@@ -2930,7 +2949,7 @@ index d23ff3fc5299f1ca7a19f33f3f8f98673aed800b..37960e5849379066ddb08ee2eeed99d9
              environments: environment_requests
                  .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
              runtime_workspace_roots,
-@@ -1321,6 +1324,11 @@ impl CodexThread {
+@@ -1450,6 +1453,11 @@ impl CodexThread {
          self.session.restorable_thread_settings().await
      }
 
@@ -4459,10 +4478,10 @@ index 062c6c786b359cf09e6244eca0547b8b99ff32ed..cfdf92fc30599b898b3b4399cea8bc88
 
  async fn forward_connection_events(
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index 3e6fd1861d6097796b5a3dcc30386f7901ad92d1..af32cc6f6937dfb91cf2d20516054c003b934060 100644
+index ce688293886083b0751a7c6d80d9141e9d1f37e0..7976ae9509dab351e0cca8f3e09fb466d9c7f518 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
-@@ -453,8 +453,7 @@ pub(crate) async fn run_turn_stop_hooks(
+@@ -454,8 +454,7 @@ pub(crate) async fn run_turn_stop_hooks(
 
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
@@ -4472,7 +4491,7 @@ index 3e6fd1861d6097796b5a3dcc30386f7901ad92d1..af32cc6f6937dfb91cf2d20516054c00
      let environments = sess.services.turn_environments.snapshot_now();
      let has_environment_end_hooks = environments.turn_environments().any(|environment| {
          !environment
-@@ -467,7 +466,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
+@@ -468,7 +467,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
          return;
      }
 
@@ -4482,20 +4501,20 @@ index 3e6fd1861d6097796b5a3dcc30386f7901ad92d1..af32cc6f6937dfb91cf2d20516054c00
      let preview_runs = hooks.preview_session_end();
      if preview_runs.is_empty() {
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 2f13035fe5d0f8cddf138b01665d2053ac19c9dc..f1f9ed2bdf26cdf367485721c763018c23eab457 100644
+index 29e7abaa37cd66930f246b9c3c6abc6ced8ac1e1..d3fe7c930636e9401181c76e0d90dfa60a3cab1f 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -307,4 +307,5 @@ pub use environment_selection::TurnEnvironmentSnapshot;
+@@ -316,4 +316,5 @@ pub use environment_selection::TurnEnvironmentSnapshot;
  pub use environment_selection::validate_environment_ids_and_cwds;
 
  mod runtime_auth;
 +pub use environment_selection::validate_environment_restatement_ids_and_cwds;
  pub use runtime_auth::build_runtime_auth_manager;
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a4417bdb2c57 100644
+index e59928f92b14f16232cce3b7312cbfb07e337241..2285e2fed2e08dd3062d710d98449c81117458db 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -22,6 +22,7 @@ use crate::config::ConstraintError;
+@@ -26,6 +26,7 @@ use crate::config::ConstraintError;
  use crate::config::ConstraintResult;
  use crate::config::ManagedFeatures;
  use crate::config::NetworkProxySpec;
@@ -4503,7 +4522,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::session::session::Session;
  use crate::session::session::SessionConfiguration;
-@@ -124,10 +125,11 @@ fn update_local_workspace(
+@@ -128,10 +129,11 @@ fn update_local_workspace(
          let mut environments = current.environments.clone();
          environments[0].cwd = requested_local.cwd.clone();
          environments[0].workspace_roots = requested_local.workspace_roots.clone();
@@ -4518,7 +4537,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
      }
      Err(ConstraintError::InvalidValue {
          field_name: "environments",
-@@ -214,6 +216,12 @@ enum ConfigUpdateSource {
+@@ -218,6 +220,12 @@ enum ConfigUpdateSource {
  }
 
  impl Session {
@@ -4531,7 +4550,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
      pub(super) fn apply_session_settings(
          &self,
          current: &SessionConfiguration,
-@@ -221,7 +229,16 @@ impl Session {
+@@ -225,7 +233,16 @@ impl Session {
      ) -> ConstraintResult<SessionConfiguration> {
          let current_environments = &current.environments;
          let adjusted;
@@ -4549,7 +4568,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
              && let Some(environments) = &updates.environments
          {
              // Recheck under the settings lock so a stale request cannot restore a removed binding.
-@@ -249,10 +266,12 @@ impl Session {
+@@ -298,10 +315,12 @@ impl Session {
      pub(super) async fn activate_turn_environments(
          &self,
          configuration: &SessionConfiguration,
@@ -4563,7 +4582,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
              // Another task may have started while this one was preparing its settings.
              if active.as_ref().is_none_or(|turn| turn.task.is_none()) {
                  let mut environments = configuration.environments.clone();
-@@ -266,16 +285,51 @@ impl Session {
+@@ -315,16 +334,51 @@ impl Session {
                      }
                  }
                  // Apply the saved defaults even if this turn selects the same environments.
@@ -4618,7 +4637,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
      }
 
      /// Applies an explicit workspace tool transition to the running task, unlike ordinary
-@@ -494,12 +548,31 @@ impl Session {
+@@ -543,12 +597,31 @@ impl Session {
              }
          }
 
@@ -4653,7 +4672,7 @@ index ab92ce991c3f1e2679f106bfe5ae748032dc6fe8..874264e16304888391ba735a5864a441
              // Invalidate MCP before installed configuration can wake a waiting turn.
              self.mark_mcp_runtime_dirty(McpRefreshReason::CurrentEnvironmentsChanged);
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265adc38d092c 100644
+index 4b538ce9094d0e3778334e168307a4af9c525531..81c208e2b479e1428a299ba3d535ffaa9600f87a 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -44,6 +44,8 @@ use crate::context::world_state::WorldStateUpdate;
@@ -4665,7 +4684,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
  use crate::environment_selection::ThreadEnvironments;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
-@@ -155,6 +157,7 @@ use codex_protocol::openai_models::ModelPreset;
+@@ -156,6 +158,7 @@ use codex_protocol::openai_models::ModelPreset;
  use codex_protocol::permissions::FileSystemSandboxPolicy;
  use codex_protocol::permissions::FileSystemSandboxPolicyContext;
  use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -4673,7 +4692,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
  use codex_protocol::protocol::FileChange;
  use codex_protocol::protocol::HasLegacyEvent;
  use codex_protocol::protocol::HistoryPosition;
-@@ -175,6 +178,7 @@ use codex_protocol::protocol::ThreadSource;
+@@ -176,6 +179,7 @@ use codex_protocol::protocol::ThreadSource;
  use codex_protocol::protocol::TurnAbortReason;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnEnvironmentRequest;
@@ -4681,7 +4700,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
  use codex_protocol::protocol::TurnEnvironmentSelection;
  use codex_protocol::protocol::TurnStartedEvent;
  use codex_protocol::protocol::W3cTraceContext;
-@@ -1056,11 +1060,11 @@ impl Session {
+@@ -1087,11 +1091,11 @@ impl Session {
              metrics_service_name,
              user_shell_override,
              inherited_exec_policy,
@@ -4695,7 +4714,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
              mut thread_extension_init,
              turn_extension_init,
              client_mcp_extensions,
-@@ -1081,6 +1085,9 @@ impl Session {
+@@ -1112,6 +1116,9 @@ impl Session {
              .get::<codex_extension_api::SessionIsolation>()
              .map(|policy| *policy)
              .unwrap_or_default();
@@ -4705,7 +4724,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
          // Manager-owned threads and inline delegates bind roots at the same startup boundary.
          let selected_capability_roots =
              match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
-@@ -1404,6 +1411,7 @@ impl Session {
+@@ -1436,6 +1443,7 @@ impl Session {
                  .as_ref()
                  .map(|discovery| Arc::clone(&discovery.optional_on_resume))
                  .unwrap_or_default(),
@@ -4713,7 +4732,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
              model_info_overrides: config.to_models_manager_config().into(),
              developer_instructions: config.developer_instructions.clone(),
              base_instructions,
-@@ -1443,7 +1451,12 @@ impl Session {
+@@ -1475,7 +1483,12 @@ impl Session {
                  || !config.features.enabled(Feature::DeferredExecutor))
          {
              debug_assert!(inherited_environments.is_none());
@@ -4727,7 +4746,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
                  Arc::clone(&environment_manager),
                  session_configuration
                      .user_shell_override
-@@ -1455,11 +1468,36 @@ impl Session {
+@@ -1487,11 +1500,36 @@ impl Session {
                  ),
                  config.as_ref(),
                  &mut environment_selections,
@@ -4766,7 +4785,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
                  thread_extension_init.insert(instructions);
                  Some(environments)
              } else {
-@@ -3125,9 +3163,30 @@ impl Session {
+@@ -3148,9 +3186,30 @@ impl Session {
              // Save new environment defaults for future turns. The running turn keeps its own.
              windows_sandbox_changed =
                  state.session_configuration.windows_sandbox_level != updated.windows_sandbox_level;
@@ -4798,7 +4817,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
              if updated.environments != state.session_configuration.environments {
                  self.services
                      .turn_environments
-@@ -3253,11 +3312,11 @@ impl Session {
+@@ -3276,11 +3335,11 @@ impl Session {
          let snapshot = {
              let _state = self.state.lock().await;
              if self.features.enabled(Feature::SubagentThreadEnvironments) {
@@ -4812,7 +4831,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
      }
 
      pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
-@@ -3298,6 +3357,23 @@ impl Session {
+@@ -3321,6 +3380,23 @@ impl Session {
              .restorable_thread_settings(state.session_configuration.environments.clone())
      }
 
@@ -4836,7 +4855,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
      pub(crate) async fn set_app_server_client_info(
          &self,
          app_server_client_name: Option<String>,
-@@ -3438,7 +3514,8 @@ impl Session {
+@@ -3461,7 +3537,8 @@ impl Session {
      pub(crate) async fn refresh_hooks(&self, mut config: Arc<Config>) {
          loop {
              let disabled_plugin_ids = self.state.lock().await.active_disabled_plugin_ids.clone();
@@ -4846,7 +4865,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
              let hooks_config = build_hooks_config(
                  config.as_ref(),
                  self.services.plugins_manager.as_ref(),
-@@ -5276,7 +5353,7 @@ impl Session {
+@@ -5310,7 +5387,7 @@ impl Session {
                  self.services.turn_environments.snapshot(),
                  self.features
                      .enabled(Feature::SubagentThreadEnvironments)
@@ -4855,7 +4874,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
              )
          };
          if self.inherits_root_service_tier(&turn_context.session_source) {
-@@ -5306,7 +5383,13 @@ impl Session {
+@@ -5340,7 +5417,13 @@ impl Session {
          );
          let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
          let environments = environments.or_cancel(cancellation_token).await?;
@@ -4871,7 +4890,7 @@ index 0abab61985cca13d5bcb6aa3d522dc76e93f694e..a0aca92a5951dfbe251eafdf557265ad
          let load_agents_md = Box::pin(async {
              let (loaded_agents_md, warnings) = self
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a3625147d1c5d09 100644
+index c15710120aa5bc681d40bddc2efa0d97018431aa..5f50cac172f6137403c3c9b50627ee40e4e85bcd 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -14,6 +14,7 @@ use crate::agent::host::InheritedSessionId;
@@ -4890,7 +4909,7 @@ index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a362514
  use codex_extension_api::ExtensionDataInit;
  use codex_http_client::ClientRouteClass;
  use codex_http_client::RouteAwareClientPool;
-@@ -159,6 +161,9 @@ pub(crate) struct SessionConfiguration {
+@@ -160,6 +162,9 @@ pub(crate) struct SessionConfiguration {
      pub(super) implicit_environment_selection: bool,
      /// Saved registry executors allowed to remain unavailable for this loaded session only.
      pub(super) resume_optional_environment_ids: Arc<std::collections::HashSet<String>>,
@@ -4900,7 +4919,7 @@ index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a362514
      /// Explicit startup overrides used when resolving effective model metadata.
      pub(super) model_info_overrides: ModelInfoOverrides,
 
-@@ -473,6 +478,40 @@ impl SessionConfiguration {
+@@ -458,6 +463,40 @@ impl SessionConfiguration {
          }
      }
 
@@ -4941,7 +4960,7 @@ index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a362514
      pub(super) fn validate(
          &self,
          environments: &[TurnEnvironmentSelection],
-@@ -542,6 +581,11 @@ impl SessionConfiguration {
+@@ -513,6 +552,11 @@ impl SessionConfiguration {
              next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
              next_configuration.environments = environments.environments.clone();
              next_configuration.implicit_environment_selection = environments.implicit_selection;
@@ -4953,7 +4972,7 @@ index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a362514
          }
          let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
          if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
-@@ -753,6 +797,8 @@ pub(crate) struct SessionSettingsUpdate {
+@@ -637,6 +681,8 @@ pub(crate) struct SessionSettingsUpdate {
      pub(crate) environments: Option<TurnEnvironmentSelections>,
      /// Recheck the secondary workspaces at commit and retain their actual bindings.
      pub(crate) preserve_secondary_workspaces: bool,
@@ -4961,12 +4980,12 @@ index 11c8078549555181716d5e7a77795fa56e93bef7..3e6a6aec6ec6318729142db69a362514
 +    pub(crate) retain_default_secondaries: bool,
      pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
      pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
-     pub(crate) sandbox_policy: Option<SandboxPolicy>,
+     /// Compatibility input consumed when normalizing settings at admission.
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263ee5e12b7c 100644
+index ce787d9cb2ebe98def38494bdcb6f39886298767..5eb8e1c74a8f6c0d94e56919d601a005e73fcff8 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -2339,6 +2339,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
+@@ -2315,6 +2315,129 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
      Ok(())
  }
 
@@ -5096,31 +5115,31 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
  #[tokio::test]
  async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -6482,6 +6605,7 @@ async fn set_rate_limits_retains_previous_credits() {
+@@ -6488,6 +6611,7 @@ async fn set_rate_limits_retains_previous_credits() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
 +        default_secondary_environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
+             request_country: RequestCountry::default(),
              collaboration_mode,
-             reasoning_summary: config.model_reasoning_summary,
-@@ -6608,6 +6732,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+@@ -6615,6 +6739,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
 +        default_secondary_environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
+             request_country: RequestCountry::default(),
              collaboration_mode,
-             reasoning_summary: config.model_reasoning_summary,
-@@ -7975,6 +8100,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+@@ -7987,6 +8112,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
          environments: Vec::new(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
 +        default_secondary_environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
+             request_country: RequestCountry::default(),
              collaboration_mode,
-             reasoning_summary: config.model_reasoning_summary,
-@@ -9632,6 +9758,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -9787,6 +9913,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5128,7 +5147,7 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -9977,6 +10104,7 @@ async fn make_session_with_config_and_rx(
+@@ -10141,6 +10268,7 @@ async fn make_session_with_config_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5136,7 +5155,7 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -10120,6 +10248,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -10285,6 +10413,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5144,7 +5163,7 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -12179,6 +12308,7 @@ where
+@@ -12346,6 +12475,7 @@ where
          environments: default_environments.clone(),
          implicit_environment_selection: false,
          resume_optional_environment_ids: Default::default(),
@@ -5152,7 +5171,7 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
          provider: create_model_provider(
              config.model_provider.clone(),
              Some(Arc::clone(&auth_manager)),
-@@ -15973,6 +16103,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
+@@ -16140,6 +16270,51 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
      assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
  }
 
@@ -5205,10 +5224,10 @@ index de4b94872060fb0c4ac4f064cb5eeb86ee07bdc4..404ccf766a4eae663470c3eec57b263e
  async fn abort_empty_active_turn_preserves_pending_input() {
      let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
 diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
-index a790900084127950e2c5d04f84357c5ff924195d..1350e81a97710ca0da4651dbe29de304e19c3c56 100644
+index 474fa927fbffdad25d06c4619b7b99bffba85fe3..cc21b62e5e7892e0847d4fe8eb4bea2e41644ca7 100644
 --- a/codex-rs/core/src/session/thread_settings.rs
 +++ b/codex-rs/core/src/session/thread_settings.rs
-@@ -149,6 +149,9 @@ pub(super) fn prepare_update(
+@@ -151,6 +151,9 @@ pub(super) fn prepare_update(
          preserve_secondary_workspaces: environment_requests
              .as_ref()
              .is_some_and(|requests| requests.preserve_secondary_workspaces),
@@ -5219,7 +5238,7 @@ index a790900084127950e2c5d04f84357c5ff924195d..1350e81a97710ca0da4651dbe29de304
          runtime_workspace_roots,
          profile_workspace_roots,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a978d453e9 100644
+index c5facf59bf3295a600129aab94cfb2177c2ed6d0..125043a511c374528284dcf1c8adcbb8f3d56b5e 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -2,10 +2,12 @@ use super::step_settings::ResolvedStepSettings;
@@ -5291,7 +5310,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
  }
 
  impl TurnContext {
-@@ -1491,7 +1503,9 @@ impl Session {
+@@ -1488,7 +1500,9 @@ impl Session {
          if let Some(service_tier) = service_tier_for_turn {
              Arc::make_mut(&mut configuration.step_settings).service_tier = Some(service_tier);
          }
@@ -5302,7 +5321,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
          let turn_context = self
              .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
              .await;
-@@ -1585,12 +1599,12 @@ impl Session {
+@@ -1582,12 +1596,12 @@ impl Session {
                      .insert_arc(Arc::clone(&model_info.model));
                  self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
              }
@@ -5321,7 +5340,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
          };
          let plugins_input = per_turn_config.plugins_config_input();
          let plugin_outcome = self
-@@ -1603,12 +1617,15 @@ impl Session {
+@@ -1600,12 +1614,15 @@ impl Session {
              &plugin_outcome,
              per_turn_config.codex_home.as_path(),
          );
@@ -5343,7 +5362,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
          {
              // Executor and orchestrator catalogs are supplied independently of host skills.
              None
-@@ -1818,6 +1835,24 @@ impl Session {
+@@ -1815,6 +1832,24 @@ impl Session {
              .await
      }
 
@@ -5368,7 +5387,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
      async fn new_default_turn_for(&self, build_mode: TurnContextBuildMode) -> Arc<TurnContext> {
          let session_configuration = self.default_turn_configuration().await;
          let turn_environments = self.services.turn_environments.snapshot().await;
-@@ -1852,7 +1887,10 @@ impl Session {
+@@ -1849,7 +1884,10 @@ impl Session {
          options: NewTurnContextOptions,
      ) -> Arc<TurnContext> {
          let turn_environments = self
@@ -5380,7 +5399,7 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
              .await;
          self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
              .await
-@@ -1882,7 +1920,9 @@ impl Session {
+@@ -1879,7 +1917,9 @@ impl Session {
                  environments,
                  NewTurnContextOptions {
                      final_output_json_schema: current.final_output_json_schema.clone(),
@@ -5391,10 +5410,10 @@ index a0e271efc87d004b260008b1fee2b806ca21a57b..88dd3c13d09e8665ccb30cc0281eb2a9
                  TurnContextBuildMode::StartupPrewarm,
                  self.git_enrichment_policy,
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index c8c51ab01f64567a7bb4e21210424d39e85504a4..f0ea331a5523a0807322694a33ed0b7ab6dd741c 100644
+index fe6110bd569e49e01d6d77e93f25ccbc1c705aef..538f50b5f3b85586719440f77eac43a73d1653e6 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
-@@ -182,6 +182,7 @@ impl PreparedTurnInputSettings {
+@@ -183,6 +183,7 @@ impl PreparedTurnInputSettings {
              prompt_cache_ttl,
              cyber_access_program,
              helper_admission,
@@ -5402,8 +5421,8 @@ index c8c51ab01f64567a7bb4e21210424d39e85504a4..f0ea331a5523a0807322694a33ed0b7a
          };
          let turn_context = match kind {
              TurnStartKind::User | TurnStartKind::Recovery => Some(
-@@ -839,13 +840,17 @@ impl Session {
-         {
+@@ -874,7 +875,14 @@ impl Session {
+             tracing::debug!(%error, "rollout budget stopped a pending-work wake");
              return None;
          }
 +        let state = self.state.lock().await;
@@ -5413,21 +5432,15 @@ index c8c51ab01f64567a7bb4e21210424d39e85504a4..f0ea331a5523a0807322694a33ed0b7a
 +            return None;
 +        }
          let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
++        drop(state);
          let previous_options = if has_trigger_turn {
              Default::default()
          } else {
--            self.state
--                .lock()
--                .await
-+            state
-                 .turn_attribution
-                 .as_ref()
-                 .map(codex_history::TurnAttribution::start_options)
 diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
-index 2a49328c9b37c3b71b83b58235def9881b29a40c..1bded72568125ce4c549afcdd613fd586644997b 100644
+index b3318efb0ddc0ddb6d985af47edfe8b6345a6aea..d809681016971ebe82f87b7b0209887cc0d4be7f 100644
 --- a/codex-rs/core/src/session/turn_suspension.rs
 +++ b/codex-rs/core/src/session/turn_suspension.rs
-@@ -56,6 +56,7 @@ pub(super) async fn suspend_turn_and_shutdown(
+@@ -58,6 +58,7 @@ pub(super) async fn suspend_turn_and_shutdown(
      let turn_id = task.turn_context.sub_id.clone();
      // A suspended task emits no terminal outcome.
      drop(task.outcome_handoff);
@@ -5436,10 +5449,10 @@ index 2a49328c9b37c3b71b83b58235def9881b29a40c..1bded72568125ce4c549afcdd613fd58
      // recovering this turn under its original ID. Cancel the task without that event.
      task.cancellation_token.cancel();
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index f69d5f6384327629d0d40cdb9afb299b20608288..4a305a948dbe5fb8729eeed2a26539879e6589ad 100644
+index b5abd93bd6c7cdb25179dbd67d05c611716489ee..ba5e24fa7861d6fd9399b967d52c5c905f9ebc01 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
-@@ -655,6 +655,7 @@ impl Session {
+@@ -701,6 +701,7 @@ impl Session {
              prompt_cache_ttl: start_options.prompt_cache_ttl,
              cyber_access_program: start_options.cyber_access_program,
              helper_admission: triggered.then_some(helper_admission).flatten(),
@@ -5447,62 +5460,15 @@ index f69d5f6384327629d0d40cdb9afb299b20608288..4a305a948dbe5fb8729eeed2a2653987
          };
          let turn_context = match session_configuration {
              Some(configuration) => {
-@@ -812,21 +813,28 @@ impl Session {
-                 (None, None, Some(err))
-             }
-         };
--        let can_continue =
--            successful && turn_context.terminal_error.lock().await.is_none();
-+        let can_continue = successful && turn_context.terminal_error.lock().await.is_none();
-         let finishing = CancellationToken::new();
-         let finish_recording = finishing.clone().drop_guard();
-         let (turn_state, unadmitted_task, mut pending_input, outcome_handoff) = {
-             let mut active = self.active_turn.lock().await;
--            let Some(active_turn) = active.as_mut() else { return TaskFinishAction::Finish; };
--            let Some(task) = active_turn.task.as_ref() else { return TaskFinishAction::Finish; };
--            if task.turn_context.sub_id != turn_context.sub_id { return TaskFinishAction::Finish; }
--            if can_continue && !task.cancellation_token.is_cancelled()
-+            let Some(active_turn) = active.as_mut() else {
-+                return TaskFinishAction::Finish;
-+            };
-+            let Some(task) = active_turn.task.as_ref() else {
-+                return TaskFinishAction::Finish;
-+            };
-+            if task.turn_context.sub_id != turn_context.sub_id {
-+                return TaskFinishAction::Finish;
-+            }
-+            if can_continue
-+                && !task.cancellation_token.is_cancelled()
-                 && (regular_output.is_some() || task.task.supports_pending_input_continuation())
-             {
-                 let state = active_turn.turn_state.lock().await;
-                 if state.accepts_mailbox_delivery_for_current_turn()
--                    && (!state.pending_input.is_empty() || self.input_queue.has_pending_mailbox_items().await)
-+                    && (!state.pending_input.is_empty()
-+                        || self.input_queue.has_pending_mailbox_items().await)
-                 {
-                     return TaskFinishAction::Continue(
-                         Arc::clone(&task.turn_context),
-@@ -834,7 +842,9 @@ impl Session {
-                     );
-                 }
-             }
--            let Some(task) = active_turn.task.take() else { return TaskFinishAction::Finish; };
-+            let Some(task) = active_turn.task.take() else {
-+                return TaskFinishAction::Finish;
-+            };
-             task.handle.detach();
-             active_turn.finishing = Some(finishing);
-             (
-@@ -1060,6 +1070,7 @@ impl Session {
+@@ -1178,6 +1179,7 @@ impl Session {
          };
          let saved_guardian_completion =
              matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
 +        self.revoke_turn_initial_recovery(turn_context.as_ref());
+         self.finish_turn_diff(&turn_context, &event).await;
          if !saved_guardian_completion {
              self.send_event(turn_context.as_ref(), event.clone()).await;
-         }
-@@ -1139,6 +1150,7 @@ impl Session {
+@@ -1299,6 +1301,7 @@ impl Session {
          error: Option<ErrorEvent>,
      ) {
          let sub_id = task.turn_context.sub_id.clone();
@@ -5511,10 +5477,10 @@ index f69d5f6384327629d0d40cdb9afb299b20608288..4a305a948dbe5fb8729eeed2a2653987
              self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                  .await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf1075415e2eb 100644
+index f631bbca9afa46680b3143472f4a78ae04b4af32..c0bc4df5d0ff60eebe3ddc9f2e24e0c5bb8b68a1 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -25,6 +25,7 @@ use crate::config::Config;
+@@ -27,6 +27,7 @@ use crate::config::Config;
  use crate::current_time::TimeProvider;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::environment_selection::default_thread_environment_requests;
@@ -5522,7 +5488,7 @@ index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf107
  use crate::exec_policy::ExecPolicyManager;
  use crate::exec_policy::InheritedExecPolicy;
  use crate::inherited_thread_state::InheritedThreadState;
-@@ -55,6 +56,7 @@ use codex_code_mode::CodeModeSessionProvider;
+@@ -57,6 +58,7 @@ use codex_code_mode::CodeModeSessionProvider;
  use codex_code_mode::DisabledCodeModeSessionProvider;
  use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
  use codex_core_plugins::PluginsManager;
@@ -5530,7 +5496,7 @@ index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf107
  use codex_exec_server::EnvironmentManager;
  use codex_exec_server::LOCAL_ENVIRONMENT_ID;
  use codex_execpolicy::Policy;
-@@ -592,8 +594,12 @@ pub struct StartThreadOptions {
+@@ -607,8 +609,12 @@ pub struct StartThreadOptions {
  pub(crate) struct StartupEnvironmentDiscovery {
      pub(crate) implicit_selection: bool,
      pub(crate) cold_resume: bool,
@@ -5543,7 +5509,7 @@ index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf107
  }
 
  /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
-@@ -626,23 +632,54 @@ impl StartThreadOptions {
+@@ -641,23 +647,54 @@ impl StartThreadOptions {
      }
 
      /// Bounds executor discovery for app-server thread/start before workspace startup work.
@@ -5601,7 +5567,7 @@ index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf107
      ) -> CodexResult<()> {
          let selection = saved.and_then(|settings| settings.environments.as_ref());
          let implicit_selection = selection.is_none_or(|saved| saved.implicit_selection);
-@@ -702,6 +739,8 @@ impl StartThreadOptions {
+@@ -717,6 +754,8 @@ impl StartThreadOptions {
                      .collect(),
              );
          }
@@ -5610,7 +5576,7 @@ index 6dca90a231e6b6b000f6067c06bc354b54757fc2..36f33c364740cecb1487ae79c81cf107
          let mut optional_on_resume = HashSet::new();
          if let Some(ids) = optional_environment_ids
              && !ids.is_empty()
-@@ -736,7 +775,9 @@ impl StartThreadOptions {
+@@ -751,7 +790,9 @@ impl StartThreadOptions {
              .insert(StartupEnvironmentDiscovery {
                  implicit_selection,
                  cold_resume: true,
@@ -5680,7 +5646,7 @@ index ec7a7d24aa87a8b28d9380f2aa8338b541c18057..e7dccd5fe07704d10f2a8b3227df52c7
  }
 
 diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
-index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed018578090973cf2ac5e 100644
+index 90494b58e173566b867bc121161ec207fc87f2b8..f385e889b9f36dd206dd739a8581b6a0112c3095 100644
 --- a/codex-rs/exec-server/src/client.rs
 +++ b/codex-rs/exec-server/src/client.rs
 @@ -4,6 +4,7 @@ use std::future::Future;
@@ -5972,7 +5938,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          match &connection.status {
              ConnectionStatus::Connected(rpc_client) if !rpc_client.is_disconnected() => {
                  Ok(Arc::clone(rpc_client))
-@@ -872,11 +1066,19 @@ impl ExecServerClient {
+@@ -875,11 +1069,19 @@ impl ExecServerClient {
 
      /// Returns shared cached executor metadata, fetching it lazily if initialization omitted it.
      pub async fn environment_info(&self) -> Result<Arc<EnvironmentInfo>, ExecServerError> {
@@ -5996,7 +5962,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      }
 
      /// Fetches executor metadata over RPC without reading or updating the cache.
-@@ -908,10 +1110,15 @@ impl ExecServerClient {
+@@ -911,10 +1113,15 @@ impl ExecServerClient {
      pub async fn environment_status(&self) -> Result<EnvironmentStatus, ExecServerError> {
          // Health checks only reuse an existing RPC connection and never initiate recovery.
          let rpc_client = self.rpc_client_without_recovery()?;
@@ -6016,7 +5982,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          )
      }
 
-@@ -1046,6 +1253,11 @@ impl ExecServerClient {
+@@ -1049,6 +1256,11 @@ impl ExecServerClient {
          &self,
          params: FsCloseParams,
      ) -> Result<FsCloseResponse, ExecServerError> {
@@ -6028,7 +5994,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          self.call_for_cleanup(FS_CLOSE_METHOD, &params).await
      }
 
-@@ -1076,11 +1288,18 @@ impl ExecServerClient {
+@@ -1079,11 +1291,18 @@ impl ExecServerClient {
          if !self.environment_info().await?.capabilities.fs_watch_missing {
              return Ok(None);
          }
@@ -6050,7 +6016,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      }
 
      pub async fn fs_get_metadata(
-@@ -1171,6 +1390,9 @@ impl ExecServerClient {
+@@ -1174,6 +1393,9 @@ impl ExecServerClient {
          loop {
              let rpc_client = self.rpc_client().await?;
              if !self.inner.begin_process_start(&rpc_client) {
@@ -6060,7 +6026,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                  continue;
              }
 
-@@ -1209,10 +1431,22 @@ impl ExecServerClient {
+@@ -1212,10 +1434,22 @@ impl ExecServerClient {
              let (result_received_tx, result_received_rx) = tokio::sync::oneshot::channel();
              let process_start_task = async move {
                  let _active_start = active_start;
@@ -6087,7 +6053,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                      Ok(response) => {
                          state.recoverable.store(true, Ordering::Release);
                          let session = Session {
-@@ -1231,7 +1465,10 @@ impl ExecServerClient {
+@@ -1234,7 +1468,10 @@ impl ExecServerClient {
                          }
                      }
                      Err(error) => {
@@ -6099,7 +6065,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                              tokio::spawn(async move {
                                  cleanup_process_start(&client, &process_id, &state).await;
                              });
-@@ -1255,6 +1492,7 @@ impl ExecServerClient {
+@@ -1258,6 +1495,7 @@ impl ExecServerClient {
                  ));
              }
              if matches!(&result, Ok(Ok(_))) {
@@ -6107,7 +6073,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                  pending_start.armed = false;
                  let _ = result_received_tx.send(());
              }
-@@ -1349,6 +1587,7 @@ impl ExecServerClient {
+@@ -1352,6 +1590,7 @@ impl ExecServerClient {
          let session_id = OnceLock::new();
          let (connection_changed, _connection_changed_rx) = watch::channel(());
          let inner = Arc::new(Inner {
@@ -6115,7 +6081,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
              connection: StdMutex::new(ConnectionState {
                  status: ConnectionStatus::Connected(Arc::clone(&rpc_client)),
                  executor_registration_id: noise_context
-@@ -1377,6 +1616,7 @@ impl ExecServerClient {
+@@ -1380,6 +1619,7 @@ impl ExecServerClient {
          let client = Self {
              inner,
              recovery_policy: RecoveryPolicy::Wait,
@@ -6123,7 +6089,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          };
          // An explicit resume can redirect notifications from running processes
          // before initialize returns. Drain them immediately so a burst cannot
-@@ -1415,14 +1655,26 @@ impl ExecServerClient {
+@@ -1418,14 +1658,26 @@ impl ExecServerClient {
      {
          let rpc_client = self.rpc_client().await?;
          // Bound sending as well as receiving: a stuck transport can fill the outbound queue.
@@ -6153,7 +6119,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                      // Retire only the connection we probed; recovery ignores a stale client.
                      rpc_client.close_transport().await;
                      self.inner.request_recovery(rpc_client, error.to_string());
-@@ -1442,7 +1694,37 @@ impl ExecServerClient {
+@@ -1445,7 +1697,37 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
@@ -6192,7 +6158,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      }
 
      async fn call_for_cleanup<P, T>(&self, method: &str, params: &P) -> Result<T, ExecServerError>
-@@ -1450,10 +1732,27 @@ impl ExecServerClient {
+@@ -1453,10 +1735,27 @@ impl ExecServerClient {
          P: serde::Serialize,
          T: serde::de::DeserializeOwned,
      {
@@ -6221,7 +6187,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      fn map_rpc_call_result<T>(
          &self,
          result: Result<T, RpcCallError>,
-@@ -1481,10 +1780,16 @@ async fn cleanup_process_start(
+@@ -1484,10 +1783,16 @@ async fn cleanup_process_start(
      process_id: &ProcessId,
      state: &Arc<SessionState>,
  ) {
@@ -6239,7 +6205,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                  continue;
              }
              Err(_) => break,
-@@ -1730,6 +2035,7 @@ impl Session {
+@@ -1733,6 +2038,7 @@ impl Session {
          max_bytes: Option<usize>,
          wait_ms: Option<u64>,
      ) -> Result<ReadResponse, ExecServerError> {
@@ -6247,7 +6213,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          loop {
              if let Some(response) = self.state.failed_response() {
                  return Ok(response);
-@@ -1746,6 +2052,7 @@ impl Session {
+@@ -1749,6 +2055,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -6255,7 +6221,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -1765,6 +2072,7 @@ impl Session {
+@@ -1768,6 +2075,7 @@ impl Session {
      }
 
      pub(crate) async fn write(&self, chunk: Vec<u8>) -> Result<WriteResponse, ExecServerError> {
@@ -6263,7 +6229,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
          let write_id = self.state.next_write_id();
          loop {
              match self
-@@ -1773,6 +2081,7 @@ impl Session {
+@@ -1776,6 +2084,7 @@ impl Session {
                  .await
              {
                  Ok(response) => return Ok(response),
@@ -6271,7 +6237,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
                  Err(error)
                      if is_transport_closed_error(&error) && !self.client.inner.is_failed() =>
                  {
-@@ -2037,14 +2346,18 @@ mod tests {
+@@ -2040,14 +2349,18 @@ mod tests {
      use tokio_tungstenite::WebSocketStream;
      use tokio_tungstenite::accept_async;
      use tokio_tungstenite::tungstenite::Message;
@@ -6290,7 +6256,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      use crate::Environment;
      use crate::EnvironmentObservedStatus;
      use crate::ExecutorFileSystem;
-@@ -2057,12 +2370,15 @@ mod tests {
+@@ -2060,12 +2373,15 @@ mod tests {
      use crate::client_api::StdioExecServerCommand;
      use crate::client_api::StdioExecServerConnectArgs;
      use crate::connection::JsonRpcConnection;
@@ -6306,7 +6272,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      use crate::protocol::EXEC_WRITE_METHOD;
      use crate::protocol::EnvironmentInfo;
      use crate::protocol::ExecClosedNotification;
-@@ -2073,11 +2389,14 @@ mod tests {
+@@ -2076,11 +2392,14 @@ mod tests {
      use crate::protocol::ExecResponse;
      use crate::protocol::FS_CLOSE_METHOD;
      use crate::protocol::FS_OPEN_METHOD;
@@ -6321,7 +6287,7 @@ index 82c3f7ca837323a5dbbc9112842743aa9b28fe18..4ce297b43e901db6408ed01857809097
      use crate::protocol::INITIALIZE_METHOD;
      use crate::protocol::INITIALIZED_METHOD;
      use crate::protocol::InitializeResponse;
-@@ -2113,6 +2432,532 @@ mod tests {
+@@ -2116,6 +2435,532 @@ mod tests {
              .expect("json-rpc line should write");
      }
 

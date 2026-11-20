@@ -1,5 +1,5 @@
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
-index cfcb0a6aa91e0c7933ba01469b0d5e6a38427c1c..1453ba5e7625b5a86ab14ae5d3b90044921783ef 100644
+index a39f9196c1f4d241c68be4b5fb3301e63007cc74..cf1b7c3b05c96ade050fdc54e9f742ed3798768d 100644
 --- a/codex-rs/ext/goal/src/extension.rs
 +++ b/codex-rs/ext/goal/src/extension.rs
 @@ -41,6 +41,7 @@ use crate::analytics::GoalAnalytics;
@@ -207,10 +207,10 @@ index 0000000000000000000000000000000000000000..b8bcc3480cb7460e4200456cc98e0a2c
 +    }
 +}
 diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
-index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b18c92c7a 100644
+index d147da903530bae91b0dae8fdf02ae6a0b003486..ddbe03d71acf72e51b21327916e7cb6894c19484 100644
 --- a/codex-rs/ext/goal/src/runtime.rs
 +++ b/codex-rs/ext/goal/src/runtime.rs
-@@ -34,6 +34,8 @@ pub(crate) struct GoalRuntimeConfig {
+@@ -32,6 +32,8 @@ pub(crate) struct GoalRuntimeConfig {
      pub(crate) enabled: bool,
      pub(crate) tools_available_for_thread: bool,
      pub(crate) tools_visible_for_thread: bool,
@@ -219,7 +219,7 @@ index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b
      pub(crate) root_accounting_state: Option<Arc<GoalAccountingState>>,
  }
 
-@@ -63,6 +65,7 @@ struct GoalRuntimeInner {
+@@ -61,6 +63,7 @@ struct GoalRuntimeInner {
      enabled: AtomicBool,
      tools_available_for_thread: bool,
      tools_visible_for_thread: bool,
@@ -227,7 +227,7 @@ index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b
      goal_state_lock: Semaphore,
  }
 
-@@ -117,6 +120,7 @@ impl GoalRuntimeHandle {
+@@ -115,6 +118,7 @@ impl GoalRuntimeHandle {
                  enabled: AtomicBool::new(config.enabled),
                  tools_available_for_thread: config.tools_available_for_thread,
                  tools_visible_for_thread: config.tools_visible_for_thread,
@@ -235,7 +235,7 @@ index 88dd463f6efba3430b122b8c74ee6220e1be1f24..d09fcc5fd5311e44b884ef2dc970b87b
                  goal_state_lock: Semaphore::new(/*permits*/ 1),
              }),
          }
-@@ -138,6 +142,10 @@ impl GoalRuntimeHandle {
+@@ -136,6 +140,10 @@ impl GoalRuntimeHandle {
          self.is_enabled() && self.inner.tools_available_for_thread
      }
 

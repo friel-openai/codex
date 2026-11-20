@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 6587a074e72736693bac8b31d6675eb0571b4d93..e4c3e65f29940ab6668a1bc5be7f1958770396f3 100644
+index 89a1687c31a48688346b113737b023425f45592d..983bc9a1f8a9171c38341815968a794e70426c05 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2510,6 +2510,7 @@ dependencies = [
+@@ -2584,6 +2584,7 @@ dependencies = [
   "chrono",
   "clap",
   "clap_complete",
@@ -10,7 +10,7 @@ index 6587a074e72736693bac8b31d6675eb0571b4d93..e4c3e65f29940ab6668a1bc5be7f1958
   "codex-api",
   "codex-app-server",
   "codex-app-server-client",
-@@ -2539,6 +2540,7 @@ dependencies = [
+@@ -2613,6 +2614,7 @@ dependencies = [
   "codex-login",
   "codex-mcp",
   "codex-memories-write",
@@ -19,7 +19,7 @@ index 6587a074e72736693bac8b31d6675eb0571b4d93..e4c3e65f29940ab6668a1bc5be7f1958
   "codex-models-manager",
   "codex-multi-env-copy-file",
 diff --git a/codex-rs/cli/Cargo.toml b/codex-rs/cli/Cargo.toml
-index ffff79d3312d781d02b959ec36902822c4cb87da..1b230c580b474712246e54b361bbc5d392df643a 100644
+index 2c3472948253a53ee1ab0f681287a54c3b1044be..8228bd28f5e91eb3b277a645b91e5a30d1cfbbef 100644
 --- a/codex-rs/cli/Cargo.toml
 +++ b/codex-rs/cli/Cargo.toml
 @@ -32,6 +32,7 @@ anyhow = { workspace = true }
@@ -39,10 +39,10 @@ index ffff79d3312d781d02b959ec36902822c4cb87da..1b230c580b474712246e54b361bbc5d3
  codex-model-provider = { workspace = true }
  codex-models-manager = { workspace = true }
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index bc7e795b04c30ce32ba59e07f710624974b8b4b0..af2d448de2a243a02e932c6fe92a57c4a2609d74 100644
+index 0dd8c266138bea4afdd0e931747ca5f215bc74ff..a2e765cb71fd643193c631afc776d6e023a16209 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
-@@ -74,6 +74,7 @@ mod mcp_login;
+@@ -76,6 +76,7 @@ mod mcp_login;
  mod migrate_nfs_db;
  mod migrate_rollouts;
  mod plugin_cmd;
@@ -50,7 +50,7 @@ index bc7e795b04c30ce32ba59e07f710624974b8b4b0..af2d448de2a243a02e932c6fe92a57c4
  mod queue_cmd;
  mod remote_control_cmd;
  #[cfg(target_os = "windows")]
-@@ -222,6 +223,9 @@ enum Subcommand {
+@@ -230,6 +231,9 @@ enum Subcommand {
      /// [experimental] Migrate configured SQLite databases to DELETE mode in place.
      MigrateNfsDb(migrate_nfs_db::MigrateNfsDbCommand),
 
@@ -60,7 +60,7 @@ index bc7e795b04c30ce32ba59e07f710624974b8b4b0..af2d448de2a243a02e932c6fe92a57c4
      /// Unarchive a saved session by id or session name.
      Unarchive(SessionArchiveCommand),
 
-@@ -1609,6 +1613,14 @@ async fn dispatch_cli(
+@@ -1666,6 +1670,14 @@ async fn dispatch_cli(
              )
              .await?;
          }
@@ -75,7 +75,7 @@ index bc7e795b04c30ce32ba59e07f710624974b8b4b0..af2d448de2a243a02e932c6fe92a57c4
          Some(Subcommand::Unarchive(cmd)) => {
              let output = run_session_archive_cli_command(
                  codex_tui::SessionArchiveAction::Unarchive,
-@@ -2365,6 +2377,7 @@ fn unsupported_subcommand_name_for_strict_config(
+@@ -2440,6 +2452,7 @@ fn unsupported_subcommand_name_for_strict_config(
          Some(Subcommand::Plugin(_)) => Some("plugin"),
          Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
          Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
@@ -83,7 +83,7 @@ index bc7e795b04c30ce32ba59e07f710624974b8b4b0..af2d448de2a243a02e932c6fe92a57c4
          #[cfg(any(target_os = "macos", target_os = "windows"))]
          Some(Subcommand::App(_)) => Some("app"),
          Some(Subcommand::Login(_)) => Some("login"),
-@@ -4422,6 +4435,55 @@ enabled = true
+@@ -4437,6 +4450,55 @@ enabled = true
          );
      }
 
@@ -317,10 +317,10 @@ index 0000000000000000000000000000000000000000..1048e404e595fc4c8f2b62bce2b4d9a1
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index cc93fef22c103c5541001fad747ea61b2d99e053..9c1f94ea78c567971410632cc6bfbee32afc18a0 100644
+index 8bb8200b0215da61f4d391ae19b634d5515c3fd5..39b3a6ebbb20fead44a0dc6b144f3b54befd73a4 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
-@@ -33,6 +33,7 @@ pub use in_memory::InMemoryThreadStore;
+@@ -36,6 +36,7 @@ pub use in_memory::InMemoryThreadStore;
  pub use in_memory::InMemoryThreadStoreCalls;
  pub use live_thread::LiveThread;
  pub use live_thread::LiveThreadInitGuard;
@@ -329,10 +329,10 @@ index cc93fef22c103c5541001fad747ea61b2d99e053..9c1f94ea78c567971410632cc6bfbee3
  pub use local::LocalThreadStoreConfig;
  pub use local::RolloutMigrationAdditionalFreeSpace;
 diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
-index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a3a59782f 100644
+index b39c6d4c14834b1f9d9f7142e85f16b3a09571a8..fdb9b2e6dd2c05fe0489d5878359f33f882c215f 100644
 --- a/codex-rs/thread-store/src/local/delete_thread.rs
 +++ b/codex-rs/thread-store/src/local/delete_thread.rs
-@@ -57,8 +57,8 @@ fn check_attached_children(
+@@ -72,8 +72,8 @@ fn check_attached_children(
 
  /// A physical rollout whose ownership has been checked before any deletion-side effects.
  #[derive(Clone)]
@@ -343,7 +343,7 @@ index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a
      rollout_id: RolloutId,
      /// Noncanonical files are authenticated individually and must not authorize sibling deletion.
      authenticated_noncanonical: bool,
-@@ -309,7 +309,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
+@@ -326,7 +326,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
      }
  }
 
@@ -352,7 +352,7 @@ index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a
      store: &LocalThreadStore,
      thread_id: ThreadId,
  ) -> ThreadStoreResult<Vec<OwnedRollout>> {
-@@ -454,7 +454,7 @@ async fn owned_rollouts_for_thread(
+@@ -471,7 +471,7 @@ async fn owned_rollouts_for_thread(
      Ok(owned_rollouts)
  }
 
@@ -361,7 +361,7 @@ index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a
      store: &LocalThreadStore,
      thread_id: codex_protocol::ThreadId,
      owned_rollouts: Vec<OwnedRollout>,
-@@ -515,9 +515,9 @@ async fn delete_thread_after_reference_check(
+@@ -532,9 +532,9 @@ async fn delete_thread_after_reference_check(
  }
 
  /// Records whether a failed deletion has already removed the thread's readable rollout data.
@@ -375,10 +375,10 @@ index 6ed9cdf346a73d9ad8d6522d27a94facc7012392..0ebfd54232b09f387a7b23fcb611755a
 
  impl DeleteThreadFailure {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index d807fba12c66b17b15d6a0c3048595cd4e537777..b58ef320c1aa6b9c12ece735559c6f709fc35eed 100644
+index 9d069b8b0e6b3dd3313d92d059e2af033db9d6a9..bd1a63db85569cb4ae75a7470f0966c4c3cafb41 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -17,6 +17,7 @@ mod paginated_fork;
+@@ -18,6 +18,7 @@ mod paginated_fork;
  mod pending_thread_metadata;
  mod projection_rebuild;
  mod projects;
@@ -386,7 +386,7 @@ index d807fba12c66b17b15d6a0c3048595cd4e537777..b58ef320c1aa6b9c12ece735559c6f70
  mod read_thread;
  mod revert_thread;
  mod rollout_migration;
-@@ -146,6 +147,7 @@ use crate::UpdateProjectParams;
+@@ -148,6 +149,7 @@ use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
  use crate::UpdatedProject;
 

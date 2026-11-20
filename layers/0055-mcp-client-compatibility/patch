@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 75e2f27134f346ca7072040e6dc5295ec8e5d8ba..4dad82b40644f70f557262b76cc7e66447c200af 100644
+index 95f7ff9b6c0cfd8cc62433fca5e3aee7d41f4dcf..24e4e32fe9a042a6ef17a64e05a8bfded29265a5 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -1498,8 +1498,16 @@ impl ThreadRequestProcessor {
+@@ -1527,8 +1527,16 @@ impl ThreadRequestProcessor {
          app_server_client_name: Option<String>,
          app_server_client_version: Option<String>,
      ) -> Result<(), JSONRPCErrorError> {
@@ -20,7 +20,7 @@ index 75e2f27134f346ca7072040e6dc5295ec8e5d8ba..4dad82b40644f70f557262b76cc7e664
              .await
              .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
      }
-@@ -8827,7 +8835,7 @@ fn legacy_page_next_turn_id(
+@@ -8909,7 +8917,7 @@ fn legacy_page_next_turn_id(
          .map(|turn| turn.id.clone())
  }
 
@@ -30,10 +30,10 @@ index 75e2f27134f346ca7072040e6dc5295ec8e5d8ba..4dad82b40644f70f557262b76cc7e664
      client_version: Option<&str>,
  ) -> bool {
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index c737e49eb6896ba344879623826f4f7405c62f9f..ba608dd2d44d0459e2205909f9a80c4989f2c660 100644
+index e1f08c02289445f0f988ab2cf6325106cd8687c6..e14c4c7ab764b5bfc9ea8892f407a2c515b99806 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -1295,8 +1295,17 @@ impl TurnRequestProcessor {
+@@ -1302,8 +1302,17 @@ impl TurnRequestProcessor {
          app_server_client_name: Option<String>,
          app_server_client_version: Option<String>,
      ) -> Result<(), JSONRPCErrorError> {
@@ -52,25 +52,11 @@ index c737e49eb6896ba344879623826f4f7405c62f9f..ba608dd2d44d0459e2205909f9a80c49
              .await
              .map_err(|err| internal_error(format!("failed to set app server client info: {err}")))
      }
-diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
-index cfb5747fdce230f4a4dc0a6ffa463eb74f860a81..e97d4d1de414d140c9fb0129681240ea4404c0c1 100644
---- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
-+++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
-@@ -594,8 +594,7 @@ impl McpConnectionSet {
-             .servers
-             .iter()
-             .filter(|(_, view)| {
--                view.connection.startup_is_dormant()
--                    && !view.connection.client.cancel_token.is_cancelled()
-+                view.startup_is_dormant() && !view.connection.is_connection_cancelled()
-             })
-             .map(|(name, _)| name.clone())
-             .collect();
 diff --git a/codex-rs/codex-mcp/src/elicitation.rs b/codex-rs/codex-mcp/src/elicitation.rs
-index 3e23359f6df2456363d30608b7916e4fddf502ca..04840a922d1bde8d0f413f7e255114f7f88d686d 100644
+index 220122c6ea0a9b82c5f8a387a5c92cc5d80e0a2b..6e640fd43a58692309f4debe6f11a64519326af1 100644
 --- a/codex-rs/codex-mcp/src/elicitation.rs
 +++ b/codex-rs/codex-mcp/src/elicitation.rs
-@@ -138,6 +138,7 @@ struct ActiveElicitation {
+@@ -142,6 +142,7 @@ struct ActiveElicitation {
  pub(crate) struct ElicitationRequestRouter {
      requests: Arc<StdMutex<PendingResponders>>,
      terminal_actions_finished: Arc<tokio::sync::Notify>,
@@ -78,7 +64,7 @@ index 3e23359f6df2456363d30608b7916e4fddf502ca..04840a922d1bde8d0f413f7e255114f7
      full_access_form_input_enabled: Arc<AtomicBool>,
  }
 
-@@ -277,6 +278,14 @@ impl ElicitationRequestRouter {
+@@ -281,6 +282,14 @@ impl ElicitationRequestRouter {
          }
      }
 
@@ -93,7 +79,7 @@ index 3e23359f6df2456363d30608b7916e4fddf502ca..04840a922d1bde8d0f413f7e255114f7
      pub(crate) fn full_access_form_input_enabled(&self) -> bool {
          self.full_access_form_input_enabled.load(Ordering::Acquire)
      }
-@@ -536,6 +545,13 @@ impl ElicitationRequestManager {
+@@ -545,6 +554,13 @@ impl ElicitationRequestManager {
                      )
                      .await;
                  }
@@ -108,10 +94,10 @@ index 3e23359f6df2456363d30608b7916e4fddf502ca..04840a922d1bde8d0f413f7e255114f7
                      .meta()
                      .and_then(|meta| meta.get(APPROVAL_KIND_KEY))
 diff --git a/codex-rs/codex-mcp/src/elicitation_tests.rs b/codex-rs/codex-mcp/src/elicitation_tests.rs
-index a71b4dfe0fdb9306f8f0846d70db47c99852718c..21023cf1e04357531e7cec5a5645983572a94f6b 100644
+index d7e89a2dd6181fb8272e2ef1793ae173753fd9bd..d591281fa6532e84694f7183d33cb10314267641 100644
 --- a/codex-rs/codex-mcp/src/elicitation_tests.rs
 +++ b/codex-rs/codex-mcp/src/elicitation_tests.rs
-@@ -1011,6 +1011,54 @@ fn verification_fixture(
+@@ -1030,6 +1030,54 @@ fn verification_fixture(
      (manager, events, sender)
  }
 
@@ -167,11 +153,11 @@ index a71b4dfe0fdb9306f8f0846d70db47c99852718c..21023cf1e04357531e7cec5a56459835
  async fn user_verification_requires_the_app_even_when_policy_would_approve_or_decline() {
      for approval_policy in [AskForApproval::Never, AskForApproval::OnRequest] {
 diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
-index ed2638e81547ecbd3cb71c8578a2fcd53cfd1944..4ec2c7080676cf1fa05bb786c0b4464a9f235d56 100644
+index f4ee9833ace0419be92feaeb492e4cc68d74bc86..8a79a00f8924fef8a3a4732cf250a0d2bb4debac 100644
 --- a/codex-rs/codex-mcp/src/runtime.rs
 +++ b/codex-rs/codex-mcp/src/runtime.rs
-@@ -926,6 +926,14 @@ impl McpRuntime {
-             })
+@@ -969,6 +969,14 @@ impl McpRuntime {
+             .environments_match(selections, ready_environments)
      }
 
 +    pub fn elicitations_auto_deny(&self) -> bool {
@@ -186,10 +172,10 @@ index ed2638e81547ecbd3cb71c8578a2fcd53cfd1944..4ec2c7080676cf1fa05bb786c0b4464a
          self.elicitation_router.enable_full_access_form_input();
      }
 diff --git a/codex-rs/core/src/codex_delegate_tests.rs b/codex-rs/core/src/codex_delegate_tests.rs
-index ab7e698585b8f0ccc88affbbd693160be56fcce7..26e780e3eb50e0d71945cca47d4a24b2c6d1d6f6 100644
+index 49ca8630a0e99afadc8c6f1ee0c6089e4d3d46d9..771c94877ce870eb48a8a35d4ee43c4c61f16d21 100644
 --- a/codex-rs/core/src/codex_delegate_tests.rs
 +++ b/codex-rs/core/src/codex_delegate_tests.rs
-@@ -262,7 +262,11 @@ async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
+@@ -265,7 +265,11 @@ async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
          .services
          .analytics_events_client = client.clone();
      parent_session
@@ -203,10 +189,10 @@ index ab7e698585b8f0ccc88affbbd693160be56fcce7..26e780e3eb50e0d71945cca47d4a24b2
          .expect("set parent client metadata");
 
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 37960e5849379066ddb08ee2eeed99d9ea725f33..63f395f2f53f0ffc9f8a4c6a0fe2e0b7712af319 100644
+index 6df8d2aa7f7e2df17ed626e688ea08959ae89499..c065287624ec3ffe22e8bf19d4104549ab16a64f 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -880,9 +880,14 @@ impl CodexThread {
+@@ -984,9 +984,14 @@ impl CodexThread {
          &self,
          app_server_client_name: Option<String>,
          app_server_client_version: Option<String>,
@@ -223,17 +209,17 @@ index 37960e5849379066ddb08ee2eeed99d9ea725f33..63f395f2f53f0ffc9f8a4c6a0fe2e0b7
      }
 
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index c8c0f2e603fa091793269f2f58aeefd62e79adc6..3c3dfb8521d395131e39d20ea5b27a892aeea21e 100644
+index 909a5e6c5a3da05c58b8df834a15527caecb586e..2b753123ba74d1a36cb3e03da58fda8ded832557 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
-@@ -809,6 +809,13 @@ impl Session {
-         request_id: RequestId,
+@@ -853,6 +853,13 @@ impl Session {
          request: ElicitationRequest,
      ) -> Option<ElicitationResponse> {
+         let server_name = server_key.name().to_owned();
 +        if self.services.mcp_runtime.elicitations_auto_deny() {
 +            return Some(ElicitationResponse {
-+                action: ElicitationAction::Accept,
-+                content: Some(serde_json::json!({})),
++                action: ElicitationAction::Decline,
++                content: None,
 +                meta: None,
 +            });
 +        }
@@ -241,10 +227,10 @@ index c8c0f2e603fa091793269f2f58aeefd62e79adc6..3c3dfb8521d395131e39d20ea5b27a89
          // Do not report its human wait as ordinary tool execution.
          if turn_context
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a0aca92a5951dfbe251eafdf557265adc38d092c..5666de49663bf4b4d9fbcc5efc3f27ffe2ffdf57 100644
+index 81c208e2b479e1428a299ba3d535ffaa9600f87a..5f3f0dfb54338574e210e946318d1097e0b977c5 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -3378,6 +3378,7 @@ impl Session {
+@@ -3401,6 +3401,7 @@ impl Session {
          &self,
          app_server_client_name: Option<String>,
          app_server_client_version: Option<String>,
@@ -252,7 +238,7 @@ index a0aca92a5951dfbe251eafdf557265adc38d092c..5666de49663bf4b4d9fbcc5efc3f27ff
      ) -> ConstraintResult<()> {
          self.update_settings(SessionSettingsUpdate {
              app_server_client_name,
-@@ -3385,6 +3386,9 @@ impl Session {
+@@ -3408,6 +3409,9 @@ impl Session {
              ..Default::default()
          })
          .await?;
@@ -262,3 +248,45 @@ index a0aca92a5951dfbe251eafdf557265adc38d092c..5666de49663bf4b4d9fbcc5efc3f27ff
          Ok(())
      }
 
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 5eb8e1c74a8f6c0d94e56919d601a005e73fcff8..ff579c0bad60878105eb633ea39f65f11950d875 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -805,6 +805,37 @@ async fn request_mcp_server_elicitation_waits_for_user_response(
+     assert!(rx.try_recv().is_err());
+ }
+
++#[tokio::test]
++async fn auto_denied_direct_elicitation_never_reports_acceptance() {
++    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
++    session
++        .services
++        .mcp_runtime
++        .set_elicitations_auto_deny(true);
++    let response = session
++        .request_mcp_server_elicitation(
++            &turn_context,
++            codex_mcp::McpServerKey::unscoped("codex_apps"),
++            RequestId::String("request-1".into()),
++            ElicitationRequest::Url {
++                meta: None,
++                message: "Connect this app to continue.".to_string(),
++                url: "https://example.com/connect".to_string(),
++                elicitation_id: "connect-1".to_string(),
++            },
++        )
++        .await;
++    assert_eq!(
++        response,
++        Some(ElicitationResponse {
++            action: ElicitationAction::Decline,
++            content: None,
++            meta: None,
++        })
++    );
++    assert!(rx.try_recv().is_err());
++}
++
+ #[tokio::test]
+ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted() {
+     let (sess, tc, rx) = make_session_and_context_with_rx().await;

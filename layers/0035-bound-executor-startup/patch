@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 407cfaa06462f4dea43c69bf27e61d99e69516a1..e85fe8f3ba7da487657a15ee3dcff95d8c7f22cf 100644
+index 52a9e250e8481fc3f78f5e69d5985a1dfb01175a..42ff1d3f8021eac2f9b4c6d21f0a98257557ce44 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -1922,6 +1922,7 @@ impl ThreadRequestProcessor {
+@@ -1951,6 +1951,7 @@ impl ThreadRequestProcessor {
              }
          }
 
@@ -10,7 +10,7 @@ index 407cfaa06462f4dea43c69bf27e61d99e69516a1..e85fe8f3ba7da487657a15ee3dcff95d
          let environment_requests = environment_requests.unwrap_or_else(|| {
              listener_task_context
                  .thread_manager
-@@ -1948,6 +1949,8 @@ impl ThreadRequestProcessor {
+@@ -1977,6 +1978,8 @@ impl ThreadRequestProcessor {
              thread_extension_init.insert(selected_capability_roots);
          }
          let mut start_options = StartThreadOptions::new(config);
@@ -19,7 +19,7 @@ index 407cfaa06462f4dea43c69bf27e61d99e69516a1..e85fe8f3ba7da487657a15ee3dcff95d
          let reserved_thread_id = if start_options.config.ephemeral {
              None
          } else {
-@@ -1989,7 +1992,6 @@ impl ThreadRequestProcessor {
+@@ -2018,7 +2021,6 @@ impl ThreadRequestProcessor {
                  metrics_service_name: service_name,
                  parent_trace: request_trace,
                  environments: Some(environment_requests),
@@ -28,7 +28,7 @@ index 407cfaa06462f4dea43c69bf27e61d99e69516a1..e85fe8f3ba7da487657a15ee3dcff95d
                  ..start_options
              })
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 609f18f934f51529846337fa3ba4f6d8a63d42d5..9f047c5a013626e8c38890c89d845e36e9fe3a11 100644
+index 19df517bb204f88a6d1559a36cd759eb09b0d209..93bc01064fd7665fedccb838a4dc56e87c8c578f 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
 @@ -13,6 +13,7 @@ use codex_protocol::models::FunctionCallOutputBody;
@@ -36,10 +36,10 @@ index 609f18f934f51529846337fa3ba4f6d8a63d42d5..9f047c5a013626e8c38890c89d845e36
  use codex_protocol::models::FunctionCallOutputPayload;
  use codex_protocol::models::ImageReference as CoreImageReference;
 +use codex_protocol::protocol::EnvironmentConfigState;
+ use codex_protocol::protocol::RealtimeConversationVersion;
  use codex_protocol::protocol::TurnEnvironmentRequests;
  use codex_protocol::protocol::TurnSettingsUpdate;
- use codex_protocol::protocol::TurnSettingsUpdateOutcome;
-@@ -907,8 +908,11 @@ impl TurnRequestProcessor {
+@@ -910,8 +911,11 @@ impl TurnRequestProcessor {
          }
 
          // Default-environment updates retain the task's fallback roots, not its active roots.
@@ -53,7 +53,7 @@ index 609f18f934f51529846337fa3ba4f6d8a63d42d5..9f047c5a013626e8c38890c89d845e36
          let legacy_fallback_cwd = cwd.unwrap_or_else(|| current_cwd.clone());
          let workspace_roots = match workspace_roots {
              Some(workspace_roots) => workspace_roots,
-@@ -918,9 +922,25 @@ impl TurnRequestProcessor {
+@@ -921,9 +925,25 @@ impl TurnRequestProcessor {
                  legacy_fallback_cwd.clone(),
              ),
          };
@@ -310,7 +310,7 @@ index d07ce4f04836de568673afb429f31dcf22cae364..6b3458397c35eae00fd8b76f6a411522
  async fn turn_model_context_uses_selected_environment() -> Result<()> {
      let server = responses::start_mock_server().await;
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 482348a605e30e4b1a630a6be943e351990b5d84..4071572744044ed6fc9cd334409f1c1a8a5bd1f1 100644
+index 14e49bd8d557cb90f2f27e879571d0faa31f7f71..216814445f882a2797ee0a525a5482bfb3c0d122 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -390,7 +390,9 @@ impl LocalAgentControl {
@@ -1074,7 +1074,7 @@ index 65198ac497e8030a70f78dd7c55d7d8ad9166f4c..04e66a4747ae25ec5a78bcb792298060
 
      use std::time::Duration;
 diff --git a/codex-rs/core/src/mcp.rs b/codex-rs/core/src/mcp.rs
-index a6270a6ccf0f19071494a0581eeb2e35c965522a..c95e3484040fcedb37f113affcc1ee6f9561cc1a 100644
+index efdbb20332c554764980fe05ae96642b77708d5a..b87061cd2a40fbc45263785548e954092f78e11c 100644
 --- a/codex-rs/core/src/mcp.rs
 +++ b/codex-rs/core/src/mcp.rs
 @@ -79,9 +79,9 @@ impl<'a> McpEnvironmentScope<'a> {
@@ -1091,10 +1091,10 @@ index a6270a6ccf0f19071494a0581eeb2e35c965522a..c95e3484040fcedb37f113affcc1ee6f
                  .mcp_policy
                  .as_ref()
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index e1d673c429dd6fb6aa80dbff8e78e329cb539f03..cd2ce8bed7b06f0232a11db703f81afbd13de08e 100644
+index 8fe221ec265b40ec9f6af6d38f8d32d5aea0bb64..d6f08e5bc0f3739bd4734a54f1d1bab625ad9976 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -61,7 +61,8 @@ pub(super) fn validate_environment_configs(
+@@ -65,7 +65,8 @@ pub(super) fn validate_environment_configs(
          match &selection.config {
              EnvironmentConfigState::FromThread
              | EnvironmentConfigState::Pending
@@ -1105,7 +1105,7 @@ index e1d673c429dd6fb6aa80dbff8e78e329cb539f03..cd2ce8bed7b06f0232a11db703f81afb
                  validate_environment_config(selection, config, features).map_err(|error| {
                      ConstraintError::InvalidValue {
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f67694be0 100644
+index 04f212453511c10ed3d589963aafd8651b6d5979..6e2e461a2b33a3478311290fb40defefa3cad282 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -44,6 +44,7 @@ use crate::context::world_state::WorldStateUpdate;
@@ -1116,7 +1116,7 @@ index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
  use crate::exec_policy::ExecPolicyManager;
-@@ -1101,7 +1102,7 @@ impl Session {
+@@ -1132,7 +1133,7 @@ impl Session {
                      roots
                  }
              };
@@ -1125,7 +1125,7 @@ index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f
              .into_iter()
              .map(|request| TurnEnvironmentSelection::new(request, &selected_capability_roots))
              .collect::<Vec<_>>();
-@@ -1382,7 +1383,7 @@ impl Session {
+@@ -1413,7 +1414,7 @@ impl Session {
          };
          // Replace any inherited context before startup hooks see this thread's effective auth.
          thread_extension_init.insert(provider_auth.clone());
@@ -1134,7 +1134,7 @@ index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f
              turn_extension_init,
              provider: provider_auth.model_provider(config.model_provider.clone()),
              step_settings: Arc::new(StepSettings {
-@@ -1426,6 +1427,34 @@ impl Session {
+@@ -1458,6 +1459,34 @@ impl Session {
          session_configuration
              .validate(&environment_selections)
              .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -1170,10 +1170,10 @@ index 01d3fd4e66673822eb678ef39dbcc30d5028da11..e44c53a9af379a6210fc2d049bddd72f
 
          // Generate a unique ID for the lifetime of this session.
 diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
-index 486aee03c7e1b41c49c6ff45dcd49c329b9847d9..fdb55014125e5b30252d8bce5b8d0fdc63a0b7a6 100644
+index 325f4dd83b465e57e57dd336ec368c57a8d83168..8d6a6bd4826099c3de6e04a14202270ac990f100 100644
 --- a/codex-rs/core/src/session/step_activation.rs
 +++ b/codex-rs/core/src/session/step_activation.rs
-@@ -540,7 +540,9 @@ fn any_environment_has_full_disk_write(
+@@ -559,7 +559,9 @@ fn any_environment_has_full_disk_write(
                  config.permission_profile.permission_profile(),
                  &config.workspace_roots,
              ),
@@ -1185,10 +1185,10 @@ index 486aee03c7e1b41c49c6ff45dcd49c329b9847d9..fdb55014125e5b30252d8bce5b8d0fdc
          Some(
              profile
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e856f578ed2682d6f213627139cd670f6b2e68bf..a0e271efc87d004b260008b1fee2b806ca21a57b 100644
+index 32f3bb736ff91cf1af47b634edebd753ac4bfbe5..c5facf59bf3295a600129aab94cfb2177c2ed6d0 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -1275,7 +1275,7 @@ impl Session {
+@@ -1272,7 +1272,7 @@ impl Session {
                  .iter()
                  .find(|environment| {
                      environment.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
@@ -1198,10 +1198,10 @@ index e856f578ed2682d6f213627139cd670f6b2e68bf..a0e271efc87d004b260008b1fee2b806
          );
          config.model = Some(
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 3097e8787106d81c31da91f162273119a708ba13..93b3551d63d634bc8df403e18f212b6c7a0ec900 100644
+index 6f58cacb08e33031cc85beb5072c1dd44ec40df1..a143d763cab20d49700421a8eb2c2a0b240961ff 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -586,6 +586,11 @@ pub struct StartThreadOptions {
+@@ -601,6 +601,11 @@ pub struct StartThreadOptions {
      pub disabled_plugin_ids: Option<Vec<String>>,
  }
 
@@ -1213,7 +1213,7 @@ index 3097e8787106d81c31da91f162273119a708ba13..93b3551d63d634bc8df403e18f212b6c
  /// A private, non-sharing provider also detaches a resumed root from its previous live provider.
  struct InheritedThreadInstructions(Instructions);
 
-@@ -615,6 +620,12 @@ impl StartThreadOptions {
+@@ -630,6 +635,12 @@ impl StartThreadOptions {
          )
      }
 
@@ -1297,10 +1297,10 @@ index 4d04d7759fb3cb27cc7a4a746111e1c2efe723dd..28637eadc8c4d801a33895cc7965f710
          }
  }
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 2d940368c93014c9197c4c4bc5a3686688417f75..bc8cd4a35b3f6f8b88cdb1476d8b09864d28581a 100644
+index 3b1f0e7d1041989a2f4c9dcc073929f8ae6c2f0f..c4ab97561c69f335e168a197d51e23f00a5b7a2c 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -5288,6 +5288,11 @@ mod tests {
+@@ -5329,6 +5329,11 @@ mod tests {
                  "owner",
                  EnvironmentConfigState::Pending,
              ),
@@ -1312,7 +1312,7 @@ index 2d940368c93014c9197c4c4bc5a3686688417f75..bc8cd4a35b3f6f8b88cdb1476d8b0986
          ] {
              let selection = TurnEnvironmentSelection {
                  environment_id: "selected-environment".to_string(),
-@@ -5300,18 +5305,19 @@ mod tests {
+@@ -5341,18 +5346,19 @@ mod tests {
              snapshot.environments =
                  Some(TurnEnvironmentSelections::new(cwd.clone(), vec![selection.clone()]).into());
              let encoded = serde_json::to_value(&snapshot)?;

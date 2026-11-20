@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index e2f7dc14ffb20675736ddd56104dc211d00dec16..c3c3b94d36a1fa121f09e268caf136570f11f54e 100644
+index 356ea8e2475b8fac3ab4f42598c9da69bfb6ecf3..6646a02fe8485fbd5736f016f9d8fa157aaacd93 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
-@@ -4154,6 +4154,7 @@ mod tests {
+@@ -4186,6 +4186,7 @@ mod tests {
                      id,
                      text,
                      phase,
@@ -10,7 +10,7 @@ index e2f7dc14ffb20675736ddd56104dc211d00dec16..c3c3b94d36a1fa121f09e268caf13657
                      delivery,
                      questions,
                      memory_citation,
-@@ -4167,6 +4168,7 @@ mod tests {
+@@ -4199,6 +4200,7 @@ mod tests {
                      "Agent message: ready for review from /root/goal_supervisor"
                  );
                  assert_eq!(phase, Some(MessagePhase::Commentary));
@@ -50,7 +50,7 @@ index 91c490021b1b73afd48c2f06a04c85d99e4e5193..d702636cfd496bd906f26f4516ad0a0a
          preview: "source".to_string(),
          name: None,
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
-index a3be6c47ab84f59fb9b24f602f2f54f3d55ef8c9..8a5b191911d6ed4edcef3e53ce2957df245d463c 100644
+index 516a6e64cf9c1bc63f5ccaa3883a1b440d843197..18332d80ffb9bca809c1a993d852c4ebbfc44b00 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 @@ -103,7 +103,6 @@ mod persisted_resume_approval_policy_tests {
@@ -87,10 +87,10 @@ index a3be6c47ab84f59fb9b24f602f2f54f3d55ef8c9..8a5b191911d6ed4edcef3e53ce2957df
              comp_hash: None,
              collaboration_mode: None,
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index fd5c446cab5f083b8c02a60408c0b7ab836f7d25..4724cd69fbf8fc87d8442659ca77dab2cb0f61ec 100644
+index 3423f5c6c69be7e477ab94c5f03fea173efc6c17..bf7a3def9a4f322aeee0cbd0c5f66ad490fa33e2 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
-@@ -602,6 +602,7 @@ mod tests {
+@@ -661,6 +661,7 @@ mod tests {
              &EventMsg::Error(codex_protocol::protocol::ErrorEvent {
                  message: "settings rejected".into(),
                  codex_error_info: None,

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index eeb7d9e92c52d3739a81e6122d69b76a79dac3f0..6717bde1ccf51ae3414e16918305fb9bc212312c 100644
+index 18416ac8f9fcfdd0368bc0b0804769c3538c21d1..9ec082c8d36c404df603e48917dfbfd6bcc40860 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
-@@ -21,7 +21,6 @@ use codex_config::NetworkDomainPermissionToml;
+@@ -22,7 +22,6 @@ use codex_config::NetworkDomainPermissionToml;
  use codex_config::NetworkDomainPermissionsToml;
  use codex_config::RequirementSource;
  use codex_config::Sourced;
@@ -11,10 +11,10 @@ index eeb7d9e92c52d3739a81e6122d69b76a79dac3f0..6717bde1ccf51ae3414e16918305fb9b
  use codex_config::types::McpServerConfig;
  use codex_exec_server::LOCAL_FS;
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 8b1f731d8b936dfa20d33b2d90cc8094a7e8c0eb..99d9e48be2d76cf9f11be1ed5f7f2f0e57479fca 100644
+index 96ee9ff2a648d4fb2a0dc151f0faa186f3ef7e12..6e7a700eb99856d554455c3c1b5eb907e65279a9 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5331,7 +5331,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+@@ -5361,7 +5361,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
          "checkpoint publication must not mutate the shared parent envelopes"
      );
      {
@@ -23,7 +23,7 @@ index 8b1f731d8b936dfa20d33b2d90cc8094a7e8c0eb..99d9e48be2d76cf9f11be1ed5f7f2f0e
          assert!(Arc::ptr_eq(
              &child_state.history.shared_annotated_items(),
              &source_response_items
-@@ -5778,7 +5778,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+@@ -5808,7 +5808,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
          )
      }));
      {
@@ -33,10 +33,10 @@ index 8b1f731d8b936dfa20d33b2d90cc8094a7e8c0eb..99d9e48be2d76cf9f11be1ed5f7f2f0e
              child_state.reference_context_item(),
              Some(reference_context_item)
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 4cf153c3e34647c95c36e0ab599d088a131df203..ae5c065f6c5357e051006475d15849d3ea014681 100644
+index d486107ed5cc34ac452d1cea118d081c1625f618..92448a4aad9a5717c2660ffba038816463418fb8 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -696,10 +696,14 @@ async fn catalog_safety_failed_first_party_catalog_cannot_expose_fallback_tools(
+@@ -697,10 +697,14 @@ async fn catalog_safety_failed_first_party_catalog_cannot_expose_fallback_tools(
              /*tool_suggest_candidates*/ None,
              session.dynamic_tools().await.as_ref(),
          );

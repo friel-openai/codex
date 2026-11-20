@@ -1,5 +1,5 @@
 diff --git a/codex-rs/rollout/src/compression.rs b/codex-rs/rollout/src/compression.rs
-index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fea86f9f02 100644
+index 2a44c28506b6410228b2151b6a42568adde89b67..f8019236fa799ba825ef932c0a493bee51628d7a 100644
 --- a/codex-rs/rollout/src/compression.rs
 +++ b/codex-rs/rollout/src/compression.rs
 @@ -375,8 +375,6 @@ mod worker {
@@ -20,7 +20,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
      use crate::SESSIONS_SUBDIR;
 
      use super::RolloutCompressionTrigger;
-@@ -563,6 +563,7 @@ mod worker {
+@@ -607,6 +607,7 @@ mod worker {
              for root in [
                  codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
                  codex_home.join(SESSIONS_SUBDIR),
@@ -28,7 +28,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              ] {
                  if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                      stats.time_budget_exhausted = true;
-@@ -674,6 +675,13 @@ mod worker {
+@@ -718,6 +719,13 @@ mod worker {
          let mut stack = vec![root.to_path_buf()];
          let mut jobs = JoinSet::new();
          while let Some(dir) = stack.pop() {
@@ -42,20 +42,44 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                  stats.time_budget_exhausted = true;
                  break;
-@@ -742,8 +750,33 @@ mod worker {
+@@ -786,27 +794,39 @@ mod worker {
                      metrics::file(trigger, "skipped_unreadable_meta");
                      continue;
                  };
+-                // Recent files cannot be compressed. Only open the header for a
+-                // possible candidate; the job rechecks its age before encoding.
 +                // Capture identity before reading the header so replacement cannot pair a
 +                // new file's bytes with the previous file's writer reservation.
+                 let checked_at = Instant::now();
+-                if let Ok(metadata) = entry.metadata().await
+-                    && let Ok(modified) = metadata.modified()
+-                    && !is_cold(modified)
+-                {
+-                    stats.scanned_file(trigger);
+-                    stats.measured_file(
+-                        trigger,
+-                        checked_at.elapsed(),
+-                        CompressionMeasurement::new(
+-                            CompressionOutcome::SkippedNotCold,
+-                            Some(metadata.len()),
+-                            /*compressed_bytes*/ None,
+-                        ),
+-                    );
+-                    continue;
+-                }
 +                let before = match cold_file_state(&path) {
 +                    Ok(ColdFileState::Cold(state)) => state,
 +                    Ok(ColdFileState::NotCold(state)) => {
-+                        stats.skipped = stats.skipped.saturating_add(1);
-+                        metrics::file(trigger, CompressionOutcome::SkippedNotCold.tag());
-+                        if let Some(state) = state {
-+                            metrics::source_bytes(trigger, "skipped_not_cold", state.len);
-+                        }
++                        stats.scanned_file(trigger);
++                        stats.measured_file(
++                            trigger,
++                            checked_at.elapsed(),
++                            CompressionMeasurement::new(
++                                CompressionOutcome::SkippedNotCold,
++                                state.map(|state| state.len),
++                                /*compressed_bytes*/ None,
++                            ),
++                        );
 +                        continue;
 +                    }
 +                    Err(err) => {
@@ -77,7 +101,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
                      Err(err) => {
                          stats.scan_errors = true;
                          let reason = err
-@@ -800,6 +833,7 @@ mod worker {
+@@ -862,6 +882,7 @@ mod worker {
                      // Blocking work retains maintenance ownership even if the async worker exits.
                      let result = compress_rollout_if_cold_blocking(
                          path.as_path(),
@@ -85,7 +109,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
                          &writer_locks,
                          thread_id,
                          &maintenance,
-@@ -816,6 +850,31 @@ mod worker {
+@@ -878,6 +899,31 @@ mod worker {
 
      type CompressionJobResult = (PathBuf, Duration, io::Result<CompressionMeasurement>);
 
@@ -117,7 +141,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
      enum CompressionOutcome {
          Compressed,
-@@ -930,6 +989,7 @@ mod worker {
+@@ -964,6 +1010,7 @@ mod worker {
 
      fn compress_rollout_if_cold_blocking(
          path: &Path,
@@ -125,7 +149,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
          writer_locks: &Arc<crate::WriterLockCoordinator>,
          thread_id: codex_protocol::ThreadId,
          maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
-@@ -942,21 +1002,18 @@ mod worker {
+@@ -976,21 +1023,18 @@ mod worker {
                  /*compressed_bytes*/ None,
              ));
          }
@@ -156,7 +180,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              return Ok(CompressionMeasurement::new(
                  CompressionOutcome::SkippedAlreadyCompressed,
                  source_bytes,
-@@ -988,7 +1045,7 @@ mod worker {
+@@ -1022,7 +1066,7 @@ mod worker {
                  let _ = resume.recv();
              }
          }
@@ -165,7 +189,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?
          {
              return Ok(CompressionMeasurement::new(
-@@ -1034,7 +1091,9 @@ mod worker {
+@@ -1068,7 +1112,9 @@ mod worker {
              .len();
 
          // Encoding and verification do not block writers. Coordination prevents writer
@@ -176,7 +200,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
          let Some(_publication_guard) = writer_locks
              .try_acquire_for_publication(thread_id)
              .inspect_err(|err| FailureMetric::File(trigger).record("writer_lock", err))?
-@@ -1086,8 +1145,14 @@ mod worker {
+@@ -1120,8 +1166,14 @@ mod worker {
                  /*compressed_bytes*/ None,
              ));
          }
@@ -191,7 +215,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
          Ok(CompressionMeasurement::new(
              CompressionOutcome::Compressed,
              source_bytes,
-@@ -1095,16 +1160,18 @@ mod worker {
+@@ -1129,16 +1181,18 @@ mod worker {
          ))
      }
 
@@ -212,7 +236,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              Ok(metadata) => metadata,
              Err(err) if err.kind() == io::ErrorKind::NotFound => {
                  return Ok(ColdFileState::NotCold(None));
-@@ -1114,13 +1181,21 @@ mod worker {
+@@ -1148,13 +1202,21 @@ mod worker {
          if !metadata.is_file() {
              return Ok(ColdFileState::NotCold(None));
          }
@@ -233,9 +257,9 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
 -            change_time: (metadata.ctime(), metadata.ctime_nsec()),
 +            identity: file_identity(&metadata),
          };
-         let age = SystemTime::now()
-             .duration_since(modified)
-@@ -1132,29 +1207,58 @@ mod worker {
+         if !is_cold(modified) {
+             return Ok(ColdFileState::NotCold(Some(state)));
+@@ -1167,29 +1229,58 @@ mod worker {
      }
 
      fn same_file_state(path: &Path, expected: &FileState) -> io::Result<bool> {
@@ -306,7 +330,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
          // Preserve fast byte-bound checks for paginated history without decoding the whole file.
          encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
          if !copy_until_foreground(&mut input, &mut encoder, maintenance)? {
-@@ -1201,6 +1305,7 @@ mod worker {
+@@ -1236,6 +1327,7 @@ mod worker {
          for root in [
              codex_home.join(SESSIONS_SUBDIR),
              codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
@@ -314,7 +338,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
          ] {
              if maintenance.should_yield()? {
                  break;
-@@ -1228,6 +1333,12 @@ mod worker {
+@@ -1263,6 +1355,12 @@ mod worker {
          }
          let mut stack = vec![root.to_path_buf()];
          while let Some(dir) = stack.pop() {
@@ -327,7 +351,7 @@ index 3634306e65c566c5fa97cb5640c348acbf4eac71..ed7a88e10fd6d49816a26c20590816fe
              if maintenance.should_yield()? {
                  return Ok(errors);
              }
-@@ -1268,7 +1379,12 @@ mod worker {
+@@ -1303,7 +1401,12 @@ mod worker {
                      && path
                          .file_name()
                          .and_then(OsStr::to_str)
@@ -740,10 +764,10 @@ index 0000000000000000000000000000000000000000..553346d9b969605db647d39d95f4b3e3
 +    Ok(())
 +}
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index ca529602e808b2ec42df50020588308ca03b19d9..8a1578c9886707040122c72e307f4a3fc15a62c0 100644
+index ef7e58691fbf10f6f28c97dcfef5c5a10ceeaf50..52a689cc67207f2bfbe6d9383ee972c6b670966b 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -32,6 +32,9 @@ use crate::first_rollout_content_match_snippet;
+@@ -32,6 +32,9 @@ use crate::append_rollout_item_to_path;
  use crate::read_session_meta_line;
  use crate::search_rollout_matches;
 
@@ -754,10 +778,10 @@ index ca529602e808b2ec42df50020588308ca03b19d9..8a1578c9886707040122c72e307f4a3f
  async fn full_scan_capacity_preserves_plain_and_compressed_records() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index eb29aee2e8a89ab024e5306f5e7f732d9aa7b1a8..2a080498d06f07afaa6606d5ea88d97f3513a856 100644
+index f05d7655ef4cee8eb5202db3b787607684129273..032d6b422d6abb045c711b0184756feb299cfab7 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
-@@ -225,6 +225,7 @@ pub use reference::materialize_model_context_rollout_items_from;
+@@ -228,6 +228,7 @@ pub use reference::materialize_model_context_rollout_items_from;
  pub use reference::materialize_recent_rollout_items;
  pub use reference::materialize_recent_rollout_lines;
  pub use reference::materialize_recent_rollout_lines_from;
@@ -766,7 +790,7 @@ index eb29aee2e8a89ab024e5306f5e7f732d9aa7b1a8..2a080498d06f07afaa6606d5ea88d97f
  pub use reference::materialize_rollout_lines;
  pub use reference::materialize_rollout_lines_from;
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97cf30f7b77 100644
+index d9418abe2b6d8585f41074f8f9c80d3c643e9de1..8cc30b7a5c26b73cf3ba6b14924bf4069fd708df 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
 @@ -4,7 +4,6 @@ use std::collections::HashMap;
@@ -808,7 +832,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          )
          .await?;
          Ok(BoundedRolloutLines {
-@@ -528,6 +532,7 @@ pub async fn materialize_rollout_lines(
+@@ -536,6 +540,7 @@ pub async fn materialize_rollout_lines(
          lines,
          MaterializationPolicy::Complete,
          &mut has_older_reference,
@@ -816,7 +840,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      )
      .await
  }
-@@ -543,6 +548,7 @@ pub async fn materialize_rollout_lines_from(
+@@ -551,6 +556,7 @@ pub async fn materialize_rollout_lines_from(
          lines,
          MaterializationPolicy::Complete,
          &mut has_older_reference,
@@ -824,7 +848,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      )
      .await
  }
-@@ -588,6 +594,7 @@ pub async fn materialize_model_context_rollout_items_from(
+@@ -596,6 +602,7 @@ pub async fn materialize_model_context_rollout_items_from(
              &mut has_older_reference,
              Some(&mut cache),
              /*retain_source_metadata*/ false,
@@ -832,7 +856,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          )
          .await?;
          let mut scan = ModelContextScan::default();
-@@ -627,7 +634,27 @@ pub async fn materialize_recent_rollout_lines(
+@@ -635,7 +642,27 @@ pub async fn materialize_recent_rollout_lines(
      rollout_path: &Path,
  ) -> io::Result<Vec<RolloutLine>> {
      let lines = load_active_rollout_lines(rollout_path).await?;
@@ -861,7 +885,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
  }
 
  /// Expands already loaded root lines using the recent-segment replay policy.
-@@ -641,6 +668,7 @@ pub async fn materialize_recent_rollout_lines_from(
+@@ -649,6 +676,7 @@ pub async fn materialize_recent_rollout_lines_from(
          lines,
          MaterializationPolicy::RecentSegments,
          &mut has_older_reference,
@@ -869,7 +893,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      )
      .await
  }
-@@ -656,20 +684,13 @@ pub async fn materialize_bounded_rollout_lines(
+@@ -664,20 +692,13 @@ pub async fn materialize_bounded_rollout_lines(
      ordinary_reference_limit: usize,
  ) -> io::Result<BoundedRolloutLines> {
      let lines = load_active_rollout_lines(rollout_path).await?;
@@ -891,7 +915,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      )
      .await?;
      Ok(BoundedRolloutLines {
-@@ -683,6 +704,7 @@ async fn materialize_rollout_lines_from_with_policy(
+@@ -691,6 +712,7 @@ async fn materialize_rollout_lines_from_with_policy(
      lines: Vec<RolloutLine>,
      policy: MaterializationPolicy,
      has_older_reference: &mut bool,
@@ -899,7 +923,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
  ) -> io::Result<Vec<RolloutLine>> {
      materialize_rollout_lines_from_with_cache(
          codex_home,
-@@ -691,6 +713,7 @@ async fn materialize_rollout_lines_from_with_policy(
+@@ -699,6 +721,7 @@ async fn materialize_rollout_lines_from_with_policy(
          has_older_reference,
          /*cache*/ None,
          /*retain_source_metadata*/ false,
@@ -907,7 +931,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      )
      .await
  }
-@@ -702,6 +725,7 @@ async fn materialize_rollout_lines_from_with_cache(
+@@ -710,6 +733,7 @@ async fn materialize_rollout_lines_from_with_cache(
      has_older_reference: &mut bool,
      cache: Option<&mut ImmutableRolloutCache>,
      retain_source_metadata: bool,
@@ -915,7 +939,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
  ) -> io::Result<Vec<RolloutLine>> {
      let root_meta = &canonical_session_meta(&lines)?.meta;
      let root_thread_id = root_meta.id;
-@@ -719,7 +743,7 @@ async fn materialize_rollout_lines_from_with_cache(
+@@ -727,7 +751,7 @@ async fn materialize_rollout_lines_from_with_cache(
      let mut materialized = Vec::with_capacity(lines.len());
      materialized.push(lines[0].clone());
      materialized.extend(
@@ -924,7 +948,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
              codex_home,
              lines,
              &mut state,
-@@ -732,6 +756,7 @@ async fn materialize_rollout_lines_from_with_cache(
+@@ -740,6 +764,7 @@ async fn materialize_rollout_lines_from_with_cache(
              policy,
              has_older_reference,
              supervisor_owner,
@@ -932,7 +956,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          )
          .await?,
      );
-@@ -743,42 +768,48 @@ async fn materialize_rollout_lines_from_with_cache(
+@@ -751,42 +776,48 @@ async fn materialize_rollout_lines_from_with_cache(
  async fn load_history_base_prefix(
      codex_home: &Path,
      position: HistoryPosition,
@@ -1014,7 +1038,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      let prefix = bytes.get(..end).ok_or_else(|| {
          io::Error::other(format!(
              "history_base byte offset exceeds rollout {}",
-@@ -799,7 +830,18 @@ async fn load_history_base_prefix(
+@@ -807,7 +838,18 @@ async fn load_history_base_prefix(
          let value = serde_json::from_slice(encoded)?;
          lines.push(crate::decode_rollout_line(value)?);
      }
@@ -1034,7 +1058,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      let actual_end = lines
          .last()
          .and_then(|line| line.ordinal)
-@@ -810,7 +852,42 @@ async fn load_history_base_prefix(
+@@ -818,7 +860,42 @@ async fn load_history_base_prefix(
              path.display()
          )));
      }
@@ -1078,7 +1102,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
  }
 
  /// Expands a rollout graph and discards only physical line metadata.
-@@ -846,7 +923,7 @@ async fn expand_lines(
+@@ -854,7 +931,7 @@ async fn expand_lines(
      policy: MaterializationPolicy,
      has_older_reference: &mut bool,
  ) -> io::Result<Vec<RolloutLine>> {
@@ -1087,7 +1111,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          codex_home,
          lines,
          state,
-@@ -855,11 +932,16 @@ async fn expand_lines(
+@@ -863,11 +940,16 @@ async fn expand_lines(
          policy,
          has_older_reference,
          /*supervisor_owner*/ None,
@@ -1105,7 +1129,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      codex_home: &Path,
      lines: Vec<RolloutLine>,
      state: &mut ExpansionState<'_>,
-@@ -868,11 +950,13 @@ async fn expand_lines_with_supervisor_projection(
+@@ -876,11 +958,13 @@ async fn expand_lines_with_supervisor_projection(
      policy: MaterializationPolicy,
      has_older_reference: &mut bool,
      supervisor_owner: Option<(ThreadId, Option<MultiAgentVersion>)>,
@@ -1119,7 +1143,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      let mut frames = vec![ExpansionFrame {
          session_meta: lines[0].clone(),
          materialized: Vec::with_capacity(lines.len()),
-@@ -883,6 +967,7 @@ async fn expand_lines_with_supervisor_projection(
+@@ -891,6 +975,7 @@ async fn expand_lines_with_supervisor_projection(
          inbound_reference: None,
          history_base,
          inbound_history_base: None,
@@ -1127,7 +1151,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
      }];
 
      while let Some(frame) = frames.last_mut() {
-@@ -902,9 +987,21 @@ async fn expand_lines_with_supervisor_projection(
+@@ -910,9 +995,21 @@ async fn expand_lines_with_supervisor_projection(
                      position.thread_id
                  )));
              }
@@ -1152,7 +1176,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
              };
              let metadata = canonical_session_meta(&predecessor)?;
              let fork_boundary = metadata.meta.id != frame.cursor.current_thread_id;
-@@ -931,6 +1028,11 @@ async fn expand_lines_with_supervisor_projection(
+@@ -939,6 +1036,11 @@ async fn expand_lines_with_supervisor_projection(
                  history_base: (metadata.meta.history_mode == ThreadHistoryMode::Paginated)
                      .then_some(metadata.meta.history_base)
                      .flatten(),
@@ -1164,7 +1188,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
                  lines: predecessor.into_iter(),
                  inherited_filter_texts: frame.inherited_filter_texts.clone(),
                  inbound_reference: None,
-@@ -1064,6 +1166,8 @@ async fn expand_lines_with_supervisor_projection(
+@@ -1072,6 +1174,8 @@ async fn expand_lines_with_supervisor_projection(
          let history_base = (referenced_meta.meta.history_mode == ThreadHistoryMode::Paginated)
              .then_some(referenced_meta.meta.history_base)
              .flatten();
@@ -1173,7 +1197,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          let filter_texts = compose_compacted_replacement_history_filter_texts(
              frame.inherited_filter_texts.as_deref(),
              reference
-@@ -1098,6 +1202,7 @@ async fn expand_lines_with_supervisor_projection(
+@@ -1106,6 +1210,7 @@ async fn expand_lines_with_supervisor_projection(
              }),
              history_base,
              inbound_history_base: None,
@@ -1181,7 +1205,7 @@ index 9a000076870a24eb090c9ba110606f4a34d16640..4b91b4e6fd3be57151afa7f682f5f97c
          });
      }
 
-@@ -1555,3 +1660,7 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
+@@ -1568,3 +1673,7 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
  #[cfg(test)]
  #[path = "reference_tests.rs"]
  mod tests;
@@ -1518,10 +1542,10 @@ index 0000000000000000000000000000000000000000..e30d9bd8af7bf6cbd7ddb6faee9841b6
 +    Ok(())
 +}
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 8d33c960a6445c913b16f1d033093ed3cea77e65..1f07487f447e1d9850e34bbcee5ae92c09fb1af1 100644
+index 630636ba0a4a40ef3ea49ea2374785a98a0e4c14..a29658c5b4d2da01ee691e90d2656157661180d3 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -3426,6 +3426,17 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
+@@ -3467,6 +3467,17 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
 
  #[tokio::test]
  async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::Result<()> {
@@ -1539,7 +1563,7 @@ index 8d33c960a6445c913b16f1d033093ed3cea77e65..1f07487f447e1d9850e34bbcee5ae92c
      let home = TempDir::new()?;
      let thread_id = ThreadId::new();
      let deepest_segment = SegmentId::new();
-@@ -3570,6 +3581,23 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -3611,6 +3622,23 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
          ],
      )?;
 
@@ -1580,7 +1604,7 @@ index 07f1909dca59189876588be768f714500d4d94dc..8241f391932a8b4746bd1806f862cf54
      let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id) else {
          return false;
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
-index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cca6372251 100644
+index ccc655eb655a85c8d32ed7be062801968bc5e601..4f67063e34599388ea54c9cff818b97f0797e72b 100644
 --- a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
 @@ -86,6 +86,7 @@ pub(super) struct GoalSupervisorHistoryAccess {
@@ -1591,7 +1615,7 @@ index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cc
      pub(super) end_byte_offset: u64,
      pub(super) head: super::rollout_lineage::RolloutHead,
      pub(super) scan: super::model_context::ActiveModelContextScan,
-@@ -765,8 +766,9 @@ async fn scan_root_for_access(
+@@ -771,8 +772,9 @@ async fn scan_root_for_access(
  ///
  /// A certified segment checkpoint makes older active-file records irrelevant to latest-state
  /// reconstruction. Inspecting only that suffix avoids buffering a multi-gigabyte active JSONL on
@@ -1603,7 +1627,7 @@ index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cc
  async fn scan_clean_certified_active_root(
      thread_id: ThreadId,
      rollout_path: &Path,
-@@ -777,12 +779,13 @@ async fn scan_clean_certified_active_root(
+@@ -783,12 +785,13 @@ async fn scan_clean_certified_active_root(
          .ok_or_else(|| ThreadStoreError::InvalidRequest {
              message: format!("rollout {} does not exist", rollout_path.display()),
          })?;
@@ -1619,7 +1643,7 @@ index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cc
          physical_path.as_path(),
          session_meta.clone(),
      )
-@@ -793,10 +796,9 @@ async fn scan_clean_certified_active_root(
+@@ -799,10 +802,9 @@ async fn scan_clean_certified_active_root(
      if !scan.segment_checkpoint {
          return Ok(None);
      }
@@ -1633,7 +1657,7 @@ index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cc
      let mut bounded_lines = scan.suffix_lines.clone();
      if session_meta.meta.id != thread_id {
          return Ok(None);
-@@ -822,7 +824,7 @@ async fn scan_clean_certified_active_root(
+@@ -828,7 +830,7 @@ async fn scan_clean_certified_active_root(
          path: codex_rollout::plain_rollout_path(rollout_path),
          end_byte_offset: None,
          source_sha256: String::new(),
@@ -1643,7 +1667,7 @@ index 97e684189c8ff10d44f65cbae4558b7e05d9af8f..209ba8bbe81bf4a119f98bc964b176cc
          reference_policy,
          needs_repair: false,
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index c74fa30ecf0cdcd21b926e6fb36fb35c5ef4db4d..d9e49e95ea3d909bbc354612d07e45e773a82a19 100644
+index 9debbbdfd13feea7fb4b5b9d471ebfa8141633af..32c589fd9faf06d838eec92bf95128dc59bd291f 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
 @@ -1,4 +1,6 @@
@@ -1663,7 +1687,7 @@ index c74fa30ecf0cdcd21b926e6fb36fb35c5ef4db4d..d9e49e95ea3d909bbc354612d07e45e7
  use tracing::warn;
 
  use super::LocalThreadStore;
-@@ -472,17 +471,6 @@ async fn build_segmented_legacy_history_projection(
+@@ -493,17 +492,6 @@ async fn build_segmented_legacy_history_projection(
      }
 
      let lineage = segmented_legacy_rollout_paths(store, thread_id, rollout_path).await?;
@@ -1681,7 +1705,7 @@ index c74fa30ecf0cdcd21b926e6fb36fb35c5ef4db4d..d9e49e95ea3d909bbc354612d07e45e7
 
      let rollout_id = super::thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
          rollout_path,
-@@ -490,16 +478,15 @@ async fn build_segmented_legacy_history_projection(
+@@ -511,16 +499,15 @@ async fn build_segmented_legacy_history_projection(
          ThreadHistoryMode::Legacy,
      )?;
      let projection = super::thread_history::projection_state(store, rollout_id).await?;
@@ -1701,7 +1725,7 @@ index c74fa30ecf0cdcd21b926e6fb36fb35c5ef4db4d..d9e49e95ea3d909bbc354612d07e45e7
          )
          .await;
      }
-@@ -562,6 +549,22 @@ async fn build_segmented_legacy_history_projection(
+@@ -583,6 +570,22 @@ async fn build_segmented_legacy_history_projection(
      Ok(builder)
  }
 
@@ -1724,7 +1748,7 @@ index c74fa30ecf0cdcd21b926e6fb36fb35c5ef4db4d..d9e49e95ea3d909bbc354612d07e45e7
  async fn segmented_legacy_rollout_paths(
      store: &LocalThreadStore,
      thread_id: ThreadId,
-@@ -688,21 +691,19 @@ async fn stream_segmented_legacy_history_builder(
+@@ -709,21 +712,19 @@ async fn stream_segmented_legacy_history_builder(
      let mut builder = ThreadHistoryBuilder::new();
      builder.handle_rollout_item_with_changes(&canonical_session_meta);
      for rollout_path in lineage {
@@ -1838,7 +1862,7 @@ index e833c6bb9835abaa2cd84af150b3b243b3fbe0f3..004e7cb666bb02af8e455d0c914b7dcd
      if before.len() != after.len() || before.modified()? != after.modified()? {
          return Ok(false);
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index d6eab0496b078051853300f00aec4f5ba53b34bc..d67dce306275a616cb67af7a34e4378ae4e2a6ec 100644
+index c6cece5b04d64c835920b1daebe341b2cf7c8648..71adb06b6cb5799e4638d67085d30db1c79b4928 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -311,6 +311,15 @@ async fn active_scan_limit_yields_to_unmarked_paginated_compatibility_reader() {
@@ -2005,7 +2029,7 @@ index d6eab0496b078051853300f00aec4f5ba53b34bc..d67dce306275a616cb67af7a34e4378a
  }
 
  #[tokio::test]
-@@ -836,6 +936,15 @@ async fn empty_wake_requires_surviving_full_world_state_and_matching_context() {
+@@ -848,6 +948,15 @@ async fn empty_wake_requires_surviving_full_world_state_and_matching_context() {
 
  #[tokio::test]
  async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
@@ -2021,7 +2045,7 @@ index d6eab0496b078051853300f00aec4f5ba53b34bc..d67dce306275a616cb67af7a34e4378a
      const SEGMENT_COUNT: usize = 514;
      let home = TempDir::new().expect("temp dir");
      let uuid = Uuid::from_u128(/*v*/ 2015);
-@@ -916,6 +1025,11 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+@@ -928,6 +1037,11 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
      let active_len = std::fs::metadata(active_path.as_path())
          .expect("active metadata")
          .len();
@@ -2033,7 +2057,7 @@ index d6eab0496b078051853300f00aec4f5ba53b34bc..d67dce306275a616cb67af7a34e4378a
      let store = projected_thread_store(
          home.path(),
          thread_id,
-@@ -923,7 +1037,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+@@ -935,7 +1049,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
          u64::try_from(SEGMENT_COUNT * 16).expect("ordinal"),
      )
      .await;
@@ -2047,7 +2071,7 @@ index d6eab0496b078051853300f00aec4f5ba53b34bc..d67dce306275a616cb67af7a34e4378a
          .expect("remove predecessor that a bounded checkpoint must not open");
 
      let context = store
-@@ -937,6 +1056,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+@@ -949,6 +1068,12 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
      assert!(context.items.iter().any(|item| {
          matches!(item, RolloutItem::Compacted(item) if item.message == "latest checkpoint")
      }));
@@ -2092,10 +2116,10 @@ index 27f737d535307d07670f09587202d78b6f015736..ad23c09a21b8a7b09ecea40e976aeafe
      Ok(lines.into_iter().map(|line| line.item).collect())
  }
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80dc622179 100644
+index 498316084f3f0a2234b68a2932ea5b5fc35ddf23..ff07073e6e2ed0f1745d629db02d9d30599a9520 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
-@@ -2773,6 +2773,54 @@ async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {
+@@ -2790,6 +2790,54 @@ async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {
 
  #[tokio::test]
  async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
@@ -2150,7 +2174,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
      let home = TempDir::new().expect("temp dir");
      let thread_id = ThreadId::new();
      let params = create_params(thread_id, ThreadHistoryMode::Legacy);
-@@ -2783,7 +2831,7 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+@@ -2800,7 +2848,7 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
          .await
          .expect("create legacy thread");
      append_message(&store, thread_id, "first indexed message").await;
@@ -2159,7 +2183,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
          .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
          .await
          .expect("index first legacy segment");
-@@ -2807,6 +2855,9 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+@@ -2824,6 +2872,9 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
          .shutdown_thread(thread_id)
          .await
          .expect("shutdown initial recorder");
@@ -2169,7 +2193,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
 
      let rollout_id = ThreadId::new();
      let file_name = rollout_path
-@@ -2822,10 +2873,22 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
+@@ -2839,10 +2890,22 @@ async fn resumed_segmented_legacy_history_preserves_projected_item_identity() {
      tokio::fs::rename(rollout_path.as_path(), selected_path.as_path())
          .await
          .expect("rename selected physical rollout");
@@ -2193,7 +2217,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
          chrono::Utc::now(),
          SessionSource::Exec,
      );
-@@ -2859,10 +2922,48 @@ WHERE thread_id = ?
+@@ -2876,10 +2939,48 @@ WHERE thread_id = ?
      super::super::live_writer::backfill_segmented_legacy_projection(
          &resumed,
          thread_id,
@@ -2243,7 +2267,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
      assert_eq!(
          resumed
              .projected_history_position(thread_id)
-@@ -2876,7 +2977,7 @@ WHERE thread_id = ?
+@@ -2893,7 +2994,7 @@ WHERE thread_id = ?
          .resume_thread(ResumeThreadParams {
              history_revision: None,
              thread_id,
@@ -2252,7 +2276,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
              history: Some(Arc::new(history)),
              include_archived: true,
              metadata,
-@@ -2909,7 +3010,7 @@ WHERE thread_id = ?
+@@ -2926,7 +3027,7 @@ WHERE thread_id = ?
              builder.handle_rollout_item_with_changes(item.as_ref());
          }
      }
@@ -2261,7 +2285,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
          .finish()
          .into_iter()
          .flat_map(|turn| {
-@@ -2917,7 +3018,10 @@ WHERE thread_id = ?
+@@ -2934,7 +3035,10 @@ WHERE thread_id = ?
                  (
                      turn.id.clone(),
                      item.id().to_string(),
@@ -2273,7 +2297,7 @@ index c98ac0045dfb66f44cc4c6e81c1002d583a6ddb2..be3684321c66faf21145f01f3e0b0b80
                  )
              })
          })
-@@ -2925,19 +3029,22 @@ WHERE thread_id = ?
+@@ -2942,19 +3046,22 @@ WHERE thread_id = ?
      let pool = codex_state::open_thread_history_db(&resumed.config.sqlite)
          .await
          .expect("open existing history projection");
@@ -2321,10 +2345,10 @@ index 78ae92cfd45060365ff8d24f25777f1a6e468a5d..35cdacfffcf1cc05eeafa750be262f3f
      let db_path = store.config.sqlite.thread_history_db_path();
      let db_exists = tokio::fs::try_exists(db_path)
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 10ff6dd759554c08b7552fcdc30612a69aa8dc60..0754998f99e7b2fcc1cefa9273f7b29e374f9c3c 100644
+index c7ae96b4f3f9a4e76ca7c43478e7eb3a5446c794..87e06be91b048d88dddfeaab8892956a6b16397c 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-@@ -341,6 +341,11 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+@@ -519,6 +519,11 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
          )
          .await;
      }
@@ -2336,7 +2360,7 @@ index 10ff6dd759554c08b7552fcdc30612a69aa8dc60..0754998f99e7b2fcc1cefa9273f7b29e
      sqlx::query(
          "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
      )
-@@ -388,6 +393,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+@@ -566,6 +571,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
      )
      .await;
      assert_eq!(turn_ids(&first_turn_page), vec!["turn-5", "turn-4"]);
@@ -2349,7 +2373,7 @@ index 10ff6dd759554c08b7552fcdc30612a69aa8dc60..0754998f99e7b2fcc1cefa9273f7b29e
      assert_eq!(
          first_turn_page.turns[0].items,
          vec![
-@@ -409,6 +420,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
+@@ -587,6 +598,12 @@ async fn assert_indexed_cursor_pages_ignore_missing_predecessors(history_mode: T
      )
      .await;
      assert_eq!(turn_ids(&older_turn_page), vec!["turn-3", "turn-2"]);
@@ -2362,7 +2386,7 @@ index 10ff6dd759554c08b7552fcdc30612a69aa8dc60..0754998f99e7b2fcc1cefa9273f7b29e
      assert!(older_turn_page.turns[0].items.is_empty());
 
      let oldest_turn_page = indexed_projected_turn_page(
-@@ -4334,23 +4351,58 @@ async fn assert_native_lineage_pagination(
+@@ -4529,23 +4546,58 @@ async fn assert_native_lineage_pagination(
          matches!(store.list_items(anchored).await, Err(ThreadStoreError::InvalidRequest { message }) if message == "cursor.itemId does not identify an item in the requested history scope")
      );
 
@@ -2451,10 +2475,10 @@ index 3e41d0afd60d5c85f089806c3786975ee52300f4..7bfa5d3d61a26b5fadeaeec63fb53d1e
      status,
      error_json,
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization.rs b/codex-rs/thread-store/src/local/thread_history_materialization.rs
-index 01a9ede59fe258341f11e714217c1e4e0a40e479..77c1dae4bd48ad684d93089440076cf2c3fe4c92 100644
+index 308c84aaaabad6aa8d6cdadc1f7861cbf0e934cb..6411ab4a7287434e1f4190dca7da7f9e18447df4 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization.rs
-@@ -773,7 +773,7 @@ fn thread_history_error(err: impl std::fmt::Display) -> ThreadStoreError {
+@@ -807,7 +807,7 @@ fn thread_history_error(err: impl std::fmt::Display) -> ThreadStoreError {
      }
  }
 
@@ -2463,7 +2487,7 @@ index 01a9ede59fe258341f11e714217c1e4e0a40e479..77c1dae4bd48ad684d93089440076cf2
      batches: tokio::sync::mpsc::Receiver<Vec<Vec<u8>>>,
      pending_lines: std::vec::IntoIter<Vec<u8>>,
      worker: Option<tokio::task::JoinHandle<io::Result<()>>>,
-@@ -781,7 +781,7 @@ struct LegacyProjectionReader {
+@@ -815,7 +815,7 @@ struct LegacyProjectionReader {
  }
 
  impl LegacyProjectionReader {
@@ -2472,7 +2496,7 @@ index 01a9ede59fe258341f11e714217c1e4e0a40e479..77c1dae4bd48ad684d93089440076cf2
          loop {
              if let Some(line) = self.pending_lines.next() {
                  return Ok(Some(line));
-@@ -801,7 +801,7 @@ impl LegacyProjectionReader {
+@@ -835,7 +835,7 @@ impl LegacyProjectionReader {
      }
  }
 

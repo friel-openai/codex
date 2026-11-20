@@ -1,8 +1,8 @@
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index 3733bb40a0f55d173ef887d6f10468859dbfb78a..f04aebf42e7d2f0e81d6abd5d9d298c870f4d368 100644
+index 847267533186bfd995fbe98468ea6968918095ad..c5d2479b805e4a2d5e220f87886f36ddeebcd2cd 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
-@@ -776,1075 +776,6 @@ impl ModelProvider for ConfiguredModelProvider {
+@@ -792,1075 +792,6 @@ impl ModelProvider for ConfiguredModelProvider {
      }
  }
 
@@ -1079,10 +1079,10 @@ index 3733bb40a0f55d173ef887d6f10468859dbfb78a..f04aebf42e7d2f0e81d6abd5d9d298c8
      use super::*;
 
 diff --git a/codex-rs/model-provider/src/provider_tests.rs b/codex-rs/model-provider/src/provider_tests.rs
-index d5d5f540dd5b41b4f54881e46d79611e725b2434..bae12e95c2569a7bf083ec1598e915855446db4f 100644
+index cc51b130f752ced036bf74333ba410cf3f348c46..d552a8357365b54ca1a4a9cb9db18936eab85079 100644
 --- a/codex-rs/model-provider/src/provider_tests.rs
 +++ b/codex-rs/model-provider/src/provider_tests.rs
-@@ -876,6 +876,7 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
+@@ -882,6 +882,7 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
              model_context_window: None,
              routing_profile: None,
              model_auto_compact_token_limit: None,
@@ -1090,7 +1090,7 @@ index d5d5f540dd5b41b4f54881e46d79611e725b2434..bae12e95c2569a7bf083ec1598e91585
          },
      )]);
      let mut expected = configured_catalog.clone();
-@@ -892,6 +893,9 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
+@@ -898,6 +899,9 @@ async fn configured_bedrock_catalog_preserves_service_tiers() {
      ] {
          let provider = create_model_provider(provider_info, /*auth_manager*/ None);
          let cache = Arc::new(crate::test_support::UnusedModelsCache);
@@ -1100,7 +1100,7 @@ index d5d5f540dd5b41b4f54881e46d79611e725b2434..bae12e95c2569a7bf083ec1598e91585
          for manager in [
              provider.models_manager(
                  test_codex_home(),
-@@ -959,6 +963,7 @@ async fn configured_catalog_preserves_origins_and_custom_aliases() {
+@@ -965,6 +969,7 @@ async fn configured_catalog_preserves_origins_and_custom_aliases() {
              model_context_window: Some(64_000),
              routing_profile: None,
              model_auto_compact_token_limit: Some(48_000),

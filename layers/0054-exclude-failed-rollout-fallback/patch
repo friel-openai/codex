@@ -1,35 +1,5 @@
-diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index a259d59008f9f78d57568c376bb61a6c1a00b470..6e51c34e8e560a315adb7f4c9af96637d5b71599 100644
---- a/codex-rs/rollout/src/list.rs
-+++ b/codex-rs/rollout/src/list.rs
-@@ -2115,6 +2115,7 @@ pub async fn index_rollout_paths_by_rollout_id(
-     for subdir in [SESSIONS_SUBDIR, ARCHIVED_SESSIONS_SUBDIR] {
-         visit_rollout_filenames::<()>(
-             codex_home.join(subdir).as_path(),
-+            /*excluded_path*/ None,
-             |_file_name| true,
-             |file_name, path| {
-                 paths.entry(file_name.rollout_id()).or_insert(path);
-diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index 4b91b4e6fd3be57151afa7f682f5f97cf30f7b77..7fbe9fd2b0ceda41619446db42940751ea4cd2b3 100644
---- a/codex-rs/rollout/src/reference.rs
-+++ b/codex-rs/rollout/src/reference.rs
-@@ -476,8 +476,11 @@ pub async fn resolve_rollout_reference_path_excluding(
-     if let Some(rollout_id) = identity
-         .rollout_id()
-         .or_else(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
--        && let Some(path) = crate::find_rollout_path_by_rollout_id(codex_home, rollout_id).await?
--        && let Some(path) = validated_candidate(codex_home, path.as_path(), identity).await?
-+        && let Some(path) =
-+            crate::find_rollout_path_by_rollout_id_excluding(codex_home, rollout_id, excluded)
-+                .await?
-+        && let Some(path) =
-+            validated_candidate(codex_home, path.as_path(), identity, excluded).await?
-     {
-         return Ok(path);
-     }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 1f07487f447e1d9850e34bbcee5ae92c09fb1af1..dfe5f6ab0c6d6331f9e8c8ebaf37f7630c0012d9 100644
+index a29658c5b4d2da01ee691e90d2656157661180d3..38b45de66961b4cf19ef210eb1f6c916e94277b1 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
 @@ -2760,6 +2760,55 @@ async fn resolver_excludes_failed_copy_without_changing_segment_identity() -> io

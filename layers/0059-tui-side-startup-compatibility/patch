@@ -39,10 +39,10 @@ index 6a5d6545e6c482357381ab29283bd2bc20220764..7e6dbb77027ac532b1adae8f188e381d
                      .await
              }
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 7999daf929efd9166a848363cc2b8fa75253a8d3..5fa3ecefd9de15057295c487a2b2ebcf450e6fc6 100644
+index 814ac03db0d76efee955edbf7e02c025d0ab8a88..ac78a5b58ecddbd7fc99ebcb95dd703f44cb4dc5 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
-@@ -1467,7 +1467,7 @@ impl AppServerSession {
+@@ -1527,7 +1527,7 @@ impl AppServerSession {
                  bootstrap_request_error("thread/fork/import failed during TUI bootstrap", err)
              })?;
          let presentation = if config.ephemeral {
@@ -51,7 +51,7 @@ index 7999daf929efd9166a848363cc2b8fa75253a8d3..5fa3ecefd9de15057295c487a2b2ebcf
          } else {
              ForkPresentation::Regular
          };
-@@ -1668,9 +1668,6 @@ impl AppServerSession {
+@@ -1728,9 +1728,6 @@ impl AppServerSession {
              self.thread_params_mode(),
          )
          .await?;
@@ -62,10 +62,10 @@ index 7999daf929efd9166a848363cc2b8fa75253a8d3..5fa3ecefd9de15057295c487a2b2ebcf
              started.session.daybreak_enabled = false;
          }
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index b7bdc02eef112c4eb364ebd60e35d6fcfab858dd..504c4b8d82676f386a7ebbabc3c97a01880fb8a3 100644
+index 16cf49e760a55399b226cff8ad608fe393a8d3bb..b64c023e1b9552888ab6f4f29b8b77e87417e9fa 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1589,7 +1589,7 @@ async fn run_ratatui_app(
+@@ -1514,7 +1514,7 @@ async fn run_ratatui_app(
                  .await??;
              let mut server =
                  AppServerSession::new(backend_id, client, app_server_target.thread_params_mode())

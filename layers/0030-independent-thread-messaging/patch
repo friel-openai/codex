@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index ff31e9e3954387dc395f2e653baa2d7471f1a475..eb308fe102431bf2879903508698719a84c0366d 100644
+index caa9b4da77c8ae870e08b573d90ffad14c0450d0..651660b3031c5eb48ff71fab8bde525c31b0b529 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
 @@ -84,6 +84,7 @@ pub(crate) fn thread_extensions(
@@ -11,10 +11,10 @@ index ff31e9e3954387dc395f2e653baa2d7471f1a475..eb308fe102431bf2879903508698719a
          codex_goal_extension::install_with_backend(
              &mut builder,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 1e53d94124c2fcd8b1fe010c46cde646e43394ec..10e52fe520487086bf50f93e70e829b873984c4e 100644
+index 7eface70e1d5bbae1c00eeee78ac1501140fb68f..c2275c870e3f1c8c6bed92f26531d85b96b601ac 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -18,6 +18,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
+@@ -22,6 +22,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
  use crate::hook_runtime::run_post_compact_hooks;
  use crate::hook_runtime::run_pre_compact_hooks;
@@ -22,20 +22,20 @@ index 1e53d94124c2fcd8b1fe010c46cde646e43394ec..10e52fe520487086bf50f93e70e829b8
 +pub(crate) use crate::independent_thread::retention::retain_independent_thread_messages;
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
- use crate::session::RequestEffortUsage;
-@@ -467,6 +469,7 @@ async fn run_compact_task_inner_impl(
-     let user_messages = collect_annotated_user_messages(history_items);
+ use crate::session::FileAudioDurations;
+@@ -477,6 +479,7 @@ async fn run_compact_task_inner_impl(
+     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
 
-     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
-+    retain_independent_thread_messages(history_items, &mut new_history);
+     let mut new_history = build_compacted_history(&history_snapshot, &summary_text);
++    retain_independent_thread_messages(history_snapshot.annotated_items(), &mut new_history);
      if let Some(summary_item) = new_history.last_mut() {
          // This replacement history skips `record_conversation_items`; only the appended summary
          // belongs to this compaction turn.
 diff --git a/codex-rs/core/src/compact_remote_history.rs b/codex-rs/core/src/compact_remote_history.rs
-index 3a6f1500f3933ac893a46c0be2cf37bbbc1e07e5..6aae68396a701b8ecdbcd8d24f0d885603671e77 100644
+index 25321d6464cdef80976f18118d131a7262a92b5a..551847637acc1a256a9b593f0b064b400383e432 100644
 --- a/codex-rs/core/src/compact_remote_history.rs
 +++ b/codex-rs/core/src/compact_remote_history.rs
-@@ -149,6 +149,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
+@@ -168,6 +168,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
  fn rewritten_output_for_context_window(
      envelope: &ResponseItemEnvelope,
  ) -> Option<ResponseItemEnvelope> {
@@ -82,10 +82,10 @@ index c1dde7d9d67c56b070e28448485c4afe392f849b..21b1bf6aa17c2403f5488872cfe493b4
  fn rewritten_output_preserves_harness_metadata() {
      let envelope = ResponseItemEnvelope {
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 2cdd37dcb26f6c352518f579aad7ed4210637559..a51353197770fc0e3a26a8b324574a999cad3025 100644
+index 294cef4d888627ddd2bfd93f22f4a3ace1b364b0..2b09d876415960f0fea3fdcbb846265834607460 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -15,6 +15,7 @@ use crate::compact::CompactionAnalyticsAttempt;
+@@ -19,6 +19,7 @@ use crate::compact::CompactionAnalyticsAttempt;
  use crate::compact::CompactionAnalyticsDetails;
  use crate::compact::CompactionReporting;
  use crate::compact::compaction_status_from_result;
@@ -94,10 +94,10 @@ index 2cdd37dcb26f6c352518f579aad7ed4210637559..a51353197770fc0e3a26a8b324574a99
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
 diff --git a/codex-rs/core/src/compact_remote_v2_installation.rs b/codex-rs/core/src/compact_remote_v2_installation.rs
-index 61a8372bded977d9d5c1a908cc8a7a1e792e654b..8db58c934d4cae1221d62dab33d49b250c4d0260 100644
+index 5732eb61f6c7ea6c17546b2717993eaa81f89529..00eed499ad27fbdceca49efe043ee26cb2a85c01 100644
 --- a/codex-rs/core/src/compact_remote_v2_installation.rs
 +++ b/codex-rs/core/src/compact_remote_v2_installation.rs
-@@ -207,18 +207,19 @@ async fn build_and_install_compaction(
+@@ -225,18 +225,19 @@ async fn build_and_install_compaction(
          },
          crate::session::file_audio::snapshot(sess).await.as_ref(),
      );
@@ -129,10 +129,10 @@ index 61a8372bded977d9d5c1a908cc8a7a1e792e654b..8db58c934d4cae1221d62dab33d49b25
              previous_items,
              &mut compacted_history,
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 9bca8726aaf080ce0d2177916c98c654eecd70d8..1fc4310028821410c7fc5aba17edd76f111ad3ac 100644
+index 9600a6a9401272d50faa517c3c9a4cc3ba13a8db..191b48db6404a5c794be11c072e27ad21eb6839f 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
-@@ -651,6 +651,11 @@ impl ContextManager {
+@@ -660,6 +660,11 @@ impl ContextManager {
          metadata: Option<&CodexHarnessMetadata>,
          policy: TruncationPolicy,
      ) -> ResponseItem {
@@ -1190,10 +1190,10 @@ index 0000000000000000000000000000000000000000..ec21030fe941b331d166492ba9bc1c92
 +    assert!(!is_independent_thread_message(&message.item));
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 36d8a597e6c1bd70a4c6a9f3abc0b01dbe48449c..2f13035fe5d0f8cddf138b01665d2053ac19c9dc 100644
+index 627efe02243cfa1a7e744fdbdfba2de52c052643..29e7abaa37cd66930f246b9c3c6abc6ced8ac1e1 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -88,6 +88,8 @@ pub use agent::types::SpawnAgentOptions;
+@@ -93,6 +93,8 @@ pub use rollout_budget::RolloutBudget;
  pub use rollout_budget::RolloutBudgetReminder;
  mod agent_communication;
  pub use agent_communication::PendingAgentMessage;
@@ -1203,10 +1203,10 @@ index 36d8a597e6c1bd70a4c6a9f3abc0b01dbe48449c..2f13035fe5d0f8cddf138b01665d2053
  mod code_mode_host;
  mod codex_delegate;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 97fbcc8da4f6d1f783fa3eb2df178885a1af1f87..01d3fd4e66673822eb678ef39dbcc30d5028da11 100644
+index 5050b4fa9300bc4bb01c2572efae6e8dca1adb48..04f212453511c10ed3d589963aafd8651b6d5979 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -5531,6 +5531,7 @@ impl Session {
+@@ -5574,6 +5574,7 @@ impl Session {
              executor_hook_sources,
              mcp,
              required_mcp_servers: required_servers.to_vec(),
@@ -1215,7 +1215,7 @@ index 97fbcc8da4f6d1f783fa3eb2df178885a1af1f87..01d3fd4e66673822eb678ef39dbcc30d
              loaded_agents_md,
              context_transition: Default::default(),
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
-index 32400ec0c11fa15d345e8ecc75d670f5454b7a12..c1a421a5356e7e386b277d0d6b4398a96c553371 100644
+index 5365808a73974b80070fe193caaab79a2d04150c..66634a2046976f571d485e554ce7bc9ed4a4bb58 100644
 --- a/codex-rs/core/src/session/step_context.rs
 +++ b/codex-rs/core/src/session/step_context.rs
 @@ -21,6 +21,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
@@ -1226,7 +1226,7 @@ index 32400ec0c11fa15d345e8ecc75d670f5454b7a12..c1a421a5356e7e386b277d0d6b4398a9
  use codex_protocol::items::ModelInvocationContext;
  use codex_protocol::protocol::TurnContextItem;
  use tokio_util::sync::CancellationToken;
-@@ -57,6 +58,8 @@ pub(crate) struct StepContext {
+@@ -59,6 +60,8 @@ pub(crate) struct StepContext {
      /// A model reroute preserves these names when it rebuilds the step so steering input does not
      /// lose a server that was not required by the original turn input.
      pub(crate) required_mcp_servers: Vec<String>,
@@ -1236,10 +1236,10 @@ index 32400ec0c11fa15d345e8ecc75d670f5454b7a12..c1a421a5356e7e386b277d0d6b4398a9
      pub(crate) tool_router: Arc<ToolRouter>,
      /// The canonical AGENTS.md value observed with this environment snapshot.
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 1d3e770012afcc644080e962ad352b39cbfaae0d..5ba3b5c3c3fa310796d28cbad08339a1b2288dc9 100644
+index d9ff69648fc2c2cf800985c0a01c6985cf98373e..a5cc9f174a92b9f0ffd2d5aee3f392455c5c471b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -332,6 +332,7 @@ impl StepContext {
+@@ -339,6 +339,7 @@ impl StepContext {
                  &turn.config,
              ))),
              required_mcp_servers: Vec::new(),
@@ -1248,7 +1248,7 @@ index 1d3e770012afcc644080e962ad352b39cbfaae0d..5ba3b5c3c3fa310796d28cbad08339a1
                  ToolRegistry::empty_for_test(),
                  Vec::new(),
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index b7c87103b35a08e1967af7bf9a009ee1e4449f2b..a8eb81da05125199b13deacbe55217a138fa16c6 100644
+index c3f7cb84b706ab7e4b845953bba1cfa799a2464c..62806f0c0fd49c94ef6b9e4a4b28dc728a1aed5c 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -159,6 +159,8 @@ pub(crate) fn build_tool_router(

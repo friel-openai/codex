@@ -1,8 +1,8 @@
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index 02694ac9af2c8b1b5858b0117fcbcaabba926fd9..eb040888c358ee3c565ef77d84fb31c29c29e8c6 100644
+index 7d35b412105a24943355dff34f2bf086c45dfc46..d26b4382237d99e45d5cbf73b58fb6a9e2a3ddc6 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
-@@ -239,11 +239,11 @@ impl StateRuntime {
+@@ -240,11 +240,11 @@ impl StateRuntime {
          .await;
          if let Err(err) = thread_goals_init_result {
              close_sqlite_pools(&[

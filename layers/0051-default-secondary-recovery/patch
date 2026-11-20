@@ -845,10 +845,10 @@ index 0000000000000000000000000000000000000000..58b60059f2b43a5e71be0f9d6a2fef10
 +    }
 +}
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 785a8223cd49edfa73d7b1474bbf59ce67376227..2816d8470e700b0bae04c7f649a9c5a74e80bd25 100644
+index 9e18ea5fa381f4c3a1e1c96885a2c42b99d0576a..95d83b48b00f5096d49f8775a8305c99abc36caa 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
-@@ -14,6 +14,7 @@ use tracing::debug_span;
+@@ -16,6 +16,7 @@ use tracing::debug_span;
  use tracing::info_span;
 
  use crate::session::session::Session;
@@ -856,7 +856,7 @@ index 785a8223cd49edfa73d7b1474bbf59ce67376227..2816d8470e700b0bae04c7f649a9c5a7
  use crate::session::thread_settings;
  use crate::session::turn_input;
 
-@@ -321,6 +322,11 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+@@ -326,6 +327,11 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
          let mut state = sess.state.lock().await;
          // Stop admission and take the current warmup together so resume cannot replace it.
          state.shutting_down = true;
@@ -869,10 +869,10 @@ index 785a8223cd49edfa73d7b1474bbf59ce67376227..2816d8470e700b0bae04c7f649a9c5a7
      };
      if let Some(startup_prewarm) = startup_prewarm {
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 3e6a6aec6ec6318729142db69a3625147d1c5d09..ddfc3a59c3ff863463dc81e32ffa915c4723a8fb 100644
+index 5f50cac172f6137403c3c9b50627ee40e4e85bcd..6b981c286136e87c08e4d21a9126a25c9e362d29 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -507,7 +507,7 @@ impl SessionConfiguration {
+@@ -492,7 +492,7 @@ impl SessionConfiguration {
                          if Arc::ptr_eq(previous, current))
                  })
              {

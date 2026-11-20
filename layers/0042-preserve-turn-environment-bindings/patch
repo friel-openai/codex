@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 12b94584384513b4e91f9ae4f0a0de0189b255d5..ae7b59de145d0eb1bacc26accf16bb1e6b70e9a9 100644
+index 413ae77b18d8ed3de8ebe16680de6e4c247cb550..969adf2f4acf49a71531b443019d91103818d1aa 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -123,6 +123,42 @@ struct ThreadEnvironmentOverride {
+@@ -196,6 +196,42 @@ struct ThreadEnvironmentOverride {
      runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
  }
 
@@ -45,7 +45,7 @@ index 12b94584384513b4e91f9ae4f0a0de0189b255d5..ae7b59de145d0eb1bacc26accf16bb1e
  struct ThreadSettingsBuildParams {
      method: &'static str,
      disabled_plugin_ids: Option<Vec<String>>,
-@@ -781,7 +817,7 @@ impl TurnRequestProcessor {
+@@ -887,7 +923,7 @@ impl TurnRequestProcessor {
              return ThreadEnvironmentOverride::default();
          }
 
@@ -54,7 +54,7 @@ index 12b94584384513b4e91f9ae4f0a0de0189b255d5..ae7b59de145d0eb1bacc26accf16bb1e
          // `runtimeWorkspaceRoots` is only a compatibility input for default environments.
          if let Some(environment_requests) = environment_requests {
              let legacy_fallback_cwd = match cwd {
-@@ -795,11 +831,31 @@ impl TurnRequestProcessor {
+@@ -901,11 +937,31 @@ impl TurnRequestProcessor {
                      None => thread.config_snapshot().await.cwd().clone(),
                  },
              };
@@ -91,10 +91,10 @@ index 12b94584384513b4e91f9ae4f0a0de0189b255d5..ae7b59de145d0eb1bacc26accf16bb1e
              };
          }
 diff --git a/codex-rs/app-server/tests/suite/v2/selected_environment.rs b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-index 6b3458397c35eae00fd8b76f6a4115222ee49aa2..1dac3ace326c46b495ffff759b56532c7b3a65bb 100644
+index 0cbdbb20ad29955fdd276ff1079c075875d5fe1e..c53c73bd8c7a04887018256d1e04dd6553b470ba 100644
 --- a/codex-rs/app-server/tests/suite/v2/selected_environment.rs
 +++ b/codex-rs/app-server/tests/suite/v2/selected_environment.rs
-@@ -163,17 +163,31 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
+@@ -199,17 +199,31 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
  #[tokio::test]
  async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discovery_stalls()
  -> Result<()> {
@@ -132,7 +132,7 @@ index 6b3458397c35eae00fd8b76f6a4115222ee49aa2..1dac3ace326c46b495ffff759b56532c
      )
      .await;
      let codex_home = TempDir::new()?;
-@@ -227,42 +241,147 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
+@@ -269,42 +283,147 @@ async fn thread_start_keeps_healthy_defaults_when_secondary_instruction_discover
          ephemeral: Some(true),
          ..Default::default()
      };
@@ -311,10 +311,10 @@ index 6b3458397c35eae00fd8b76f6a4115222ee49aa2..1dac3ace326c46b495ffff759b56532c
          })
          .await?;
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index d3759f7a5d834d9105a35062b73dbfdf0797ae26..26c8cb6e5d6c5af6a2d1345af5fdbde1da7487c8 100644
+index 24d8dc1bc72e0442fa4ea5cb8e75ca8c89f52a5a..9e0c89e2493ba24c2e2d62c25a362b000e767303 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -917,6 +917,9 @@ impl CodexThread {
+@@ -1104,6 +1104,9 @@ impl CodexThread {
                  approval_policy,
                  approvals_reviewer,
              },
@@ -325,10 +325,10 @@ index d3759f7a5d834d9105a35062b73dbfdf0797ae26..26c8cb6e5d6c5af6a2d1345af5fdbde1
                  .map(|requests| requests.select(&self.session.services.selected_capability_roots)),
              runtime_workspace_roots,
 diff --git a/codex-rs/core/src/session/environment.rs b/codex-rs/core/src/session/environment.rs
-index 719e7cb083d93790eab8339e71511fb0b13bcedf..e9618b49a913b7ef0feedcd948d25873b51aa336 100644
+index d6f08e5bc0f3739bd4734a54f1d1bab625ad9976..e59928f92b14f16232cce3b7312cbfb07e337241 100644
 --- a/codex-rs/core/src/session/environment.rs
 +++ b/codex-rs/core/src/session/environment.rs
-@@ -14,6 +14,7 @@ use codex_protocol::protocol::AgentStatus;
+@@ -19,6 +19,7 @@ use codex_protocol::protocol::AgentStatus;
  use codex_protocol::protocol::EnvironmentConfig;
  use codex_protocol::protocol::EnvironmentConfigState;
  use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -336,7 +336,7 @@ index 719e7cb083d93790eab8339e71511fb0b13bcedf..e9618b49a913b7ef0feedcd948d25873
  use codex_protocol::sandbox::SandboxType;
 
  use crate::config::ConstraintError;
-@@ -98,6 +99,43 @@ pub(super) fn ensure_configs_stay_owner_provided(
+@@ -103,6 +104,43 @@ pub(super) fn ensure_configs_stay_owner_provided(
      Ok(())
  }
 
@@ -380,7 +380,7 @@ index 719e7cb083d93790eab8339e71511fb0b13bcedf..e9618b49a913b7ef0feedcd948d25873
  fn validate_environment_config(
      selection: &TurnEnvironmentSelection,
      config: &EnvironmentConfig,
-@@ -181,6 +219,19 @@ impl Session {
+@@ -186,6 +224,19 @@ impl Session {
          updates: &SessionSettingsUpdate,
      ) -> ConstraintResult<SessionConfiguration> {
          let current_environments = &current.environments;
@@ -401,10 +401,10 @@ index 719e7cb083d93790eab8339e71511fb0b13bcedf..e9618b49a913b7ef0feedcd948d25873
              ensure_configs_stay_owner_provided(current_environments, &environments.environments)?;
          }
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index aa465e47105456875b698c21f72226f0455d1f71..b0e0f8007b6b50d4e11235bddd38ea67524ef898 100644
+index 72a5ef5c8951749620393cfe13d21dbdc8ce6785..c15710120aa5bc681d40bddc2efa0d97018431aa 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -673,6 +673,8 @@ pub(crate) struct SessionSettingsUpdate {
+@@ -635,6 +635,8 @@ pub(crate) struct SessionSettingsUpdate {
      /// Omission preserves the current data; an empty initializer clears it.
      pub(crate) turn_extension_init: Option<ExtensionDataInit>,
      pub(crate) environments: Option<TurnEnvironmentSelections>,
@@ -412,12 +412,12 @@ index aa465e47105456875b698c21f72226f0455d1f71..b0e0f8007b6b50d4e11235bddd38ea67
 +    pub(crate) preserve_secondary_workspaces: bool,
      pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
      pub(crate) profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
-     pub(crate) sandbox_policy: Option<SandboxPolicy>,
+     /// Compatibility input consumed when normalizing settings at admission.
 diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
-index de1f4e1466f9f50b6aef2261c0d995e46e8e9f58..1a000b9cb5fa5b584ac859f36e588c635776b49e 100644
+index 0a4e21f09aaffd3aa3467ee8c5f1c5aceee24e69..474fa927fbffdad25d06c4619b7b99bffba85fe3 100644
 --- a/codex-rs/core/src/session/thread_settings.rs
 +++ b/codex-rs/core/src/session/thread_settings.rs
-@@ -143,6 +143,9 @@ pub(super) fn prepare_update(
+@@ -148,6 +148,9 @@ pub(super) fn prepare_update(
              approval_policy,
              approvals_reviewer,
          },
@@ -428,10 +428,10 @@ index de1f4e1466f9f50b6aef2261c0d995e46e8e9f58..1a000b9cb5fa5b584ac859f36e588c63
          runtime_workspace_roots,
          profile_workspace_roots,
 diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
-index 28637eadc8c4d801a33895cc7965f71023402426..b6a2eda66f86870c90a906be78d9fceff90d3d3c 100644
+index 12b6cb03b5c1d3c0345f7f634e7472af3cfee71b..9d2d42a2228f3c64c74fd1d5e4bd5c6b8783c4b1 100644
 --- a/codex-rs/protocol/src/environment.rs
 +++ b/codex-rs/protocol/src/environment.rs
-@@ -190,6 +190,7 @@ impl TurnEnvironmentSelections {
+@@ -197,6 +197,7 @@ impl TurnEnvironmentSelections {
      /// Requests these environments again, leaving root choices to the receiving thread.
      pub fn into_requests(self) -> TurnEnvironmentRequests {
          TurnEnvironmentRequests {
@@ -439,7 +439,7 @@ index 28637eadc8c4d801a33895cc7965f71023402426..b6a2eda66f86870c90a906be78d9fcef
              legacy_fallback_cwd: self.legacy_fallback_cwd,
              environment_requests: self
                  .environments
-@@ -204,6 +205,9 @@ impl TurnEnvironmentSelections {
+@@ -212,6 +213,9 @@ impl TurnEnvironmentSelections {
  /// The receiving thread attaches roots in `select` before capturing these environments.
  #[derive(Debug, Clone, PartialEq)]
  pub struct TurnEnvironmentRequests {
@@ -448,12 +448,12 @@ index 28637eadc8c4d801a33895cc7965f71023402426..b6a2eda66f86870c90a906be78d9fcef
 +    pub preserve_secondary_workspaces: bool,
      pub legacy_fallback_cwd: AbsolutePathBuf,
      pub environment_requests: Vec<TurnEnvironmentRequest>,
- }
-@@ -214,6 +218,7 @@ impl TurnEnvironmentRequests {
+     /// Whether the environment list came from registry defaults.
+@@ -224,6 +228,7 @@ impl TurnEnvironmentRequests {
          environment_requests: Vec<TurnEnvironmentRequest>,
      ) -> Self {
          Self {
 +            preserve_secondary_workspaces: false,
              legacy_fallback_cwd,
              environment_requests,
-         }
+             implicit_selection: false,

@@ -63,7 +63,7 @@ index 6ea0d0deee7dd0c9d7e9ec75c5d29b9ee9e4b5b7..9cd85b46b4235c536faa063e14fe3aac
 +    }
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 8a1578c9886707040122c72e307f4a3fc15a62c0..5fb47d491cf5ea696064f79b56882cc6183bd59c 100644
+index 52a689cc67207f2bfbe6d9383ee972c6b670966b..f7c0a2fbdbe688c26e95640167a5e82be4bf53eb 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
 @@ -90,6 +90,106 @@ async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {

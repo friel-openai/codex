@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index fc062529bcc6d7b62f935736eb6bb50893d06cd5..407cfaa06462f4dea43c69bf27e61d99e69516a1 100644
+index dea16542ff9b51288ddae1372286073942991e78..52a9e250e8481fc3f78f5e69d5985a1dfb01175a 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2319,7 +2319,7 @@ impl ThreadRequestProcessor {
+@@ -2348,7 +2348,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index fc062529bcc6d7b62f935736eb6bb50893d06cd5..407cfaa06462f4dea43c69bf27e61d99
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -7066,6 +7066,28 @@ impl ThreadRequestProcessor {
+@@ -7189,6 +7189,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,7 +41,7 @@ index fc062529bcc6d7b62f935736eb6bb50893d06cd5..407cfaa06462f4dea43c69bf27e61d99
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 2224e0d4ddcb6f8fbee307d0b4a2fcc24d5048ec..34398e54b4aa256f1616dd8bb6b47cdc6c1f756b 100644
+index 9a60aa050247abe41af1d2a91c4cead8dbc4850a..b6abf644b1cd38c9e2e7ef7fb1184fd33c8f2652 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -154,6 +154,7 @@ mod skills_list;
@@ -349,10 +349,10 @@ index 4f5b77cc3c907d94b75b68de53603873caec751d..39b44b41b3b532923ae19d4e2a7e85d4
      Ok(())
  }
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 01689292fa34aa36989890f48b5c7d4e902d5878..ca529602e808b2ec42df50020588308ca03b19d9 100644
+index ced0edf245bd0a0d728ae65b9dace29b27bed78e..ef7e58691fbf10f6f28c97dcfef5c5a10ceeaf50 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -807,6 +807,7 @@ async fn worker_preserves_inherited_acl_through_append() -> anyhow::Result<()> {
+@@ -815,6 +815,7 @@ async fn worker_preserves_inherited_acl_through_append() -> anyhow::Result<()> {
  #[cfg(unix)]
  #[tokio::test]
  async fn worker_preserves_alternate_group_through_materialization() -> anyhow::Result<()> {
@@ -360,7 +360,7 @@ index 01689292fa34aa36989890f48b5c7d4e902d5878..ca529602e808b2ec42df50020588308c
      use std::os::unix::fs::MetadataExt;
      use std::process::Command;
 
-@@ -825,34 +826,39 @@ async fn worker_preserves_alternate_group_through_materialization() -> anyhow::R
+@@ -833,34 +834,39 @@ async fn worker_preserves_alternate_group_through_materialization() -> anyhow::R
          .collect::<Result<Vec<_>, _>>()?;
      #[cfg(target_os = "linux")]
      let groups = {
@@ -411,7 +411,7 @@ index 01689292fa34aa36989890f48b5c7d4e902d5878..ca529602e808b2ec42df50020588308c
      assert_eq!(fs::metadata(&path)?.gid(), group);
 
      worker::run(home.path().to_path_buf(), Startup).await?;
-@@ -1051,6 +1057,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+@@ -1059,6 +1065,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
      Ok(())
  }
 
@@ -446,10 +446,10 @@ index 01689292fa34aa36989890f48b5c7d4e902d5878..ca529602e808b2ec42df50020588308c
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index 333e11bdf993ffe84e8ad437d9cf591589fd0b6f..a259d59008f9f78d57568c376bb61a6c1a00b470 100644
+index 3d0073bad0c97b661ba04d05e59471d3fae496eb..965bdd3358e3f07f3875e1e29fdb1e104d9e39d4 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1259,12 +1259,12 @@ async fn select_thread_candidates(
+@@ -1254,12 +1254,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }
@@ -863,7 +863,7 @@ index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd2
 +    assert!(!path.exists());
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
-index 4fd105d538074d0933f74cb09ca4d82767895ed5..b2c0c092d7f65e846b6216e8fa6160f0ea0892c4 100644
+index 928c8cbdb675e98ab13fafb8d8c3bc722deb79d1..241026b703c2b7043d382181ff00ce8a367ff208 100644
 --- a/codex-rs/thread-store/src/local/archive_thread.rs
 +++ b/codex-rs/thread-store/src/local/archive_thread.rs
 @@ -1,14 +1,16 @@
@@ -976,10 +976,10 @@ index 4fd105d538074d0933f74cb09ca4d82767895ed5..b2c0c092d7f65e846b6216e8fa6160f0
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 3cb78c1c651dcbb9d559393631cb108a9199be5c..84d0ad26f53c5c753553c6253337bb01a64c5c28 100644
+index eaa1a84975979411382d8f5099ca7ca1829332ba..9d069b8b0e6b3dd3313d92d059e2af033db9d6a9 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -1723,8 +1723,6 @@ impl ThreadStore for LocalThreadStore {
+@@ -1773,8 +1773,6 @@ impl ThreadStore for LocalThreadStore {
 
      fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move {
@@ -988,7 +988,7 @@ index 3cb78c1c651dcbb9d559393631cb108a9199be5c..84d0ad26f53c5c753553c6253337bb01
              archive_thread::archive_threads(
                  self,
                  ArchiveThreadsParams {
-@@ -1741,12 +1739,7 @@ impl ThreadStore for LocalThreadStore {
+@@ -1791,12 +1789,7 @@ impl ThreadStore for LocalThreadStore {
          &self,
          params: ArchiveThreadsParams,
      ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
@@ -1003,7 +1003,7 @@ index 3cb78c1c651dcbb9d559393631cb108a9199be5c..84d0ad26f53c5c753553c6253337bb01
 
      fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 358b815481d7f9b13b07b2fe3afc401594a536cd..40e7b8a7629fddab200c71b01c798c9b5f38566e 100644
+index abbc95faf6ffd0a0f59d9382941a2effa5bade74..1e79b7dfe69284e2e93d918e6c883e2644b54e3e 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
 @@ -53,6 +53,7 @@ use super::thread_history::RolloutProjectionStep;

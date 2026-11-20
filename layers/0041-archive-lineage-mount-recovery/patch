@@ -586,10 +586,10 @@ index 835c28392fa10b89c1ea88b36cf2e4b5d627a2d1..5626f450990a4d0e1ab7fbfd89856b16
              self.promote_legacy_name(journal.selected_thread_id, None)
                  .await?;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b5510954d 100644
+index 8e06697f243a8a174b720902ed873eeeb2378679..772bc996f710f61cb9e4220f7500c2f518bb86cc 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -6189,15 +6189,35 @@ async fn assert_migration_process_death_recovers_every_durable_phase(
+@@ -6192,15 +6192,35 @@ async fn assert_migration_process_death_recovers_every_durable_phase(
 
  #[tokio::test]
  async fn migration_preserves_archived_compressed_segmented_lineage_and_sources() {
@@ -628,7 +628,7 @@ index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b
      let home = TempDir::new().expect("create Codex home");
      let thread_id = ThreadId::new();
      let segment_ids = [SegmentId::new(), SegmentId::new()];
-@@ -6258,6 +6278,35 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+@@ -6261,6 +6281,35 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
          fs::read(archived.as_path()).expect("read compressed active"),
      ];
      let store = indexed_store(home.path()).await;
@@ -664,7 +664,7 @@ index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b
 
      let report = store
          .migrate_rollouts(apply_options())
-@@ -6268,7 +6317,7 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+@@ -6271,7 +6320,7 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
          report.outcomes[0].status,
          RolloutMigrationStatus::Migrated,
          "{:?}",
@@ -673,7 +673,7 @@ index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b
      );
      let selected_path = report.outcomes[0].rollout_path.clone();
      assert!(selected_path.starts_with(home.path().join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)));
-@@ -6276,6 +6325,16 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+@@ -6279,6 +6328,16 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
          selected_path.extension().and_then(|value| value.to_str()),
          Some("zst")
      );
@@ -690,7 +690,7 @@ index 98cfaf14b338560382812a0ba8a10fb4a3d672e0..77ee77d4559f0b7f3d75d30c73dfb48b
      assert_eq!(
          [
              fs::read(immutable.as_path()).expect("reread compressed predecessor"),
-@@ -6307,6 +6366,134 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
+@@ -6310,6 +6369,134 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
      assert!(json.contains("archived active"));
  }
 

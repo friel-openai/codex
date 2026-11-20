@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
-index 22f741c6081feebdf767c27a5528bc5cd0fbf396..01ccde7639f606502d45f8476bf0de447dccf2b4 100644
+index dd6ada7a3886c70f5e19a10c85d5bd320e91a6bd..5844d94c46eb5ba3dcb421f30261e73245fec8a0 100644
 --- a/codex-rs/core/src/agent/child_config.rs
 +++ b/codex-rs/core/src/agent/child_config.rs
 @@ -14,7 +14,6 @@ use codex_features::Feature;
@@ -20,10 +20,10 @@ index 22f741c6081feebdf767c27a5528bc5cd0fbf396..01ccde7639f606502d45f8476bf0de44
      }
 
 diff --git a/codex-rs/core/src/guardian/review_session_prompt.rs b/codex-rs/core/src/guardian/review_session_prompt.rs
-index 37a9be301ab6bb66a15a15a02216660b313a78eb..c4f83fb7a3bb1ebe4098a97cb889d81f2390da77 100644
+index 54d84c39c48d5ece14db3922c3903964188e0408..34012c310d38374b8a21ecaaee0948793d1fffd0 100644
 --- a/codex-rs/core/src/guardian/review_session_prompt.rs
 +++ b/codex-rs/core/src/guardian/review_session_prompt.rs
-@@ -7,7 +7,6 @@ use codex_protocol::models::ImageReference;
+@@ -9,7 +9,6 @@ use codex_protocol::models::ResponseItem;
  use codex_protocol::openai_models::CatalogModel;
  use codex_protocol::openai_models::InputModality;
  use codex_protocol::openai_models::ModelInfo;
@@ -31,15 +31,15 @@ index 37a9be301ab6bb66a15a15a02216660b313a78eb..c4f83fb7a3bb1ebe4098a97cb889d81f
  use codex_tools::normalize_output_image_detail;
  use std::borrow::Cow;
  use tracing::warn;
-@@ -51,7 +50,7 @@ pub(super) async fn build_guardian_prompt_items(
+@@ -69,7 +68,7 @@ pub(super) async fn build_guardian_prompt_items(
              / 100
      });
      let context_window =
 -        context_window.filter(|limit| *limit > 0 && model_info.origin != ModelOrigin::Synthetic);
 +        context_window.filter(|limit| *limit > 0 && !model_info.origin.is_synthetic());
-     let image_mode = if unified_image_budget_enabled(&params.spawn_config.features, model_info) {
-         ImagePreparationMode::UnifiedBudget
-     } else {
+     let image_mode = ImagePreparationMode::for_model(&params.spawn_config.features, model_info);
+     let history_tokens = if context_window.is_some() && collected.sections.has_images() {
+         let base_instructions = reviewer.session.get_base_instructions().await;
 diff --git a/codex-rs/core/src/session/code_mode_warning.rs b/codex-rs/core/src/session/code_mode_warning.rs
 index fb386c42d542592cccb77638b6a851ff8cc772aa..c29ff67a73326e8e963c56a0193e13bb501d8a1e 100644
 --- a/codex-rs/core/src/session/code_mode_warning.rs
@@ -65,7 +65,7 @@ index fb386c42d542592cccb77638b6a851ff8cc772aa..c29ff67a73326e8e963c56a0193e13bb
      }
 
 diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
-index fec0f6f0f4c3a6a7feab602cc2b655818e92d30e..430352169785c9d857b81c55d5f4402e634fa5e3 100644
+index ff50bef5264355909dafdbb4d9536f6faac1c015..d006fdd2957e4dad1b4f13014c286091c02d4975 100644
 --- a/codex-rs/core/src/session/review.rs
 +++ b/codex-rs/core/src/session/review.rs
 @@ -1,6 +1,5 @@
@@ -85,7 +85,7 @@ index fec0f6f0f4c3a6a7feab602cc2b655818e92d30e..430352169785c9d857b81c55d5f4402e
              .supported_reasoning_levels
              .iter()
 diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
-index fdb55014125e5b30252d8bce5b8d0fdc63a0b7a6..84bcf0c969b6f297c7940f15c6b377bef566be47 100644
+index 8d6a6bd4826099c3de6e04a14202270ac990f100..10af000d962aeaa8180d35da6c4a4ff82ed06379 100644
 --- a/codex-rs/core/src/session/step_activation.rs
 +++ b/codex-rs/core/src/session/step_activation.rs
 @@ -21,7 +21,6 @@ use codex_protocol::openai_models::GuardianV2ModelConfig;
@@ -110,19 +110,19 @@ index fdb55014125e5b30252d8bce5b8d0fdc63a0b7a6..84bcf0c969b6f297c7940f15c6b377be
      }
      let retained_models = [admitted, current];
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index e17b1c4700a1ee3665067588ba9523cb4b4309e7..8226fd43ea9d0f35dfe885ac719b1baaa52b1e0e 100644
+index c790888cb5f1f81c3578182a7a8c4a465792b503..68b59b406ebfb9fd6b763033093b4bc713544599 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -76,6 +76,7 @@ use crate::tools::router::ToolSuggestCandidates;
+@@ -79,6 +79,7 @@ use crate::tools::router::ToolSuggestCandidates;
  use crate::tools::router::ToolSuggestPresentation;
  use crate::tools::router::record_registration_metrics;
  use crate::tools::spec_plan::build_tool_router;
 +use crate::tools::spec_plan::model_catalog_unavailable;
- use crate::tools::spec_plan::tool_suggest_enabled;
  use crate::turn_diff_tracker::TurnDiffTracker;
- use crate::turn_timing::record_turn_ttft_metric;
-@@ -2856,13 +2857,21 @@ pub(crate) async fn prepare_tool_recommendations(
- pub(crate) async fn built_tools(
+ use crate::util::error_or_panic;
+ use codex_analytics::AppInvocation;
+@@ -2900,13 +2901,21 @@ impl PreparedToolRecommendations {
+ pub(super) async fn built_tools(
      sess: &Session,
      turn_context: &TurnContext,
 -    model_info: &codex_protocol::openai_models::ModelInfo,
@@ -130,7 +130,7 @@ index e17b1c4700a1ee3665067588ba9523cb4b4309e7..8226fd43ea9d0f35dfe885ac719b1baa
      environments: &TurnEnvironmentSnapshot,
      mcp: &Arc<codex_mcp::McpBinding>,
      step_store: &ExtensionData,
-     prepared_recommendations: PreparedToolRecommendations,
+     prepared_recommendations: Option<PreparedToolRecommendations>,
      dynamic_tools: &[codex_protocol::dynamic_tools::DynamicToolSpec],
  ) -> CodexResult<Arc<ToolRouter>> {
 +    if sess
@@ -141,13 +141,13 @@ index e17b1c4700a1ee3665067588ba9523cb4b4309e7..8226fd43ea9d0f35dfe885ac719b1baa
 +    {
 +        return Err(model_catalog_unavailable());
 +    }
-     let all_mcp_tools = mcp.tools();
-     let connector_snapshot = mcp.config().connector_snapshot.clone();
-
-@@ -3963,6 +3972,14 @@ async fn try_run_sampling_request(
-     };
-     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
-     let mut stream_request = async |prompt: &Prompt| {
+     let apps_enabled = turn_context.apps_enabled();
+     let tool_suggest_candidates = match prepared_recommendations {
+         Some(PreparedToolRecommendations::Endpoint(tools)) => Some(ToolSuggestCandidates {
+@@ -3997,6 +4006,14 @@ async fn try_run_sampling_request(
+     let prompt = Arc::new(prompt);
+     let interrupt_at_boundary = SamplingInterrupt::enabled(&turn_context);
+     let mut stream_request = async |prompt: &Arc<Prompt>| {
 +        if sess
 +            .services
 +            .models_manager
@@ -156,11 +156,11 @@ index e17b1c4700a1ee3665067588ba9523cb4b4309e7..8226fd43ea9d0f35dfe885ac719b1baa
 +        {
 +            return Err(model_catalog_unavailable());
 +        }
-         client_session
-             .stream(
+         let send = client_session
+             .open_model_response(
                  prompt,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index e17b22d44600e5bc9604adda656144bdfd55defa..f6e4368149f65e6c09b5b833e6fbdb497e0d996e 100644
+index d91636707ee62258fdce0c2524820142571cb0ec..b8ce0c12524967f9eccd1f99fb382c71a4e8e03d 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -33,7 +33,6 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -171,7 +171,7 @@ index e17b22d44600e5bc9604adda656144bdfd55defa..f6e4368149f65e6c09b5b833e6fbdb49
  use codex_protocol::openai_models::ModelServiceTier;
  use codex_protocol::permissions::RawFileSystemSandboxPolicy;
  use codex_protocol::protocol::EnvironmentConfig;
-@@ -1069,7 +1068,7 @@ impl TurnContext {
+@@ -1066,7 +1065,7 @@ impl TurnContext {
              );
              Arc::make_mut(&mut model_info).model = overridden.into();
          }
@@ -180,7 +180,7 @@ index e17b22d44600e5bc9604adda656144bdfd55defa..f6e4368149f65e6c09b5b833e6fbdb49
 
          let reasoning_effort = if let Some(reasoning_effort) = candidate.reasoning_effort.as_ref() {
              let supports_effort = model_info
-@@ -1787,7 +1786,7 @@ impl Session {
+@@ -1784,7 +1783,7 @@ impl Session {
      }
 
      pub(crate) async fn maybe_emit_model_warnings_for_turn(&self, tc: &TurnContext) {
@@ -190,7 +190,7 @@ index e17b22d44600e5bc9604adda656144bdfd55defa..f6e4368149f65e6c09b5b833e6fbdb49
                  tc,
                  EventMsg::Warning(WarningEvent {
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index a8eb81da05125199b13deacbe55217a138fa16c6..d8d37b509405e1f23a920a30df27de059c444bc3 100644
+index 62806f0c0fd49c94ef6b9e4a4b28dc728a1aed5c..1584a6b82d934a8f199b7c2bcf4dd33ef885d811 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -80,9 +80,11 @@ use codex_protocol::account::PlanType;
@@ -238,10 +238,10 @@ index a8eb81da05125199b13deacbe55217a138fa16c6..d8d37b509405e1f23a920a30df27de05
  fn code_mode_only_strict_3p_tools(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
      effective_tool_mode(turn_context, model_info) == ToolMode::CodeModeOnly
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 9e81fa76a8949e2f36c014fef63b1e51a52b14b7..4cf153c3e34647c95c36e0ab599d088a131df203 100644
+index fb8382960b4d38072d1fd02db5ef01ccfd150adc..d486107ed5cc34ac452d1cea118d081c1625f618 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -674,6 +674,52 @@ async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
+@@ -675,6 +675,52 @@ async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
      }
  }
 
@@ -295,7 +295,7 @@ index 9e81fa76a8949e2f36c014fef63b1e51a52b14b7..4cf153c3e34647c95c36e0ab599d088a
  async fn reviewer_tool_policy_exclude_optional_core_tools() {
      let (mut session, mut turn) = make_session_and_context().await;
 diff --git a/codex-rs/guardian-context/src/budget.rs b/codex-rs/guardian-context/src/budget.rs
-index 4938909166e836e7814b5f1020c98e5bc0b161e3..79cb2cca0b5d7f2f4024f3b27fe17771a772b8e8 100644
+index f21ed75fb000b0b5b418835c297942388696ccef..225296b794a8dfaa824e3c827085e5028e2d8bbf 100644
 --- a/codex-rs/guardian-context/src/budget.rs
 +++ b/codex-rs/guardian-context/src/budget.rs
 @@ -4,7 +4,6 @@
@@ -1003,10 +1003,10 @@ index 9157d68550536379bd19842b03eff8b0dcd17634..8f6af4142128e31fb78740c9dd57719d
 
      fn has_command_auth(&self) -> bool {
 diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
-index 3e77ea56dcc5a33ab5fb0ea84e59c3b82feb370d..2d6686ef1db715f0d8c6fe3094efe26443a4b458 100644
+index 0ffa03bf08e950e902eeb428b1b53f2b4b040e69..141f9830baa05e388e96c3c7eea102714a0e0c10 100644
 --- a/codex-rs/protocol/src/openai_models.rs
 +++ b/codex-rs/protocol/src/openai_models.rs
-@@ -544,6 +544,36 @@ pub enum ModelOrigin {
+@@ -548,6 +548,36 @@ pub enum ModelOrigin {
      ExplicitConfig,
      /// Generic metadata synthesized when no catalog entry matches the requested model.
      Synthetic,

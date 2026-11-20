@@ -909,10 +909,10 @@ index 622e882f546ec1f0a016fffcc85247db3e883984..44b64bd700eb34de3fb9610d0aa02462
      async fn default_thread_environment_requests_use_manager_default_id() {
          let cwd = AbsolutePathBuf::current_dir().expect("cwd");
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 36f33c364740cecb1487ae79c81cf1075415e2eb..9599318fdc235da3d6d3d2cdfcec99cc77fe394e 100644
+index c0bc4df5d0ff60eebe3ddc9f2e24e0c5bb8b68a1..d319308eb25137b27ce22f7d1d5a8cdd3b5aee5b 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -596,6 +596,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
+@@ -611,6 +611,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
      pub(crate) cold_resume: bool,
      /// Ordinary local conversation does not await registry secondaries.
      pub(crate) defer_registry_secondaries: bool,
@@ -921,7 +921,7 @@ index 36f33c364740cecb1487ae79c81cf1075415e2eb..9599318fdc235da3d6d3d2cdfcec99cc
      /// Explicit exceptions for one cold resume, never part of saved settings.
      pub(crate) optional_on_resume: Arc<HashSet<String>>,
      /// Present only for the actual local-primary registry selection at a new app-server start.
-@@ -666,6 +668,7 @@ impl StartThreadOptions {
+@@ -681,6 +683,7 @@ impl StartThreadOptions {
                  implicit_selection,
                  cold_resume: false,
                  defer_registry_secondaries: implicit_selection,
@@ -929,7 +929,7 @@ index 36f33c364740cecb1487ae79c81cf1075415e2eb..9599318fdc235da3d6d3d2cdfcec99cc
                  optional_on_resume: Arc::default(),
                  default_registrations,
              });
-@@ -776,6 +779,7 @@ impl StartThreadOptions {
+@@ -791,6 +794,7 @@ impl StartThreadOptions {
                  implicit_selection,
                  cold_resume: true,
                  defer_registry_secondaries,
@@ -937,7 +937,7 @@ index 36f33c364740cecb1487ae79c81cf1075415e2eb..9599318fdc235da3d6d3d2cdfcec99cc
                  optional_on_resume: Arc::new(optional_on_resume),
                  default_registrations: HashMap::new(),
              });
-@@ -2789,13 +2793,25 @@ impl ThreadManager {
+@@ -2813,13 +2817,25 @@ impl ThreadManager {
          {
              meta.meta.multi_agent_version = Some(multi_agent_version);
          }
@@ -969,7 +969,7 @@ index 36f33c364740cecb1487ae79c81cf1075415e2eb..9599318fdc235da3d6d3d2cdfcec99cc
          if options.config.workspace_roots_explicit
              && let Some(environments) = environments.as_mut()
          {
-@@ -2822,7 +2838,42 @@ impl ThreadManager {
+@@ -2846,7 +2862,42 @@ impl ThreadManager {
          }
          let agent_control = self.agent_control_for_config(&options.config);
          options.initial_history = history;
@@ -1385,10 +1385,10 @@ index 0000000000000000000000000000000000000000..6c119d5c69fc2307c91db2cac68ffa22
 +    }
 +}
 diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
-index 4ef470c1491c7f4cf33c109bd2ad6d1112c6f34d..72eff826d9aff0450c6918b98296767ff1e76b9b 100644
+index 6240e8abb12ac07e25898c52147bb2b686ada166..6ebb59de9cbb872c2dd3613500c8fda8e00d4e49 100644
 --- a/codex-rs/exec-server/src/lib.rs
 +++ b/codex-rs/exec-server/src/lib.rs
-@@ -121,6 +121,7 @@ pub use environment::EnvironmentConnectionState;
+@@ -122,6 +122,7 @@ pub use environment::EnvironmentConnectionState;
  pub use environment::EnvironmentManager;
  pub use environment::EnvironmentObservedStatus;
  pub use environment::EnvironmentReadyInfo;

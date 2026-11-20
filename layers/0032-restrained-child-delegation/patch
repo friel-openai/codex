@@ -336,10 +336,10 @@ index 0000000000000000000000000000000000000000..32aa1bafcb90060bb24a6453da18563f
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index f356a3ee015c72628f6af19778bf052f33e8f22b..46c161b4d85f64bed45e85000a32bb5857b8cc62 100644
+index 3bf986d8fda7fa5bfce67d927d56a5349779f3a2..3420405ab7e3212e6581b954c53201ebfa9898a3 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -105,6 +105,7 @@ mod guardian_checkpoint_migration;
+@@ -106,6 +106,7 @@ mod reasoning_replay_metrics;
  // Uses the same command-approval harness as guardian_review below.
  mod builtin_model_catalog;
  mod canonical_plugin_connectors;
@@ -507,10 +507,10 @@ index 881a7e25cf1710fad2860fb0ebcf7eedd4fb0e0f..66bd74ce84d2ff910b5ce7351b2c69b4
      Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
  03:message/developer:
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
-index c0a4a85e842b895a4377a878e16009b8e1942ec5..24833b579995fb88ff81acd7d49aea4a34dc3309 100644
+index 698c1d5bca7d9cf017073692cfbcb03319edaa2b..1d0467ab796b7c5da56931e29f0ba1ef2323102a 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
-@@ -8,17 +8,54 @@ Scenario: First post-resume turn where pre-turn override sets model to rollout m
+@@ -8,12 +8,49 @@ Scenario: First post-resume turn where pre-turn override sets model to rollout m
  -- request 1 (turn; Last Request Before Resume) --
  00:message/developer:
      <MODEL_INSTRUCTIONS>
@@ -563,16 +563,8 @@ index c0a4a85e842b895a4377a878e16009b8e1942ec5..24833b579995fb88ff81acd7d49aea4a
 -03:message/user:
 +05:message/user:
      seed resume history
- -- request 2 (turn; First Request After Resume + Override) --
--04:message/assistant:
-+06:message/assistant:
-     recorded before resume
--05:message/user:
-+07:message/user:
-     <ENVIRONMENT_CONTEXT>
--06:message/user:
-+08:message/user:
-     first resumed turn after model override
+
+ ## Window 2 (after request 1: settings changed (tools))
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
 index 5811b895af2ac33029059f36750b35e31353104a..a639bd4c0dc0551c580de8d731531dc584629080 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
@@ -836,16 +828,16 @@ index 9d29212c2ea36ef3d4c9c3ee059d6c8fe4860d35..a85cc7acb421970b7e6e6ab7aec15f5b
 +09:message/user:
      Continue after restart.
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
-index e7d2ffa51ee7e1a56e3f0173dedb452054d56a6f..0bdfb2c766150f577984e83d51e9990b32fbdaf6 100644
+index fec4764764ea53f92512d0bf26d10afc2dc2d7e9..4add8185f895a35626428bddd4134f42fcdd5bc5 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__scenarios__model_catalog_refresh_preserves_tools_and_history.snap
 @@ -14,10 +14,12 @@ Settings:
    store: false
    stream: true
    tool_choice: "auto"
--  tools (6; hash=1ea0fa9abde186d4):
+-  tools (6; hash=6d27d4ee152c61c9):
 +  tools (7; hash=c95f91442f992620):
-     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
+     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=24f4b6739dd5d940
      - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
      - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
 +    - namespace/workspace: Tools for changing the working directory used by the active thread.; hash=d05f60cc92935a0f
@@ -954,7 +946,7 @@ index 66378384f28faff32e207a3ade47873214a86b47..5d664ff45463b739bc951dcc7f2472c0
 +06:function_call/update_plan:{"plan":[{"status":"in_progress","step":"Continue in the new context window"}]}
 +07:function_call_output:Plan updated
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index d5fc027d4a5dc549915fafc7e30e94c5b0b90467..faf8f0da8a442a045b2be0f3795938d63a6c83b9 100644
+index 4cf2187ed4827bb66268be8c8322b8a314faf91f..8e0691278c82cd70542120b0b0f4a84a20a6cdf1 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
 @@ -138,7 +138,7 @@ const FULL_HISTORY_SHARED_USAGE_HINT: &str = "Shared delegation guidance.";
@@ -975,7 +967,7 @@ index d5fc027d4a5dc549915fafc7e30e94c5b0b90467..faf8f0da8a442a045b2be0f3795938d6
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
      selection: FullHistoryV2ModelSelection,
-@@ -2014,8 +2014,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2016,8 +2016,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              (
                  mode_instruction_count(&parent_request.message_input_texts("developer")),
                  mode_instruction_count(&child_developer_messages),
@@ -992,7 +984,7 @@ index d5fc027d4a5dc549915fafc7e30e94c5b0b90467..faf8f0da8a442a045b2be0f3795938d6
          );
      }
      if matches!(
-@@ -2026,10 +2033,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2028,10 +2035,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
              .message_input_texts("developer")
              .into_iter()
              .rfind(|message| message.starts_with(MULTI_AGENT_MODE_OPEN_TAG))
@@ -1005,7 +997,7 @@ index d5fc027d4a5dc549915fafc7e30e94c5b0b90467..faf8f0da8a442a045b2be0f3795938d6
          assert_eq!(
              (
                  child_developer_messages
-@@ -2049,7 +2056,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
+@@ -2051,7 +2058,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                      .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                      .count(),
              ),
