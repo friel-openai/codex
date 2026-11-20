@@ -1,0 +1,597 @@
+diff --git a/codex-rs/core/src/agent/control_request_restoration_tests.rs b/codex-rs/core/src/agent/control_request_restoration_tests.rs
+index be533e986f4b56f3d9a553d52aeb7db98c684c5b..980be4a0ceba090f5342b5c8738cfbf636c13a0d 100644
+--- a/codex-rs/core/src/agent/control_request_restoration_tests.rs
++++ b/codex-rs/core/src/agent/control_request_restoration_tests.rs
+@@ -7,6 +7,13 @@ use core_test_support::responses::ev_assistant_message;
+ use core_test_support::responses::start_websocket_server;
+ use pretty_assertions::assert_eq;
+
++fn client_text_input(text: &str) -> Vec<UserInput> {
++    text_input(text)
++        .iter()
++        .map(ResolvedUserInput::to_user_input)
++        .collect()
++}
++
+ #[test]
+ #[serial(fork_env)]
+ fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume() -> anyhow::Result<()> {
+@@ -125,7 +132,7 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
+     let (parent_thread_id, parent_thread) = harness.start_thread().await;
+     let parent_prompt_cache_key = parent_thread.session.prompt_cache_key();
+     parent_thread
+-        .start_or_steer_turn(TurnInputRequest::user_input(text_input(
++        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
+             "seed alias-backed guidance",
+         )))
+         .await?;
+@@ -250,7 +257,7 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
+         .try_ensure_rollout_materialized(PersistContext::Standard)
+         .await?;
+     resumed_thread
+-        .start_or_steer_turn(TurnInputRequest::user_input(text_input(
++        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
+             "inspect resumed alias guidance",
+         )))
+         .await?;
+@@ -444,7 +451,9 @@ async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key
+     let parent_prompt_cache_key = parent.thread.session.prompt_cache_key();
+     parent
+         .thread
+-        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
++        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
++            "parent seed",
++        )))
+         .await?;
+     wait_for_turn_complete(parent.thread.as_ref()).await;
+     parent
+diff --git a/codex-rs/core/src/agent/control_retirement_tests.rs b/codex-rs/core/src/agent/control_retirement_tests.rs
+index 1c8c7c63d06fe6e0fb3977e949c1b8170a23f237..1255f84ee44bcde30945001c0e18769a6d0be40b 100644
+--- a/codex-rs/core/src/agent/control_retirement_tests.rs
++++ b/codex-rs/core/src/agent/control_retirement_tests.rs
+@@ -18,6 +18,7 @@ async fn shared_mcp_process_id(thread: &CodexThread) -> u64 {
+     thread
+         .call_mcp_tool(
+             "retirement",
++            /*environment_id*/ None,
+             "shared_counter",
+             /*arguments*/ None,
+             /*meta*/ None,
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 20fcfb4ca80dc7b3c30a84cea6063680306b1ff1..0017d42ef6d0a906fd237f3777e00b36c1e4fa1d 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2655,8 +2655,8 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+     assert_eq!(
+         reloaded_child.config_snapshot().await.request_country,
+         match route {
+-            V2ReloadRoute::Sender => germany,
+-            V2ReloadRoute::NestedParent => united_states,
++            V2ReloadRoute::Sender | V2ReloadRoute::EphemeralParent => germany,
++            V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => united_states,
+         },
+     );
+     if matches!(route, V2ReloadRoute::Sender) {
+@@ -7137,7 +7137,7 @@ while True:
+     assert!(
+         parent_mcp_tools
+             .iter()
+-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
++            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
+         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
+     );
+     parent
+@@ -12349,7 +12349,7 @@ while True:
+     assert!(
+         parent_mcp_tools
+             .iter()
+-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
++            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
+         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
+     );
+     parent_thread
+@@ -12414,7 +12414,7 @@ while True:
+         child_mcp_tool_snapshot
+             .tools
+             .iter()
+-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
++            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
+         "goal supervisor helper should inherit the parent MCP tool snapshot"
+     );
+
+@@ -13115,7 +13115,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+             root_turn_id: None,
+             cyber_access_program: None,
+             initiating_agent_path: None,
+-        }
++            inherited_client_metadata,
++        } if inherited_client_metadata.is_empty()
+     ));
+     let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
+     persist_thread_for_tree_resume(&child_thread, "child persisted").await;
+@@ -13342,7 +13343,10 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+             .contains("queued non-triggering messages")
+     );
+     assert_eq!(
+-        original_control.runtime.mailboxes.take(child.thread_id),
++        original_control
++            .runtime
++            .mailboxes
++            .take(child.thread_id, |_| true),
+         retained_messages
+             .into_iter()
+             .map(crate::PendingAgentMessage::from)
+@@ -13352,7 +13356,7 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+         original_control
+             .runtime
+             .mailboxes
+-            .take(child.thread_id)
++            .take(child.thread_id, |_| true)
+             .is_empty()
+     );
+     assert!(Arc::ptr_eq(
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 3f6595ae58da42d4bfce38f4f43f01b36fdb4be0..81162c9f2861d399239dcd7b54d387d933c9df0f 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1621,7 +1621,7 @@ fn test_response_continuation() -> ResponseContinuation {
+             text: None,
+             client_metadata: None,
+             access_programs: None,
+-            request_country: None,
++            request_country: Default::default(),
+         }),
+         last_response: LastResponse {
+             response_id: "parent-resp".to_string(),
+@@ -1952,7 +1952,7 @@ async fn stream_client_test_request(
+ ) -> String {
+     let mut stream = session
+         .stream(
+-            prompt,
++            &Arc::new(prompt.clone()),
+             &test_model_info(),
+             &test_session_telemetry(),
+             /*effort*/ None,
+@@ -2046,7 +2046,7 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
+ #[test]
+ fn model_reroute_reset_discards_provider_route_segment_state() {
+     let client = test_model_client(SessionSource::Cli);
+-    let request = ResponsesApiRequest {
++    let request = Arc::new(ResponsesApiRequest {
+         model: "test-primary".to_string(),
+         input: vec![
+             developer_message_item("test instructions"),
+@@ -2066,7 +2066,8 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
+         text: None,
+         client_metadata: None,
+         access_programs: None,
+-    };
++        request_country: Default::default(),
++    });
+     let continuation = ResponseContinuation {
+         request: request.clone(),
+         last_response: LastResponse {
+@@ -3741,7 +3742,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+         request: Some(request.clone()),
+     }
+     .into_raw_stream()?;
+-    assert_eq!(stream.routing_affinity, Some(routing_affinity));
++    assert_eq!(stream.0.routing_affinity, Some(routing_affinity));
+     let mut delivered = Vec::new();
+     while let Some(event) = stream.next().await {
+         if let ResponseEvent::OutputItemDone(item) = event? {
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index 9ec082c8d36c404df603e48917dfbfd6bcc40860..75655ec3097508af45d842925420bca7c5dfa4df 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -3810,9 +3810,13 @@ async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enable
+         Arc::make_mut(&mut context.model_info).slug = "gpt-5.6-sol".to_string();
+     }
+     let captured_parent_model = context.model_info.slug.clone();
+-    let guardian_config = guardian_review_session_config(session.as_ref(), &context)
+-        .await
+-        .expect("guardian config");
++    let guardian_config = guardian_review_session_config(
++        session.as_ref(),
++        &context,
++        ReviewRetrieval::ConversationHistory,
++    )
++    .await
++    .expect("guardian config");
+     let (review_model, _) = resolve_review_model(session.as_ref(), &context).await;
+     let expected_effort = guardian_config.spawn_config.model_reasoning_effort.clone();
+
+diff --git a/codex-rs/core/src/independent_thread/retention_tests.rs b/codex-rs/core/src/independent_thread/retention_tests.rs
+index 54e56293fcd9a8df363b281bedc1df6bf83fb614..b3f5f816fd1be93286b62a8a8829dbeda01cf794 100644
+--- a/codex-rs/core/src/independent_thread/retention_tests.rs
++++ b/codex-rs/core/src/independent_thread/retention_tests.rs
+@@ -1,5 +1,5 @@
+ use super::*;
+-use crate::compact::collect_annotated_user_messages;
++use crate::compact::collect_user_messages;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::FunctionCallOutputPayload;
+@@ -53,11 +53,11 @@ fn compaction_retains_bounded_independent_messages_without_user_authority() {
+             .iter()
+             .all(|item| matches!(&item.item, ResponseItem::FunctionCallOutput { .. }))
+     );
+-    assert!(collect_annotated_user_messages(&compacted).is_empty());
+     let items = compacted
+         .iter()
+-        .map(|envelope| &envelope.item)
++        .map(|envelope| envelope.item.clone())
+         .collect::<Vec<_>>();
++    assert!(collect_user_messages(&items).is_empty());
+     let serialized = serde_json::to_string(&items).unwrap();
+     let restored: Vec<ResponseItem> = serde_json::from_str(&serialized).unwrap();
+     let restored = restored
+diff --git a/codex-rs/core/src/session/late_steer_tests.rs b/codex-rs/core/src/session/late_steer_tests.rs
+index 97dce5cc25e25d429a9049da8a7fc748148ceae5..e64f66b6d0bd67433ad1f39df4dfe857b79d5e79 100644
+--- a/codex-rs/core/src/session/late_steer_tests.rs
++++ b/codex-rs/core/src/session/late_steer_tests.rs
+@@ -55,7 +55,7 @@ impl SessionTask for OrderingTask {
+         assert_eq!(input.len(), 1);
+         assert!(
+             matches!(&input[0], TurnInput::UserInput { content, .. }
+-            if matches!(content.as_slice(), [UserInput::Text { text, .. }]
++            if matches!(content.as_slice(), [ResolvedUserInput::Text { text, .. }]
+                 if text == "late steer before supervisor"))
+                 || matches!(&input[0], TurnInput::InterAgentCommunication(mail)
+                 if mail.content == "late mailbox update")
+@@ -216,10 +216,9 @@ async fn late_steer_continues_before_thread_idle_lifecycle(outcome: TaskOutcome)
+     } else {
+         let submission = submit_steer_only(
+             &session,
+-            vec![UserInput::Text {
+-                text: "late steer before supervisor".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            vec![ResolvedUserInput::text(
++                "late steer before supervisor".to_string(),
++            )],
+             &turn_context.sub_id,
+         )
+         .await;
+diff --git a/codex-rs/core/src/session/model_routing.rs b/codex-rs/core/src/session/model_routing.rs
+index d3ee2ecb74c8148d8bd7a0ef405b25c15c4579d0..069f3078124885af917240f7d47e3ad33bc79849 100644
+--- a/codex-rs/core/src/session/model_routing.rs
++++ b/codex-rs/core/src/session/model_routing.rs
+@@ -319,7 +319,6 @@ pub(super) fn classify_model_routing_failure(error: &CodexErr) -> Option<ModelRo
+ mod tests {
+     use super::*;
+     use crate::current_time::SleepFuture;
+-    use crate::current_time::TimeFuture;
+     use crate::current_time::TimeProvider;
+     use codex_protocol::ThreadId;
+     use std::time::Duration;
+@@ -360,10 +359,8 @@ mod tests {
+     }
+
+     impl TimeProvider for RoutingTestClock {
+-        fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
+-            Box::pin(async {
+-                Ok(self.wall_time + chrono::Duration::from_std(self.started_at.elapsed()).unwrap())
+-            })
++        fn current_time(&self, _thread_id: ThreadId) -> anyhow::Result<DateTime<Utc>> {
++            Ok(self.wall_time + chrono::Duration::from_std(self.started_at.elapsed()).unwrap())
+         }
+
+         fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index 61b81ff75e1efae36b4e458bb11cf0cada860851..06691d60b68d4708dcfde8d2d924b984d3f6ed5f 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -234,6 +234,7 @@ async fn recorded_local_input_order_preserves_checkpoint_evidence(
+                 phase: None,
+             },
+             acceptance_order: 0,
++            retained_source: None,
+         },
+         &session.item_id_generator,
+     ));
+@@ -3233,6 +3234,8 @@ async fn completed_certified_companion_restores_its_settings(late_completion: bo
+     };
+     let mut compacted = checkpoint_compacted(vec![user_message("checkpoint")]);
+     compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -4602,6 +4605,8 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
+     // Starting from this checkpoint checks their original revision as well as their order.
+     checkpoint.retained_context = Some(captured.retained_context().clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -4896,6 +4901,8 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
+     }
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: expected_runtime,
+         dynamic_tools: None,
+@@ -5265,6 +5272,8 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
+     });
+     checkpoint.guardian_history = guardian_baseline.clone();
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -5403,6 +5412,8 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
+     checkpoint.retained_context = Some(Default::default());
+     checkpoint.window_number = Some(1);
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -5560,6 +5571,8 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.retained_context = Some(worker_retained);
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -5711,6 +5724,8 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash:
+     let mut checkpoint = checkpoint_compacted(Vec::new());
+     checkpoint.replacement_history = Some(replacement.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -5854,6 +5869,8 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
+         baseline.clone().into(),
+     ]));
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -6085,6 +6102,8 @@ async fn migration_preserves_review_eviction_under_current_model_policy(has_guar
+     let mut checkpoint = checkpoint_compacted(baseline.clone());
+     checkpoint.guardian_history = has_guardian_backup.then(|| guardian_baseline.clone());
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -6178,6 +6197,8 @@ async fn review_input_resolution_follows_reconstruction_checkpoint() {
+     let mut selected = checkpoint_compacted(vec![user_message("A")]);
+     selected.segment_state_checkpoint = None;
+     selected.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -6274,6 +6295,8 @@ fn modern_state_only_checkpoint_is_invisible_without_hiding_real_compaction() {
+     checkpoint.message.clear();
+     checkpoint.segment_state_checkpoint = None;
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -6309,6 +6332,8 @@ fn nonempty_summary_compaction_remains_visible(modern: bool) {
+     checkpoint.segment_state_checkpoint = None;
+     checkpoint.compaction_response_id = None;
+     checkpoint.resume_metadata = modern.then_some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+@@ -6335,6 +6360,8 @@ fn incomplete_modern_checkpoint_without_window_remains_visible() {
+     checkpoint.window_number = None;
+     checkpoint.compaction_response_id = None;
+     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
++        next_item_ordinal: None,
++        observation_clock_floor_ms: None,
+         rejected_audio_file_ids: Default::default(),
+         multi_agent_version: None,
+         dynamic_tools: None,
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 5d44f62c67d5b0aac74e459daa35b6fd46950d21..1b6a02fe8318664eb42afa71bbe4622f23a89999 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -1431,7 +1431,11 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
+                 .expect("build captured settings for the new context window"),
+         );
+         session
+-            .start_new_context_window(step, world_state)
++            .start_new_context_window(
++                step,
++                world_state,
++                &codex_rollout_trace::CompactionTraceContext::disabled(),
++            )
+             .await
+             .expect("persist captured settings in the new context window");
+         assert_eq!(
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 6e7a700eb99856d554455c3c1b5eb907e65279a9..087e5e8c112b30f598ef8dcbe1ce1fccc144efe8 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -7605,7 +7605,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
+     store.fail_next_checkpoint(session.thread_id).await;
+
+     let installation = if prefix {
+-        CompactedHistoryInstallation::Prefix {
++        CompactedHistoryInstallation::Prefix(PrefixCompactionInstallation {
+             prefix: captured_prefix,
+             prefix_context: Vec::new(),
+             initial_context: Vec::new(),
+@@ -7616,7 +7616,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
+             prepared_window_advance,
+             turn_context: &turn_context,
+             started_item: None,
+-        }
++        })
+     } else {
+         CompactedHistoryMetadata {
+             input_goal_ids: Default::default(),
+@@ -11418,8 +11418,8 @@ async fn submit_with_trace_cancelled_when_queue_full_does_not_enqueue() {
+     };
+     assert!(submit_settings().is_none());
+     assert!(matches!(
+-        rx_sub.try_recv().expect("original op").op,
+-        Op::Interrupt
++        rx_sub.try_recv().expect("original op").op.as_protocol(),
++        Some(Op::Interrupt)
+     ));
+     assert!(
+         rx_sub.try_recv().is_err(),
+@@ -11430,7 +11430,10 @@ async fn submit_with_trace_cancelled_when_queue_full_does_not_enqueue() {
+         .expect("accepted");
+     let submitted = rx_sub.try_recv().expect("accepted settings");
+     assert_eq!(submitted.id, id);
+-    assert!(matches!(submitted.op, Op::ThreadSettings { .. }));
++    assert!(matches!(
++        submitted.op.as_protocol(),
++        Some(Op::ThreadSettings { .. })
++    ));
+     assert!(rx_sub.try_recv().is_err());
+ }
+
+@@ -11547,7 +11550,7 @@ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
+         .await;
+     let (tx_sub, rx_sub) = async_channel::bounded(1);
+     tx_sub
+-        .send(Submission {
++        .send(Box::new(Submission {
+             id: "settings-after-checkpoint".to_string(),
+             turn_extension_init: None,
+             op: Op::ThreadSettings {
+@@ -11556,13 +11559,14 @@ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
+                     ..Default::default()
+                 },
+                 reply: None,
+-            },
++            }
++            .into(),
+             trace: None,
+             parent_turn_id: None,
+             root_turn_id: None,
+             residency_guard: None,
+             message_delivery: None,
+-        })
++        }))
+         .await
+         .expect("submit settings");
+     let mut submissions = Box::pin(tokio::task::unconstrained(submission_loop(
+@@ -16740,7 +16744,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+ }
+
+ #[test_case::test_case(MultiAgentVersion::V1, "user", TurnAborted::INTERRUPTED_GUIDANCE; "v1")]
+-#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE; "v2")]
++#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_NEUTRAL_GUIDANCE; "v2")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn abort_review_task_emits_exited_then_aborted_and_records_history(
+     version: MultiAgentVersion,
+diff --git a/codex-rs/core/src/session/turn_start_mcp_tests.rs b/codex-rs/core/src/session/turn_start_mcp_tests.rs
+index c0f408462297ebf5e5baf16c720280d32e966202..8f77b88ce107404cae97b935a212a9723f63e4e3 100644
+--- a/codex-rs/core/src/session/turn_start_mcp_tests.rs
++++ b/codex-rs/core/src/session/turn_start_mcp_tests.rs
+@@ -347,6 +347,9 @@ async fn mcp_budget_stop_at_handoff(phase: McpPause) -> anyhow::Result<()> {
+     let reply = response.await?;
+     let (count, outcome) = match phase {
+         McpPause::Start => {
++            let crate::tools::parallel::ToolCallResponse::Response(reply) = reply else {
++                panic!("aborted MCP call must return a response");
++            };
+             assert_eq!(
+                 reply.item,
+                 ResponseInputItem::FunctionCallOutput {
+diff --git a/codex-rs/core/src/thread_manager/current_membership_tests.rs b/codex-rs/core/src/thread_manager/current_membership_tests.rs
+index 53ed83f10a377c2646d1fd809e467a9af9427f3e..bfbdee89905031198f7b645aa33ab81726668e6f 100644
+--- a/codex-rs/core/src/thread_manager/current_membership_tests.rs
++++ b/codex-rs/core/src/thread_manager/current_membership_tests.rs
+@@ -6,7 +6,7 @@ use codex_history::ResumedHistory;
+ use codex_protocol::protocol::SessionMeta;
+ use codex_protocol::protocol::SessionMetaLine;
+ use codex_protocol::protocol::SubAgentSource;
+-use codex_protocol::user_input::UserInput;
++use codex_user_input::ResolvedUserInput;
+ use core_test_support::responses::ev_completed;
+ use core_test_support::responses::ev_response_created;
+ use core_test_support::responses::mount_sse_once;
+@@ -282,10 +282,7 @@ async fn retained_membership_ignores_an_independent_legacy_registry_with_the_sam
+     let child_id = control
+         .spawn_agent(
+             config.clone(),
+-            vec![UserInput::Text {
+-                text: "wait".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            vec![ResolvedUserInput::text("wait".to_string())],
+             Some(source.clone()),
+         )
+         .await
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 0809c19afe53952d275f69a503133282c2fcb3a9..acf39deeb01b50c108512110cfd00da5487b2e54 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -1543,6 +1543,7 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
+     let resumed = manager
+         .state
+         .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
++            request_country: config.request_country.clone(),
+             config,
+             prompt_cache_key: None,
+             initial_history,
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 0a3152b0ba2d81865a356230de970e5d1b5a13f9..cec0e3d2d3135c258bb9db6e8d08d4d4b069de85 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -1782,10 +1782,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
+         .control(session.session_id())
+         .spawn_agent_with_metadata(
+             config.clone(),
+-            vec![UserInput::Text {
+-                text: "worker".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            vec![ResolvedUserInput::text("worker".to_string())],
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                 parent_thread_id: root.thread_id,
+                 depth: 1,
+@@ -1806,10 +1803,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
+         .control(session.session_id())
+         .spawn_agent_with_metadata(
+             config,
+-            vec![UserInput::Text {
+-                text: "named parent child".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            vec![ResolvedUserInput::text("named parent child".to_string())],
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                 parent_thread_id: worker_thread_id,
+                 depth: 2,
+@@ -2129,10 +2123,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+         .control(session.session_id())
+         .spawn_agent_with_metadata(
+             config,
+-            vec![UserInput::Text {
+-                text: "inspect this repo".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            vec![ResolvedUserInput::text("inspect this repo".to_string())],
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                 parent_thread_id: root.thread_id,
+                 depth: 1,
