@@ -792,6 +792,17 @@ impl ThreadStateManager {
         lock.lock_owned().await
     }
 
+    /// Counts owners without upgrading the weak reference held by the manager.
+    #[cfg(test)]
+    pub(crate) async fn resume_reservation_strong_count(&self, thread_id: ThreadId) -> usize {
+        self.state
+            .lock()
+            .await
+            .resume_locks
+            .get(&thread_id)
+            .map_or(0, Weak::strong_count)
+    }
+
     /// Coordinates goal edits with cold/path-based resume for just this thread.
     pub(crate) async fn lock_goal_resume(
         &self,
