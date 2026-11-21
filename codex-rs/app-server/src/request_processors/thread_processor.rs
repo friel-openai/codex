@@ -822,6 +822,10 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
     legacy_page_depth_hints: Arc<Mutex<LegacyPageDepthHints>>,
+    #[cfg(test)]
+    pub(super) missing_resume_history_sources: Arc<std::sync::Mutex<HashSet<ThreadId>>>,
+    #[cfg(test)]
+    pub(super) missing_resume_history_applied: Arc<tokio::sync::Notify>,
 }
 
 /// Whether resume attaches a client or restores a cold runtime during daemon startup.
@@ -891,6 +895,10 @@ impl ThreadRequestProcessor {
             turn_cost_worker,
             initial_config_warnings: Arc::new(initial_config_warnings),
             legacy_page_depth_hints: Arc::default(),
+            #[cfg(test)]
+            missing_resume_history_sources: Arc::default(),
+            #[cfg(test)]
+            missing_resume_history_applied: Arc::default(),
         }
     }
 
@@ -5822,8 +5830,7 @@ impl ThreadRequestProcessor {
         let redact_resume_payloads =
             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
-        let exclusive =
-            retry.force_exclusive || matches!(target, ThreadResumeTarget::DaemonRecovery(_));
+        let exclusive = retry.force_exclusive;
         let permit_started = Instant::now();
         let permit = match retry.held_permit.take() {
             Some(permit) => Ok(permit),
@@ -5880,6 +5887,11 @@ impl ThreadRequestProcessor {
                     .await?
                     .is_some()
                 {
+                    // A loaded recovery does not inspect source ownership before continuing.
+                    if permit.is_shared() {
+                        retry.upgrade(permit).await?;
+                        return Ok(ControlFlow::Continue(()));
+                    }
                     if let Some(saved) = saved {
                         self.continue_daemon_turn(&params.thread_id, saved.clone())
                             .await;
@@ -5984,14 +5996,25 @@ impl ThreadRequestProcessor {
                 });
                 (history, Some(stored_thread), selected_home_rollout)
             };
+        #[cfg(test)]
+        if let InitialHistory::Resumed(resumed) = &mut thread_history
+            && self
+                .missing_resume_history_sources
+                .lock()
+                .unwrap()
+                .contains(&resumed.conversation_id)
+        {
+            Arc::make_mut(&mut resumed.history)
+                .retain(|item| !matches!(item, RolloutItem::SessionMeta(_)));
+            self.missing_resume_history_applied.notify_one();
+        }
         if let InitialHistory::Resumed(resumed) = &thread_history {
             permit.check_id(resumed.conversation_id)?;
         }
         if permit.is_shared()
-            && let Some((source, _)) = thread_history.get_resumed_session_sources()
-            && !resume_permit::source_kind_can_share(
-                &source,
-                thread_history.get_resumed_parent_thread_id(),
+            && !resume_permit::history_can_share(
+                &thread_history,
+                matches!(target, ThreadResumeTarget::DaemonRecovery(_)),
             )
         {
             retry.upgrade(permit).await?;

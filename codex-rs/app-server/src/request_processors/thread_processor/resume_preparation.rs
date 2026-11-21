@@ -372,6 +372,122 @@ mod tests {
             .expect("root resume should proceed after the exclusive resume");
     }
 
+    #[tokio::test]
+    async fn attached_and_unknown_sources_cannot_share_daemon_resume_admission() {
+        let server = wiremock::MockServer::start().await;
+        let test = core_test_support::test_codex::test_codex()
+            .build_with_auto_env(&server)
+            .await
+            .unwrap();
+        let thread_id = test.session_configured.thread_id;
+        test.thread_store
+            .persist_thread(thread_id, codex_thread_store::PersistContext::Standard)
+            .await
+            .unwrap();
+        let mut source = test
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+            .unwrap();
+        assert!(resume_permit::source_can_share(&source));
+        source.attached_to_thread_id = Some(ThreadId::new());
+        assert!(!resume_permit::source_can_share(&source));
+        source.attached_to_thread_id = None;
+        source.source = codex_protocol::protocol::SessionSource::Unknown;
+        assert!(!resume_permit::source_can_share(&source));
+        source.source = codex_protocol::protocol::SessionSource::Cli;
+        source.parent_thread_id = Some(ThreadId::new());
+        assert!(!resume_permit::source_can_share(&source));
+    }
+
+    #[test]
+    fn daemon_history_without_source_metadata_requires_exclusive_admission() {
+        let history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history_revision: None,
+            history: Arc::new(Vec::new()),
+            rollout_path: None,
+        });
+        assert!(!resume_permit::history_can_share(&history, true));
+        assert!(resume_permit::history_can_share(&history, false));
+    }
+
+    #[test]
+    fn daemon_history_requires_safe_owned_metadata_even_with_a_foreign_header() {
+        use codex_protocol::protocol::SessionMeta;
+        use codex_protocol::protocol::SessionMetaLine;
+        use codex_protocol::protocol::SessionSource;
+
+        let thread_id = ThreadId::new();
+        let metadata = |id, attached| {
+            RolloutItem::SessionMeta(Box::new(SessionMetaLine {
+                meta: SessionMeta {
+                    id,
+                    source: SessionSource::Cli,
+                    attached_thread: attached,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }))
+        };
+        let mut history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history_revision: None,
+            history: Arc::new(vec![
+                metadata(ThreadId::new(), true),
+                metadata(thread_id, false),
+            ]),
+            rollout_path: None,
+        });
+        assert!(resume_permit::history_can_share(&history, true));
+        let InitialHistory::Resumed(resumed) = &mut history else {
+            unreachable!();
+        };
+        Arc::make_mut(&mut resumed.history).pop();
+        assert!(!resume_permit::history_can_share(&history, true));
+        let InitialHistory::Resumed(resumed) = &mut history else {
+            unreachable!();
+        };
+        Arc::make_mut(&mut resumed.history).push(metadata(thread_id, false));
+        for boundary in ["attached", "subagent", "parent", "unknown"] {
+            let InitialHistory::Resumed(resumed) = &mut history else {
+                unreachable!();
+            };
+            let items = Arc::make_mut(&mut resumed.history);
+            let RolloutItem::SessionMeta(line) = &mut items[1] else {
+                unreachable!();
+            };
+            match boundary {
+                "attached" => line.meta.attached_thread = true,
+                "subagent" => line.meta.subagent_history_start_ordinal = Some(1),
+                "parent" => line.meta.parent_thread_id = Some(ThreadId::new()),
+                "unknown" => line.meta.source = SessionSource::Unknown,
+                _ => unreachable!(),
+            }
+            assert!(
+                !resume_permit::history_can_share(&history, true),
+                "{boundary}"
+            );
+            assert!(
+                resume_permit::history_can_share(&history, false),
+                "client behavior"
+            );
+            let InitialHistory::Resumed(resumed) = &mut history else {
+                unreachable!();
+            };
+            Arc::make_mut(&mut resumed.history)[1] = metadata(thread_id, false);
+        }
+        let InitialHistory::Resumed(resumed) = &mut history else {
+            unreachable!();
+        };
+        Arc::make_mut(&mut resumed.history).push(metadata(thread_id, true));
+        assert!(!resume_permit::history_can_share(&history, true));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cold_resume_with_pending_shutdown_drain_releases_thread_queue() {
         let thread_id = ThreadId::new();
