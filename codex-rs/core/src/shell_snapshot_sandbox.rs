@@ -148,15 +148,19 @@ impl ShellSnapshotSandbox {
             bail!("shell snapshot sandbox cannot be enforced on this host");
         }
 
-        let managed_network = if let Some(network) = self.network.as_ref() {
-            let prepared = network
-                .prepare_for_optional_environment(env, Some(&self.environment_id))
-                .context("failed to prepare managed network for shell snapshot")?;
-            env = prepared.env;
-            Some(prepared.sandbox_context)
-        } else {
-            None
-        };
+        let (managed_network, environment_proxy_lease) =
+            if let Some(network) = self.network.as_ref() {
+                let prepared = network
+                    .prepare_for_optional_environment(env, Some(&self.environment_id))
+                    .context("failed to prepare managed network for shell snapshot")?;
+                env = prepared.env;
+                (
+                    Some(prepared.sandbox_context),
+                    prepared.environment_proxy_lease,
+                )
+            } else {
+                (None, None)
+            };
         let (program, args) = args
             .split_first()
             .ok_or_else(|| anyhow!("shell snapshot command is empty"))?;
@@ -183,7 +187,7 @@ impl ShellSnapshotSandbox {
             self.additional_permissions.as_ref(),
             snapshot_permissions.as_ref(),
         );
-        let request = ExecRequest::prepare_local_sandbox(
+        let mut request = ExecRequest::prepare_local_sandbox(
             &self.manager,
             SandboxTransformRequest {
                 command: SandboxCommand {
@@ -216,6 +220,7 @@ impl ShellSnapshotSandbox {
         )
         .await
         .context("failed to prepare shell snapshot sandbox")?;
+        request.environment_proxy_lease = environment_proxy_lease;
         // Caller cancellation must leave execution alive long enough to clean up its process group.
         let output = tokio::spawn(execute_env(request, /*stdout_stream*/ None))
             .await
