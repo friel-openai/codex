@@ -14,6 +14,7 @@ use codex_exec_server::EnvironmentInfo;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerError;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::FirstEnvironmentRegistration;
 use codex_exec_server::SelectedCapabilityRootsStatus;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::EnvironmentCapabilityRoots;
@@ -402,12 +403,27 @@ impl DefaultSecondaryEnvironment {
     }
 }
 
-/// The exact optional rejection and its original registration, not an ID to resolve later.
+/// The rejected selection and the single registration eligible for later verification.
 pub(crate) struct InitialDefaultSecondary {
     pub(crate) rejection: TurnEnvironmentSelection,
-    registration: Weak<Environment>,
+    registration: InitialSecondaryRegistration,
     pub(crate) revoked: CancellationToken,
     background: Option<BackgroundSecondaryVerification>,
+}
+
+/// The registration present at startup, or the first registration captured while it was absent.
+enum InitialSecondaryRegistration {
+    Existing(Weak<Environment>),
+    First(FirstEnvironmentRegistration),
+}
+
+impl InitialSecondaryRegistration {
+    fn get(&self) -> Option<Arc<Environment>> {
+        match self {
+            Self::Existing(environment) => environment.upgrade(),
+            Self::First(capture) => capture.get(),
+        }
+    }
 }
 
 /// Optional read-only verification can prepare a later turn, but cannot change an active turn.
@@ -716,7 +732,14 @@ impl ThreadEnvironments {
                 if selection.config != EnvironmentConfigState::FromThread {
                     continue;
                 }
-                let current = environment_manager.get_environment(&selection.environment_id);
+                let first_capture = startup.capture_missing_secondaries.then(|| {
+                    environment_manager
+                        .capture_first_environment_registration(&selection.environment_id)
+                });
+                let current = match &first_capture {
+                    Some(capture) => capture.get(),
+                    None => environment_manager.get_environment(&selection.environment_id),
+                };
                 if current
                     .as_ref()
                     .is_some_and(|environment| !environment.is_remote())
@@ -735,17 +758,26 @@ impl ThreadEnvironments {
                 if startup.cold_resume {
                     deferred_on_resume.insert(selection.environment_id.clone());
                 }
-                if let Some(registration) = registration {
+                let recovery_registration = match registration.as_ref() {
+                    Some(registration) => Some(InitialSecondaryRegistration::Existing(
+                        Arc::downgrade(registration),
+                    )),
+                    None => first_capture.map(InitialSecondaryRegistration::First),
+                };
+                if let Some(recovery_registration) = recovery_registration {
                     let original = Arc::new(InitialDefaultSecondary {
                         rejection: selection.clone(),
-                        registration: Arc::downgrade(&registration),
+                        registration: recovery_registration,
                         revoked: CancellationToken::new(),
                         background: Some(BackgroundSecondaryVerification {
                             limit: Arc::clone(&limit),
                             pending: Mutex::new(None),
                         }),
                     });
-                    let _ = original.take_verified_or_start(&config, &normalized, &registration);
+                    if let Some(registration) = registration {
+                        let _ =
+                            original.take_verified_or_start(&config, &normalized, &registration);
+                    }
                     initially_unavailable
                         .push(DefaultSecondaryEnvironment::InitiallyUnavailable(original));
                 }
@@ -868,7 +900,7 @@ impl ThreadEnvironments {
                 initially_unavailable.push(DefaultSecondaryEnvironment::InitiallyUnavailable(
                     Arc::new(InitialDefaultSecondary {
                         rejection: selection.clone(),
-                        registration: registration.clone(),
+                        registration: InitialSecondaryRegistration::Existing(registration.clone()),
                         revoked: CancellationToken::new(),
                         background: None,
                     }),
@@ -1732,7 +1764,10 @@ impl ThreadEnvironments {
                 let DefaultSecondaryEnvironment::InitiallyUnavailable(original) = default else {
                     return None;
                 };
-                let registration = original.registration.upgrade()?;
+                let registration = original.registration.get()?;
+                if !registration.is_remote() {
+                    return None;
+                }
                 let mut input = original.rejection.clone();
                 input.config = EnvironmentConfigState::FromThread;
                 let (selection, _) = resolve_selection_config(input, &state.thread_defaults);
@@ -2901,7 +2936,7 @@ mod tests {
             resolve_turn_environments(manager, &[local.clone(), rejection.clone()]).await;
         let original = Arc::new(InitialDefaultSecondary {
             rejection: rejection.clone(),
-            registration: Arc::downgrade(&remote),
+            registration: InitialSecondaryRegistration::Existing(Arc::downgrade(&remote)),
             revoked: CancellationToken::new(),
             background: None,
         });
@@ -2949,6 +2984,99 @@ mod tests {
         let state = environments.state.lock().expect("state");
         assert!(!admission.matches_initial_rejection(&state));
         drop(state);
+        assert_eq!(
+            environments.snapshot_now().all_selections(),
+            [local, rejection]
+        );
+    }
+
+    #[tokio::test]
+    async fn captured_first_registration_stays_bound_and_cancellation_revokes_attempt() {
+        let manager = Arc::new(EnvironmentManager::default_for_tests());
+        let capture = manager.capture_first_environment_registration(REMOTE_ENVIRONMENT_ID);
+        manager
+            .upsert_environment(
+                REMOTE_ENVIRONMENT_ID.to_string(),
+                "ws://127.0.0.1:1".to_string(),
+                None,
+            )
+            .expect("first registration");
+        let first = manager
+            .get_environment(REMOTE_ENVIRONMENT_ID)
+            .expect("first");
+        manager
+            .upsert_environment(
+                REMOTE_ENVIRONMENT_ID.to_string(),
+                "ws://127.0.0.1:2".to_string(),
+                None,
+            )
+            .expect("replacement registration");
+        let local = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+            selected_capability_roots: Default::default(),
+        };
+        let rejection = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            config: EnvironmentConfigState::StartupUnavailable,
+            ..local.clone()
+        };
+        let environments =
+            resolve_turn_environments(Arc::clone(&manager), &[local.clone(), rejection.clone()])
+                .await;
+        let original = Arc::new(InitialDefaultSecondary {
+            rejection: rejection.clone(),
+            registration: InitialSecondaryRegistration::First(capture),
+            revoked: CancellationToken::new(),
+            background: None,
+        });
+        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
+        let admissions = environments
+            .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
+            .expect("captured first registration");
+        let admission = &admissions.secondaries[0];
+        assert!(Arc::ptr_eq(&admission.registration, &first));
+        assert!(!environments.is_current_registration(admission));
+        let attempt = admission.initial_recovery.as_ref().expect("attempt");
+        environments.update_selections(std::slice::from_ref(&local));
+        assert!(attempt.revoked.is_cancelled());
+        assert_eq!(environments.snapshot_now().all_selections(), [local]);
+    }
+
+    #[tokio::test]
+    async fn captured_non_remote_registration_cannot_be_admitted_as_a_secondary() {
+        let manager = Arc::new(EnvironmentManager::default_for_tests());
+        // Use the real local registration as a synthetic wrong-kind capture.
+        let capture = manager.capture_first_environment_registration(LOCAL_ENVIRONMENT_ID);
+        let local = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("cwd")),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+            selected_capability_roots: Default::default(),
+        };
+        let rejection = TurnEnvironmentSelection {
+            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+            config: EnvironmentConfigState::StartupUnavailable,
+            ..local.clone()
+        };
+        let environments =
+            resolve_turn_environments(Arc::clone(&manager), &[local.clone(), rejection.clone()])
+                .await;
+        let original = Arc::new(InitialDefaultSecondary {
+            rejection: rejection.clone(),
+            registration: InitialSecondaryRegistration::First(capture),
+            revoked: CancellationToken::new(),
+            background: None,
+        });
+        let defaults = [DefaultSecondaryEnvironment::InitiallyUnavailable(original)];
+        assert!(
+            environments
+                .begin_default_secondary_admissions(&[local.clone(), rejection.clone()], &defaults)
+                .is_none()
+        );
         assert_eq!(
             environments.snapshot_now().all_selections(),
             [local, rejection]
