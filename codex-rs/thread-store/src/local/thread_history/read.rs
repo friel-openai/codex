@@ -1416,11 +1416,40 @@ pub(in crate::local) async fn has_complete_root_projection_for_resolved(
     thread_id: ThreadId,
     resolved: ResolvedThreadRollout,
 ) -> ThreadStoreResult<bool> {
-    Ok(
-        indexed_same_thread_lineage_from_resolved(store, thread_id, resolved)
-            .await?
-            .is_some(),
+    let Some(meta) = resolved.authenticated_session_meta.as_ref() else {
+        return Ok(false);
+    };
+    if meta.id != thread_id
+        || meta.history_mode != ThreadHistoryMode::Paginated
+        || meta.history_base.is_none()
+        || meta.attached_thread
+        || meta.forked_from_id.is_some()
+        || meta.subagent_history_start_ordinal.is_some()
+    {
+        return Ok(false);
+    }
+    let Some(state_db) = store.state_db().await else {
+        return Ok(false);
+    };
+    let Some(metadata) = state_db
+        .get_thread(thread_id)
+        .await
+        .map_err(super::thread_history_error)?
+    else {
+        return Ok(false);
+    };
+    if metadata.archived_at.is_some()
+        || !codex_rollout::rollout_paths_match(&metadata.rollout_path, &resolved.path).await
+    {
+        return Ok(false);
+    }
+    super::projection_certificate::certificate_is_current_for_single_owner(
+        store,
+        resolved.rollout_id,
+        &resolved.path,
+        thread_id,
     )
+    .await
 }
 
 /// Read an existing segmented legacy projection without exposing indexed cursors.
