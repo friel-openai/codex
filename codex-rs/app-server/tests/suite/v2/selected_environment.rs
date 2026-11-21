@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadClosedNotification;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadLoadedListParams;
@@ -61,6 +62,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -1767,6 +1769,560 @@ async fn cold_resume_and_sends_do_not_wait_for_saved_secondaries(by_path: bool) 
 }
 
 #[tokio::test]
+async fn thread_fork_defers_disconnected_implicit_secondary_but_keeps_explicit_required()
+-> Result<()> {
+    const EARLY_CALL: &str = "fork-secondary-before-verification";
+    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
+    let server = create_mock_responses_server_sequence(vec![
+        responses::sse(vec![
+            responses::ev_response_created("early-fork-exec"),
+            responses::ev_exec_command_call_with_args(
+                EARLY_CALL,
+                &json!({"cmd": "echo must-not-start", "environment_id": "secondary", "login": false}),
+            ),
+            responses::ev_completed("early-fork-exec"),
+        ]),
+        create_final_assistant_message_sse_response("continued while unavailable")?,
+        create_final_assistant_message_sse_response("retry discovery")?,
+        create_final_assistant_message_sse_response("continued after verification")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    std::fs::write(workspace.join("AGENTS.md"), "local workspace instructions")?;
+    let remote_source = PathUri::from_abs_path(&workspace).join("AGENTS.override.md")?;
+    let recovered = Arc::new(AtomicBool::new(true));
+    let requests = Arc::new(InstructionDiscoveryRequests::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "[[environments]]\nid = \"secondary\"\nurl = \"ws://{}\"\n",
+            listener.local_addr()?
+        ),
+    )?;
+    let (stop, stop_receiver) = oneshot::channel();
+    let executor = tokio::spawn(serve_instruction_discovery_executor(
+        listener,
+        InstructionDiscoveryExecutor::Recoverable {
+            source: remote_source,
+            recovered: Arc::clone(&recovered),
+        },
+        Arc::clone(&requests),
+        stop_receiver,
+    ));
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.4")
+        .with_sandbox_mode("danger-full-access")
+        .with_provider_config("supports_websockets = false")
+        .enable_feature(Feature::UnifiedExec)
+        .write(codex_home.path())?;
+    let implicit_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
+        true,
+        None,
+    )?;
+    let required_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
+        false,
+        None,
+    )?;
+    let explicit_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "secondary"],
+        false,
+        None,
+    )?;
+    let explicit_path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &explicit_id);
+    let explicit_contents = std::fs::read_to_string(&explicit_path)?;
+    let mut explicit_settings: serde_json::Value =
+        serde_json::from_str(explicit_contents.lines().last().context("saved settings")?)?;
+    explicit_settings["payload"]["thread_settings"]["environments"]["implicit_selection"] =
+        json!(false);
+    writeln!(
+        OpenOptions::new().append(true).open(explicit_path)?,
+        "{explicit_settings}"
+    )?;
+    let remote_primary_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &["secondary", LOCAL_ENVIRONMENT_ID],
+        true,
+        None,
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+        .build_initialized()
+        .await?;
+    let request = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: implicit_id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse =
+        timeout(BOUNDED_RESUME_TIMEOUT, app.read_response(request)).await??;
+    wait_for_optional_secondary_verification(&app, "secondary", &[], true).await?;
+    recovered.store(false, Ordering::Relaxed);
+    let request = app
+        .send_raw_request(
+            "thread/fork",
+            Some(json!({
+                "threadId": implicit_id, "excludeTurns": true,
+            })),
+        )
+        .await?;
+    let fork: ThreadForkResponse =
+        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
+    assert_eq!(
+        fork.instruction_sources,
+        [LegacyAppPathString::from_path(&workspace.join("AGENTS.md"))]
+    );
+    for thread_id in [required_id, explicit_id, remote_primary_id] {
+        let request = app
+            .send_raw_request(
+                "thread/fork",
+                Some(json!({
+                    "threadId": thread_id, "excludeTurns": true,
+                })),
+            )
+            .await?;
+        let error = timeout(
+            BOUNDED_RESUME_TIMEOUT,
+            app.read_stream_until_error_message(RequestId::Integer(request)),
+        )
+        .await??;
+        assert_eq!(error.error.code, -32600);
+        assert!(error.error.message.contains("secondary"));
+    }
+    let first = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id.clone(),
+            "Continue while the secondary is unavailable",
+        )),
+    )
+    .await??;
+    assert_eq!(first.turn.status, TurnStatus::Completed);
+    let responses = responses::received_responses_requests(&server).await;
+    assert!(responses.iter().all(|request| {
+        request
+            .message_input_texts("user")
+            .iter()
+            .all(|text| !text.contains(AGENTS_INSTRUCTIONS))
+    }));
+    let (output, success) = responses
+        .last()
+        .context("execution denial response")?
+        .function_call_output_content_and_success(EARLY_CALL)
+        .context("execution denial for the unverified secondary")?;
+    assert_ne!(success, Some(true));
+    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
+    recovered.store(true, Ordering::Relaxed);
+    let previous_events = app.json_log_events()?;
+    let primed = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id.clone(),
+            "Retry the secondary after it recovers",
+        )),
+    )
+    .await??;
+    assert_eq!(primed.turn.status, TurnStatus::Completed);
+    wait_for_optional_secondary_verification(&app, "secondary", &previous_events, true).await?;
+    let completed = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id,
+            "Continue after verification",
+        )),
+    )
+    .await??;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let responses = responses::received_responses_requests(&server).await;
+    assert!(responses.iter().any(|request| {
+        request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains(AGENTS_INSTRUCTIONS))
+    }));
+    let _ = stop.send(());
+    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_with_unregistered_implicit_secondary_verifies_first_registration() -> Result<()> {
+    use codex_app_server_protocol::EnvironmentAddResponse;
+
+    const EARLY_CALL: &str = "late-secondary-before-verification";
+    const LATER_CALL: &str = "late-secondary-after-verification";
+    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
+    let call = |id: &'static str| {
+        responses::sse(vec![
+            responses::ev_response_created(id),
+            responses::ev_exec_command_call_with_args(
+                id,
+                &json!({"cmd": "echo synthetic", "environment_id": "late", "login": false}),
+            ),
+            responses::ev_completed(id),
+        ])
+    };
+    let server = create_mock_responses_server_sequence(vec![
+        call(EARLY_CALL),
+        create_final_assistant_message_sse_response("continued locally")?,
+        call(LATER_CALL),
+        create_final_assistant_message_sse_response("continued after verification")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    std::fs::write(workspace.join("AGENTS.md"), "local workspace instructions")?;
+    let remote_source = PathUri::from_abs_path(&workspace).join("AGENTS.override.md")?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.4")
+        .with_sandbox_mode("danger-full-access")
+        .with_provider_config("supports_websockets = false")
+        .enable_feature(Feature::UnifiedExec)
+        .write(codex_home.path())?;
+    let source_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "late"],
+        true,
+        Some("late"),
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+        .build_initialized()
+        .await?;
+    let request = app
+        .send_raw_request(
+            "thread/fork",
+            Some(json!({"threadId": source_id, "excludeTurns": true})),
+        )
+        .await?;
+    let fork: ThreadForkResponse =
+        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
+    assert_eq!(
+        fork.instruction_sources,
+        [LegacyAppPathString::from_path(&workspace.join("AGENTS.md"))]
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let requests = Arc::new(InstructionDiscoveryRequests::default());
+    let (stop, stop_receiver) = oneshot::channel();
+    let executor = tokio::spawn(serve_instruction_discovery_executor(
+        listener,
+        InstructionDiscoveryExecutor::ReadyWithProcess {
+            source: remote_source,
+            process_call_id: LATER_CALL,
+        },
+        Arc::clone(&requests),
+        stop_receiver,
+    ));
+    let request = app
+        .send_raw_request(
+            "environment/add",
+            Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{address}")})),
+        )
+        .await?;
+    let _: EnvironmentAddResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+    let previous_events = app.json_log_events()?;
+    let first = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id.clone(),
+            "Continue while the secondary is being verified",
+        )),
+    )
+    .await??;
+    assert_eq!(first.turn.status, TurnStatus::Completed);
+    assert_eq!(requests.process_starts.load(Ordering::Relaxed), 0);
+    assert!(
+        responses::received_responses_requests(&server)
+            .await
+            .iter()
+            .all(|request| request
+                .message_input_texts("user")
+                .iter()
+                .all(|text| !text.contains(AGENTS_INSTRUCTIONS)))
+    );
+
+    let early_requests = responses::received_responses_requests(&server).await;
+    let (output, success) = early_requests
+        .last()
+        .context("early execution response")?
+        .function_call_output_content_and_success(EARLY_CALL)
+        .context("denial while AGENTS.md verification is pending")?;
+    assert_ne!(success, Some(true));
+    assert_eq!(output.as_deref(), Some(UNAVAILABLE));
+    wait_for_optional_secondary_verification(&app, "late", &previous_events, true).await?;
+    let resumed = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id,
+            "Continue after verifying the registered secondary",
+        )),
+    )
+    .await??;
+    assert_eq!(resumed.turn.status, TurnStatus::Completed);
+    assert!(requests.instruction_reads.load(Ordering::Relaxed) > 0);
+    assert_eq!(requests.process_starts.load(Ordering::Relaxed), 1);
+    assert!(
+        responses::received_responses_requests(&server)
+            .await
+            .iter()
+            .any(|request| request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text.contains(AGENTS_INSTRUCTIONS)))
+    );
+    let _ = stop.send(());
+    timeout(DEFAULT_READ_TIMEOUT, executor).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_never_adopts_replaced_first_registration() -> Result<()> {
+    for scenario in [
+        FirstRegistrationRace::ReplaceBeforeTurn,
+        FirstRegistrationRace::ReplaceDuringVerification,
+    ] {
+        exercise_first_registration_race(scenario).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_cancels_first_registration_verification_on_unload() -> Result<()> {
+    exercise_first_registration_race(FirstRegistrationRace::CancelDuringVerification).await
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FirstRegistrationRace {
+    ReplaceBeforeTurn,
+    ReplaceDuringVerification,
+    CancelDuringVerification,
+}
+
+async fn exercise_first_registration_race(scenario: FirstRegistrationRace) -> Result<()> {
+    use codex_app_server_protocol::EnvironmentAddResponse;
+
+    const EARLY_CALL: &str = "first-registration-before-verification";
+    const LATER_CALL: &str = "replacement-registration-exec";
+    const UNAVAILABLE: &str = "No usable execution environment is available. Wait for an environment to become available before using this tool.";
+    let call = |id: &'static str| {
+        responses::sse(vec![
+            responses::ev_response_created(id),
+            responses::ev_exec_command_call_with_args(
+                id,
+                &json!({"cmd": "echo synthetic", "environment_id": "late", "login": false}),
+            ),
+            responses::ev_completed(id),
+        ])
+    };
+    let server = create_mock_responses_server_sequence(vec![
+        call(EARLY_CALL),
+        create_final_assistant_message_sse_response("continued locally")?,
+        call(LATER_CALL),
+        create_final_assistant_message_sse_response("rejected replacement")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    std::fs::write(workspace.join("AGENTS.md"), "local workspace instructions")?;
+    let remote_source = PathUri::from_abs_path(&workspace).join("AGENTS.override.md")?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.4")
+        .with_sandbox_mode("danger-full-access")
+        .with_provider_config("supports_websockets = false")
+        .with_root_config("thread_unload_delay_secs = 1")
+        .enable_feature(Feature::UnifiedExec)
+        .write(codex_home.path())?;
+    let source_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "late"],
+        true,
+        None,
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+        .build_initialized()
+        .await?;
+    let request = app
+        .send_raw_request(
+            "thread/fork",
+            Some(json!({"threadId": source_id, "excludeTurns": true})),
+        )
+        .await?;
+    let fork: ThreadForkResponse =
+        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
+
+    let first_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let first_address = first_listener.local_addr()?;
+    let first_requests = Arc::new(InstructionDiscoveryRequests::default());
+    let gate = Arc::new(Semaphore::new(0));
+    let (_stop_first, first_stop) = oneshot::channel();
+    let first_executor = tokio::spawn(serve_instruction_discovery_executor(
+        first_listener,
+        InstructionDiscoveryExecutor::HeldMetadata {
+            source: remote_source.clone(),
+            gate: Arc::clone(&gate),
+            process_call_id: EARLY_CALL,
+        },
+        Arc::clone(&first_requests),
+        first_stop,
+    ));
+    let request = app
+        .send_raw_request(
+            "environment/add",
+            Some(
+                json!({"environmentId": "late", "execServerUrl": format!("ws://{first_address}")}),
+            ),
+        )
+        .await?;
+    let _: EnvironmentAddResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+
+    let replacement_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let replacement_address = replacement_listener.local_addr()?;
+    let replacement_requests = Arc::new(InstructionDiscoveryRequests::default());
+    let (_stop_replacement, replacement_stop) = oneshot::channel();
+    let replacement_executor = tokio::spawn(serve_instruction_discovery_executor(
+        replacement_listener,
+        InstructionDiscoveryExecutor::ReadyWithProcess {
+            source: remote_source,
+            process_call_id: LATER_CALL,
+        },
+        Arc::clone(&replacement_requests),
+        replacement_stop,
+    ));
+    if scenario == FirstRegistrationRace::ReplaceBeforeTurn {
+        let request = app
+            .send_raw_request(
+                "environment/add",
+                Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{replacement_address}")})),
+            )
+            .await?;
+        let _: EnvironmentAddResponse =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+    }
+    let first = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id.clone(),
+            "Continue locally",
+        )),
+    )
+    .await??;
+    assert_eq!(first.turn.status, TurnStatus::Completed);
+    if scenario != FirstRegistrationRace::ReplaceBeforeTurn {
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            first_requests.stalled_metadata_seen.notified(),
+        )
+        .await?;
+    }
+    if scenario == FirstRegistrationRace::CancelDuringVerification {
+        let request = app
+            .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+                thread_id: fork.thread.id.clone(),
+            })
+            .await?;
+        let unsubscribe: ThreadUnsubscribeResponse =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+        assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
+        let closed: ThreadClosedNotification =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+        assert_eq!(closed.thread_id, fork.thread.id);
+        gate.add_permits(1);
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            first_requests.metadata_released.notified(),
+        )
+        .await?;
+        assert_eq!(first_requests.process_starts.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            replacement_requests.process_starts.load(Ordering::Relaxed),
+            0
+        );
+        first_executor.abort();
+        replacement_executor.abort();
+        let _ = first_executor.await;
+        let _ = replacement_executor.await;
+        return Ok(());
+    }
+    if scenario == FirstRegistrationRace::ReplaceDuringVerification {
+        let request = app
+            .send_raw_request(
+                "environment/add",
+                Some(json!({"environmentId": "late", "execServerUrl": format!("ws://{replacement_address}")})),
+            )
+            .await?;
+        let _: EnvironmentAddResponse =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+        gate.add_permits(1);
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            first_requests.metadata_released.notified(),
+        )
+        .await?;
+    }
+    let second = timeout(
+        BOUNDED_RESUME_TIMEOUT,
+        app.start_turn_and_wait_for_completion(text_turn_params(
+            fork.thread.id,
+            "Do not adopt the replacement",
+        )),
+    )
+    .await??;
+    assert_eq!(second.turn.status, TurnStatus::Completed);
+    let sent = responses::received_responses_requests(&server).await;
+    for (index, call_id) in [(1, EARLY_CALL), (3, LATER_CALL)] {
+        let (output, success) = sent[index]
+            .function_call_output_content_and_success(call_id)
+            .context("execution denial")?;
+        assert_ne!(success, Some(true));
+        assert_eq!(output.as_deref(), Some(UNAVAILABLE));
+    }
+    assert_eq!(first_requests.process_starts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        replacement_requests.process_starts.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        replacement_requests
+            .instruction_reads
+            .load(Ordering::Relaxed),
+        0
+    );
+    first_executor.abort();
+    replacement_executor.abort();
+    let _ = first_executor.await;
+    let _ = replacement_executor.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments()
 -> Result<()> {
     let server = create_mock_responses_server_sequence(vec![
@@ -2359,6 +2915,15 @@ enum InstructionDiscoveryExecutor {
         source: PathUri,
         read_once: bool,
     },
+    ReadyWithProcess {
+        source: PathUri,
+        process_call_id: &'static str,
+    },
+    HeldMetadata {
+        source: PathUri,
+        gate: Arc<Semaphore>,
+        process_call_id: &'static str,
+    },
     Stalled,
     Recoverable {
         source: PathUri,
@@ -2371,7 +2936,9 @@ enum InstructionDiscoveryExecutor {
 struct InstructionDiscoveryRequests {
     total: AtomicUsize,
     stalled_metadata_seen: Notify,
+    metadata_released: Notify,
     instruction_reads: AtomicUsize,
+    process_starts: AtomicUsize,
     allow_repeated_instruction_reads: AtomicBool,
 }
 
@@ -2388,9 +2955,12 @@ async fn serve_instruction_discovery_executor(
     let mut websocket = accept_exec_server_environment(listener, environment_info.clone()).await?;
     let instruction_path = match &executor {
         InstructionDiscoveryExecutor::Ready { source, .. }
+        | InstructionDiscoveryExecutor::ReadyWithProcess { source, .. }
+        | InstructionDiscoveryExecutor::HeldMetadata { source, .. }
         | InstructionDiscoveryExecutor::Recoverable { source, .. } => serde_json::to_value(source)?,
         InstructionDiscoveryExecutor::Stalled => serde_json::Value::Null,
     };
+    let mut metadata_was_held = false;
     loop {
         let request = tokio::select! {
             biased;
@@ -2402,6 +2972,8 @@ async fn serve_instruction_discovery_executor(
         let is_instruction_path = request["params"]["path"] == instruction_path;
         let stalled = match &executor {
             InstructionDiscoveryExecutor::Ready { .. } => false,
+            InstructionDiscoveryExecutor::ReadyWithProcess { .. } => false,
+            InstructionDiscoveryExecutor::HeldMetadata { .. } => false,
             InstructionDiscoveryExecutor::Stalled => true,
             InstructionDiscoveryExecutor::Recoverable { recovered, .. } => {
                 !recovered.load(Ordering::Relaxed)
@@ -2413,14 +2985,25 @@ async fn serve_instruction_discovery_executor(
                 requests.stalled_metadata_seen.notify_one();
                 continue;
             }
-            Some("fs/getMetadata") => json!({
+            Some("fs/getMetadata") => {
+                if is_instruction_path
+                    && !metadata_was_held
+                    && let InstructionDiscoveryExecutor::HeldMetadata { gate, .. } = &executor
+                {
+                    metadata_was_held = true;
+                    requests.stalled_metadata_seen.notify_one();
+                    gate.acquire().await?.forget();
+                    requests.metadata_released.notify_one();
+                }
+                json!({
                 "isDirectory": false,
                 "isFile": is_instruction_path,
                 "isSymlink": false,
                 "size": if is_instruction_path { AGENTS_INSTRUCTIONS.len() } else { 0 },
                 "createdAtMs": 0,
                 "modifiedAtMs": 0,
-            }),
+                })
+            }
             Some("fs/readFile") if is_instruction_path => {
                 let previous_reads = requests.instruction_reads.fetch_add(1, Ordering::Relaxed);
                 anyhow::ensure!(
@@ -2447,7 +3030,31 @@ async fn serve_instruction_discovery_executor(
                 "config": {"layers": [], "cloudInsertionIndex": 0},
                 "requirements": {"layers": [], "cloudInsertionIndex": 0},
             }),
-            Some("process/start") => anyhow::bail!("unexpected process/start: {request}"),
+            Some("process/start") => {
+                let process_call_id = match &executor {
+                    InstructionDiscoveryExecutor::ReadyWithProcess {
+                        process_call_id, ..
+                    }
+                    | InstructionDiscoveryExecutor::HeldMetadata {
+                        process_call_id, ..
+                    } => process_call_id,
+                    _ => anyhow::bail!("unexpected process/start: {request}"),
+                };
+                anyhow::ensure!(request["params"]["metadata"]["toolCallId"] == *process_call_id);
+                requests.process_starts.fetch_add(1, Ordering::Relaxed);
+                json!({"processId": request["params"]["processId"], "sandboxType": "none"})
+            }
+            Some("process/read")
+                if matches!(
+                    &executor,
+                    InstructionDiscoveryExecutor::ReadyWithProcess { .. }
+                        | InstructionDiscoveryExecutor::HeldMetadata { .. }
+                ) =>
+            {
+                json!({
+                    "chunks": [], "nextSeq": 0, "exited": true, "exitCode": 0, "closed": true, "failure": null,
+                })
+            }
             _ => {
                 let error = json!({"code": -32601, "message": "not supported by test executor"});
                 let response = json!({"id": id, "error": error});
