@@ -1543,7 +1543,7 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
     let resumed = manager
         .state
         .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
-            request_country: config.request_country.clone(),
+            request_country: parent.thread.config_snapshot().await.request_country,
             config,
             prompt_cache_key: None,
             initial_history,
