@@ -80,7 +80,7 @@ async fn run_compact_task_inner(
         &turn_context.provider.info().name,
     );
     sess.start_new_context_window(step_context, world_state, &trace)
-        .await;
+        .await?;
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
 

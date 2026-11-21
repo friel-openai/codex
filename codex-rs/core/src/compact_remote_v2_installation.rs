@@ -256,7 +256,7 @@ async fn build_and_install_compaction(
                 started_item: needs_start.then_some(&compaction_item),
             }),
         )
-        .await
+        .await?
     } else {
         let (new_history, world_state_baseline) = build_compaction_replacement_history(
             sess,
@@ -286,7 +286,7 @@ async fn build_and_install_compaction(
             rejected_audio_file_ids,
             installation,
         )
-        .await
+        .await?
     };
     if !installed {
         return Ok(false);

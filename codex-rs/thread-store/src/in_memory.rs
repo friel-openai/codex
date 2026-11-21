@@ -63,6 +63,7 @@ mod tests {
     use crate::SortDirection;
     use crate::StoredTurnItemsView;
     use crate::ThreadPersistenceMetadata;
+    use crate::ThreadPersistenceMode;
     use crate::ThreadSortKey;
     use codex_protocol::ContextWindowId;
     use codex_protocol::models::BaseInstructions;
@@ -186,6 +187,8 @@ mod tests {
                     history_mode: ThreadHistoryMode::Legacy,
                     history_base: None,
                     subagent_history_start_ordinal: None,
+                    persistence_mode: ThreadPersistenceMode::Durable,
+                    initial_rollout_ordinal: 0,
                     initial_window_id: ContextWindowId::new_uuid_v7(),
                     runtime_workspace_roots: None,
                     metadata: ThreadPersistenceMetadata {
@@ -467,6 +470,8 @@ mod tests {
             history_mode,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: thread_metadata(),
