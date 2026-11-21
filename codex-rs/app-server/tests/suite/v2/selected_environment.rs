@@ -2342,13 +2342,17 @@ async fn exercise_first_registration_race(scenario: FirstRegistrationRace) -> Re
             responses::ev_completed(id),
         ])
     };
-    let server = create_mock_responses_server_sequence(vec![
+    let mut responses = vec![
         call(EARLY_CALL),
         create_final_assistant_message_sse_response("continued locally")?,
-        call(LATER_CALL),
-        create_final_assistant_message_sse_response("rejected replacement")?,
-    ])
-    .await;
+    ];
+    if scenario != FirstRegistrationRace::CancelDuringVerification {
+        responses.push(call(LATER_CALL));
+        responses.push(create_final_assistant_message_sse_response(
+            "rejected replacement",
+        )?);
+    }
+    let server = create_mock_responses_server_sequence(responses).await;
     let codex_home = TempDir::new()?;
     let workspace_dir = TempDir::new()?;
     let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
@@ -2529,6 +2533,124 @@ async fn exercise_first_registration_race(scenario: FirstRegistrationRace) -> Re
 }
 
 #[tokio::test]
+async fn optional_verifier_refresh_is_distinct_from_required_resume_discovery() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    let workspace_dir = TempDir::new()?;
+    let workspace = workspace_dir.path().to_path_buf().abs().canonicalize()?;
+    std::fs::write(workspace.join("AGENTS.md"), "local workspace instructions")?;
+    let healthy_source = PathUri::from_abs_path(&workspace).join("AGENTS.override.md")?;
+    let healthy_requests = Arc::new(InstructionDiscoveryRequests::default());
+    let mut registrations = String::new();
+    let mut executors = Vec::new();
+    for (id, executor) in [
+        (
+            "healthy",
+            InstructionDiscoveryExecutor::Ready {
+                source: healthy_source,
+                read_once: false,
+            },
+        ),
+        ("stalled", InstructionDiscoveryExecutor::Stalled),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        registrations.push_str(&format!(
+            "[[environments]]\nid = {id:?}\nurl = \"ws://{}\"\n\n",
+            listener.local_addr()?
+        ));
+        let (stop, receiver) = oneshot::channel();
+        let requests = if id == "healthy" {
+            Arc::clone(&healthy_requests)
+        } else {
+            Arc::new(InstructionDiscoveryRequests::default())
+        };
+        let task = tokio::spawn(serve_instruction_discovery_executor(
+            listener, executor, requests, receiver,
+        ));
+        executors.push((stop, task));
+    }
+    std::fs::write(codex_home.path().join("environments.toml"), registrations)?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.4")
+        .with_sandbox_mode("danger-full-access")
+        .with_root_config("thread_unload_delay_secs = 1")
+        .with_provider_config("supports_websockets = false")
+        .write(codex_home.path())?;
+    let implicit_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "healthy"],
+        true,
+        None,
+    )?;
+    let required_id = seed_resume_with_saved_environments(
+        codex_home.path(),
+        &workspace,
+        &[LOCAL_ENVIRONMENT_ID, "healthy", "stalled"],
+        false,
+        None,
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_json_logging(OPTIONAL_VERIFICATION_LOG_FILTER)
+        .build_initialized()
+        .await?;
+    let request = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: implicit_id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse =
+        timeout(LOCAL_CONVERSATION_TIMEOUT, app.read_response(request)).await??;
+    wait_for_optional_secondary_verification(&app, "healthy", &[], true).await?;
+    assert_eq!(
+        healthy_requests.instruction_reads.load(Ordering::Relaxed),
+        1
+    );
+    timeout(Duration::from_secs(12), async {
+        while healthy_requests.instruction_reads.load(Ordering::Relaxed) < 2 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("optional verifier did not refresh before the required resume")?;
+
+    let request = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: implicit_id.clone(),
+        })
+        .await?;
+    let unsubscribe: ThreadUnsubscribeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+    assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
+    let closed: ThreadClosedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+    assert_eq!(closed.thread_id, implicit_id);
+    let reads_after_unload = healthy_requests.instruction_reads.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(
+        healthy_requests.instruction_reads.load(Ordering::Relaxed),
+        reads_after_unload
+    );
+    healthy_requests
+        .instruction_reads
+        .store(0, Ordering::Relaxed);
+    assert_saved_resume_requires_environment(&mut app, &required_id, Some(&[]), "stalled").await?;
+    assert_eq!(
+        healthy_requests.instruction_reads.load(Ordering::Relaxed),
+        1
+    );
+    for (stop, task) in executors {
+        let _ = stop.send(());
+        task.await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_required_environments()
 -> Result<()> {
     let server = create_mock_responses_server_sequence(vec![
@@ -2687,6 +2809,26 @@ async fn thread_resume_bounds_saved_implicit_environment_discovery_and_keeps_req
             .with_context(|| format!("{id} never received an instruction metadata request"))?;
         }
     }
+
+    // The implicit thread's verifier refreshes independently of the required resume. Stop it
+    // before counting the required resume's healthy instruction reads.
+    let request_id = app_server
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: implicit_id.clone(),
+        })
+        .await?;
+    let unsubscribe: ThreadUnsubscribeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+    assert_eq!(unsubscribe.status, ThreadUnsubscribeStatus::Unsubscribed);
+    let closed: ThreadClosedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_notification("thread/closed"),
+    )
+    .await??;
+    assert_eq!(closed.thread_id, implicit_id);
+    healthy_requests
+        .instruction_reads
+        .store(0, Ordering::Relaxed);
 
     assert_saved_resume_requires_environment(
         &mut app_server,
