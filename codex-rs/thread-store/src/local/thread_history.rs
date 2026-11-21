@@ -26,6 +26,7 @@ pub(super) use projection_certificate::FileIdentity as ProjectionLeafIdentity;
 pub(super) use projection_certificate::ProjectionCertificate;
 pub(super) use projection_certificate::certificate_is_current;
 pub(super) use projection_certificate::leaf_identity as projection_leaf_identity;
+
 pub(super) use read::has_complete_root_projection_for_resolved;
 pub(super) use read::has_complete_segmented_legacy_projection;
 pub(super) use read::indexed_same_thread_lineage;
@@ -432,14 +433,59 @@ pub(super) async fn reset_projection_for_replacement(
     thread_id: ThreadId,
     next_rollout_ordinal: u64,
 ) -> ThreadStoreResult<()> {
+    reset_projection_for_replacement_inner(store, thread_id, next_rollout_ordinal, None).await
+}
+
+pub(super) async fn reset_projection_for_native_rotation(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    root_path: &std::path::Path,
+    previous_identity: &ProjectionLeafIdentity,
+    previous_file: &tokio::fs::File,
+    frozen_path: &std::path::Path,
+    boundary: codex_protocol::protocol::HistoryPosition,
+) -> ThreadStoreResult<()> {
+    reset_projection_for_replacement_inner(
+        store,
+        thread_id,
+        boundary.end_ordinal_exclusive,
+        Some((
+            root_path,
+            previous_identity,
+            previous_file,
+            frozen_path,
+            boundary,
+        )),
+    )
+    .await
+}
+
+async fn reset_projection_for_replacement_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    next_rollout_ordinal: u64,
+    rotation: Option<(
+        &std::path::Path,
+        &ProjectionLeafIdentity,
+        &tokio::fs::File,
+        &std::path::Path,
+        codex_protocol::protocol::HistoryPosition,
+    )>,
+) -> ThreadStoreResult<()> {
     let pool = store.thread_history_db().await?;
-    let thread_id = thread_id.to_string();
+    let _writer = store
+        .thread_history_writer
+        .acquire()
+        .await
+        .map_err(thread_history_error)?;
+    let mut transaction = pool.begin_immediate().await.map_err(thread_history_error)?;
+    let thread_id_string = thread_id.to_string();
     let next_rollout_ordinal = sqlite_integer(next_rollout_ordinal, "rollout ordinal")?;
     let existing_state = sqlx::query_as::<_, (i64, i64)>(
         "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
     )
-    .bind(thread_id.as_str())
-    .fetch_optional(pool)
+    .bind(thread_id_string.as_str())
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
     if existing_state
@@ -448,10 +494,31 @@ pub(super) async fn reset_projection_for_replacement(
     {
         return Err(ThreadStoreError::Conflict {
             message: format!(
-                "thread history projection for {thread_id} does not end at ordinal {next_rollout_ordinal}"
+                "thread history projection for {thread_id_string} does not end at ordinal {next_rollout_ordinal}"
             ),
         });
     }
+    let pending = if let (Some((root, old_identity, old_file, frozen, boundary)), Some((offset, _))) =
+        (rotation, existing_state)
+        && decode_paginated_projection_offset(offset)? == (old_identity.size(), true)
+        && super::live_writer::require_selected_rollout_path(store, thread_id, root)
+            .await
+            .is_ok()
+    {
+        projection_certificate::prepare_rotation(
+            &mut transaction,
+            thread_id,
+            root,
+            old_identity,
+            old_file,
+            frozen,
+            boundary,
+        )
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
     let lineage_complete = existing_state
         .map(|(encoded_offset, _)| decode_paginated_projection_offset(encoded_offset))
         .transpose()?
@@ -468,15 +535,19 @@ ON CONFLICT(thread_id) DO UPDATE SET
     next_rollout_ordinal = excluded.next_rollout_ordinal
         "#,
     )
-    .bind(thread_id)
+    .bind(thread_id_string)
     .bind(encode_paginated_projection_offset(
         /*offset*/ 0,
         lineage_complete,
     )?)
     .bind(next_rollout_ordinal)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
+    if let Some(pending) = pending {
+        projection_certificate::publish(&mut transaction, &pending).await?;
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
     Ok(())
 }
 
@@ -706,6 +777,7 @@ WHERE thread_id = ?
     .fetch_optional(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
+    let fresh_projection = projection_state.is_none_or(|state| state == (0, 0));
     let (expected_offset, mut next_ordinal, lineage_complete) = match projection_state {
         Some((encoded_offset, next_ordinal)) => {
             let (expected_offset, lineage_complete) =
@@ -728,9 +800,10 @@ WHERE thread_id = ?
         });
     }
 
-    let refreshed_proof = if lineage_complete && legacy_backfill_complete.is_none() {
+    let mut refreshed_proof = if lineage_complete && legacy_backfill_complete.is_none() {
         match participating_leaf {
             Some((path, identity, source_sha256)) => projection_certificate::prepare_leaf_refresh(
+                store,
                 &mut transaction,
                 &thread_id,
                 path,
@@ -747,6 +820,28 @@ WHERE thread_id = ?
     } else {
         None
     };
+    if refreshed_proof.is_none()
+        && fresh_projection
+        && initial_ordinal == 0
+        && lineage_complete
+        && legacy_backfill_complete.is_none()
+        && let Some((path, identity, source_sha256)) = participating_leaf
+        && let Ok(id) = ThreadId::from_string(&thread_id)
+    {
+        refreshed_proof = projection_certificate::prepare_initial_root(
+            store,
+            &mut transaction,
+            id,
+            path,
+            start_offset,
+            next_offset,
+            &projections,
+            identity,
+            source_sha256,
+        )
+        .await
+        .unwrap_or(None);
+    }
 
     for projection in projections {
         match projection {
