@@ -70,6 +70,7 @@ fn thread_settings() -> ThreadSettingsAppliedEvent {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
+            requested_approvals_reviewer: None,
             permission_profile: PermissionProfile::workspace_write(),
             active_permission_profile: None,
             cwd: cwd.clone(),
