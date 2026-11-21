@@ -3,8 +3,28 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use tokio::sync::Notify;
 
-type Slot<T> = OnceLock<Weak<T>>;
+/// A one-time registration capture and the notification of its installation.
+#[derive(Debug)]
+struct Slot<T> {
+    registration: OnceLock<Weak<T>>,
+    inserted: Notify,
+    cancelled: AtomicBool,
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self {
+            registration: OnceLock::new(),
+            inserted: Notify::new(),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
 type Pending<T> = Mutex<HashMap<String, Vec<Weak<Slot<T>>>>>;
 
 /// One capture of a current registration or the first later registration for an ID.
@@ -18,12 +38,32 @@ pub struct FirstRegistration<T> {
 impl<T> FirstRegistration<T> {
     /// Returns the captured registration while it remains alive.
     pub fn get(&self) -> Option<Arc<T>> {
-        self.slot.get()?.upgrade()
+        if self.slot.cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        self.slot.registration.get()?.upgrade()
     }
-}
 
-impl<T> Drop for FirstRegistration<T> {
-    fn drop(&mut self) {
+    /// Waits for the first registration without adopting a later replacement.
+    pub async fn wait(&self) -> Option<Arc<T>> {
+        loop {
+            let inserted = self.slot.inserted.notified();
+            tokio::pin!(inserted);
+            inserted.as_mut().enable();
+            if self.slot.cancelled.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(registration) = self.slot.registration.get() {
+                return registration.upgrade();
+            }
+            inserted.await;
+        }
+    }
+
+    /// Stops waiting and removes an unfulfilled watch even if the capture is still retained.
+    pub fn cancel(&self) {
+        self.slot.cancelled.store(true, Ordering::Release);
+        self.slot.inserted.notify_waiters();
         let Some(pending) = self.pending.upgrade() else {
             return;
         };
@@ -37,6 +77,12 @@ impl<T> Drop for FirstRegistration<T> {
                 pending.remove(&self.environment_id);
             }
         }
+    }
+}
+
+impl<T> Drop for FirstRegistration<T> {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -61,9 +107,9 @@ impl<T> FirstRegistrationWatches<T> {
         environment_id: &str,
         current: Option<&Arc<T>>,
     ) -> FirstRegistration<T> {
-        let slot = Arc::new(OnceLock::new());
+        let slot = Arc::new(Slot::default());
         if let Some(environment) = current {
-            let _ = slot.set(Arc::downgrade(environment));
+            let _ = slot.registration.set(Arc::downgrade(environment));
         } else {
             self.pending
                 .lock()
@@ -88,8 +134,14 @@ impl<T> FirstRegistrationWatches<T> {
             .remove(environment_id);
         if let Some(captures) = captures {
             for capture in captures {
-                if let Some(capture) = capture.upgrade() {
-                    let _ = capture.set(Arc::downgrade(environment));
+                if let Some(capture) = capture.upgrade()
+                    && !capture.cancelled.load(Ordering::Acquire)
+                    && capture
+                        .registration
+                        .set(Arc::downgrade(environment))
+                        .is_ok()
+                {
+                    capture.inserted.notify_waiters();
                 }
             }
         }
@@ -194,5 +246,58 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[tokio::test]
+    async fn wait_observes_first_insert_before_or_after_waiting() {
+        for insert_first in [false, true] {
+            let registry = Registry::default();
+            let capture = Arc::new(registry.capture("worker"));
+            let first = Arc::new(1);
+            if insert_first {
+                registry.insert("worker", Arc::clone(&first));
+            }
+            let waiter = {
+                let capture = Arc::clone(&capture);
+                tokio::spawn(async move { capture.wait().await })
+            };
+            if !insert_first {
+                tokio::task::yield_now().await;
+                registry.insert("worker", Arc::clone(&first));
+            }
+            let captured = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("first registration notification")
+                .expect("waiter")
+                .expect("registration");
+            assert!(Arc::ptr_eq(&captured, &first));
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_does_not_adopt_a_replacement_after_the_first_drops() {
+        let registry = Registry::default();
+        let capture = registry.capture("worker");
+        let first = Arc::new(1);
+        registry.insert("worker", Arc::clone(&first));
+        registry.insert("worker", Arc::new(2));
+        drop(first);
+        assert!(capture.wait().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_a_retained_watch_and_wakes_waiters() {
+        let registry = Registry::default();
+        let capture = Arc::new(registry.capture("worker"));
+        let waiter = {
+            let capture = Arc::clone(&capture);
+            tokio::spawn(async move { capture.wait().await })
+        };
+        tokio::task::yield_now().await;
+        capture.cancel();
+        assert!(registry.watches.pending.lock().expect("pending").is_empty());
+        assert!(waiter.await.expect("waiter").is_none());
+        registry.insert("worker", Arc::new(1));
+        assert!(capture.get().is_none());
     }
 }

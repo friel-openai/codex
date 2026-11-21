@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
+use std::time::Duration;
 
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -36,8 +37,8 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::future::Shared;
 use futures::stream::BoxStream;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -61,10 +62,15 @@ use crate::shell_snapshot::SnapshotCredentialBrokerState;
 use crate::thread_manager::StartupEnvironmentDiscovery;
 
 mod attachment;
+mod secondary_verifier;
 pub(crate) use attachment::EnvironmentAttachment;
+use secondary_verifier::BackgroundSecondaryVerification;
 
 // Reject pathological selected cwd values at the environment-selection boundary.
 const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
+
+// Retry work across all loaded threads must not create unbounded concurrent connections.
+static OPTIONAL_SECONDARY_VERIFICATION_LIMIT: Semaphore = Semaphore::const_new(64);
 
 /// Records whether a normalized config should follow later thread setting updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,9 +418,10 @@ pub(crate) struct InitialDefaultSecondary {
 }
 
 /// The registration present at startup, or the first registration captured while it was absent.
+#[derive(Clone)]
 enum InitialSecondaryRegistration {
     Existing(Weak<Environment>),
-    First(FirstEnvironmentRegistration),
+    First(Arc<FirstEnvironmentRegistration>),
 }
 
 impl InitialSecondaryRegistration {
@@ -424,111 +431,12 @@ impl InitialSecondaryRegistration {
             Self::First(capture) => capture.get(),
         }
     }
-}
 
-/// Optional read-only verification can prepare a later turn, but cannot change an active turn.
-struct BackgroundSecondaryVerification {
-    limit: Arc<Semaphore>,
-    pending: Mutex<Option<SecondaryVerification>>,
-}
-
-/// One verification of the selected workspace, permissions and executor attachment.
-struct SecondaryVerification {
-    config: Arc<Config>,
-    selection: TurnEnvironmentSelection,
-    revoked: CancellationToken,
-    result: oneshot::Receiver<Option<(TurnEnvironment, Instant)>>,
-    _task: AbortOnDropHandle<()>,
-}
-
-impl InitialDefaultSecondary {
-    fn take_verified_or_start(
-        &self,
-        config: &Arc<Config>,
-        selection: &TurnEnvironmentSelection,
-        registration: &Arc<Environment>,
-    ) -> Option<(TurnEnvironment, CancellationToken)> {
-        let background = self.background.as_ref()?;
-        let mut pending = background
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(mut verification) = pending.take() {
-            if !verification.revoked.is_cancelled()
-                && &verification.selection == selection
-                && verification.config.active_project.is_untrusted()
-                    == config.active_project.is_untrusted()
-                && verification.config.project_doc_max_bytes == config.project_doc_max_bytes
-                && verification.config.project_doc_fallback_filenames
-                    == config.project_doc_fallback_filenames
-                && verification.config.config_layer_stack == config.config_layer_stack
-            {
-                match (&mut verification.result).now_or_never() {
-                    Some(Ok(Some((environment, completed))))
-                        if completed.elapsed() < REMOTE_AGENTS_MD_DISCOVERY_BUDGET
-                            && environment.environment().check_connected_view().is_ok() =>
-                    {
-                        return Some((environment, verification.revoked));
-                    }
-                    None => {
-                        *pending = Some(verification);
-                        return None;
-                    }
-                    Some(_) => {}
-                }
-            }
-            verification.revoked.cancel();
+    async fn wait(&self) -> Option<Arc<Environment>> {
+        match self {
+            Self::Existing(environment) => environment.upgrade(),
+            Self::First(capture) => capture.wait().await,
         }
-        if self.revoked.is_cancelled() {
-            return None;
-        }
-        let revoked = self.revoked.child_token();
-        let (result_tx, result) = oneshot::channel();
-        let task = {
-            let limit = Arc::clone(&background.limit);
-            let config = Arc::clone(config);
-            let selection = selection.clone();
-            let registration = Arc::clone(registration);
-            let revoked = revoked.clone();
-            AbortOnDropHandle::new(tokio::spawn(async move {
-                let environment_id = selection.environment_id.clone();
-                let verify = async {
-                    let _permit = limit.acquire().await.ok()?;
-                    registration.wait_until_ready().await.ok()?;
-                    let bound = registration.connected_registry_view(revoked.clone()).ok()?;
-                    let mut environment = TurnEnvironment::new(
-                        selection,
-                        EnvironmentConfigOrigin::Thread,
-                        Arc::new(bound),
-                        /*shell*/ None,
-                    );
-                    verify_secondary_instructions(&config, &mut environment).await?;
-                    Some((environment, Instant::now()))
-                };
-                let result = tokio::select! {
-                    _ = revoked.cancelled() => None,
-                    result = tokio::time::timeout(REMOTE_AGENTS_MD_DISCOVERY_BUDGET, verify) => {
-                        result.ok().flatten()
-                    }
-                };
-                let verified = result.is_some();
-                if result_tx.send(result).is_ok() {
-                    if verified {
-                        tracing::debug!(%environment_id, "optional secondary executor verified");
-                    } else {
-                        tracing::debug!(%environment_id, "optional secondary executor verification failed");
-                    }
-                }
-            }))
-        };
-        *pending = Some(SecondaryVerification {
-            config: Arc::clone(config),
-            selection: selection.clone(),
-            revoked,
-            result,
-            _task: task,
-        });
-        None
     }
 }
 
@@ -762,7 +670,8 @@ impl ThreadEnvironments {
                     Some(registration) => Some(InitialSecondaryRegistration::Existing(
                         Arc::downgrade(registration),
                     )),
-                    None => first_capture.map(InitialSecondaryRegistration::First),
+                    None => first_capture
+                        .map(|capture| InitialSecondaryRegistration::First(Arc::new(capture))),
                 };
                 if let Some(recovery_registration) = recovery_registration {
                     let original = Arc::new(InitialDefaultSecondary {
@@ -771,13 +680,11 @@ impl ThreadEnvironments {
                         revoked: CancellationToken::new(),
                         background: Some(BackgroundSecondaryVerification {
                             limit: Arc::clone(&limit),
+                            manager: Arc::downgrade(&environment_manager),
                             pending: Mutex::new(None),
                         }),
                     });
-                    if let Some(registration) = registration {
-                        let _ =
-                            original.take_verified_or_start(&config, &normalized, &registration);
-                    }
+                    let _ = original.take_verified_or_start(&config, &normalized);
                     initially_unavailable
                         .push(DefaultSecondaryEnvironment::InitiallyUnavailable(original));
                 }
@@ -1841,12 +1748,8 @@ impl ThreadEnvironments {
                         if attempt.original.background.is_some() {
                             let original = Arc::clone(&attempt.original);
                             if let Some(config) = background_config
-                                && let Some((mut environment, revoked)) = original
-                                    .take_verified_or_start(
-                                        config,
-                                        &admission.selection,
-                                        &admission.registration,
-                                    )
+                                && let Some((mut environment, revoked)) =
+                                    original.take_verified_or_start(config, &admission.selection)
                             {
                                 attempt.revoked = revoked.clone();
                                 environment.initial_recovery =
@@ -3028,7 +2931,7 @@ mod tests {
                 .await;
         let original = Arc::new(InitialDefaultSecondary {
             rejection: rejection.clone(),
-            registration: InitialSecondaryRegistration::First(capture),
+            registration: InitialSecondaryRegistration::First(Arc::new(capture)),
             revoked: CancellationToken::new(),
             background: None,
         });
@@ -3067,7 +2970,7 @@ mod tests {
                 .await;
         let original = Arc::new(InitialDefaultSecondary {
             rejection: rejection.clone(),
-            registration: InitialSecondaryRegistration::First(capture),
+            registration: InitialSecondaryRegistration::First(Arc::new(capture)),
             revoked: CancellationToken::new(),
             background: None,
         });
