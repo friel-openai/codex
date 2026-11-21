@@ -208,6 +208,14 @@ static SEGMENT_PRECOMMIT_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
 static CHECKPOINT_PERSISTENCE_PAUSES: LazyLock<
     StdMutex<HashMap<ThreadId, Arc<CheckpointPersistencePause>>>,
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
+#[cfg(test)]
+static ROTATION_PROJECTION_PAUSES: LazyLock<
+    StdMutex<HashMap<ThreadId, Arc<CheckpointPersistencePause>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+#[cfg(test)]
+static ROTATION_PUBLICATION_PAUSES: LazyLock<
+    StdMutex<HashMap<ThreadId, Arc<CheckpointPersistencePause>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[cfg(test)]
 pub(super) const SEGMENT_ROTATION_CRASH_BOUNDARY_ENV: &str =
@@ -258,6 +266,36 @@ pub(super) fn inject_checkpoint_persistence_pause(
     CHECKPOINT_PERSISTENCE_PAUSES
         .lock()
         .expect("checkpoint persistence pause mutex")
+        .insert(thread_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(test)]
+pub(super) fn inject_rotation_projection_pause(
+    thread_id: ThreadId,
+) -> Arc<CheckpointPersistencePause> {
+    let pause = Arc::new(CheckpointPersistencePause {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    ROTATION_PROJECTION_PAUSES
+        .lock()
+        .expect("rotation pause mutex")
+        .insert(thread_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(test)]
+pub(super) fn inject_rotation_publication_pause(
+    thread_id: ThreadId,
+) -> Arc<CheckpointPersistencePause> {
+    let pause = Arc::new(CheckpointPersistencePause {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    ROTATION_PUBLICATION_PAUSES
+        .lock()
+        .expect("rotation publication pause mutex")
         .insert(thread_id, Arc::clone(&pause));
     pause
 }
@@ -1190,6 +1228,20 @@ async fn freeze_thread_segment_reserved_with_publication(
             source_path.as_path(),
         )?
     };
+    let rotation_source_identity = if live_entry.is_some()
+        && matches!(history_mode, ThreadHistoryMode::Paginated)
+        && !skipped_records
+    {
+        super::thread_history::projection_leaf_identity(source_path.as_path()).await
+    } else {
+        None
+    };
+    // Keep the old inode open until publication so a concurrent rewrite cannot be certified.
+    let rotation_source_handle = if rotation_source_identity.is_some() {
+        fs::File::open(source_path.as_path()).await.ok()
+    } else {
+        None
+    };
     if skipped_records {
         install_snapshot_segment(
             source_lines.as_slice(),
@@ -1294,6 +1346,17 @@ async fn freeze_thread_segment_reserved_with_publication(
                 ),
             })?;
         crash_segment_rotation_at(thread_id, "staged_rollout_durable_before_publication");
+        #[cfg(test)]
+        {
+            let pause = ROTATION_PUBLICATION_PAUSES
+                .lock()
+                .expect("rotation publication pause mutex")
+                .remove(&thread_id);
+            if let Some(pause) = pause {
+                pause.entered.notify_one();
+                pause.release.notified().await;
+            }
+        }
 
         fs::metadata(staged_path.as_path())
             .await
@@ -1378,16 +1441,45 @@ async fn freeze_thread_segment_reserved_with_publication(
         }
         crash_segment_rotation_at(thread_id, "stable_rollout_published_before_projection");
         let projection_result = async {
-            super::thread_history::reset_projection_for_replacement(
-                store,
-                source_rollout_id,
-                initial_rollout_ordinal,
-            )
-            .await?;
-            super::thread_history_materialization::materialize_to_sqlite(
+            if let (Some(identity), Some(handle)) = (
+                rotation_source_identity.as_ref(),
+                rotation_source_handle.as_ref(),
+            ) {
+                super::thread_history::reset_projection_for_native_rotation(
+                    store,
+                    source_rollout_id,
+                    active_path.as_path(),
+                    identity,
+                    handle,
+                    immutable_path.as_path(),
+                    history_base,
+                )
+                .await?;
+            } else {
+                super::thread_history::reset_projection_for_replacement(
+                    store,
+                    source_rollout_id,
+                    initial_rollout_ordinal,
+                )
+                .await?;
+            }
+            crash_segment_rotation_at(thread_id, "rotation_pending_before_projection");
+            #[cfg(test)]
+            {
+                let pause = ROTATION_PROJECTION_PAUSES
+                    .lock()
+                    .expect("rotation pause mutex")
+                    .remove(&thread_id);
+                if let Some(pause) = pause {
+                    pause.entered.notify_one();
+                    pause.release.notified().await;
+                }
+            }
+            super::thread_history_materialization::materialize_durable_suffix(
                 store,
                 source_rollout_id,
                 active_path.as_path(),
+                None,
             )
             .await
         }
