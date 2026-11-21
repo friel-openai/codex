@@ -401,6 +401,12 @@ crate.annotation(
     crate = "blake3",
     rustc_flags = ["-Copt-level=3"],
 )
+crate.annotation(
+    # Source-backed history rechecks large root prefixes, including in fastbuild mode.
+    crate = "sha2",
+    rustc_flags = ["-Copt-level=3"],
+    version = "0.10.9",
+)
 crate.annotation_select(
     # Avoid native x86 assembly tools unavailable when cross-compiling Windows.
     crate = "blake3",
