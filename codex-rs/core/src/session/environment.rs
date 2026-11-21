@@ -222,7 +222,7 @@ enum ConfigUpdateSource {
 impl Session {
     pub(crate) fn revoke_turn_initial_recovery(&self, turn_context: &TurnContext) {
         if turn_context.initial_environments.revoke_initial_recovery() {
-            self.mark_mcp_runtime_dirty();
+            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
         }
     }
 
@@ -364,14 +364,14 @@ impl Session {
             (self.services.turn_environments.snapshot_now(), admissions)
         };
         if let Some(admissions) = admissions {
-            self.mark_mcp_runtime_dirty();
+            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
             let config = self.build_effective_session_config(configuration);
             let snapshot = self
                 .services
                 .turn_environments
                 .verify_default_secondaries(&config, admissions, snapshot)
                 .await;
-            self.mark_mcp_runtime_dirty();
+            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
             snapshot
         } else {
             self.services
@@ -408,7 +408,7 @@ impl Session {
                     "workspace settings changed while preparing the transition".to_string(),
                 ));
             }
-            self.mark_mcp_runtime_dirty();
+            self.mark_mcp_runtime_dirty(crate::McpRefreshReason::CurrentEnvironmentsChanged);
             self.services
                 .turn_environments
                 .set_active_thread_defaults(configuration.inferred_environment_config());

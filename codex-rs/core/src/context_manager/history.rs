@@ -674,7 +674,7 @@ impl ContextManager {
                 .and_then(|metadata| metadata.history_truncation_token_limit)
                 .map(TruncationPolicy::Tokens)
                 .unwrap_or_else(|| with_serialization_allowance(policy));
-            truncate_function_output_payload(output, policy, estimate_audio_token_count);
+            truncate_function_output_payload(output, policy, estimate_tool_audio_tokens);
         }
         processed
     }
@@ -1023,15 +1023,26 @@ impl ContextManager {
         self.reset_version = history_version;
     }
 
+    pub(crate) fn review_budgeting(&self) -> ContextBudgeting {
+        self.review_budgeting
+    }
+
     /// Detects any parent model-state change between optimistic fork snapshot checks.
     pub(crate) fn has_same_fork_metadata(&self, other: &Self) -> bool {
         // Keep this exhaustive so new state must participate in fork validation. Shared
         // payload identities avoid comparing the full transcript at every fork checkpoint.
         let Self {
+            item_id_generator,
+            sampling,
+            restored_through_sequence,
             items,
             review_history,
+            review_budgeting,
             retained_context,
+            rejected_audio_file_ids,
+            file_audio_durations,
             guardian_review_mode,
+            guardian_include_additional_context,
             retain_inherited_user_messages,
             history_version,
             reset_version,
@@ -1043,8 +1054,14 @@ impl ContextManager {
             reference_context_item,
             world_state_baseline,
         } = self;
-        Arc::ptr_eq(items, &other.items)
+        Arc::ptr_eq(item_id_generator, &other.item_id_generator)
+            && sampling == &other.sampling
+            && restored_through_sequence == &other.restored_through_sequence
+            && Arc::ptr_eq(items, &other.items)
+            && review_budgeting == &other.review_budgeting
             && Arc::ptr_eq(retained_context, &other.retained_context)
+            && Arc::ptr_eq(rejected_audio_file_ids, &other.rejected_audio_file_ids)
+            && Arc::ptr_eq(file_audio_durations, &other.file_audio_durations)
             && match (review_history, &other.review_history) {
                 (None, None) => true,
                 (Some(left), Some(right)) => {
@@ -1057,6 +1074,7 @@ impl ContextManager {
                 _ => false,
             }
             && guardian_review_mode == &other.guardian_review_mode
+            && guardian_include_additional_context == &other.guardian_include_additional_context
             && retain_inherited_user_messages == &other.retain_inherited_user_messages
             && history_version == &other.history_version
             && reset_version == &other.reset_version

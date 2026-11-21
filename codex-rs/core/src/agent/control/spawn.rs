@@ -572,7 +572,6 @@ impl LocalAgentControl {
                     let _membership = membership;
                     let residency_pin = runtime.pin_v2_residency(&reloaded_thread.thread).await?;
                     runtime.registry.clear_evicted_runtime_settings(thread_id);
-                    runtime.registry.clear_evicted_runtime_settings(thread_id);
                     runtime.registry.clear_evicted_instructions(thread_id);
                     lifecycle.clear_cold_terminal_status();
                     residency_slot.commit(reloaded_thread.thread_id);

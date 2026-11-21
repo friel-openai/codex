@@ -12,8 +12,6 @@ use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
-use codex_protocol::models::is_closing_media_label;
-use codex_protocol::models::is_opening_media_label;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::CATALOG_APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
@@ -87,30 +85,6 @@ fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
             .get(..prefix.len())
             .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
     })
-}
-
-/// User-input parts with their original indices. Media wrapper labels are not
-/// user text; retain the indices so history edits can carry the right annotations.
-pub(crate) fn user_input_parts(
-    message: &[ContentItem],
-) -> impl Iterator<Item = (usize, &ContentItem)> {
-    message
-        .iter()
-        .enumerate()
-        .filter(|(idx, content_item)| match content_item {
-            ContentItem::InputText { text } => {
-                let opens_media = message
-                    .get(idx + 1)
-                    .is_some_and(|part| is_opening_media_label(text, part));
-                let closes_media = idx
-                    .checked_sub(1)
-                    .is_some_and(|i| is_closing_media_label(text, &message[i]));
-                !opens_media && !closes_media
-            }
-            ContentItem::InputImage { .. }
-            | ContentItem::InputAudio { .. }
-            | ContentItem::OutputText { .. } => true,
-        })
 }
 
 fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
