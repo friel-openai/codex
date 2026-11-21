@@ -80,9 +80,11 @@ use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
@@ -131,7 +133,7 @@ struct CoreToolPlanContext<'a> {
 pub(crate) fn build_tool_router(
     session: &Session,
     turn_context: &TurnContext,
-    model_info: &ModelInfo,
+    model_info: &CatalogModel,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     apps_enabled: bool,
@@ -139,6 +141,9 @@ pub(crate) fn build_tool_router(
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
     dynamic_tools: &[DynamicToolSpec],
 ) -> CodexResult<ToolRouter> {
+    if model_info.origin.catalog_refresh_failed() {
+        return Err(model_catalog_unavailable());
+    }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let wait_for_environment_tool_config = session
@@ -225,6 +230,12 @@ pub(crate) fn build_tool_router(
         registry,
         hosted_specs,
         &session.services.tool_search_handler_cache,
+    )
+}
+
+pub(crate) fn model_catalog_unavailable() -> CodexErr {
+    CodexErr::InvalidRequest(
+        "The model catalog changed or could not be refreshed, so the selected model's tool capabilities are unavailable. Retry after model discovery succeeds.".to_string(),
     )
 }
 

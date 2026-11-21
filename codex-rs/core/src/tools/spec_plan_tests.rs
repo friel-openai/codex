@@ -676,6 +676,52 @@ async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
 }
 
 #[tokio::test]
+async fn catalog_safety_failed_first_party_catalog_cannot_expose_fallback_tools() {
+    let (session, turn) = make_session_and_context().await;
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let mut model = step.settings.model_info.as_ref().clone();
+    for origin in [
+        codex_protocol::openai_models::ModelOrigin::SyntheticAfterCatalogFailure,
+        codex_protocol::openai_models::ModelOrigin::BundledAfterCatalogFailure,
+    ] {
+        model.origin = origin;
+        let result = super::build_tool_router(
+            &session,
+            step.turn.as_ref(),
+            &model,
+            &step.environments,
+            &step.mcp,
+            /*apps_enabled*/ false,
+            &turn.extension_data,
+            /*tool_suggest_candidates*/ None,
+            session.dynamic_tools().await.as_ref(),
+        );
+        assert!(
+            matches!(result, Err(codex_protocol::error::CodexErr::InvalidRequest(message))
+            if message.contains("model catalog") && message.contains("tool capabilities"))
+        );
+    }
+
+    model.origin = codex_protocol::openai_models::ModelOrigin::Synthetic;
+    assert!(
+        super::build_tool_router(
+            &session,
+            step.turn.as_ref(),
+            &model,
+            &step.environments,
+            &step.mcp,
+            /*apps_enabled*/ false,
+            &turn.extension_data,
+            /*tool_suggest_candidates*/ None,
+            session.dynamic_tools().await.as_ref(),
+        )
+        .is_ok(),
+        "an unknown model without a failed catalog retains its existing behavior"
+    );
+}
+
+#[tokio::test]
 async fn reviewer_tool_policy_exclude_optional_core_tools() {
     let (mut session, mut turn) = make_session_and_context().await;
     session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
