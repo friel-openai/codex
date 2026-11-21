@@ -529,25 +529,45 @@ impl LocalThreadStore {
                 .await
                 .map_err(migration_error)?
                 .ok_or_else(|| migration_error("selected lineage thread is missing"))?;
-            publish_lineage_targets(journal_path, &mut journal, locks).await?;
             let selected_target = journal
                 .targets
                 .iter()
                 .find(|target| target.selected)
+                .map(|target| target.path.clone())
                 .ok_or_else(|| migration_error("lineage journal has no selected target"))?;
-            if current.rollout_path != selected_target.path
+            let needs_selection = current.rollout_path != selected_target;
+            if needs_selection {
+                let selected_source = journal
+                    .sources
+                    .last()
+                    .ok_or_else(|| migration_error("lineage journal has no selected source"))?;
+                // A compressed sibling can be the recorded source while SQLite still stores the
+                // plain path. Authenticate the physical file, but keep the exact SQLite key.
+                if codex_rollout::existing_rollout_path(&current.rollout_path)
+                    .await
+                    .as_deref()
+                    != Some(selected_source.path.as_path())
+                {
+                    return Err(migration_error(
+                        "SQLite selection no longer resolves to the recorded lineage source",
+                    ));
+                }
+            }
+            publish_lineage_targets(journal_path, &mut journal, locks).await?;
+            if needs_selection
                 && !state_db
                     .replace_rollout_path_if_current(
                         journal.selected_thread_id,
-                        selected_source_path,
-                        selected_target.path.as_path(),
+                        &current.rollout_path,
+                        &selected_target,
                     )
                     .await
                     .map_err(migration_error)?
             {
-                return Err(ThreadStoreError::Conflict {
-                    message: "selected rollout changed during lineage migration".to_string(),
-                });
+                // A changed selection is not writer-lock contention.
+                return Err(migration_error(
+                    "SQLite selection changed while publishing the lineage",
+                ));
             }
             self.promote_legacy_name(journal.selected_thread_id, None)
                 .await?;
