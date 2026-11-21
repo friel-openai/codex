@@ -246,6 +246,7 @@ async fn list_current_members(
             params: ThreadListParams {
                 include_attached_threads: false,
                 current_account_only: false,
+                included_thread_ids: None,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(200),
@@ -298,6 +299,7 @@ async fn wait_for_completed_current_tree(
                 params: ThreadListParams {
                     include_attached_threads: false,
                     current_account_only: false,
+                    included_thread_ids: None,
                     excluded_thread_ids: None,
                     cursor: None,
                     limit: Some(200),
