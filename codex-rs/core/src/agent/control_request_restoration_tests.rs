@@ -90,8 +90,14 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
         &config,
-        Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager,
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                config.codex_home.to_path_buf(),
+            )),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -101,7 +107,6 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
         crate::thread_manager::passthrough_image_store(),
         crate::thread_manager::thread_store_from_config(&config, Some(state_db.clone())),
         crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
-        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );

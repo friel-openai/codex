@@ -5416,6 +5416,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         .expect("test config should allow sqlite");
     let state_db = init_state_db(&config).await;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let thread_store = ThreadStoreBuilder::from_config(&config, state_db.clone()).build();
     let manager = ThreadManager::new(
         &config,
         crate::build_startup_models(
@@ -5431,7 +5432,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
         crate::thread_manager::passthrough_image_store(),
-        ThreadStoreBuilder::from_config(&config, state_db.clone()).build(),
+        Arc::clone(&thread_store),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,

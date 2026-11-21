@@ -73,7 +73,7 @@ fn compaction_retains_bounded_independent_messages_without_user_authority() {
 fn compaction_keeps_independent_message_before_following_user_input() {
     let delivery = independent_thread_input("send_message_to_thread", 1);
     let user = ResponseItemEnvelope::new(ResponseItem::Message {
-        id: Some(ResponseItemId::new("later-user")),
+        id: Some(ResponseItemId::from_server("later-user".to_owned())),
         status: None,
         encrypted_content: None,
         role: "user".to_string(),

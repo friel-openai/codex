@@ -1,7 +1,6 @@
 use super::*;
 use crate::CodexAppsToolsCache;
 use crate::ThreadManager;
-use crate::build_models_manager;
 use crate::init_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
@@ -321,8 +320,14 @@ impl TestHost {
             crate::independent_thread::install(&mut builder, manager.clone());
             ThreadManager::new(
                 &config,
-                Arc::clone(&auth),
-                build_models_manager(&config, Arc::clone(&auth)),
+                crate::build_startup_models(
+                    &config,
+                    Arc::clone(&auth),
+                    "message-test".to_string(),
+                    Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                        config.codex_home.to_path_buf(),
+                    )),
+                ),
                 CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -332,7 +337,6 @@ impl TestHost {
                 crate::passthrough_image_store(),
                 thread_store_from_config(&config, Some(state)),
                 None,
-                "message-test".to_string(),
                 None,
                 None,
             )
