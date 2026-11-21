@@ -10,6 +10,7 @@ use codex_protocol::protocol::SessionSource;
 pub(super) struct ResumePermit<'a> {
     list: ThreadListResumePermit<'a>,
     thread_id: Option<ThreadId>,
+    _resume: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl<'a> ResumePermit<'a> {
@@ -26,11 +27,41 @@ impl<'a> ResumePermit<'a> {
             None
         };
         let shared = thread_id.is_some_and(|id| id.to_string() == params.thread_id);
-        let list = processor
-            .thread_list_state_permit
-            .acquire_resume(shared)
-            .await?;
-        Ok(Self { list, thread_id })
+        Self::acquire_for_id(
+            &processor.thread_state_manager,
+            &processor.thread_list_state_permit,
+            thread_id,
+            shared,
+        )
+        .await
+    }
+
+    pub(super) async fn acquire_for_id(
+        state: &ThreadStateManager,
+        list: &'a ThreadListState,
+        thread_id: Option<ThreadId>,
+        shared: bool,
+    ) -> Result<Self, JSONRPCErrorError> {
+        // Same-ID waiters must not hold a list permit: an earlier waiter may need to
+        // upgrade its shared permit before either request can complete.
+        let resume = if shared {
+            match thread_id {
+                Some(thread_id) => Some(state.lock_resume(thread_id).await),
+                None => {
+                    return Err(internal_error(
+                        "shared resume requires a canonical thread ID",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let list = list.acquire_resume(shared).await?;
+        Ok(Self {
+            list,
+            thread_id,
+            _resume: resume,
+        })
     }
 
     pub(super) fn is_shared(&self) -> bool {
@@ -42,10 +73,15 @@ impl<'a> ResumePermit<'a> {
     }
 
     pub(super) async fn upgrade(self) -> Result<Self, JSONRPCErrorError> {
-        let Self { list, thread_id } = self;
+        let Self {
+            list,
+            thread_id,
+            _resume,
+        } = self;
         Ok(Self {
             list: list.upgrade().await?,
             thread_id,
+            _resume,
         })
     }
 
