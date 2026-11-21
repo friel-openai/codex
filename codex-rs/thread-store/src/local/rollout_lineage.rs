@@ -88,6 +88,8 @@ pub(super) struct RolloutLineage {
     pub(super) root_rollout_id: RolloutId,
     pub(super) segments: Vec<RolloutLineageSegment>,
     pub(super) reads: AncestorReads,
+    /// Visibility includes authenticated ancestors even if their segments were trimmed.
+    pub(super) has_attached_visibility: bool,
     requested_thread_id: ThreadId,
     mode: LineageResolutionMode,
     leaf_path: PathBuf,
@@ -216,6 +218,7 @@ impl LocalThreadStore {
                 LineageResolutionMode::ModelContext,
                 None,
                 excluded,
+                LineageOffsetMode::Resolve,
             )
             .await?;
         lineage.retry_source_stamp = Some(RetrySourceStamp::read(path).await?);
@@ -250,12 +253,46 @@ impl LocalThreadStore {
         &self,
         requested_thread_id: ThreadId,
     ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(
+            requested_thread_id,
+            LineageResolutionMode::ModelContext,
+            LineageOffsetMode::Resolve,
+        )
+        .await
+    }
+
+    /// Authenticates lineage heads; consumers authenticate byte boundaries only when read.
+    pub(super) async fn resolve_rollout_lineage_deferred(
+        &self,
+        requested_thread_id: ThreadId,
+    ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_offsets(
+            requested_thread_id,
+            LineageResolutionMode::HistoryPage,
+            LineageOffsetMode::Deferred,
+        )
+        .await
+    }
+
+    async fn resolve_rollout_lineage_with_offsets(
+        &self,
+        requested_thread_id: ThreadId,
+        mode: LineageResolutionMode,
+        offset_mode: LineageOffsetMode,
+    ) -> ThreadStoreResult<RolloutLineage> {
         let resolved =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
                 .await?
                 .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
-        self.resolve_rollout_lineage_from_path(requested_thread_id, &resolved.path)
-            .await
+        self.resolve_rollout_lineage_from_path_with_mode(
+            requested_thread_id,
+            resolved.path,
+            mode,
+            None,
+            &[],
+            offset_mode,
+        )
+        .await
     }
 
     pub(super) async fn resolve_rollout_lineage_for_history_page(
@@ -272,6 +309,7 @@ impl LocalThreadStore {
             LineageResolutionMode::HistoryPage,
             None,
             &[],
+            LineageOffsetMode::Resolve,
         )
         .await
     }
@@ -289,8 +327,53 @@ impl LocalThreadStore {
             LineageResolutionMode::ModelContext,
             None,
             &[],
+            LineageOffsetMode::Resolve,
         )
         .await
+    }
+
+    pub(super) async fn resolve_reserved_history_page_lineage(
+        &self,
+        requested_thread_id: ThreadId,
+        root: &RolloutLineageSegment,
+        expected_rollout_id: RolloutId,
+        reservation: &RolloutWriterReservation,
+    ) -> ThreadStoreResult<RolloutLineage> {
+        if root.thread_id != requested_thread_id
+            || root.rollout_id != expected_rollout_id
+            || codex_rollout::existing_rollout_path(root.rollout_path.as_path())
+                .await
+                .as_deref()
+                != Some(root.rollout_path.as_path())
+        {
+            return Err(malformed_lineage(
+                requested_thread_id,
+                "reserved root identity changed",
+            ));
+        }
+        let visible = self
+            .resolve_rollout_lineage_from_path_with_mode(
+                requested_thread_id,
+                root.rollout_path.clone(),
+                LineageResolutionMode::HistoryPage,
+                None,
+                &[],
+                LineageOffsetMode::Resolve,
+            )
+            .await?;
+        if visible.root_rollout_id != expected_rollout_id
+            || !reservation.contains(requested_thread_id)
+            || visible
+                .segments
+                .iter()
+                .any(|segment| !reservation.contains(segment.thread_id))
+        {
+            return Err(malformed_lineage(
+                requested_thread_id,
+                "reserved visibility lineage changed",
+            ));
+        }
+        Ok(visible)
     }
 
     async fn resolve_rollout_lineage_from_path_with_mode(
@@ -300,6 +383,7 @@ impl LocalThreadStore {
         mode: LineageResolutionMode,
         leaf_cutoff: Option<HistoryPosition>,
         excluded: &[ExcludedAncestor],
+        offset_mode: LineageOffsetMode,
     ) -> ThreadStoreResult<RolloutLineage> {
         let path = if tokio::fs::symlink_metadata(&path)
             .await
@@ -327,7 +411,7 @@ impl LocalThreadStore {
         )?;
         let leaf_path = path.clone();
         let mut excluded = excluded.to_vec();
-        let (segments, references) = loop {
+        let (segments, has_attached_visibility, references) = loop {
             let mut active_paths = HashSet::new();
             let mut references = HashMap::new();
             let mut failed = None;
@@ -344,11 +428,13 @@ impl LocalThreadStore {
                 &excluded,
                 &mut references,
                 &mut failed,
-                LineageOffsetMode::Resolve,
+                offset_mode,
             )
             .await;
             match result {
-                Ok(segments) => break (segments, references),
+                Ok((segments, has_attached_visibility)) => {
+                    break (segments, has_attached_visibility, references);
+                }
                 Err(error) => {
                     let Some((failed_path, cutoff)) = failed else {
                         return Err(excluded
@@ -374,6 +460,7 @@ impl LocalThreadStore {
             root_rollout_id: rollout_id,
             reads: AncestorReads::new(&segments, references),
             segments,
+            has_attached_visibility,
             requested_thread_id,
             mode,
             leaf_path,
@@ -458,6 +545,7 @@ impl LocalThreadStore {
                     LineageResolutionMode::ModelContext,
                     None,
                     excluded,
+                    LineageOffsetMode::Resolve,
                 )
                 .await?;
             lineage.retry_source_stamp = Some(RetrySourceStamp::read(&source.path).await?);
@@ -541,6 +629,7 @@ impl LocalThreadStore {
                 LineageResolutionMode::ModelContext,
                 None,
                 excluded,
+                LineageOffsetMode::Resolve,
             )
             .await?;
         lineage.retry_source_stamp = Some(RetrySourceStamp::read(&source.path).await?);
@@ -615,7 +704,7 @@ impl LocalThreadStore {
                 .is_none();
         let mut active_paths = HashSet::new();
         let mut references = HashMap::new();
-        let segments = resolve_path(
+        let (segments, has_attached_visibility) = resolve_path(
             self,
             requested_thread_id,
             source.rollout_id,
@@ -643,6 +732,7 @@ impl LocalThreadStore {
             root_rollout_id: source.rollout_id,
             reads: AncestorReads::new(&segments, references),
             segments,
+            has_attached_visibility,
             requested_thread_id,
             mode: LineageResolutionMode::ModelContext,
             leaf_path: source.path,
@@ -1112,7 +1202,7 @@ impl LocalThreadStore {
         let leaf_path = rollout_path.clone();
         let mut active_paths = HashSet::new();
         let mut references = HashMap::new();
-        let segments = resolve_path(
+        let (segments, has_attached_visibility) = resolve_path(
             self,
             meta.meta.id,
             end.thread_id,
@@ -1132,6 +1222,7 @@ impl LocalThreadStore {
             root_rollout_id: end.thread_id,
             reads: AncestorReads::new(&segments, references),
             segments,
+            has_attached_visibility,
             requested_thread_id: meta.meta.id,
             mode: LineageResolutionMode::ModelContext,
             leaf_path,
@@ -1513,6 +1604,7 @@ impl RolloutLineage {
         Self {
             root_rollout_id,
             segments,
+            has_attached_visibility: false,
             reads: AncestorReads::default(),
             requested_thread_id,
             mode: LineageResolutionMode::ModelContext,
@@ -1772,7 +1864,7 @@ async fn resolve_path(
     references: &mut HashMap<PathBuf, RolloutReferenceItem>,
     failed: &mut Option<(PathBuf, Option<HistoryPosition>)>,
     offset_mode: LineageOffsetMode,
-) -> ThreadStoreResult<Vec<RolloutLineageSegment>> {
+) -> ThreadStoreResult<(Vec<RolloutLineageSegment>, bool)> {
     let mut inserted_paths = Vec::new();
     let result = resolve_path_iteratively(
         store,
@@ -1813,13 +1905,14 @@ async fn resolve_path_iteratively(
     references: &mut HashMap<PathBuf, RolloutReferenceItem>,
     failed: &mut Option<(PathBuf, Option<HistoryPosition>)>,
     offset_mode: LineageOffsetMode,
-) -> ThreadStoreResult<Vec<RolloutLineageSegment>> {
+) -> ThreadStoreResult<(Vec<RolloutLineageSegment>, bool)> {
     let mut pending_segments = Vec::new();
     let mut prefetched_paths = HashMap::new();
     let mut history_page_boundary = None;
     let mut goal_supervisor_provenance = GoalSupervisorLineageProvenance::Untrusted;
     let mut rollout_reference_index = None;
     let mut prefetched_head = None;
+    let mut has_attached_visibility = false;
 
     loop {
         let resolved_path = if tokio::fs::symlink_metadata(&rollout_path)
@@ -1870,6 +1963,7 @@ async fn resolve_path_iteratively(
             ));
         }
         let segment_goal_supervisor_provenance = goal_supervisor_provenance;
+        has_attached_visibility |= head.session_meta.meta.attached_thread;
         let current_goal_supervisor_provenance =
             goal_supervisor_provenance.continued_through_session_meta(&head.session_meta);
 
@@ -2213,7 +2307,7 @@ async fn resolve_path_iteratively(
             });
         }
     }
-    Ok(segments)
+    Ok((segments, has_attached_visibility))
 }
 
 pub(super) async fn read_rollout_head(path: &Path) -> ThreadStoreResult<RolloutHead> {
@@ -2433,7 +2527,10 @@ async fn trim_to_history_position(
 }
 
 /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
-fn validated_history_byte_offset(bytes: &[u8], end: HistoryPosition) -> ThreadStoreResult<u64> {
+pub(super) fn validated_history_byte_offset(
+    bytes: &[u8],
+    end: HistoryPosition,
+) -> ThreadStoreResult<u64> {
     let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
         malformed_lineage(
             end.thread_id,
