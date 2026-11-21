@@ -321,6 +321,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     let runtime = &sess.services.local_agent_runtime;
     let wakes_root = runtime.suspension_root() == Some(sess.thread_id)
         && (sess.has_outstanding_durable_sleep() || sess.should_wake_on_agent_messages().await);
+    sess.close_persistence_repair().await;
     let startup_prewarm = {
         let mut state = sess.state.lock().await;
         // Stop admission and take the current warmup together so resume cannot replace it.
