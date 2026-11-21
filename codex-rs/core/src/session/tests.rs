@@ -806,6 +806,37 @@ async fn request_mcp_server_elicitation_waits_for_user_response(
 }
 
 #[tokio::test]
+async fn auto_denied_direct_elicitation_never_reports_acceptance() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    session
+        .services
+        .mcp_runtime
+        .set_elicitations_auto_deny(true);
+    let response = session
+        .request_mcp_server_elicitation(
+            &turn_context,
+            codex_mcp::McpServerKey::unscoped("codex_apps"),
+            RequestId::String("request-1".into()),
+            ElicitationRequest::Url {
+                meta: None,
+                message: "Connect this app to continue.".to_string(),
+                url: "https://example.com/connect".to_string(),
+                elicitation_id: "connect-1".to_string(),
+            },
+        )
+        .await;
+    assert_eq!(
+        response,
+        Some(ElicitationResponse {
+            action: ElicitationAction::Decline,
+            content: None,
+            meta: None,
+        })
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let (_tx, startup_prewarm_rx) = tokio::sync::oneshot::channel::<()>();
