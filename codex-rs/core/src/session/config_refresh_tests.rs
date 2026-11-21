@@ -12,6 +12,89 @@ async fn runtime_servers(session: &Session) -> HashMap<String, McpServerConfig> 
     )
 }
 
+#[tokio::test]
+async fn file_reload_updates_auto_review_ultrafast_for_new_turns() {
+    let (session, _) = make_session_and_context().await;
+    let home = session.codex_home().await;
+    let file = home.join(CONFIG_TOML_FILE);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
+    session.reload_user_config_layer().await;
+    let before = session.new_default_turn().await;
+    assert!(!before.config.auto_review_use_ultrafast);
+
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = true\n").unwrap();
+    session.reload_user_config_layer().await;
+    let enabled = session.new_default_turn().await;
+    assert!(enabled.config.auto_review_use_ultrafast);
+    assert!(!before.config.auto_review_use_ultrafast);
+
+    let last_valid = session.get_config().await;
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = 'invalid'\n").unwrap();
+    session.reload_user_config_layer().await;
+    assert!(Arc::ptr_eq(&last_valid, &session.get_config().await));
+
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
+    session.reload_user_config_layer().await;
+    assert!(
+        !session
+            .new_default_turn()
+            .await
+            .config
+            .auto_review_use_ultrafast
+    );
+    assert!(enabled.config.auto_review_use_ultrafast);
+}
+
+#[tokio::test]
+async fn file_reload_uses_effective_auto_review_ultrafast_from_selected_profile() {
+    let (session, _) = make_session_and_context().await;
+    let home = session.codex_home().await;
+    let file = home.join(CONFIG_TOML_FILE);
+    let profile = home.join("work.config.toml");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = true\n").unwrap();
+    std::fs::write(&profile, "[auto_review]\nuse_ultrafast = false\n").unwrap();
+    let initial = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(profile.clone()),
+            user_config_profile: Some("work".parse().unwrap()),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await
+        .unwrap();
+    assert!(!initial.auto_review_use_ultrafast);
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .original_config_do_not_use = Arc::new(initial);
+
+    std::fs::write(&file, "[auto_review]\nuse_ultrafast = false\n").unwrap();
+    std::fs::write(&profile, "[auto_review]\nuse_ultrafast = true\n").unwrap();
+    session.reload_user_config_layer().await;
+    assert!(
+        session
+            .new_default_turn()
+            .await
+            .config
+            .auto_review_use_ultrafast
+    );
+
+    std::fs::write(&profile, "").unwrap();
+    session.reload_user_config_layer().await;
+    assert!(
+        !session
+            .new_default_turn()
+            .await
+            .config
+            .auto_review_use_ultrafast
+    );
+}
+
 #[test_case::test_case(true; "host enabled")]
 #[test_case::test_case(false; "host disabled")]
 #[tokio::test]
