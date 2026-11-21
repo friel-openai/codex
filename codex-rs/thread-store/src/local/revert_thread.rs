@@ -12,6 +12,18 @@ use crate::RevertThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RevertPublicationPause {
+    pub(super) persisted: tokio::sync::Notify,
+    pub(super) resume: tokio::sync::Notify,
+    pub(super) completed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) static REVERT_PUBLICATION_PAUSES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ThreadId, std::sync::Arc<RevertPublicationPause>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Revert an unloaded paginated thread by creating a new immutable rollout file.
 ///
 /// Old rollouts stay intact. The new file references the retained prefix, and the only mutable
@@ -31,10 +43,31 @@ pub(super) async fn revert(
         .ok_or(ThreadStoreError::Unsupported {
             operation: "revert_thread",
         })?;
-    let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
-    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
-    store.ensure_live_recorder_absent(thread_id).await?;
-    let writer_lock = store.acquire_writer_lock(thread_id)?;
+    // Discover without locks, then acquire every lifecycle and writer in the same order as
+    // archive/delete. A changed graph is rediscovered only after releasing all reservations.
+    let mut lock_thread_ids = vec![thread_id];
+    let (_lifecycle_guards, mut writer_reservation, lineage) = loop {
+        lock_thread_ids.sort_unstable_by_key(ThreadId::to_string);
+        lock_thread_ids.dedup();
+        let mut lifecycle_guards = Vec::with_capacity(lock_thread_ids.len());
+        for &id in &lock_thread_ids {
+            lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(id).await);
+        }
+        let reservation = store.reserve_rollout_writers(&lock_thread_ids).await?;
+        store.ensure_live_recorder_absent(thread_id).await?;
+        let lineage = store.resolve_rollout_lineage(thread_id).await?;
+        let mut discovered = lineage.segments().iter().map(|segment| segment.thread_id()).collect::<Vec<_>>();
+        discovered.push(thread_id);
+        if discovered.iter().all(|id| reservation.contains(*id)) {
+            break (lifecycle_guards, reservation, lineage);
+        }
+        drop(reservation);
+        drop(lifecycle_guards);
+        lock_thread_ids.extend(discovered);
+    };
+    let writer_lock = writer_reservation.take_writer_lock(thread_id).ok_or_else(|| ThreadStoreError::Conflict {
+        message: format!("thread {thread_id} already has an active writer"),
+    })?;
 
     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
     let stored_metadata = state_db
@@ -48,6 +81,9 @@ pub(super) async fn revert(
     let current_rollout = thread_rollout_resolver::resolve_current(store, thread_id)
         .await?
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    if current_rollout.rollout_id != lineage.root_rollout_id() || current_rollout.path.as_path() != lineage.leaf_path() {
+        return Err(ThreadStoreError::Conflict { message: format!("thread {thread_id} changed while its writers were reserved") });
+    }
     let source_path = current_rollout.path;
     let mut source_meta = codex_rollout::read_session_meta_line(source_path.as_path())
         .await
@@ -79,16 +115,19 @@ pub(super) async fn revert(
 
     // Preserve old-reader compatibility when introducing the first reference to a standalone
     // source. Already-shared ancestors stay read-only; their offsets address decoded JSONL bytes.
-    let lineage = store
-        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
-        .await?;
     let boundary = &ForkBoundary::BeforeTurn(before_turn_id);
     let standalone_rollout_id = source_meta
         .history_base
         .is_none()
         .then_some(current_rollout.rollout_id);
+    super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage).await?;
+    let reservation = &writer_reservation;
     let history_base = lineage
         .read_with_fallback(store, |mut lineage| async move {
+            if lineage.segments().iter().any(|segment| !reservation.contains(segment.thread_id())) {
+                return Err(ThreadStoreError::Conflict { message: "revert lineage expanded outside the reserved writers".to_string() });
+            }
+            super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage).await?;
             for segment in &mut lineage.segments {
                 if Some(segment.rollout_id()) == standalone_rollout_id {
                     segment.rollout_path = codex_rollout::materialize_rollout_for_reference(
@@ -123,36 +162,50 @@ pub(super) async fn revert(
 
     source_meta.multi_agent_version = multi_agent_version.or(source_meta.multi_agent_version);
     let rollout_id = ThreadId::new();
-    let recorder = create_replacement_recorder(
-        store,
-        source_meta,
-        rollout_id,
-        history_base,
-        forked_from_ordinal_exclusive,
-        writer_lock,
-    )
-    .await?;
-    let replacement_path = recorder.rollout_path().to_path_buf();
-    recorder.persist().await.map_err(thread_store_io_error)?;
-    recorder.shutdown().await.map_err(thread_store_io_error)?;
-
-    let replaced = state_db
-        .replace_rollout_path_if_current(
-            thread_id,
-            expected_sqlite_path.as_path(),
-            replacement_path.as_path(),
-        )
-        .await
-        .map_err(|err| ThreadStoreError::Internal {
+    // Publication keeps every reservation until the SQLite cutover completes, even if the
+    // request is cancelled after the replacement file is created.
+    let publication_store = store.clone();
+    tokio::spawn(async move {
+        let _lifecycle_guards = _lifecycle_guards;
+        let _writer_reservation = writer_reservation;
+        let recorder = create_replacement_recorder(
+            &publication_store, source_meta, rollout_id, history_base,
+            forked_from_ordinal_exclusive, writer_lock,
+        ).await?;
+        let replacement_path = recorder.rollout_path().to_path_buf();
+        if let Err(error) = recorder.persist().await {
+            let _ = recorder.shutdown().await;
+            let _ = tokio::fs::remove_file(&replacement_path).await;
+            return Err(thread_store_io_error(error));
+        }
+        if let Err(error) = recorder.shutdown().await {
+            let _ = tokio::fs::remove_file(&replacement_path).await;
+            return Err(thread_store_io_error(error));
+        }
+        #[cfg(test)]
+        let pause = REVERT_PUBLICATION_PAUSES.lock().expect("revert pause mutex").remove(&thread_id);
+        #[cfg(test)]
+        if let Some(pause) = &pause {
+            pause.persisted.notify_one();
+            pause.resume.notified().await;
+        }
+        let replaced = state_db.replace_rollout_path_if_current(
+            thread_id, expected_sqlite_path.as_path(), replacement_path.as_path(),
+        ).await.map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to switch thread {thread_id} to reverted rollout: {err}"),
         })?;
-    if !replaced {
-        let _ = tokio::fs::remove_file(replacement_path.as_path()).await;
-        return Err(ThreadStoreError::Conflict {
-            message: format!("thread {thread_id} changed while it was being reverted"),
-        });
-    }
-    Ok(())
+        if !replaced {
+            let _ = tokio::fs::remove_file(&replacement_path).await;
+            return Err(ThreadStoreError::Conflict {
+                message: format!("thread {thread_id} changed while it was being reverted"),
+            });
+        }
+        #[cfg(test)]
+        if let Some(pause) = pause { pause.completed.notify_one(); }
+        Ok(())
+    }).await.map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to join revert publication for {thread_id}: {err}"),
+    })?
 }
 
 async fn create_replacement_recorder(

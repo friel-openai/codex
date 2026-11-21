@@ -15,14 +15,53 @@ use super::ReadFailureSource;
 use super::ReadMetrics;
 use super::RolloutLineReaderInner;
 use super::open_rollout_line_reader;
+use super::open_rollout_line_reader_exact;
 
 /// Opens a fresh reader and processes its lines on the shared blocking worker.
-pub(crate) async fn read_rollout_lines<T, F>(path: &Path, read: F) -> io::Result<T>
+pub(crate) async fn read_rollout_lines<T, F>(path: &Path, exact: bool, byte_limit: Option<u64>, read: F) -> io::Result<T>
 where
     T: Send + 'static,
     F: FnOnce(&mut dyn Iterator<Item = io::Result<String>>) -> io::Result<T> + Send + 'static,
 {
-    let reader = open_rollout_line_reader(path).await?;
+    if let Some(byte_limit) = byte_limit {
+        let path = path.to_path_buf();
+        let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            use std::io::Seek;
+            let mut reader = crate::open_rollout_seekable_reader_with_exact_path(&path, || stop.is_closed(), exact)?;
+            if reader.seek(io::SeekFrom::End(0))? < byte_limit {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "rollout is shorter than its frozen boundary"));
+            }
+            if byte_limit > 0 {
+                reader.seek(io::SeekFrom::Start(byte_limit - 1))?;
+                let mut last = [0u8; 1];
+                reader.read_exact(&mut last)?;
+                if last[0] != b'\n' {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "frozen boundary is not a complete rollout record"));
+                }
+            }
+            reader.rewind()?;
+            struct CountingReader<R> { inner: R, bytes: Arc<std::sync::atomic::AtomicU64> }
+            impl<R: Read> Read for CountingReader<R> {
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    let count = self.inner.read(buf)?;
+                    self.bytes.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                    Ok(count)
+                }
+            }
+            let bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut lines = io::BufReader::new(CountingReader { inner: reader.take(byte_limit), bytes: Arc::clone(&bytes) }).lines();
+            let result = read(&mut lines)?;
+            if bytes.load(std::sync::atomic::Ordering::Relaxed) != byte_limit {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "rollout changed while its frozen prefix was read"));
+            }
+            Ok(result)
+        }).await.map_err(io::Error::other)?;
+        drop(keep_running);
+        return result;
+    }
+    let reader = if exact { open_rollout_line_reader_exact(path).await? } else { open_rollout_line_reader(path).await? };
     let lines: BlockingLineReader = match reader.inner {
         RolloutLineReaderInner::Plain(lines) => {
             // The fresh reader has no buffered data to preserve when converting the file.

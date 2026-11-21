@@ -81,7 +81,7 @@ async fn cancelling_full_scan_stops_before_the_next_record() -> anyhow::Result<(
     let (continue_tx, continue_rx) = std::sync::mpsc::channel();
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
-        read_rollout_lines(&path, move |lines| {
+        read_rollout_lines(&path, /*exact*/ false, /*byte_limit*/ None, move |lines| {
             assert_eq!(lines.next().transpose()?, Some("first".to_string()));
             let _ = started_tx.send(());
             continue_rx.recv().map_err(io::Error::other)?;
