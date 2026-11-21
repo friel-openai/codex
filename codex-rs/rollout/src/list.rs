@@ -2281,7 +2281,26 @@ pub async fn snapshot_rollout_paths_by_rollout_id(
     codex_home: &Path,
     rollout_ids: &HashSet<RolloutId>,
 ) -> io::Result<Option<RolloutPathSnapshot>> {
+    snapshot_rollout_paths(codex_home, Some(rollout_ids), false).await
+}
+
+/// Captures unambiguous rollout paths for a migration pass.
+///
+/// IDs with multiple physical files are omitted because a later directory traversal could select
+/// a different file. Callers must fall back to a fresh traversal for omitted IDs.
+pub async fn snapshot_all_rollout_paths_by_rollout_id(
+    codex_home: &Path,
+) -> io::Result<Option<RolloutPathSnapshot>> {
+    snapshot_rollout_paths(codex_home, None, true).await
+}
+
+async fn snapshot_rollout_paths(
+    codex_home: &Path,
+    rollout_ids: Option<&HashSet<RolloutId>>,
+    reject_ambiguous: bool,
+) -> io::Result<Option<RolloutPathSnapshot>> {
     let mut paths = HashMap::new();
+    let mut ambiguous = HashSet::new();
     let mut directories = DirectorySnapshot {
         directories: Vec::new(),
         valid: true,
@@ -2290,9 +2309,18 @@ pub async fn snapshot_rollout_paths_by_rollout_id(
         visit_rollout_filenames_recording::<()>(
             codex_home.join(subdir).as_path(),
             /*excluded_path*/ None,
-            |file_name| rollout_ids.contains(&file_name.rollout_id()),
+            |file_name| rollout_ids.is_none_or(|ids| ids.contains(&file_name.rollout_id())),
             |file_name, path| {
-                paths.entry(file_name.rollout_id()).or_insert(path);
+                match paths.entry(file_name.rollout_id()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(path);
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        if entry.get() != &path {
+                            ambiguous.insert(*entry.key());
+                        }
+                    }
+                }
                 ControlFlow::Continue(())
             },
             Some(&mut directories),
@@ -2301,6 +2329,9 @@ pub async fn snapshot_rollout_paths_by_rollout_id(
     }
     if !directories.valid {
         return Ok(None);
+    }
+    if reject_ambiguous {
+        paths.retain(|id, _| !ambiguous.contains(id));
     }
     if !directories.is_current().await {
         return Err(io::Error::new(
