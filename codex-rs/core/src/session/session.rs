@@ -492,7 +492,7 @@ impl SessionConfiguration {
                         if Arc::ptr_eq(previous, current))
                 })
             {
-                previous.revoked.cancel();
+                previous.revoke();
             }
         }
     }
