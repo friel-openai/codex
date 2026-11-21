@@ -58,6 +58,7 @@ const MAX_ANCHOR_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ROOT_ITEMS: usize = 20_000;
 const MAX_SUMMARY_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const SCAN_CONCURRENCY: usize = 8;
+const MAX_ROTATION_EXTENSION_SEGMENTS: usize = 16;
 
 #[cfg(test)]
 static INDEX_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
@@ -449,6 +450,14 @@ pub(super) async fn indexed_sources(
         }
         return Ok(Some((graph, scan.clone())));
     }
+    if let Some(previous) = cached.as_ref()
+        && let Some((graph, scan)) = extend_rotated_scan(store, id, &mut walk, previous).await?
+    {
+        *cached = Some(scan.clone());
+        drop(cached);
+        persistent_scan::save(store, id, graph.lineage.root_rollout_id(), scan.clone()).await;
+        return Ok(Some((graph, scan)));
+    }
     let Some(graph) = discover(store, id).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "could not resolve rotated history sources".to_string(),
@@ -473,6 +482,90 @@ pub(super) async fn indexed_sources(
     drop(cached);
     persistent_scan::save(store, id, root_rollout_id, scan.clone()).await;
     Ok(Some((current, scan)))
+}
+
+/// Extends an in-memory predecessor scan when the selected root rotated within the same thread.
+async fn extend_rotated_scan(
+    store: &LocalThreadStore,
+    id: ThreadId,
+    walk: &mut HistoryPageWalk<'_>,
+    cached: &UncertifiedItemScan,
+) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
+    if cached.attached
+        || cached.root.thread_id() != id
+        || walk.root_rollout_id() == cached.root.rollout_id()
+    {
+        return Ok(None);
+    }
+    let Some(expected_base) = cached_predecessor_position(cached) else {
+        return Ok(None);
+    };
+    for _ in 0..MAX_ROTATION_EXTENSION_SEGMENTS {
+        if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) {
+            return Ok(None);
+        }
+        let segment = walk.current();
+        if segment.thread_id() != id {
+            return Ok(None);
+        }
+        if segment.rollout_id() != cached.root.rollout_id() {
+            continue;
+        }
+        // The former root is rescanned at the new child's exact cutoff. Its physical copy and
+        // length may have changed after rotation, but its metadata and inherited cutoff must not.
+        let mut normalized = segment.clone();
+        normalized.rollout_path = cached.root.rollout_path.clone();
+        normalized.end_ordinal_exclusive = cached.root.end_ordinal_exclusive;
+        normalized.jsonl_end_byte_offset = cached.root.jsonl_end_byte_offset;
+        normalized.end_byte_offset = cached.root.end_byte_offset;
+        normalized.byte_boundary_recorded = cached.root.byte_boundary_recorded;
+        normalized.physical_size = cached.root.physical_size;
+        if normalized != cached.root || walk.next_history_position() != expected_base {
+            return Ok(None);
+        }
+        let partial = walk.snapshot();
+        let mut segments = cached.ancestors.clone();
+        segments.extend_from_slice(partial.segments());
+        let mut identities = cached.identities.clone();
+        identities.extend(walk.deferred_identities().iter().rev().cloned());
+        let graph = DiscoveredLineage {
+            attached: false,
+            lineage: RolloutLineage::from_segments(
+                id,
+                walk.root_rollout_id(),
+                walk.root_path().to_path_buf(),
+                segments,
+            ),
+            identities,
+        };
+        if !supported_owner_order(&graph) {
+            return Ok(None);
+        }
+        let Some(scan) = scan_ancestors_with_prefix(&graph, Some(cached)).await? else {
+            return Ok(None);
+        };
+        let scan = Arc::new(scan);
+        let Some(current) = discover_cached_after_scan(store, id, &scan, &graph).await? else {
+            return Ok(None);
+        };
+        return Ok(Some((current, scan)));
+    }
+    Ok(None)
+}
+
+/// The history-base cutoff that connects the cached root to its predecessor scan.
+fn cached_predecessor_position(cached: &UncertifiedItemScan) -> Option<Option<HistoryPosition>> {
+    match cached.ancestors.last() {
+        Some(segment) => {
+            let (ordinal, offset) = segment.end_ordinal().zip(segment.jsonl_end_byte_offset())?;
+            Some(Some(HistoryPosition {
+                thread_id: segment.rollout_id(),
+                end_ordinal_exclusive: ordinal,
+                end_byte_offset: offset,
+            }))
+        }
+        None => Some(None),
+    }
 }
 
 async fn indexed_attached_sources(
@@ -964,6 +1057,12 @@ pub(in crate::local) async fn try_list_uncertified_turn_items(
         };
         if let Some(graph) = current {
             (graph, cached.clone())
+        } else if let Some(previous) = cached.as_ref()
+            && let Some((graph, scan)) =
+                extend_rotated_scan(store, params.thread_id, &mut selected, previous).await?
+        {
+            *cached = Some(scan.clone());
+            (graph, Some(scan))
         } else {
             let Some(graph) = discover(store, params.thread_id).await? else {
                 return Ok(None);
@@ -1178,20 +1277,8 @@ pub(super) async fn discover_cached(
     {
         return Ok(None);
     }
-    let expected_base = match cached.ancestors.last() {
-        Some(segment) => {
-            let Some((ordinal, offset)) =
-                segment.end_ordinal().zip(segment.jsonl_end_byte_offset())
-            else {
-                return Ok(None);
-            };
-            Some(HistoryPosition {
-                thread_id: segment.rollout_id(),
-                end_ordinal_exclusive: ordinal,
-                end_byte_offset: offset,
-            })
-        }
-        None => None,
+    let Some(expected_base) = cached_predecessor_position(cached) else {
+        return Ok(None);
     };
     let path_snapshot = {
         let mut snapshot = cached.path_snapshot.lock().await;
@@ -1340,18 +1427,26 @@ async fn ancestor_identities_unchanged(graph: &DiscoveredLineage) -> bool {
 pub(super) async fn scan_ancestors(
     graph: &DiscoveredLineage,
 ) -> ThreadStoreResult<Option<UncertifiedItemScan>> {
+    scan_ancestors_with_prefix(graph, None).await
+}
+
+async fn scan_ancestors_with_prefix(
+    graph: &DiscoveredLineage,
+    prefix: Option<&UncertifiedItemScan>,
+) -> ThreadStoreResult<Option<UncertifiedItemScan>> {
     let segments = graph.lineage.segments();
     let root = segments.last().expect("discover requires a root").clone();
     let cancelled = ScanCancellation::default();
     let stop = cancelled.0.clone();
-    let ancestors = segments[..segments.len() - 1].to_vec();
+    let prefix_len = prefix.map_or(0, |scan| scan.ancestors.len());
+    let ancestors = segments[prefix_len..segments.len() - 1].to_vec();
     let mut scans = futures::stream::iter(ancestors)
         .enumerate()
         .map(move |(index, segment)| {
             let stop = stop.clone();
             async move {
                 (
-                    index,
+                    index + prefix_len,
                     tokio::task::spawn_blocking(move || {
                         scan_source(&segment, None, true, None, true, &stop, None)
                     })
@@ -1360,13 +1455,20 @@ pub(super) async fn scan_ancestors(
             }
         })
         .buffer_unordered(SCAN_CONCURRENCY);
-    let mut turn_ids = HashSet::new();
-    let mut turn_segments: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut turn_ids = prefix.map_or_else(HashSet::new, |scan| scan.turn_ids.clone());
+    let mut turn_segments: HashMap<String, Vec<usize>> =
+        prefix.map_or_else(HashMap::new, |scan| scan.turn_segments.clone());
     let mut results = Vec::new();
-    let mut anchor_bytes = 0usize;
-    let mut anchor_count = 0usize;
-    let mut turn_bytes = 0usize;
-    let mut event_count = 0usize;
+    let mut anchor_bytes = prefix.map_or(0, |scan| {
+        scan.anchors.iter().fold(0usize, |bytes, anchor| {
+            bytes.saturating_add(anchor.turn_id.len() + anchor.item_id.len())
+        })
+    });
+    let mut anchor_count = prefix.map_or(0, |scan| scan.anchors.len());
+    let mut turn_bytes = turn_ids
+        .iter()
+        .fold(0usize, |bytes, turn| bytes.saturating_add(turn.len()));
+    let mut event_count = prefix.map_or(0, |scan| scan.turn_events.len());
     while let Some((index, result)) = scans.next().await {
         let scan = match result.map_err(thread_history_error)? {
             Ok(Some(scan)) => scan,
@@ -1402,8 +1504,8 @@ pub(super) async fn scan_ancestors(
         return Ok(None);
     }
     results.sort_by_key(|(index, _)| *index);
-    let mut turn_events = Vec::new();
-    let mut anchors = Vec::new();
+    let mut turn_events = prefix.map_or_else(Vec::new, |scan| scan.turn_events.clone());
+    let mut anchors = prefix.map_or_else(Vec::new, |scan| scan.anchors.clone());
     for (_, scan) in results {
         turn_events.extend(scan.turns);
         anchors.extend(scan.anchors);
