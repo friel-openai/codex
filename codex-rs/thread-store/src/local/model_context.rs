@@ -183,7 +183,9 @@ pub(super) async fn load_from_rollout_path(
                 .resolve_rollout_lineage_from_path(thread_id, path)
                 .await?;
             let mut items = lineage
-                .read_with_fallback(store, scan_model_context_from_lineage)
+                .read_with_fallback(store, |lineage| {
+                    scan_model_context_from_lineage(lineage, session_meta.clone())
+                })
                 .await?;
             items.insert(0, RolloutItem::SessionMeta(Box::new(session_meta)));
             items

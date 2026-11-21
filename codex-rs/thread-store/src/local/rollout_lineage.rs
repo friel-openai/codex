@@ -92,6 +92,7 @@ pub(super) struct RolloutLineage {
     pub(super) has_attached_visibility: bool,
     requested_thread_id: ThreadId,
     mode: LineageResolutionMode,
+    offset_mode: LineageOffsetMode,
     leaf_path: PathBuf,
     leaf_cutoff: Option<HistoryPosition>,
     excluded: Vec<ExcludedAncestor>,
@@ -196,7 +197,7 @@ pub(super) struct BoundedSameThreadPrefix {
     pub(super) lines: Vec<RolloutLine>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LineageOffsetMode {
     Resolve,
     Deferred,
@@ -463,6 +464,7 @@ impl LocalThreadStore {
             has_attached_visibility,
             requested_thread_id,
             mode,
+            offset_mode,
             leaf_path,
             leaf_cutoff,
             excluded,
@@ -735,6 +737,7 @@ impl LocalThreadStore {
             has_attached_visibility,
             requested_thread_id,
             mode: LineageResolutionMode::ModelContext,
+            offset_mode: LineageOffsetMode::Deferred,
             leaf_path: source.path,
             leaf_cutoff: None,
             excluded: Vec::new(),
@@ -1225,6 +1228,7 @@ impl LocalThreadStore {
             has_attached_visibility,
             requested_thread_id: meta.meta.id,
             mode: LineageResolutionMode::ModelContext,
+            offset_mode: LineageOffsetMode::Resolve,
             leaf_path,
             leaf_cutoff: Some(end),
             excluded: Vec::new(),
@@ -1392,15 +1396,25 @@ impl LocalThreadStore {
             }
             let physical_end_byte_offset =
                 (!rollout_path_is_compressed(&materialized_path)).then_some(end.end_byte_offset);
+            let physical_size = tokio::fs::metadata(&materialized_path)
+                .await
+                .map_err(lineage_io_error)?
+                .len();
             return Ok(Some(BoundedSameThreadPrefix {
                 segment: RolloutLineageSegment {
                     thread_id: requested_thread_id,
                     rollout_id: expected_rollout_id,
+                    segment_id: head.session_meta.meta.segment_id,
                     rollout_path: materialized_path,
                     start_ordinal: head.first_local_ordinal,
+                    physical_start_ordinal: head.first_local_ordinal,
+                    history_page_visible: true,
+                    history_page_start: None,
                     end_ordinal_exclusive: Some(end.end_ordinal_exclusive),
                     jsonl_end_byte_offset: Some(end.end_byte_offset),
                     end_byte_offset: physical_end_byte_offset,
+                    byte_boundary_recorded: true,
+                    physical_size: Some(physical_size),
                     filter_texts: Vec::new(),
                     goal_supervisor_provenance: GoalSupervisorLineageProvenance::Untrusted,
                     uses_history_base: false,
@@ -1565,6 +1579,8 @@ impl RolloutLineage {
         self.root_rollout_id == other.root_rollout_id
             && self.requested_thread_id == other.requested_thread_id
             && self.mode == other.mode
+            && self.offset_mode == other.offset_mode
+            && self.has_attached_visibility == other.has_attached_visibility
             && self.leaf_path == other.leaf_path
             && self.leaf_cutoff == other.leaf_cutoff
             && self.segments == other.segments
@@ -1608,6 +1624,7 @@ impl RolloutLineage {
             reads: AncestorReads::default(),
             requested_thread_id,
             mode: LineageResolutionMode::ModelContext,
+            offset_mode: LineageOffsetMode::Resolve,
             leaf_path,
             leaf_cutoff: None,
             excluded: Vec::new(),
@@ -2204,7 +2221,7 @@ async fn resolve_path_iteratively(
         break;
     }
 
-    let mut segments = Vec::with_capacity(pending_segments.len());
+    let mut segments: Vec<RolloutLineageSegment> = Vec::with_capacity(pending_segments.len());
     while let Some(pending) = pending_segments.pop() {
         if let Some(reference) = pending.reference {
             let end_path = segments

@@ -329,6 +329,7 @@ impl RolloutLineage {
     {
         let requested_thread_id = self.requested_thread_id;
         let mode = self.mode;
+        let offset_mode = self.offset_mode;
         let leaf = self.leaf_path.clone();
         let leaf_cutoff = self.leaf_cutoff;
         let original_segments = self.segments.clone();
@@ -377,6 +378,7 @@ impl RolloutLineage {
                     mode,
                     leaf_cutoff,
                     &excluded,
+                    offset_mode,
                 )
                 .await
                 .map_err(|_| error.clone())?;
