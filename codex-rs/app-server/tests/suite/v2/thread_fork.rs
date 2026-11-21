@@ -2615,7 +2615,7 @@ enum IndexedForkPresentation {
     Ephemeral,
 }
 
-fn certified_indexed_fork_checkpoint(
+pub(super) fn certified_indexed_fork_checkpoint(
     codex_home: &std::path::Path,
 ) -> CertifiedSegmentStateCheckpoint {
     let window_id = codex_protocol::ContextWindowId::new_uuid_v7();

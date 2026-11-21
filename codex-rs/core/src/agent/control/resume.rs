@@ -497,6 +497,7 @@ impl LocalAgentControl {
             ownership,
             /*inherited_instructions*/ None,
             /*lifecycle*/ None,
+            /*request_country_override*/ None,
         )
         .await
     }
@@ -509,6 +510,7 @@ impl LocalAgentControl {
         ownership: ResumedThreadOwnership,
         inherited_instructions: Option<SessionInstructions>,
         lifecycle: Option<Arc<AgentLifecycle>>,
+        request_country_override: Option<codex_protocol::RequestCountry>,
     ) -> CodexResult<ThreadId> {
         let _membership = self.runtime.admit_start()?;
         let (resumed_thread_id, _) = Box::pin(self.resume_single_agent_from_rollout(
@@ -518,6 +520,7 @@ impl LocalAgentControl {
             ownership,
             inherited_instructions,
             lifecycle,
+            request_country_override,
         ))
         .await?;
         Ok(resumed_thread_id)
@@ -531,6 +534,7 @@ impl LocalAgentControl {
         ownership: ResumedThreadOwnership,
         inherited_instructions: Option<SessionInstructions>,
         lifecycle: Option<Arc<AgentLifecycle>>,
+        request_country_override: Option<codex_protocol::RequestCountry>,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
         let membership = self.runtime.admit_start()?;
         let state = self.upgrade()?;
@@ -674,12 +678,15 @@ impl LocalAgentControl {
         }
         let notification_source = session_source.clone();
 
-        let request_country = match parent_thread_id {
-            Some(parent_thread_id) => match state.get_thread(parent_thread_id).await {
-                Ok(parent) => parent.config_snapshot().await.request_country,
-                Err(_) => codex_protocol::RequestCountry::UNKNOWN,
+        let request_country = match request_country_override {
+            Some(country) => country,
+            None => match parent_thread_id {
+                Some(parent_thread_id) => match state.get_thread(parent_thread_id).await {
+                    Ok(parent) => parent.config_snapshot().await.request_country,
+                    Err(_) => codex_protocol::RequestCountry::UNKNOWN,
+                },
+                None => Default::default(),
             },
-            None => Default::default(),
         };
 
         let resumed_thread = state

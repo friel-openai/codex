@@ -55,6 +55,67 @@ use crate::local::test_support::write_session_file_with_fork;
 use crate::local::test_support::write_session_file_with_history_mode;
 
 #[tokio::test]
+async fn legacy_reference_resume_seeds_model_ids_from_inherited_records() {
+    let home = TempDir::new().expect("temp dir");
+    let parent_uuid = Uuid::new_v4();
+    let child_uuid = Uuid::new_v4();
+    let parent = ThreadId::from_string(&parent_uuid.to_string()).unwrap();
+    let child = ThreadId::from_string(&child_uuid.to_string()).unwrap();
+    let parent_path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T12-00-00",
+        parent_uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .unwrap();
+    let child_path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T12-00-01",
+        child_uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .unwrap();
+    let inherited: RolloutItem = serde_json::from_value(serde_json::json!({
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "content": [],
+                    "id": "inherited", "id_allocation": {"salt": "item", "ordinal": 24, "value": 3}}
+    }))
+    .unwrap();
+    append_items(&parent_path, [inherited]);
+    append_items(
+        &child_path,
+        [RolloutItem::RolloutReference(RolloutReferenceItem {
+            rollout_id: Some(parent),
+            rollout_path: parent_path,
+            thread_id: Some(parent),
+            rollout_timestamp: None,
+            segment_id: None,
+            max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        })],
+    );
+    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let history = store
+        .resume_thread(crate::ResumeThreadParams {
+            thread_id: child,
+            history_revision: None,
+            rollout_path: Some(child_path),
+            history: None,
+            include_archived: false,
+            metadata: crate::ThreadPersistenceMetadata {
+                cwd: Some(home.path().to_path_buf()),
+                model_provider: "test-provider".to_string(),
+                memory_mode: codex_protocol::protocol::ThreadMemoryMode::Enabled,
+            },
+        })
+        .await
+        .expect("resume reference-backed history");
+    assert_eq!(codex_rollout::next_model_id_ordinals(&history).0, 25);
+    assert_eq!(*store.live_writer_locks.lock(child).await, 25);
+}
+
+#[tokio::test]
 async fn model_context_revision_invalidates_after_append_or_removal() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1009);
@@ -578,6 +639,7 @@ async fn modern_unmarked_compaction_retains_sticky_state_from_predecessor() {
                     service_tier: Some("priority".to_string()),
                     approval_policy: AskForApproval::OnRequest,
                     approvals_reviewer: ApprovalsReviewer::AutoReview,
+                    requested_approvals_reviewer: None,
                     permission_profile: PermissionProfile::workspace_write(),
                     active_permission_profile: None,
                     cwd: cwd.clone(),
@@ -1090,6 +1152,7 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
         "historical inherited request",
         Some("test-provider"),
         Some(Uuid::from_u128(/*v*/ 2019)),
+        /*attached_thread*/ false,
         ThreadHistoryMode::Legacy,
     )
     .expect("write historically forked legacy rollout");
@@ -1215,6 +1278,7 @@ async fn projected_legacy_checkpoint_without_window_replays_canonical_history() 
         "historical inherited request",
         Some("test-provider"),
         Some(Uuid::from_u128(/*v*/ 2022)),
+        /*attached_thread*/ false,
         ThreadHistoryMode::Legacy,
     )
     .expect("write historically forked legacy rollout");
@@ -1556,6 +1620,9 @@ async fn assert_fork_version_respects_inherited_segment_cutoffs(compressed: bool
                 unreachable!();
             };
             compacted.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+                next_item_ordinal: None,
+                observation_clock_floor_ms: None,
+                rejected_audio_file_ids: Default::default(),
                 dynamic_tools: None,
                 multi_agent_version: None,
                 last_started_turn_id: None,
@@ -1789,6 +1856,8 @@ async fn same_thread_fork_fast_path_rejects_invalid_native_byte_cutoffs() {
                         thread_id,
                         Some(thread_id),
                         &reservation,
+                        /*excluded*/ &[],
+                        /*original*/ None,
                     )
                     .await
                     .expect_err("compatibility validator rejects inconsistent boundary"),
@@ -1839,6 +1908,8 @@ async fn same_thread_fork_fast_path_defers_stabilized_offsets_to_compatibility()
                 thread_id,
                 Some(thread_id),
                 &reservation,
+                /*excluded*/ &[],
+                /*original*/ None,
             )
             .await
             .expect("recover stale offset through compatibility validator");
@@ -2686,6 +2757,7 @@ fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoin
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),

@@ -3,9 +3,13 @@ use crate::legacy_core::config::Config;
 use codex_config::ConfigLayerSource;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_terminal_detection::Multiplexer;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use shlex::try_join;
 use std::path::Path;
 use std::path::PathBuf;
@@ -148,7 +152,7 @@ pub(crate) fn fork_command_parts(
     config: &Config,
     additional_writable_roots: &[PathBuf],
     handoff_socket: &Path,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     pane_child_command_parts(
         PaneChildKind::Fork,
         exe,
@@ -165,7 +169,7 @@ pub(crate) fn standalone_side_command_parts(
     config: &Config,
     additional_writable_roots: &[PathBuf],
     handoff_socket: &Path,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     pane_child_command_parts(
         PaneChildKind::StandaloneSide,
         exe,
@@ -183,7 +187,7 @@ fn pane_child_command_parts(
     config: &Config,
     additional_writable_roots: &[PathBuf],
     handoff_socket: &Path,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut args = vec![
         "env".to_string(),
         format!("CODEX_HOME={}", config.codex_home.display()),
@@ -245,10 +249,46 @@ fn pane_child_command_parts(
             toml::Value::String(service_tier.to_string())
         ));
     }
-    if let Some(sandbox_mode) = sandbox_mode_arg(&config.legacy_sandbox_policy()) {
-        args.push("-s".to_string());
-        args.push(sandbox_mode.to_string());
+    let profile = config.permissions.effective_permission_profile();
+    let policy = profile
+        .to_legacy_sandbox_policy(config.cwd.as_path())
+        .map_err(|err| format!("Cannot open a pane with the current permission profile: {err}"))?;
+    let sandbox_mode = sandbox_mode_arg(&policy).ok_or_else(|| {
+        "Cannot open a pane with the current external sandbox policy.".to_string()
+    })?;
+    let roots = additional_writable_roots
+        .iter()
+        .map(AbsolutePathBuf::from_absolute_path_checked)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Cannot open a pane with a non-absolute writable root: {err}"))?;
+    let projected_profile = match &policy {
+        SandboxPolicy::DangerFullAccess => PermissionProfile::Disabled,
+        SandboxPolicy::ReadOnly { .. } if roots.is_empty() => PermissionProfile::read_only(),
+        SandboxPolicy::WorkspaceWrite { .. } => PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::workspace_write(
+                &roots, /*exclude_tmpdir_env_var*/ false, /*exclude_slash_tmp*/ false,
+            )
+            .with_workspace_write_cwd(config.cwd.as_path()),
+            NetworkSandboxPolicy::Restricted,
+        ),
+        SandboxPolicy::ReadOnly { .. } | SandboxPolicy::ExternalSandbox { .. } => {
+            return Err(
+                "Cannot open a pane with writable roots outside its sandbox policy.".to_string(),
+            );
+        }
+    };
+    if profile.network_sandbox_policy() != projected_profile.network_sandbox_policy()
+        || !profile
+            .file_system_sandbox_policy()
+            .is_semantically_equivalent_to(
+                &projected_profile.file_system_sandbox_policy(),
+                config.cwd.as_path(),
+            )
+    {
+        return Err("Cannot open a pane: the current permission profile cannot be represented safely by a sandbox mode and writable roots. Use a standard permission profile or open the thread in this terminal.".to_string());
     }
+    args.push("-s".to_string());
+    args.push(sandbox_mode.to_string());
     if config.web_search_mode.value() == WebSearchMode::Live {
         args.push("--search".to_string());
     }
@@ -264,7 +304,7 @@ fn pane_child_command_parts(
         }
     }
 
-    args
+    Ok(args)
 }
 
 fn active_user_profile_from_config(config: &Config) -> Option<&str> {
@@ -403,7 +443,7 @@ fn pane_spawn_config(
             config,
             additional_writable_roots,
             handoff_socket,
-        );
+        )?;
         match multiplexer {
             Multiplexer::Zellij { .. } => Ok(MultiplexerSpawnConfig {
                 program: PathBuf::from("zellij"),
@@ -607,6 +647,17 @@ mod tests {
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
+
+    fn workspace_write_with_extra_root() -> SandboxPolicy {
+        SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![
+                AbsolutePathBuf::from_absolute_path("/repo/extra").expect("absolute extra root"),
+            ],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        }
+    }
 
     #[test]
     fn resolve_codex_executable_prefers_sibling_codex_for_codex_tui() {
@@ -970,7 +1021,8 @@ mod tests {
             .set(AskForApproval::OnRequest)
             .expect("approval policy");
         config
-            .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
+            .permissions
+            .set_legacy_sandbox_policy(workspace_write_with_extra_root(), config.cwd.as_path())
             .expect("sandbox policy");
         config.web_search_mode = codex_config::Constrained::allow_any(WebSearchMode::Live);
         let expected_cwd = config.cwd.to_string_lossy().to_string();
@@ -979,9 +1031,10 @@ mod tests {
             Path::new("/bin/codex"),
             &ThreadId::new(),
             &config,
-            &[PathBuf::from("/extra")],
+            &[PathBuf::from("/repo/extra")],
             Path::new("/tmp/fork-handoff.sock"),
-        );
+        )
+        .expect("standard workspace-write profile");
         let thread_id = command.last().expect("thread id").clone();
 
         assert_eq!(
@@ -1009,7 +1062,7 @@ mod tests {
                 "workspace-write".to_string(),
                 "--search".to_string(),
                 "--add-dir".to_string(),
-                "/extra".to_string(),
+                "/repo/extra".to_string(),
                 thread_id,
             ]
         );
@@ -1034,7 +1087,8 @@ mod tests {
             .set(AskForApproval::OnRequest)
             .expect("approval policy");
         config
-            .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
+            .permissions
+            .set_legacy_sandbox_policy(workspace_write_with_extra_root(), config.cwd.as_path())
             .expect("sandbox policy");
         config.web_search_mode = codex_config::Constrained::allow_any(WebSearchMode::Live);
         let thread_id = ThreadId::new();
@@ -1043,9 +1097,10 @@ mod tests {
             Path::new("/bin/codex"),
             &thread_id,
             &config,
-            &[PathBuf::from("/extra")],
+            &[PathBuf::from("/repo/extra")],
             Path::new("/tmp/fork-handoff.sock"),
-        );
+        )
+        .expect("standard workspace-write profile");
 
         assert_eq!(
             command,
@@ -1069,11 +1124,69 @@ mod tests {
                 "workspace-write".to_string(),
                 "--search".to_string(),
                 "--add-dir".to_string(),
-                "/extra".to_string(),
+                "/repo/extra".to_string(),
                 "--internal-side-session-id".to_string(),
                 thread_id.to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn pane_command_rejects_custom_profile_not_representable_by_sandbox_mode() {
+        use codex_protocol::models::PermissionProfile;
+        use codex_protocol::permissions::NetworkSandboxPolicy;
+
+        let codex_home = tempdir().expect("temp codex home");
+        let mut config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config");
+        config
+            .permissions
+            .set_permission_profile(PermissionProfile::workspace_write_with(
+                &[],
+                NetworkSandboxPolicy::Enabled,
+                /*exclude_tmpdir_env_var*/ false,
+                /*exclude_slash_tmp*/ false,
+            ))
+            .expect("custom permission profile");
+        let error = fork_command_parts(
+            Path::new("/bin/codex"),
+            &ThreadId::new(),
+            &config,
+            &[],
+            Path::new("/tmp/fork-handoff.sock"),
+        )
+        .expect_err("network-enabled workspace profile cannot be reduced to -s workspace-write");
+        assert!(error.contains("cannot be represented safely"));
+    }
+
+    #[tokio::test]
+    async fn pane_command_rejects_extra_root_not_in_parent_profile() {
+        let codex_home = tempdir().expect("temp codex home");
+        let mut config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config");
+        config.cwd = AbsolutePathBuf::from_absolute_path(PathBuf::from("/repo")).unwrap();
+        config
+            .permissions
+            .set_legacy_sandbox_policy(
+                SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            )
+            .expect("sandbox policy");
+        let error = fork_command_parts(
+            Path::new("/bin/codex"),
+            &ThreadId::new(),
+            &config,
+            &[PathBuf::from("/outside")],
+            Path::new("/tmp/fork-handoff.sock"),
+        )
+        .expect_err("extra writable roots must not widen the parent profile");
+        assert!(error.contains("cannot be represented safely"));
     }
 
     #[tokio::test]
@@ -1099,7 +1212,8 @@ mod tests {
             }))
             .expect("approval policy");
         config
-            .set_legacy_sandbox_policy(SandboxPolicy::new_read_only_policy())
+            .permissions
+            .set_legacy_sandbox_policy(SandboxPolicy::new_read_only_policy(), config.cwd.as_path())
             .expect("sandbox policy");
 
         let command = fork_command_parts(
@@ -1108,7 +1222,8 @@ mod tests {
             &config,
             &[],
             Path::new("/tmp/fork-handoff.sock"),
-        );
+        )
+        .expect("standard read-only profile");
         let thread_id = command.last().expect("thread id").clone();
 
         assert_eq!(

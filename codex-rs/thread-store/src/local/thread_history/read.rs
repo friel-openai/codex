@@ -1,5 +1,12 @@
+use std::collections::HashMap;
+
+use codex_app_server_protocol::ThreadHistoryTurnMetadata;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
+use codex_app_server_protocol::TurnStatus;
 use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 use serde::Deserialize;
@@ -10,15 +17,26 @@ use super::super::LocalThreadStore;
 use super::super::rollout_lineage::RolloutLineage;
 use super::super::rollout_lineage::RolloutLineageSegment;
 use super::super::thread_rollout_resolver::ResolvedThreadRollout;
+use super::segment_paging::LazyPage;
+use super::segment_paging::SegmentPage;
+use super::segment_paging::certified_resume_backwards_cursors;
+use super::segment_paging::page_certified_ascending_item_rows;
+use super::segment_paging::page_certified_single_owner_item_rows;
+use super::segment_paging::page_certified_single_owner_turn_rows;
 use super::segment_paging::page_indexed_item_rows;
 use super::segment_paging::page_indexed_turn_rows;
 use super::segment_paging::page_item_rows;
+use super::segment_paging::page_lazy_item_rows;
+use super::segment_paging::page_lazy_turn_rows;
 use super::segment_paging::page_turn_rows;
 use super::segment_paging::validate_page_size;
 use super::sqlite_integer;
 use super::turn_lookup::find_source_turn;
+use super::uncertified_items;
+use super::uncertified_items::SourceTurnEvent;
 use crate::ItemPage;
 use crate::ListItemsParams;
+use crate::ListItemsPosition;
 use crate::ListTurnsParams;
 use crate::StoredThreadItem;
 use crate::StoredTurn;
@@ -132,15 +150,393 @@ pub(in crate::local) async fn list_turns(
     )
     .await?;
     validate_page_size(params.page_size)?;
-    let lineage = match indexed_same_thread_lineage(store, params.thread_id).await? {
-        Some(lineage) => lineage,
-        None => {
-            store
-                .resolve_rollout_lineage_for_history_page(params.thread_id)
-                .await?
-        }
-    };
+    if let Some(page) = page_certified_single_owner_turn_rows(store, &params).await? {
+        return match page {
+            LazyPage::Page(page, lineage) => {
+                turns_from_page(store, params.items_view, &lineage, page).await
+            }
+            LazyPage::Full(lineage) => list_turns_from_lineage(store, params, &lineage).await,
+        };
+    }
+    if let Some(page) = source_backed_turns(store, &params).await? {
+        return Ok(page);
+    }
+    if let Some(lineage) = indexed_same_thread_lineage(store, params.thread_id).await? {
+        return list_turns_from_lineage(store, params, &lineage).await;
+    }
+    if matches!(params.sort_direction, crate::SortDirection::Desc)
+        && params.page_size < i64::MAX as usize - 1
+    {
+        return match page_lazy_turn_rows(
+            store,
+            params.thread_id,
+            params.cursor.as_deref(),
+            params.page_size,
+            params.items_view,
+            /*require_lookahead*/ true,
+        )
+        .await?
+        {
+            LazyPage::Page(page, lineage) => {
+                turns_from_page(store, params.items_view, &lineage, page).await
+            }
+            LazyPage::Full(lineage) => list_turns_from_lineage(store, params, &lineage).await,
+        };
+    }
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     list_turns_from_lineage(store, params, &lineage).await
+}
+
+/// Summary pointers and terminal state reconstructed from the selected rollout records.
+struct AggregateTurn {
+    ordinal: u64,
+    owner: ThreadId,
+    metadata: ThreadHistoryTurnMetadata,
+    terminal_ordinal: Option<u64>,
+    first_user: Option<String>,
+    final_agent: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryKind {
+    User,
+    FinalAgent,
+    LegacyAgent,
+    Other,
+}
+
+/// The first creation position and latest canonical snapshot of a summary candidate.
+struct AggregateItem {
+    ordinal: u64,
+    item: StoredThreadItem,
+    kind: SummaryKind,
+}
+
+fn summary_kind(item: &ThreadItem) -> SummaryKind {
+    match &item.payload {
+        ThreadItemPayload::UserMessage { .. } => SummaryKind::User,
+        ThreadItemPayload::AgentMessage {
+            phase: Some(MessagePhase::FinalAnswer),
+            ..
+        } => SummaryKind::FinalAgent,
+        ThreadItemPayload::AgentMessage { phase: None, .. } => SummaryKind::LegacyAgent,
+        _ => SummaryKind::Other,
+    }
+}
+
+fn latest_summary_id(items: &HashMap<String, AggregateItem>, kind: SummaryKind) -> Option<String> {
+    items
+        .iter()
+        .filter(|(_, item)| item.kind == kind)
+        .max_by_key(|(_, item)| item.ordinal)
+        .map(|(id, _)| id.clone())
+}
+
+fn reduce_aggregate_sources(
+    events: Vec<SourceTurnEvent>,
+) -> ThreadStoreResult<(
+    HashMap<String, AggregateTurn>,
+    HashMap<(ThreadId, String), HashMap<String, AggregateItem>>,
+)> {
+    let mut turns: HashMap<String, AggregateTurn> = HashMap::new();
+    let mut items: HashMap<(ThreadId, String), HashMap<String, AggregateItem>> = HashMap::new();
+    for event in events {
+        match event {
+            SourceTurnEvent::Turn(ordinal, owner, turn) => {
+                let id = turn.turn_id.clone();
+                let terminal = (turn.status != TurnStatus::InProgress).then_some(ordinal);
+                let current = match turns.entry(id.clone()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(AggregateTurn {
+                            ordinal,
+                            owner,
+                            metadata: turn,
+                            terminal_ordinal: terminal,
+                            first_user: None,
+                            final_agent: None,
+                        })
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let current = entry.into_mut();
+                        if current.owner != owner {
+                            *current = AggregateTurn {
+                                ordinal,
+                                owner,
+                                metadata: turn,
+                                terminal_ordinal: terminal,
+                                first_user: None,
+                                final_agent: None,
+                            };
+                        } else {
+                            if current.metadata.status != TurnStatus::InProgress {
+                                continue;
+                            }
+                            current.metadata.root_turn_id =
+                                current.metadata.root_turn_id.clone().or(turn.root_turn_id);
+                            current.metadata.status = turn.status;
+                            current.metadata.error = turn.error;
+                            current.metadata.started_at =
+                                turn.started_at.or(current.metadata.started_at);
+                            current.metadata.completed_at = turn.completed_at;
+                            current.metadata.duration_ms = turn.duration_ms;
+                            current.terminal_ordinal = terminal;
+                        }
+                        current
+                    }
+                };
+                if let Some(found) = items.get(&(owner, id.clone())) {
+                    if current.first_user.is_none() {
+                        current.first_user = found
+                            .iter()
+                            .filter(|(_, item)| item.kind == SummaryKind::User)
+                            .min_by_key(|(_, item)| item.ordinal)
+                            .map(|(id, _)| id.clone());
+                    }
+                    let final_agent =
+                        latest_summary_id(found, SummaryKind::FinalAgent).or_else(|| {
+                            (current.metadata.status != TurnStatus::InProgress)
+                                .then(|| latest_summary_id(found, SummaryKind::LegacyAgent))
+                                .flatten()
+                        });
+                    if final_agent.is_some() {
+                        current.final_agent = final_agent;
+                    }
+                }
+            }
+            SourceTurnEvent::SummaryItem(ordinal, owner, turn_id, item, timestamp) => {
+                let id = item.id().to_string();
+                let kind = summary_kind(&item);
+                let json =
+                    serde_json::to_vec(&item.payload).map_err(super::thread_history_error)?;
+                let entry = items
+                    .entry((owner, turn_id.clone()))
+                    .or_default()
+                    .entry(id.clone())
+                    .or_insert_with(|| AggregateItem {
+                        ordinal,
+                        item: StoredThreadItem {
+                            turn_id: turn_id.clone(),
+                            item_id: id.clone(),
+                            updated_at_ordinal: ordinal,
+                            created_at_ms: item.started_at_ms.unwrap_or(timestamp),
+                            started_at_ms: item.started_at_ms,
+                            completed_at_ms: item.completed_at_ms,
+                            item_json: json.clone(),
+                        },
+                        kind,
+                    });
+                entry.item.updated_at_ordinal = ordinal;
+                entry.item.started_at_ms = entry.item.started_at_ms.or(item.started_at_ms);
+                entry.item.completed_at_ms = entry.item.completed_at_ms.or(item.completed_at_ms);
+                entry.item.item_json = json;
+                entry.kind = kind;
+                if let Some(turn) = turns.get_mut(&turn_id)
+                    && turn.owner == owner
+                    && (turn.metadata.status == TurnStatus::InProgress
+                        || (turn.metadata.status == TurnStatus::Completed
+                            && turn.terminal_ordinal == Some(turn.ordinal)))
+                {
+                    if kind == SummaryKind::User && turn.first_user.is_none() {
+                        turn.first_user = Some(id.clone());
+                    }
+                    if kind == SummaryKind::FinalAgent {
+                        turn.final_agent = Some(id);
+                    }
+                }
+            }
+        }
+    }
+    Ok((turns, items))
+}
+
+/// Pages canonical turn records when SQLite projections span multiple physical rollout IDs.
+async fn source_backed_turns(
+    store: &LocalThreadStore,
+    params: &ListTurnsParams,
+) -> ThreadStoreResult<Option<TurnPage>> {
+    let Some((graph, scan)) = uncertified_items::indexed_sources(store, params.thread_id).await?
+    else {
+        return Ok(None);
+    };
+    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not read the selected rollout".to_string(),
+        });
+    };
+    let mut events = scan.turn_events.clone();
+    events.extend(root.turns);
+    events.sort_by_key(SourceTurnEvent::ordinal);
+    let (initial, _) = reduce_aggregate_sources(events.clone())?;
+    if initial.is_empty() {
+        if graph.lineage.segments().len() > 900 {
+            return Ok(None);
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT EXISTS(SELECT 1 FROM thread_turns WHERE thread_id IN (",
+        );
+        let mut ids = query.separated(", ");
+        for segment in graph.lineage.segments() {
+            ids.push_bind(segment.rollout_id().to_string());
+        }
+        ids.push_unseparated("))");
+        let has_rows: i64 = query
+            .build_query_scalar()
+            .fetch_one(store.thread_history_db().await?)
+            .await
+            .map_err(super::thread_history_error)?;
+        if has_rows != 0 {
+            // The compatibility reader may use SQLite; this does not certify its freshness.
+            return Ok(None);
+        }
+    }
+    let cursor = parse_cursor(
+        params.cursor.as_deref(),
+        params.thread_id,
+        graph.lineage.root_rollout_id(),
+        CursorScope::Turns,
+    )?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        graph
+            .lineage
+            .segments()
+            .iter()
+            .filter(|segment| segment.contains_ordinal(cursor.rollout_ordinal))
+            .count()
+            != 1
+    }) {
+        return Err(invalid_cursor(
+            "position outside or ambiguous in thread lineage",
+        ));
+    }
+    let mut selected = initial
+        .iter()
+        .filter(|(_, turn)| {
+            cursor.as_ref().is_none_or(|cursor| {
+                match (params.sort_direction, cursor.include_anchor) {
+                    (crate::SortDirection::Asc, true) => turn.ordinal >= cursor.rollout_ordinal,
+                    (crate::SortDirection::Asc, false) => turn.ordinal > cursor.rollout_ordinal,
+                    (crate::SortDirection::Desc, true) => turn.ordinal <= cursor.rollout_ordinal,
+                    (crate::SortDirection::Desc, false) => turn.ordinal < cursor.rollout_ordinal,
+                }
+            })
+        })
+        .map(|(id, turn)| (id.clone(), turn.ordinal))
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|(_, ordinal)| *ordinal);
+    if params.sort_direction == crate::SortDirection::Desc {
+        selected.reverse();
+    }
+    let has_more = selected.len() > params.page_size;
+    selected.truncate(params.page_size);
+    let backwards_cursor = selected
+        .first()
+        .map(|(_, ordinal)| {
+            serialize_cursor(
+                params.thread_id,
+                graph.lineage.root_rollout_id(),
+                CursorScope::Turns,
+                sqlite_integer(*ordinal, "rollout ordinal")?,
+                true,
+            )
+        })
+        .transpose()?;
+    let next_cursor = if has_more {
+        selected
+            .last()
+            .map(|(_, ordinal)| {
+                serialize_cursor(
+                    params.thread_id,
+                    graph.lineage.root_rollout_id(),
+                    CursorScope::Turns,
+                    sqlite_integer(*ordinal, "rollout ordinal")?,
+                    false,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let (turns, items) = if params.items_view == StoredTurnItemsView::Summary
+        && !selected.is_empty()
+    {
+        for (id, _) in &selected {
+            let owner = initial.get(id).expect("selected turn exists").owner;
+            if scan
+                .anchors
+                .iter()
+                .chain(root.anchors.iter())
+                .any(|anchor| anchor.turn_id == *id && anchor.owner != owner)
+            {
+                return Ok(None);
+            }
+        }
+        let ids = selected.iter().map(|(id, _)| id.clone()).collect();
+        let Some(item_events) = uncertified_items::scan_selected_items(&graph, &scan, ids).await?
+        else {
+            return Err(ThreadStoreError::Conflict {
+                message: "could not read selected turn items".to_string(),
+            });
+        };
+        events.extend(item_events);
+        events.sort_by_key(SourceTurnEvent::ordinal);
+        reduce_aggregate_sources(events)?
+    } else {
+        (initial, HashMap::new())
+    };
+    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
+        return Err(ThreadStoreError::Conflict {
+            message: "rotated thread sources changed while listing turns".to_string(),
+        });
+    }
+    let mut output = Vec::with_capacity(selected.len());
+    for (id, _) in selected {
+        let Some(source) = turns.get(&id) else {
+            return Err(ThreadStoreError::Conflict {
+                message: "selected source turn changed".to_string(),
+            });
+        };
+        let mut summary = Vec::new();
+        if let Some(found) = items.get(&(source.owner, id.clone())) {
+            for item_id in [&source.first_user, &source.final_agent]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(item) = found.get(item_id) {
+                    summary.push((item.ordinal, item.item.clone()));
+                }
+            }
+        }
+        summary.sort_by_key(|(ordinal, _)| *ordinal);
+        let metadata = &source.metadata;
+        let status = match &metadata.status {
+            TurnStatus::Completed => StoredTurnStatus::Completed,
+            TurnStatus::Interrupted => StoredTurnStatus::Interrupted,
+            TurnStatus::Failed => StoredTurnStatus::Failed,
+            TurnStatus::InProgress => StoredTurnStatus::InProgress,
+        };
+        output.push(StoredTurn {
+            turn_id: id,
+            root_turn_id: metadata.root_turn_id.clone(),
+            items: summary.into_iter().map(|(_, item)| item).collect(),
+            items_view: params.items_view,
+            status,
+            error: metadata.error.as_ref().map(|error| StoredTurnError {
+                message: error.message.clone(),
+                codex_error_info: error.codex_error_info.clone(),
+                additional_details: error.additional_details.clone(),
+            }),
+            started_at: metadata.started_at,
+            completed_at: metadata.completed_at,
+            duration_ms: metadata.duration_ms,
+        });
+    }
+    Ok(Some(TurnPage {
+        turns: output,
+        next_cursor,
+        backwards_cursor,
+    }))
 }
 
 pub(in crate::local) async fn resume_backwards_cursors(
@@ -148,15 +544,69 @@ pub(in crate::local) async fn resume_backwards_cursors(
     thread_id: ThreadId,
 ) -> ThreadStoreResult<(Option<String>, Option<String>)> {
     validate_thread_for_paginated_reads(store, thread_id, true, "list_turns").await?;
-    let lineage = match indexed_same_thread_lineage(store, thread_id).await? {
-        Some(lineage) => lineage,
-        None => {
-            store
-                .resolve_rollout_lineage_for_history_page(thread_id)
-                .await?
+    let item_params = ListItemsParams {
+        item_ids: None,
+        thread_id,
+        turn_id: None,
+        include_archived: true,
+        position: None,
+        page_size: 1,
+        sort_direction: crate::SortDirection::Desc,
+        sort_key: crate::ItemSortKey::CreatedAtOrdinal,
+        after_updated_at_ordinal: None,
+        before_updated_at_ordinal: None,
+    };
+    if let Some(cursors) = certified_resume_backwards_cursors(store, &item_params).await? {
+        return Ok(cursors);
+    }
+    if let Some(cursors) = source_resume_cursors(store, thread_id).await? {
+        return Ok(cursors);
+    }
+    let pool = store.thread_history_db().await?;
+    let lineage = if let Some(lineage) = indexed_same_thread_lineage(store, thread_id).await? {
+        lineage
+    } else {
+        match page_lazy_turn_rows(
+            store,
+            thread_id,
+            None,
+            1,
+            StoredTurnItemsView::NotLoaded,
+            /*require_lookahead*/ false,
+        )
+        .await?
+        {
+            LazyPage::Full(lineage) => lineage,
+            LazyPage::Page(_, turn_lineage) => {
+                match page_lazy_item_rows(store, &item_params, /*require_lookahead*/ false).await? {
+                    LazyPage::Page(_, item_lineage) => {
+                        if !same_walked_prefix(&turn_lineage, &item_lineage) {
+                            return Err(ThreadStoreError::Conflict {
+                                message: "history changed while preparing resume cursors"
+                                    .to_string(),
+                            });
+                        }
+                        if turn_lineage.segments().len() >= item_lineage.segments().len() {
+                            turn_lineage
+                        } else {
+                            item_lineage
+                        }
+                    }
+                    LazyPage::Full(lineage) => {
+                        if lineage.root_rollout_id() != turn_lineage.root_rollout_id()
+                            || lineage.leaf_path() != turn_lineage.leaf_path()
+                        {
+                            return Err(ThreadStoreError::Conflict {
+                                message: "selected rollout changed while preparing resume cursors"
+                                    .to_string(),
+                            });
+                        }
+                        lineage
+                    }
+                }
+            }
         }
     };
-    let pool = store.thread_history_db().await?;
     let turns = page_turn_rows(
         pool,
         thread_id,
@@ -167,24 +617,82 @@ pub(in crate::local) async fn resume_backwards_cursors(
         StoredTurnItemsView::NotLoaded,
     )
     .await?;
-    let items = page_item_rows(
-        pool,
-        &lineage,
-        &ListItemsParams {
-            item_ids: None,
-            thread_id,
-            turn_id: None,
-            include_archived: true,
-            position: None,
-            page_size: 1,
-            sort_direction: crate::SortDirection::Desc,
-            sort_key: crate::ItemSortKey::CreatedAtOrdinal,
-            after_updated_at_ordinal: None,
-            before_updated_at_ordinal: None,
-        },
-    )
-    .await?;
+    let items = page_item_rows(pool, &lineage, &item_params).await?;
     Ok((turns.backwards_cursor, items.backwards_cursor))
+}
+
+/// Derives both resume cursors from the same verified source lineage.
+async fn source_resume_cursors(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
+    let Some((graph, scan)) = uncertified_items::indexed_sources(store, thread_id).await? else {
+        return Ok(None);
+    };
+    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not read the selected rollout".to_string(),
+        });
+    };
+    let mut events = scan.turn_events.clone();
+    events.extend(root.turns);
+    events.sort_by_key(SourceTurnEvent::ordinal);
+    let (turns, _) = reduce_aggregate_sources(events)?;
+    let newest_turn = turns.values().map(|turn| turn.ordinal).max();
+    let mut creations: HashMap<(ThreadId, &str, &str), u64> = HashMap::new();
+    for anchor in scan.anchors.iter().chain(root.anchors.iter()) {
+        creations
+            .entry((
+                anchor.owner,
+                anchor.turn_id.as_str(),
+                anchor.item_id.as_str(),
+            ))
+            .and_modify(|ordinal| *ordinal = (*ordinal).min(anchor.ordinal))
+            .or_insert(anchor.ordinal);
+    }
+    let newest_item = creations.values().copied().max();
+    if newest_turn.is_none() && newest_item.is_none() {
+        return Ok(None);
+    }
+    let turn_cursor = newest_turn
+        .map(|ordinal| {
+            serialize_cursor(
+                thread_id,
+                graph.lineage.root_rollout_id(),
+                CursorScope::Turns,
+                sqlite_integer(ordinal, "rollout ordinal")?,
+                true,
+            )
+        })
+        .transpose()?;
+    let item_cursor = newest_item
+        .map(|ordinal| {
+            serialize_cursor(
+                thread_id,
+                graph.lineage.root_rollout_id(),
+                CursorScope::ItemsByCreatedAtOrdinal,
+                sqlite_integer(ordinal, "rollout ordinal")?,
+                true,
+            )
+        })
+        .transpose()?;
+    if !uncertified_items::sources_still_current(store, thread_id, &graph, &scan).await? {
+        return Err(ThreadStoreError::Conflict {
+            message: "rotated thread sources changed while preparing resume cursors".to_string(),
+        });
+    }
+    Ok(Some((turn_cursor, item_cursor)))
+}
+
+fn same_walked_prefix(left: &RolloutLineage, right: &RolloutLineage) -> bool {
+    left.root_rollout_id() == right.root_rollout_id()
+        && left.leaf_path() == right.leaf_path()
+        && left
+            .segments()
+            .iter()
+            .rev()
+            .zip(right.segments().iter().rev())
+            .all(|(left, right)| left == right)
 }
 
 async fn list_turns_from_lineage(
@@ -203,9 +711,19 @@ async fn list_turns_from_lineage(
         params.items_view,
     )
     .await?;
+    turns_from_page(store, params.items_view, lineage, page).await
+}
+
+async fn turns_from_page(
+    store: &LocalThreadStore,
+    items_view: StoredTurnItemsView,
+    lineage: &RolloutLineage,
+    page: SegmentPage<StoredTurnRow>,
+) -> ThreadStoreResult<TurnPage> {
+    let pool = store.thread_history_db().await?;
     let mut turns = Vec::with_capacity(page.rows.len());
     for turn in page.rows {
-        let items = match params.items_view {
+        let items = match items_view {
             StoredTurnItemsView::NotLoaded => Vec::new(),
             StoredTurnItemsView::Summary
                 if matches!(turn.status, StoredTurnStatus::Interrupted)
@@ -222,7 +740,7 @@ async fn list_turns_from_lineage(
             turn_id: turn.turn_id,
             root_turn_id: turn.root_turn_id,
             items,
-            items_view: params.items_view,
+            items_view,
             status: turn.status,
             error: turn.error,
             started_at: turn.started_at,
@@ -266,13 +784,57 @@ pub(in crate::local) async fn list_items(
         params.sort_direction = crate::SortDirection::Asc;
     }
     validate_page_size(params.page_size)?;
-    let lineage = match indexed_same_thread_lineage(store, params.thread_id).await? {
-        Some(lineage) => lineage,
-        None => {
-            store
-                .resolve_rollout_lineage_for_history_page(params.thread_id)
-                .await?
+    if let Some(page) = page_certified_single_owner_item_rows(store, &params).await? {
+        return match page {
+            LazyPage::Page(page, _) => Ok(ItemPage {
+                items: page.rows.into_iter().map(|row| row.item).collect(),
+                next_cursor: page.next_cursor,
+                backwards_cursor: page.backwards_cursor,
+            }),
+            LazyPage::Full(lineage) => {
+                let pool = store.thread_history_db().await?;
+                let page = page_item_rows(pool, &lineage, &params).await?;
+                Ok(ItemPage {
+                    items: page.rows.into_iter().map(|row| row.item).collect(),
+                    next_cursor: page.next_cursor,
+                    backwards_cursor: page.backwards_cursor,
+                })
+            }
+        };
+    }
+    if let Some(page) = source_backed_items(store, &params).await? {
+        return Ok(page);
+    }
+    let lineage = if let Some(lineage) =
+        indexed_same_thread_lineage(store, params.thread_id).await?
+    {
+        lineage
+    } else if params.sort_key == crate::ItemSortKey::CreatedAtOrdinal
+        && params.after_updated_at_ordinal.is_none()
+        && params.before_updated_at_ordinal.is_none()
+        && params.item_ids.is_none()
+        && params.page_size < i64::MAX as usize - 1
+        && (matches!(params.sort_direction, crate::SortDirection::Desc) || params.turn_id.is_some())
+    {
+        let page = if matches!(params.sort_direction, crate::SortDirection::Desc) {
+            page_lazy_item_rows(store, &params, /*require_lookahead*/ true).await?
+        } else {
+            page_certified_ascending_item_rows(store, &params).await?
+        };
+        match page {
+            LazyPage::Page(page, _) => {
+                return Ok(ItemPage {
+                    items: page.rows.into_iter().map(|row| row.item).collect(),
+                    next_cursor: page.next_cursor,
+                    backwards_cursor: page.backwards_cursor,
+                });
+            }
+            LazyPage::Full(lineage) => lineage,
         }
+    } else {
+        store
+            .resolve_rollout_lineage_for_history_page(params.thread_id)
+            .await?
     };
     let pool = store.thread_history_db().await?;
     let page = page_item_rows(pool, &lineage, &params).await?;
@@ -282,6 +844,268 @@ pub(in crate::local) async fn list_items(
         next_cursor: page.next_cursor,
         backwards_cursor: page.backwards_cursor,
     })
+}
+
+/// Pages turn items from selected source records rather than a partial SQLite key layout.
+pub(super) async fn source_backed_items(
+    store: &LocalThreadStore,
+    params: &ListItemsParams,
+) -> ThreadStoreResult<Option<ItemPage>> {
+    if params.turn_id.as_deref() == Some("") {
+        return Ok(None);
+    }
+    let turn_id = params.turn_id.as_deref();
+    if matches!(
+        params.position.as_ref(),
+        Some(ListItemsPosition::ItemAnchor { .. })
+    ) || params.item_ids.is_some()
+        || params.sort_key != crate::ItemSortKey::CreatedAtOrdinal
+        || params.after_updated_at_ordinal.is_some()
+        || params.before_updated_at_ordinal.is_some()
+    {
+        return Ok(None);
+    }
+    let Some((graph, scan)) = uncertified_items::indexed_sources(store, params.thread_id).await?
+    else {
+        return Ok(None);
+    };
+    let Some(root) = uncertified_items::scan_root_index(&graph, None).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not read the selected rollout".to_string(),
+        });
+    };
+    let cursor_text = match params.position.as_ref() {
+        Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
+        _ => None,
+    };
+    let cursor = parse_cursor(
+        cursor_text,
+        params.thread_id,
+        graph.lineage.root_rollout_id(),
+        CursorScope::ItemsByCreatedAtOrdinal,
+    )?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        graph
+            .lineage
+            .segments()
+            .iter()
+            .filter(|segment| segment.contains_ordinal(cursor.rollout_ordinal))
+            .count()
+            != 1
+    }) {
+        return Err(invalid_cursor(
+            "position outside or ambiguous in thread lineage",
+        ));
+    }
+    let selected_turns: std::collections::HashSet<String> = if let Some(turn) = turn_id {
+        [turn.to_string()].into_iter().collect()
+    } else {
+        let mut first: HashMap<(ThreadId, &str, &str), u64> = HashMap::new();
+        for anchor in scan.anchors.iter().chain(root.anchors.iter()) {
+            first
+                .entry((anchor.owner, &anchor.turn_id, &anchor.item_id))
+                .and_modify(|ordinal| *ordinal = (*ordinal).min(anchor.ordinal))
+                .or_insert(anchor.ordinal);
+        }
+        let mut candidates = first
+            .into_iter()
+            .filter(|(_, ordinal)| {
+                cursor.as_ref().is_none_or(|cursor| {
+                    match (params.sort_direction, cursor.include_anchor) {
+                        (crate::SortDirection::Asc, true) => *ordinal >= cursor.rollout_ordinal,
+                        (crate::SortDirection::Asc, false) => *ordinal > cursor.rollout_ordinal,
+                        (crate::SortDirection::Desc, true) => *ordinal <= cursor.rollout_ordinal,
+                        (crate::SortDirection::Desc, false) => *ordinal < cursor.rollout_ordinal,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, ordinal)| *ordinal);
+        if params.sort_direction == crate::SortDirection::Desc {
+            candidates.reverse();
+        }
+        candidates
+            .into_iter()
+            .take(params.page_size.saturating_add(1))
+            .map(|((_, turn, _), _)| turn.to_string())
+            .collect()
+    };
+    if selected_turns.is_empty() {
+        if scan.anchors.is_empty() && root.anchors.is_empty() {
+            return Ok(None);
+        }
+        if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await?
+        {
+            return Err(ThreadStoreError::Conflict {
+                message: "rotated thread sources changed while listing items".to_string(),
+            });
+        }
+        return Ok(Some(ItemPage {
+            items: Vec::new(),
+            next_cursor: None,
+            backwards_cursor: None,
+        }));
+    }
+    let mut owner_by_turn = HashMap::new();
+    for anchor in scan.anchors.iter().chain(root.anchors.iter()) {
+        if selected_turns.contains(&anchor.turn_id)
+            && owner_by_turn
+                .insert(anchor.turn_id.as_str(), anchor.owner)
+                .is_some_and(|owner| owner != anchor.owner)
+        {
+            return Ok(None);
+        }
+    }
+    let Some(events) =
+        uncertified_items::scan_selected_items(&graph, &scan, selected_turns.clone()).await?
+    else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not read selected turn items".to_string(),
+        });
+    };
+    let (_, items) = reduce_aggregate_sources(events)?;
+    let all = items
+        .into_iter()
+        .flat_map(|(_, items)| items.into_values())
+        .collect::<Vec<_>>();
+    if all.is_empty() {
+        // No canonical items were found; the compatibility reader does not certify SQLite.
+        return Ok(None);
+    }
+    let by_ordinal: HashMap<u64, &AggregateItem> =
+        all.iter().map(|item| (item.ordinal, item)).collect();
+    if by_ordinal.len() != all.len() {
+        return Err(ThreadStoreError::Conflict {
+            message: "ambiguous source item positions".to_string(),
+        });
+    }
+    if graph
+        .lineage
+        .segments()
+        .len()
+        .saturating_add(selected_turns.len())
+        > 900
+    {
+        return Err(ThreadStoreError::Internal {
+            message: "rotated history exceeds the SQLite comparison limit".to_string(),
+        });
+    }
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(super::thread_history_error)?;
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, started_at_ms, completed_at_ms, item_json FROM thread_items WHERE turn_id IN (",
+    );
+    let mut turns = query.separated(", ");
+    for turn in &selected_turns {
+        turns.push_bind(turn.clone());
+    }
+    turns.push_unseparated(") AND thread_id IN (");
+    let mut ids = query.separated(", ");
+    for segment in graph.lineage.segments() {
+        ids.push_bind(segment.rollout_id().to_string());
+    }
+    ids.push_unseparated(") LIMIT 40001");
+    let rows = query
+        .build()
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(super::thread_history_error)?;
+    if rows.len() > 40000 {
+        return Err(ThreadStoreError::Internal {
+            message: "rotated item projection exceeds the comparison limit".to_string(),
+        });
+    }
+    for row in rows {
+        let row = stored_thread_item_row(row)?;
+        let Some(expected) = u64::try_from(row.position.rollout_ordinal)
+            .ok()
+            .and_then(|ordinal| by_ordinal.get(&ordinal))
+        else {
+            continue;
+        };
+        if row.item.turn_id == expected.item.turn_id
+            && row.item.item_id == expected.item.item_id
+            && row.item.updated_at_ordinal == expected.item.updated_at_ordinal
+        {
+            match uncertified_items::compare_item_json(
+                &row.item.item_json,
+                &expected.item.item_json,
+            ) {
+                uncertified_items::ItemComparison::Equivalent => {}
+                uncertified_items::ItemComparison::Contradict => {
+                    return Err(ThreadStoreError::Conflict {
+                        message: "thread item projection disagrees with the selected rollout"
+                            .to_string(),
+                    });
+                }
+                uncertified_items::ItemComparison::Uncertain => {
+                    tracing::warn!(thread_id = %params.thread_id, "thread item representation differs; returning source item")
+                }
+            }
+        }
+    }
+    drop(by_ordinal);
+    let mut selected = all
+        .into_iter()
+        .filter(|item| {
+            cursor.as_ref().is_none_or(|cursor| {
+                match (params.sort_direction, cursor.include_anchor) {
+                    (crate::SortDirection::Asc, true) => item.ordinal >= cursor.rollout_ordinal,
+                    (crate::SortDirection::Asc, false) => item.ordinal > cursor.rollout_ordinal,
+                    (crate::SortDirection::Desc, true) => item.ordinal <= cursor.rollout_ordinal,
+                    (crate::SortDirection::Desc, false) => item.ordinal < cursor.rollout_ordinal,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|item| item.ordinal);
+    if params.sort_direction == crate::SortDirection::Desc {
+        selected.reverse();
+    }
+    let has_more = selected.len() > params.page_size;
+    selected.truncate(params.page_size);
+    let backwards_cursor = selected
+        .first()
+        .map(|item| {
+            serialize_cursor(
+                params.thread_id,
+                graph.lineage.root_rollout_id(),
+                CursorScope::ItemsByCreatedAtOrdinal,
+                sqlite_integer(item.ordinal, "rollout ordinal")?,
+                true,
+            )
+        })
+        .transpose()?;
+    let next_cursor = if has_more {
+        selected
+            .last()
+            .map(|item| {
+                serialize_cursor(
+                    params.thread_id,
+                    graph.lineage.root_rollout_id(),
+                    CursorScope::ItemsByCreatedAtOrdinal,
+                    sqlite_integer(item.ordinal, "rollout ordinal")?,
+                    false,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    if !uncertified_items::sources_still_current(store, params.thread_id, &graph, &scan).await? {
+        return Err(ThreadStoreError::Conflict {
+            message: "rotated thread sources changed while listing items".to_string(),
+        });
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(super::thread_history_error)?;
+    Ok(Some(ItemPage {
+        items: selected.into_iter().map(|item| item.item).collect(),
+        next_cursor,
+        backwards_cursor,
+    }))
 }
 
 /// Treats a fully projected root thread as one logical ordinal range instead of its segments.

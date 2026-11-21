@@ -32,6 +32,8 @@ enum OriginalRootResidency {
 struct OriginalRoot {
     control: LocalAgentControl,
     config: Config,
+    /// Trusted runtime country captured before unloading, or unknown for a cold root.
+    request_country: codex_protocol::RequestCountry,
     /// Live policy retained for rollback; cold roots have no persisted host cache policy.
     prompt_cache_key: Option<PromptCacheKey>,
     source: SessionSource,
@@ -167,6 +169,7 @@ impl LocalAgentControl {
                     OriginalRoot {
                         control: original_control,
                         config: original_config,
+                        request_country: codex_protocol::RequestCountry::UNKNOWN,
                         prompt_cache_key: Some(
                             thread
                                 .session
@@ -196,6 +199,7 @@ impl LocalAgentControl {
                     OriginalRoot {
                         control: original_control,
                         config: original_config,
+                        request_country: codex_protocol::RequestCountry::UNKNOWN,
                         prompt_cache_key: None,
                         source: stored_thread.source.clone(),
                         residency: OriginalRootResidency::Cold,
@@ -223,6 +227,7 @@ impl LocalAgentControl {
                     ));
                 }
                 original.instructions = Some(thread.session.inherited_instructions().await);
+                original.request_country = thread.config_snapshot().await.request_country;
                 Some(transition)
             }
             None => None,
@@ -274,6 +279,7 @@ impl LocalAgentControl {
                     .control
                     .resume_root_from_rollout(
                         original.config.clone(),
+                        original.request_country.clone(),
                         original.prompt_cache_key.clone(),
                         thread_id,
                         original.source.clone(),
@@ -302,6 +308,7 @@ impl LocalAgentControl {
                 ResumedThreadOwnership::Transfer,
                 original.instructions.clone(),
                 original.lifecycle.clone(),
+                /*request_country_override*/ None,
             )
             .await
         {
@@ -387,6 +394,7 @@ impl LocalAgentControl {
             .control
             .resume_root_from_rollout(
                 original.config.clone(),
+                original.request_country.clone(),
                 original.prompt_cache_key.clone(),
                 thread_id,
                 original.source.clone(),
@@ -448,6 +456,7 @@ impl LocalAgentControl {
             .await?;
         let mut config = thread.config().await.as_ref().clone();
         config.ephemeral = false;
+        let request_country = thread.config_snapshot().await.request_country;
         let original_instructions = thread.session.inherited_instructions().await;
         let prompt_cache_key = thread
             .session
@@ -465,8 +474,8 @@ impl LocalAgentControl {
         let promoted_root_source =
             load_agent_model_context(&state, thread_id, stored_thread.history_mode)
                 .await?
+                .items
                 .into_iter()
-                .flat_map(|context| context.items)
                 .find_map(|item| match item {
                     RolloutItem::SessionMeta(line) if !line.meta.source.is_non_root_agent() => {
                         Some(line.meta.source)
@@ -523,6 +532,7 @@ impl LocalAgentControl {
                         ResumedThreadOwnership::Transfer,
                         Some(original_instructions.clone()),
                         Some(Arc::clone(&lifecycle)),
+                        Some(request_country.clone()),
                     )
                     .await
             {
@@ -540,6 +550,7 @@ impl LocalAgentControl {
         if let Err(err) = root_control
             .resume_root_from_rollout(
                 config.clone(),
+                request_country.clone(),
                 Some(prompt_cache_key),
                 thread_id,
                 promoted_root_source,
@@ -565,6 +576,7 @@ impl LocalAgentControl {
                     ResumedThreadOwnership::Transfer,
                     Some(original_instructions.clone()),
                     Some(Arc::clone(&lifecycle)),
+                    Some(request_country.clone()),
                 )
                 .await
             {
@@ -598,6 +610,7 @@ impl LocalAgentControl {
                     ResumedThreadOwnership::Transfer,
                     Some(original_instructions.clone()),
                     Some(Arc::clone(&lifecycle)),
+                    Some(request_country.clone()),
                 )
                 .await
             {
@@ -632,6 +645,7 @@ impl LocalAgentControl {
                     ResumedThreadOwnership::Transfer,
                     Some(original_instructions),
                     Some(Arc::clone(&lifecycle)),
+                    Some(request_country),
                 )
                 .await
             {
@@ -656,6 +670,7 @@ impl LocalAgentControl {
     async fn resume_root_from_rollout(
         &self,
         config: Config,
+        request_country: codex_protocol::RequestCountry,
         prompt_cache_key: Option<PromptCacheKey>,
         thread_id: ThreadId,
         session_source: SessionSource,
@@ -670,9 +685,8 @@ impl LocalAgentControl {
                 include_history: false,
             })
             .await?;
-        let mut history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
-            .await?
-            .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        let mut history =
+            load_agent_model_context(&state, thread_id, stored_thread.history_mode).await?;
         normalize_resumed_session_metadata(
             &mut history.items,
             thread_id,
@@ -694,6 +708,7 @@ impl LocalAgentControl {
         let resumed = state
             .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
                 config,
+                request_country,
                 prompt_cache_key,
                 initial_history: InitialHistory::Resumed(ResumedHistory {
                     conversation_id: thread_id,
@@ -872,8 +887,8 @@ pub(super) async fn persisted_thread_workspace_roots(
     Ok(
         load_agent_model_context(state, stored_thread.thread_id, stored_thread.history_mode)
             .await?
+            .items
             .into_iter()
-            .flat_map(|context| context.items)
             .rev()
             .find_map(|item| match item {
                 RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {

@@ -3399,6 +3399,7 @@ mod tests {
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use codex_utils_path_uri::LegacyAppPathString;
+    use color_eyre::eyre::ContextCompat;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tempfile::TempDir;
