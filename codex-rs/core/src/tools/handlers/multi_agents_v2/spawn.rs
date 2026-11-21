@@ -1,14 +1,22 @@
 use super::*;
+use crate::agent::api::AgentInfo;
+use crate::agent::child_config::build_agent_resume_config;
+use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::types::MessageDeliveryMode;
 use crate::agent::types::SpawnAgentForkMode;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::thread_spawn::ThreadSpawnError;
 use crate::thread_spawn::ThreadSpawnRequest;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
+use crate::tools::handlers::multi_agents_spec::create_adopt_agent_tool;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use crate::turn_timing::now_unix_timestamp_ms;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
@@ -20,6 +28,11 @@ pub(crate) struct Handler {
     description_override: Option<String>,
 }
 
+/// Executes ownership transfer without changing the reserved spawn-agent contract.
+pub(crate) struct AdoptHandler {
+    hide_agent_metadata: bool,
+}
+
 impl Handler {
     pub(crate) fn new(
         options: SpawnAgentToolOptions,
@@ -28,6 +41,14 @@ impl Handler {
         Self {
             options,
             description_override,
+        }
+    }
+}
+
+impl AdoptHandler {
+    pub(crate) fn new(hide_agent_metadata: bool) -> Self {
+        Self {
+            hide_agent_metadata,
         }
     }
 }
@@ -51,7 +72,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
             let turn_id = invocation.step_context.turn.sub_id.clone();
             let call_id = invocation.call_id.clone();
             let started_at_ms = now_unix_timestamp_ms();
-            let result = handle_spawn_agent(invocation).await;
+            let result = handle_agent_start(invocation, AgentStartOperation::Spawn).await;
             let completed_at_ms = now_unix_timestamp_ms();
             let (status, receiver_thread_ids, agents_states) = match &result {
                 Ok((_, thread_id, agent_status, _)) => (
@@ -65,7 +86,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     Default::default(),
                 ),
             };
-            let agent_snapshot = result.as_ref().ok().map(|(_, _, _, snapshot)| snapshot);
+            let agent_snapshot = result
+                .as_ref()
+                .ok()
+                .and_then(|(_, _, _, snapshot)| snapshot.as_ref());
 
             analytics.track_collab_tool_call(
                 turn_id,
@@ -91,14 +115,40 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 }
 
-async fn handle_spawn_agent(
+impl ToolExecutor<ToolInvocation> for AdoptHandler {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("adopt_agent")
+    }
+
+    fn spec(&self) -> ToolSpec {
+        create_adopt_agent_tool(self.hide_agent_metadata)
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            handle_agent_start(invocation, AgentStartOperation::Adopt)
+                .await
+                .map(|(output, _, _, _)| boxed_tool_output(output))
+        })
+    }
+}
+
+/// Selects the contract-specific validation before the shared agent-start operation.
+#[derive(Clone, Copy)]
+enum AgentStartOperation {
+    Spawn,
+    Adopt,
+}
+
+async fn handle_agent_start(
     invocation: ToolInvocation,
+    operation: AgentStartOperation,
 ) -> Result<
     (
         SpawnAgentResult,
         ThreadId,
         AgentStatus,
-        ThreadConfigSnapshot,
+        Option<ThreadConfigSnapshot>,
     ),
     FunctionCallError,
 > {
@@ -113,7 +163,35 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let fork_mode = args.fork_mode()?;
+    if matches!(operation, AgentStartOperation::Adopt)
+        && !turn.config.multi_agent_v2.enable_thread_adoption
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
+                .to_string(),
+        ));
+    }
+    if matches!(operation, AgentStartOperation::Spawn) && args.existing_thread_id.is_some() {
+        return Err(FunctionCallError::RespondToModel(
+            "existing_thread_id is only accepted by frodex.adopt_agent".to_string(),
+        ));
+    }
+    let is_adoption = matches!(operation, AgentStartOperation::Adopt);
+    let adopted_thread_id = if is_adoption {
+        Some(args.existing_thread_id.ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "frodex.adopt_agent requires existing_thread_id".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let fork_mode = if is_adoption {
+        args.validate_adoption_options()?;
+        None
+    } else {
+        args.fork_mode()?
+    };
     let message = message_content(args.message)?;
     let role_name = args
         .agent_type
@@ -121,23 +199,55 @@ async fn handle_spawn_agent(
         .map(str::trim)
         .filter(|role| !role.is_empty());
 
-    let spawned = crate::thread_spawn::spawn(
-        &session,
-        &step_context,
-        &call_id,
-        ThreadSpawnRequest {
-            task_name: args.task_name,
-            message: agent_message_from_tool(message, &source),
-            fork_mode: fork_mode.clone(),
-            agent_type: args.agent_type.clone(),
-            model: args.model,
-            reasoning_effort: args.reasoning_effort,
-        },
-    )
-    .await
-    .map_err(|err| match err {
-        ThreadSpawnError::Preparation(message) => FunctionCallError::RespondToModel(message),
-        ThreadSpawnError::Backend(err) => {
+    let (spawned_agent, agent_snapshot, new_agent_path) = if let Some(thread_id) = adopted_thread_id
+    {
+        let config =
+            build_agent_resume_config(turn.as_ref()).map_err(FunctionCallError::RespondToModel)?;
+        let spawn_source = thread_spawn_source(
+            session.thread_id,
+            &turn.session_source,
+            next_thread_spawn_depth(&turn.session_source),
+            /*agent_role*/ None,
+            Some(args.task_name.clone()),
+        )?;
+        let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "adopted agent is missing a canonical task name".to_string(),
+            )
+        })?;
+        let author = turn
+            .session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let communication = agent_message_from_tool(message, &source).into_communication(
+            author,
+            new_agent_path.clone(),
+            MessageDeliveryMode::TriggerTurn,
+        );
+        let context =
+            AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
+        let spawned_agent = Box::pin(
+            session
+                .services
+                .local_agent_runtime
+                .control(session.session_id())
+                .adopt_agent_with_communication(
+                    config,
+                    thread_id,
+                    communication,
+                    context,
+                    spawn_source,
+                    crate::TurnStartOptions {
+                        parent_turn_id: Some(turn.sub_id.clone()),
+                        root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                        turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
+                        cyber_access_program: turn.cyber_access_program,
+                        ..Default::default()
+                    },
+                ),
+        )
+        .await
+        .map_err(|err| {
             record_collab_spawn_failure(
                 &turn.session_telemetry,
                 turn.config.apps_mcp_product_sku.as_deref(),
@@ -148,23 +258,67 @@ async fn handle_spawn_agent(
                 MultiAgentVersion::V2,
             );
             collab_spawn_error(err)
-        }
-    })?;
-    let spawned_agent = spawned.agent;
-    let agent_snapshot = spawned.config;
-    let new_agent_path = spawned.task_name;
+        })?;
+        let agent_snapshot = session
+            .services
+            .local_agent_runtime
+            .control(session.session_id())
+            .inspect_agent(spawned_agent.thread_id)
+            .await
+            .ok()
+            .and_then(|agent| match agent {
+                AgentInfo::Loaded { config, .. } => Some(*config),
+                AgentInfo::Unloaded(_) => None,
+            });
+        (spawned_agent, agent_snapshot, new_agent_path)
+    } else {
+        let spawned = crate::thread_spawn::spawn(
+            &session,
+            &step_context,
+            &call_id,
+            ThreadSpawnRequest {
+                task_name: args.task_name,
+                message: agent_message_from_tool(message, &source),
+                fork_mode: fork_mode.clone(),
+                agent_type: args.agent_type.clone(),
+                model: args.model,
+                reasoning_effort: args.reasoning_effort,
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            ThreadSpawnError::Preparation(message) => FunctionCallError::RespondToModel(message),
+            ThreadSpawnError::Backend(err) => {
+                record_collab_spawn_failure(
+                    &turn.session_telemetry,
+                    turn.config.apps_mcp_product_sku.as_deref(),
+                    &err,
+                    &call_id,
+                    &turn.sub_id,
+                    fork_mode.as_ref(),
+                    MultiAgentVersion::V2,
+                );
+                collab_spawn_error(err)
+            }
+        })?;
+        (spawned.agent, Some(spawned.config), spawned.task_name)
+    };
     let new_thread_id = spawned_agent.thread_id;
     let agent_status = spawned_agent.status;
     let nickname = agent_snapshot
-        .session_source
-        .get_nickname()
+        .as_ref()
+        .and_then(|snapshot| snapshot.session_source.get_nickname())
         .or(spawned_agent.metadata.agent_nickname);
     emit_sub_agent_activity(
         &session,
         turn,
         SubAgentActivityItem {
-            model: Some(agent_snapshot.model.clone()),
-            reasoning_effort: agent_snapshot.reasoning_effort.clone(),
+            model: agent_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.model.clone()),
+            reasoning_effort: agent_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.reasoning_effort.clone()),
             id: call_id,
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
@@ -198,11 +352,18 @@ impl CoreToolRuntime for Handler {
     }
 }
 
+impl CoreToolRuntime for AdoptHandler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
+    existing_thread_id: Option<ThreadId>,
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
@@ -211,6 +372,21 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
+    fn validate_adoption_options(&self) -> Result<(), FunctionCallError> {
+        if self.fork_turns.is_some()
+            || self.fork_context.is_some()
+            || self.agent_type.is_some()
+            || self.model.is_some()
+            || self.reasoning_effort.is_some()
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "existing_thread_id cannot be combined with fork, agent type, model, reasoning effort, or service tier overrides".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(

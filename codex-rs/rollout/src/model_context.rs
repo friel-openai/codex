@@ -133,6 +133,7 @@ impl ModelContextScan {
                     state.full && !self.active_segment.saw_compaction;
             }
             RolloutItem::EventMsg(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::RolloutReference(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
