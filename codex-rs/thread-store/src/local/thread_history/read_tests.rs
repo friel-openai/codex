@@ -1086,10 +1086,13 @@ fn copy_same_path_rotation(
 ) -> (ThreadId, std::path::PathBuf) {
     let predecessor_id = ThreadId::new();
     let named = codex_rollout::history_rollout_path_with_rollout_id(root, predecessor_id).unwrap();
+    let (year, month, day) = codex_rollout::rollout_date_parts(named.file_name().unwrap()).unwrap();
     let predecessor = home
         .join("sessions")
         .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
-        .join("2026/07/16")
+        .join(year)
+        .join(month)
+        .join(day)
         .join(named.file_name().unwrap());
     fs::create_dir_all(predecessor.parent().unwrap()).unwrap();
     fs::copy(root, &predecessor).unwrap();
@@ -1338,6 +1341,61 @@ async fn same_path_rotation_revalidates_replaced_or_truncated_copy() {
                 .iter()
                 .any(|anchor| anchor.item_id == "fresh-item")
         );
+    }
+}
+
+#[tokio::test]
+async fn same_path_rotation_revalidates_changes_during_extension() {
+    for change in ["predecessor", "root"] {
+        let (home, store, thread_id, root, _) =
+            persistent_source_scan_fixture_with_segments(4, Some(SegmentId::new()), None).await;
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, predecessor) =
+            copy_same_path_rotation(home.path(), &root, thread_id, 15, Some(SegmentId::new()));
+        let first = uncertified_items::inject_index_pause(thread_id);
+        let reader = store.clone();
+        let request = tokio::spawn(async move {
+            super::source_backed_items(
+                &reader,
+                &item_params(thread_id, Some("local"), None, 100, SortDirection::Desc),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(30), first.entered.notified())
+            .await
+            .expect("initial cached index validation");
+        let final_validation = uncertified_items::inject_index_pause(thread_id);
+        first.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), final_validation.entered.notified())
+            .await
+            .expect("extended index validation");
+        if change == "predecessor" {
+            let original = fs::read_to_string(&predecessor).unwrap();
+            let changed = original.replace("local-item", "fresh-item");
+            assert_eq!(original.len(), changed.len());
+            let replacement = home.path().join("replacement");
+            fs::write(&replacement, changed).unwrap();
+            fs::rename(replacement, &predecessor).unwrap();
+        } else {
+            copy_same_path_rotation(home.path(), &root, thread_id, 16, Some(SegmentId::new()));
+            append_timeline_record(
+                &root,
+                17,
+                timeline_user_item(thread_id, "local", "new-root", "new"),
+            );
+        }
+        final_validation.release.notify_one();
+        match request.await.unwrap() {
+            Err(ThreadStoreError::Conflict { .. }) => {}
+            Ok(Some(page)) if change == "predecessor" => {
+                assert_eq!(item_ids(&page), ["fresh-item"]);
+            }
+            Ok(Some(page)) => assert_eq!(item_ids(&page), ["new-root", "local-item"]),
+            _ => panic!("{change} must return a current page or a conflict"),
+        }
     }
 }
 
