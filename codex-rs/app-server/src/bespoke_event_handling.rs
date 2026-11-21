@@ -1589,6 +1589,7 @@ fn raw_response_item_completed_notification(
             thread_id: conversation_id.to_string(),
             turn_id: turn_id.to_string(),
             item: thread_item,
+            content_token_count: None,
             completed_at_ms: now_unix_timestamp_ms(),
         };
         return ServerNotification::ItemCompleted(notification);
@@ -1615,6 +1616,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
             .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
         text,
         phase: Some(MessagePhase::Commentary),
+        moderation: None,
         delivery: None,
         questions: None,
         memory_citation: None,
