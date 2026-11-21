@@ -1,5 +1,5 @@
 diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
-index ccbfd28d238bfc8a86b7a4404ab71124c17a805f..5be67d45fa0fe35407ef241616bb335da68e5b9b 100644
+index ccbfd28d238bfc8a86b7a4404ab71124c17a805f..5e539af7209c6cbfa891558ce5c86b9ed75c5b13 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read.rs
 @@ -1,4 +1,5 @@
@@ -115,3 +115,18 @@ index ccbfd28d238bfc8a86b7a4404ab71124c17a805f..5be67d45fa0fe35407ef241616bb335d
      }
      let (initial, _) = reduce_aggregate_sources(events.clone())?;
      if initial.is_empty() && !scan.attached {
+@@ -712,6 +759,14 @@ async fn source_resume_cursors(
+     let mut events = scan.turn_events.clone();
+     events.extend(root.turns);
+     events.sort_by_key(SourceTurnEvent::ordinal);
++    if !normalize_inherited_fork_interruptions(
++        &mut events,
++        graph.lineage.segments(),
++        &scan.anchors,
++        &root.anchors,
++    ) {
++        return Ok(None);
++    }
+     let (turns, _) = reduce_aggregate_sources(events)?;
+     let newest_turn = turns.values().map(|turn| turn.ordinal).max();
+     let mut creations: HashMap<(ThreadId, &str, &str), u64> = HashMap::new();
