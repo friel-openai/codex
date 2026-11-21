@@ -775,6 +775,307 @@ async fn paginated_rotation_installs_the_exact_source_bytes() {
     assert_eq!(sqlite_less_active, active_path);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_writer_seeds_certificate_only_for_empty_nonforked_projection() {
+    let home = TempDir::new().expect("temp dir");
+    let store = state_backed_store(home.path()).await;
+    let fresh = ThreadId::new();
+    Box::pin(store.create_thread(create_params(fresh, ThreadHistoryMode::Paginated)))
+        .await
+        .unwrap();
+    Box::pin(store.persist_thread(fresh, PersistContext::Standard))
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(store.has_current_history_certificate(fresh))
+            .await
+            .unwrap()
+    );
+    Box::pin(append_turn(&store, fresh, "turn", "item", "source item")).await;
+    Box::pin(store.flush_thread(fresh)).await.unwrap();
+    assert!(
+        Box::pin(store.has_current_history_certificate(fresh))
+            .await
+            .unwrap()
+    );
+
+    let fork = ThreadId::new();
+    let mut params = create_params(fork, ThreadHistoryMode::Paginated);
+    params.forked_from_id = Some(fresh);
+    Box::pin(store.create_thread(params)).await.unwrap();
+    Box::pin(store.persist_thread(fork, PersistContext::Standard))
+        .await
+        .unwrap();
+    assert!(
+        !Box::pin(store.has_current_history_certificate(fork))
+            .await
+            .unwrap()
+    );
+
+    let tainted = ThreadId::new();
+    Box::pin(store.create_thread(create_params(tainted, ThreadHistoryMode::Paginated)))
+        .await
+        .unwrap();
+    let pool = store.thread_history_db().await.unwrap();
+    sqlx::query("INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status) VALUES (?, 'forged', 7, 'completed')")
+        .bind(tainted.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    Box::pin(store.persist_thread(tainted, PersistContext::Standard))
+        .await
+        .unwrap();
+    assert!(
+        !Box::pin(store.has_current_history_certificate(tainted))
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_rotation_retains_certified_lineage_until_source_changes() {
+    let home = TempDir::new().expect("temp dir");
+    let store = state_backed_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .expect("create paginated thread");
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist metadata");
+    append_turn(&store, thread_id, "before", "before-item", "before").await;
+    store.flush_thread(thread_id).await.expect("flush");
+    assert!(
+        store
+            .rebuild_history_projection_with_certificate(thread_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .has_current_history_certificate(thread_id)
+            .await
+            .unwrap()
+    );
+
+    let frozen = store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .await
+        .expect("rotate certified source");
+    let boundary = frozen.history_base.expect("native cutoff");
+    assert_eq!(
+        boundary.end_ordinal_exclusive,
+        frozen.next_rollout_ordinal.unwrap()
+    );
+    assert_eq!(
+        boundary.end_byte_offset,
+        std::fs::metadata(&frozen.reference.rollout_path)
+            .unwrap()
+            .len()
+    );
+    assert!(
+        store
+            .has_current_history_certificate(thread_id)
+            .await
+            .unwrap(),
+        "rotation must carry the source-bound certificate"
+    );
+    append_turn(&store, thread_id, "after", "after-item", "after").await;
+    store
+        .flush_thread(thread_id)
+        .await
+        .expect("flush appended turn");
+    assert!(
+        store
+            .has_current_history_certificate(thread_id)
+            .await
+            .unwrap(),
+        "writer append must retain the certificate"
+    );
+
+    tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&frozen.reference.rollout_path)
+        .await
+        .unwrap()
+        .write_all(b"\n")
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .has_current_history_certificate(thread_id)
+            .await
+            .unwrap(),
+        "changed predecessor must invalidate the certificate"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rotation_pending_certificate_rejects_intervening_sqlite_and_source_changes() {
+    for mutation in 0..6 {
+        let home = TempDir::new().unwrap();
+        let store = Arc::new(state_backed_store(home.path()).await);
+        let thread_id = ThreadId::new();
+        store
+            .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+            .await
+            .unwrap();
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .unwrap();
+        append_turn(&store, thread_id, "before", "item", "source").await;
+        store.flush_thread(thread_id).await.unwrap();
+        assert!(
+            store
+                .rebuild_history_projection_with_certificate(thread_id)
+                .await
+                .unwrap()
+        );
+
+        let pause = super::inject_rotation_projection_pause(thread_id);
+        let rotating_store = Arc::clone(&store);
+        let rotation = tokio::spawn(async move {
+            rotating_store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
+            .await
+            .unwrap();
+        let pool = store.thread_history_db().await.unwrap();
+        let proof: String = sqlx::query_scalar(
+            "SELECT proof_json FROM frodex_history_lineage_proofs WHERE root_id = ?",
+        )
+        .bind(thread_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let mut proof: serde_json::Value = serde_json::from_str(&proof).unwrap();
+        assert_eq!(proof["version"], 2);
+        let root = std::path::Path::new(proof["root_path"].as_str().unwrap());
+        assert!(
+            !super::super::thread_history::certificate_is_current(&store, thread_id, root)
+                .await
+                .unwrap()
+        );
+        if mutation == 1 {
+            let sources = proof["sources"].as_array().unwrap();
+            let frozen = sources[sources.len() - 2]["path"].as_str().unwrap();
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(frozen)
+                .await
+                .unwrap()
+                .write_all(b"\n")
+                .await
+                .unwrap();
+        } else if mutation == 0 {
+            sqlx::query("INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status) VALUES (?, 'intervening', 0, 'completed')")
+                .bind(thread_id.to_string()).execute(pool).await.unwrap();
+        } else if mutation < 4 {
+            let sources = proof["sources"].as_array_mut().unwrap();
+            let index = sources.len() - 2;
+            let field = if mutation == 2 {
+                "end_ordinal"
+            } else {
+                "end_byte_offset"
+            };
+            let old = sources[index][field].as_u64().unwrap();
+            sources[index][field] = serde_json::json!(old + 1);
+            sqlx::query(
+                "UPDATE frodex_history_lineage_proofs SET proof_json = ? WHERE root_id = ?",
+            )
+            .bind(serde_json::to_string(&proof).unwrap())
+            .bind(thread_id.to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        } else {
+            let sources = proof["sources"].as_array().unwrap();
+            let frozen =
+                std::path::PathBuf::from(sources[sources.len() - 2]["path"].as_str().unwrap());
+            let bytes = tokio::fs::read(&frozen).await.unwrap();
+            tokio::fs::rename(&frozen, frozen.with_extension("unavailable"))
+                .await
+                .unwrap();
+            if mutation == 4 {
+                tokio::fs::write(&frozen, bytes).await.unwrap();
+            }
+        }
+        pause.release.notify_one();
+        rotation.await.unwrap().unwrap();
+        assert!(
+            !store
+                .has_current_history_certificate(thread_id)
+                .await
+                .unwrap()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rotation_rejects_same_inode_rewrite_before_publication() {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let home = TempDir::new().unwrap();
+    let store = Arc::new(state_backed_store(home.path()).await);
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .unwrap();
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .unwrap();
+    append_turn(&store, thread_id, "before", "item", "source").await;
+    store.flush_thread(thread_id).await.unwrap();
+    assert!(
+        store
+            .rebuild_history_projection_with_certificate(thread_id)
+            .await
+            .unwrap()
+    );
+    let source = store.live_rollout_path(thread_id).await.unwrap();
+    let before = std::fs::metadata(&source).unwrap();
+    let pause = super::inject_rotation_publication_pause(thread_id);
+    let rotating_store = Arc::clone(&store);
+    let rotation = tokio::spawn(async move {
+        rotating_store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+    assert_eq!(file.write_at(b"X", 0).unwrap(), 1);
+    let after = file.metadata().unwrap();
+    assert_eq!(
+        (before.dev(), before.ino(), before.len()),
+        (after.dev(), after.ino(), after.len())
+    );
+    pause.release.notify_one();
+    rotation.await.unwrap().unwrap();
+    assert!(
+        !store
+            .has_current_history_certificate(thread_id)
+            .await
+            .unwrap()
+    );
+}
+
 const SEGMENT_ROTATION_CRASH_HOME_ENV: &str = "FRODEX_SEGMENT_ROTATION_CRASH_HOME";
 const PROJECTION_REBUILD_CRASH_HOME_ENV: &str = "FRODEX_PROJECTION_REBUILD_CRASH_HOME";
 
@@ -826,6 +1127,17 @@ async fn segment_rotation_process_crash_child() {
         "before segment process death",
     )
     .await;
+    if std::env::var(SEGMENT_ROTATION_CRASH_BOUNDARY_ENV).as_deref()
+        == Ok("rotation_pending_before_projection")
+    {
+        store.flush_thread(thread_id).await.unwrap();
+        assert!(
+            store
+                .rebuild_history_projection_with_certificate(thread_id)
+                .await
+                .unwrap()
+        );
+    }
     store
         .freeze_thread_segment(
             thread_id,
@@ -851,6 +1163,7 @@ async fn segment_rotation_process_death_recovers_every_boundary() {
         ("checkpoint_recorded_before_flush", false),
         ("staged_rollout_durable_before_publication", false),
         ("stable_rollout_published_before_projection", true),
+        ("rotation_pending_before_projection", true),
     ];
 
     for (boundary, published) in boundaries {
@@ -887,6 +1200,21 @@ async fn segment_rotation_process_death_recovers_every_boundary() {
             .expect("read selected thread")
             .expect("selected thread metadata");
         let stable_path = metadata.rollout_path;
+        if boundary == "rotation_pending_before_projection" {
+            let pool = restarted.thread_history_db().await.unwrap();
+            let version: i64 = sqlx::query_scalar("SELECT json_extract(proof_json, '$.version') FROM frodex_history_lineage_proofs WHERE root_id = ?")
+                .bind(thread_id.to_string()).fetch_one(pool).await.unwrap();
+            assert_eq!(version, 2);
+            assert!(
+                !super::super::thread_history::certificate_is_current(
+                    &restarted,
+                    thread_id,
+                    &stable_path
+                )
+                .await
+                .unwrap()
+            );
+        }
         let recovered =
             codex_rollout::materialize_rollout_items(home.path(), stable_path.as_path())
                 .await

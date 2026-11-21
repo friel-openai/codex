@@ -67,6 +67,204 @@ impl FileIdentity {
 
 const MAX_APPEND_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Version two is a rotation awaiting projection of its new root and is never readable.
+const PENDING_ROTATION_VERSION: u8 = 2;
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn prepare_rotation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    root_id: codex_protocol::ThreadId,
+    root_path: &Path,
+    previous_identity: &FileIdentity,
+    previous_file: &tokio::fs::File,
+    frozen_path: &Path,
+    boundary: codex_protocol::protocol::HistoryPosition,
+) -> ThreadStoreResult<Option<ProjectionCertificate>> {
+    let id = root_id.to_string();
+    let Some(encoded) = sqlx::query_scalar::<_, String>(
+        "SELECT proof_json FROM frodex_history_lineage_proofs WHERE root_id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(thread_history_error)?
+    else {
+        return Ok(None);
+    };
+    let Ok(mut proof) = serde_json::from_str::<ProjectionCertificate>(&encoded) else {
+        return Ok(None);
+    };
+    if proof.version != 1
+        || proof.root_rollout_id != root_id
+        || proof.root_path != root_path
+        || !proof_storage_is_valid(transaction, &id, &proof).await?
+        || proof
+            .sources
+            .iter()
+            .any(|source| source.owner_id != root_id)
+        || boundary.thread_id == root_id
+        || proof
+            .sources
+            .iter()
+            .any(|source| source.rollout_id == boundary.thread_id)
+    {
+        return Ok(None);
+    }
+    let Some(expected_digest) = proof.root_sha256 else {
+        return Ok(None);
+    };
+    let Some((previous_digest, after_publication)) = hash_open_file(previous_file).await else {
+        return Ok(None);
+    };
+    if previous_digest != expected_digest
+        || after_publication.device != previous_identity.device
+        || after_publication.inode != previous_identity.inode
+        || after_publication.size != previous_identity.size
+    {
+        return Ok(None);
+    }
+    let Some((old_root, ancestors)) = proof.sources.split_last() else {
+        return Ok(None);
+    };
+    if old_root.path != root_path
+        || old_root.rollout_id != root_id
+        || &old_root.identity != previous_identity
+        || old_root.end_ordinal.is_some()
+        || old_root
+            .end_byte_offset
+            .is_some_and(|end| end != previous_identity.size)
+        || boundary.end_byte_offset != previous_identity.size
+        || boundary.end_ordinal_exclusive < old_root.start_ordinal
+    {
+        return Ok(None);
+    }
+    for source in ancestors {
+        let Ok(meta) = tokio::fs::symlink_metadata(&source.path).await else {
+            return Ok(None);
+        };
+        if file_identity(&meta).as_ref() != Some(&source.identity) {
+            return Ok(None);
+        }
+    }
+    let Some((_, _, frozen_digest, frozen_identity)) = hash_leaf(frozen_path, 0).await else {
+        return Ok(None);
+    };
+    if frozen_digest != expected_digest
+        || frozen_identity.size != boundary.end_byte_offset
+        || codex_rollout::rollout_id_from_path(frozen_path) != Some(boundary.thread_id)
+    {
+        return Ok(None);
+    }
+    let Ok(meta) = codex_rollout::read_session_meta_line_exact(root_path).await else {
+        return Ok(None);
+    };
+    if meta.meta.id != root_id
+        || meta.meta.history_mode != codex_protocol::protocol::ThreadHistoryMode::Paginated
+        || meta.meta.history_base != Some(boundary)
+        || meta.meta.forked_from_id.is_some()
+        || meta.meta.attached_thread
+        || meta.meta.subagent_history_start_ordinal.is_some()
+        || !strict_source_records(root_path, None).await?
+    {
+        return Ok(None);
+    }
+    let Some((_, _, root_digest, root_identity)) = hash_leaf(root_path, 0).await else {
+        return Ok(None);
+    };
+    let old_root = proof.sources.last_mut().expect("checked nonempty");
+    old_root.path = frozen_path.to_owned();
+    old_root.rollout_id = boundary.thread_id;
+    old_root.end_ordinal = Some(boundary.end_ordinal_exclusive);
+    old_root.end_byte_offset = Some(boundary.end_byte_offset);
+    old_root.identity = frozen_identity;
+    proof.sources.push(CertifiedSource {
+        owner_id: root_id,
+        rollout_id: root_id,
+        path: root_path.to_owned(),
+        start_ordinal: boundary.end_ordinal_exclusive,
+        end_ordinal: None,
+        end_byte_offset: None,
+        identity: root_identity,
+    });
+    proof.version = PENDING_ROTATION_VERSION;
+    proof.root_sha256 = Some(root_digest);
+    Ok(Some(proof))
+}
+
+/// Certifies a fresh single-file writer projection built entirely from its durable source.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn prepare_initial_root(
+    store: &LocalThreadStore,
+    transaction: &mut Transaction<'_, Sqlite>,
+    thread_id: codex_protocol::ThreadId,
+    path: &Path,
+    start_offset: u64,
+    next_offset: u64,
+    projections: &[super::RolloutProjectionStep],
+    captured_leaf: &FileIdentity,
+    source_sha256: [u8; 32],
+) -> ThreadStoreResult<Option<ProjectionCertificate>> {
+    if start_offset != 0
+        || next_offset == 0
+        || next_offset != captured_leaf.size
+        || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        || codex_rollout::rollout_id_from_path(path) != Some(thread_id)
+        || projections
+            .iter()
+            .any(|step| !matches!(step, super::RolloutProjectionStep::Line(_)))
+    {
+        return Ok(None);
+    }
+    let id = thread_id.to_string();
+    for table in ["thread_items", "thread_turns", "thread_realtime_items"] {
+        let query = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE thread_id = ?)");
+        let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            .bind(&id)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(thread_history_error)?;
+        if exists != 0 {
+            return Ok(None);
+        }
+    }
+    let meta = match codex_rollout::read_session_meta_line_exact(path).await {
+        Ok(meta) => meta.meta,
+        Err(_) => return Ok(None),
+    };
+    if meta.id != thread_id
+        || meta.history_mode != codex_protocol::protocol::ThreadHistoryMode::Paginated
+        || meta.history_base.is_some()
+        || meta.forked_from_id.is_some()
+        || meta.attached_thread
+        || meta.subagent_history_start_ordinal.is_some()
+        || !strict_source_records(path, None).await?
+    {
+        return Ok(None);
+    }
+    super::super::live_writer::require_selected_rollout_path(store, thread_id, path).await?;
+    let Some((_, _, digest, identity)) = hash_leaf(path, 0).await else {
+        return Ok(None);
+    };
+    if digest != source_sha256 || &identity != captured_leaf {
+        return Ok(None);
+    }
+    Ok(Some(ProjectionCertificate {
+        version: 1,
+        root_rollout_id: thread_id,
+        root_path: path.to_path_buf(),
+        sources: vec![CertifiedSource {
+            owner_id: thread_id,
+            rollout_id: thread_id,
+            path: path.to_path_buf(),
+            start_ordinal: 0,
+            end_ordinal: None,
+            end_byte_offset: None,
+            identity,
+        }],
+        root_sha256: Some(digest),
+    }))
+}
+
 #[cfg(unix)]
 pub(super) fn file_identity(metadata: &std::fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
@@ -91,6 +289,33 @@ pub(in crate::local) async fn leaf_identity(path: &Path) -> Option<FileIdentity>
     file_identity(&tokio::fs::symlink_metadata(path).await.ok()?)
 }
 
+/// Rechecks the unlinked previous root after publication, including its exact bytes.
+async fn hash_open_file(file: &tokio::fs::File) -> Option<([u8; 32], FileIdentity)> {
+    use tokio::io::AsyncSeekExt;
+    let before = file_identity(&file.metadata().await.ok()?)?;
+    if before.size > MAX_APPEND_PROOF_BYTES {
+        return None;
+    }
+    let mut file = file.try_clone().await.ok()?;
+    file.seek(std::io::SeekFrom::Start(0)).await.ok()?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).await.ok()?;
+        if count == 0 {
+            break;
+        }
+        size = size.checked_add(count as u64)?;
+        digest.update(&buffer[..count]);
+    }
+    let after = file_identity(&file.metadata().await.ok()?)?;
+    if before != after || size != before.size {
+        return None;
+    }
+    Some((digest.finalize().into(), after))
+}
+
 /// Hashes the exact leaf and its old prefix while rejecting replacement or concurrent writes.
 async fn hash_leaf(
     path: &Path,
@@ -108,7 +333,7 @@ async fn hash_leaf(
     let mut prefix = sha2::Sha256::new();
     let mut suffix = sha2::Sha256::new();
     let mut offset = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let count = file.read(&mut buffer).await.ok()?;
         if count == 0 {
@@ -276,6 +501,7 @@ async fn strict_source_records(path: &Path, end: Option<u64>) -> ThreadStoreResu
 /// Retains a verified ancestor projection only for a participating, append-only leaf write.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_leaf_refresh(
+    store: &LocalThreadStore,
     transaction: &mut Transaction<'_, Sqlite>,
     root_id: &str,
     path: &Path,
@@ -311,7 +537,19 @@ pub(super) async fn prepare_leaf_refresh(
     let Ok(mut proof) = serde_json::from_str::<ProjectionCertificate>(&encoded) else {
         return Ok(None);
     };
-    if proof.version != 1
+    let pending_rotation = proof.version == PENDING_ROTATION_VERSION;
+    if pending_rotation {
+        let Ok(thread_id) = codex_protocol::ThreadId::from_string(root_id) else {
+            return Ok(None);
+        };
+        if super::super::live_writer::require_selected_rollout_path(store, thread_id, path)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+    }
+    if !(proof.version == 1 || pending_rotation)
         || proof.root_rollout_id.to_string() != root_id
         || proof.root_path != path
         || proof.sources.is_empty()
@@ -325,8 +563,34 @@ pub(super) async fn prepare_leaf_refresh(
     let Some((root, ancestors)) = proof.sources.split_last_mut() else {
         return Ok(None);
     };
-    if root.path != path || root.end_ordinal.is_some() || root.identity.size != start_offset {
+    if root.path != path
+        || root.end_ordinal.is_some()
+        || if pending_rotation {
+            start_offset != 0
+        } else {
+            root.identity.size != start_offset
+        }
+    {
         return Ok(None);
+    }
+    if pending_rotation {
+        let Some(frozen) = ancestors.last() else {
+            return Ok(None);
+        };
+        let Ok(meta) = codex_rollout::read_session_meta_line_exact(path).await else {
+            return Ok(None);
+        };
+        let Some(boundary) = meta.meta.history_base else {
+            return Ok(None);
+        };
+        if boundary.thread_id != frozen.rollout_id
+            || Some(boundary.end_ordinal_exclusive) != frozen.end_ordinal
+            || Some(boundary.end_byte_offset) != frozen.end_byte_offset
+            || boundary.end_byte_offset != frozen.identity.size
+            || boundary.end_ordinal_exclusive != root.start_ordinal
+        {
+            return Ok(None);
+        }
     }
     for source in ancestors.iter() {
         let Ok(metadata) = tokio::fs::symlink_metadata(&source.path).await else {
@@ -339,8 +603,11 @@ pub(super) async fn prepare_leaf_refresh(
     let Some((prefix, suffix, digest, identity)) = hash_leaf(path, start_offset).await else {
         return Ok(None);
     };
-    if prefix != old_sha256
-        || suffix != source_sha256
+    if (if pending_rotation {
+        digest != old_sha256 || identity != root.identity
+    } else {
+        prefix != old_sha256
+    }) || suffix != source_sha256
         || &identity != captured_leaf
         || identity.size != next_offset
         || identity.device != root.identity.device
@@ -389,6 +656,7 @@ pub(super) async fn prepare_leaf_refresh(
     }
     root.identity = identity;
     proof.root_sha256 = Some(digest);
+    proof.version = 1;
     Ok(Some(proof))
 }
 
