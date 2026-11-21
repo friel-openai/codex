@@ -735,7 +735,7 @@ mod tests {
                 history_base: None,
                 persistence_mode: Default::default(),
                 initial_rollout_ordinal: 0,
-                initial_window_id: "workspace-test-window".to_string(),
+                initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
                 runtime_workspace_roots: None,
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(fixture.primary.as_path().to_path_buf()),
