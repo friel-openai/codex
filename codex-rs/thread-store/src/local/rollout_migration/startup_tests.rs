@@ -180,6 +180,337 @@ async fn indexed_store(home: &Path) -> LocalThreadStore {
     LocalThreadStore::new(config, Some(state_db))
 }
 
+#[cfg(unix)]
+async fn inspect_cached(
+    home: &Path,
+    path: &Path,
+    cache: &mut super::super::lineage::LineageInspectionCache,
+) -> crate::ThreadStoreResult<bool> {
+    super::super::lineage::contains_convertible_rollout_reference_cached(home, path, cache).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_paginated_ancestors_are_inspected_once_per_startup_pass() {
+    const ANCESTORS: usize = 16;
+    const THREADS: usize = 48;
+
+    let home = TempDir::new().expect("create Codex home");
+    let mut predecessor = ThreadId::new();
+    write_rollout(home.path(), predecessor, ThreadHistoryMode::Paginated);
+    for ordinal in 1..ANCESTORS {
+        let thread_id = ThreadId::new();
+        let path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
+        set_history_base(
+            &path,
+            HistoryPosition {
+                thread_id: predecessor,
+                end_ordinal_exclusive: ordinal as u64,
+                end_byte_offset: ordinal as u64,
+            },
+        );
+        predecessor = thread_id;
+    }
+    let mut paths = Vec::new();
+    for _ in 0..THREADS {
+        let path = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
+        set_history_base(
+            &path,
+            HistoryPosition {
+                thread_id: predecessor,
+                end_ordinal_exclusive: ANCESTORS as u64,
+                end_byte_offset: ANCESTORS as u64,
+            },
+        );
+        paths.push(path);
+    }
+
+    let mut cache = super::super::lineage::LineageInspectionCache::default();
+    for path in &paths {
+        assert!(
+            !super::super::lineage::contains_convertible_rollout_reference_cached(
+                home.path(),
+                path,
+                &mut cache,
+            )
+            .await
+            .expect("inspect paginated ancestry")
+        );
+    }
+    let stats = cache.stats();
+    eprintln!("shared ancestry inspection: {stats:?}");
+    assert_eq!(stats.path_indexes, 1);
+    assert_eq!(stats.source_reads, ANCESTORS + THREADS);
+    assert!(stats.walk_steps <= ANCESTORS + 2 * THREADS);
+    assert_eq!(stats.source_validations, THREADS * (ANCESTORS + 1));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cached_startup_inspection_detects_in_place_edits_and_replacements() {
+    let home = TempDir::new().expect("create Codex home");
+    let ancestor_id = ThreadId::new();
+    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
+    let original = fs::read(&ancestor).expect("read original ancestor");
+    prepend_rollout_reference(
+        &ancestor,
+        RolloutReferenceItem {
+            rollout_id: Some(ThreadId::new()),
+            rollout_path: home.path().join("legacy-parent.jsonl"),
+            thread_id: Some(ThreadId::new()),
+            rollout_timestamp: None,
+            segment_id: Some(SegmentId::new()),
+            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        },
+    );
+    let reference = fs::read(&ancestor).expect("read reference-backed ancestor");
+    assert!(reference.len() > original.len());
+    let mut padded_original = original;
+    padded_original.resize(reference.len(), b' ');
+    fs::write(&ancestor, &padded_original).expect("restore equal-length ancestor");
+    let descendant_id = ThreadId::new();
+    let descendant = write_rollout(home.path(), descendant_id, ThreadHistoryMode::Paginated);
+    set_history_base(
+        &descendant,
+        HistoryPosition {
+            thread_id: ancestor_id,
+            end_ordinal_exclusive: 2,
+            end_byte_offset: 1,
+        },
+    );
+    let mut cache = super::super::lineage::LineageInspectionCache::default();
+    assert!(
+        !inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("inspect original")
+    );
+
+    // An older process can edit a predecessor without changing any directory entry.
+    fs::write(&ancestor, &reference).expect("rewrite ancestor in place");
+    assert_eq!(
+        fs::metadata(&ancestor).expect("metadata").len(),
+        reference.len() as u64
+    );
+    assert!(
+        inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("detect in-place rewrite")
+    );
+    assert!(
+        inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("cache rewritten lineage")
+    );
+
+    let replacement = ancestor.with_extension("replacement");
+    fs::write(&replacement, &padded_original).expect("write replacement");
+    fs::rename(&replacement, &ancestor).expect("replace ancestor");
+    assert!(
+        !inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("detect replacement")
+    );
+    fs::remove_file(&ancestor).expect("remove ancestor");
+    assert!(
+        inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .is_err()
+    );
+    fs::write(&ancestor, &reference).expect("restore ancestor");
+    assert!(
+        inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("detect restored ancestor")
+    );
+
+    let reference_text = String::from_utf8(reference).expect("reference is UTF-8");
+    let mut lines = reference_text.lines();
+    let metadata = lines.next().expect("session metadata");
+    let mut reference_line =
+        codex_rollout::parse_rollout_line(lines.next().expect("reference record"))
+            .expect("parse reference");
+    let RolloutItem::RolloutReference(reference) = &mut reference_line.item else {
+        panic!("expected a rollout reference");
+    };
+    reference.nth_user_message = Some(1);
+    let mut filtered = format!(
+        "{metadata}\n{}\n",
+        serde_json::to_string(&reference_line).expect("serialize filtered reference")
+    );
+    for line in lines {
+        filtered.push_str(line);
+        filtered.push('\n');
+    }
+    fs::write(&ancestor, filtered).expect("write filtered reference");
+    assert!(
+        !inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("filtered reference remains compatible")
+    );
+    assert!(
+        !inspect_cached(home.path(), &descendant, &mut cache)
+            .await
+            .expect("cache filtered reference")
+    );
+
+    write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Legacy);
+    let error = inspect_cached(home.path(), &descendant, &mut cache)
+        .await
+        .expect_err("a legacy history_base source is invalid");
+    assert!(error.to_string().contains("source is not Paginated"));
+
+    write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
+    set_history_base(
+        &ancestor,
+        HistoryPosition {
+            thread_id: descendant_id,
+            end_ordinal_exclusive: 2,
+            end_byte_offset: 1,
+        },
+    );
+    let error = inspect_cached(home.path(), &descendant, &mut cache)
+        .await
+        .expect_err("a cyclic history_base is invalid");
+    assert!(error.to_string().contains("contains a cycle"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cached_startup_inspection_falls_back_for_ambiguous_rollout_ids() {
+    let home = TempDir::new().expect("create Codex home");
+    let ancestor_id = ThreadId::new();
+    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
+    let archived = home.path().join("archived_sessions");
+    fs::create_dir_all(&archived).expect("create archive directory");
+    fs::copy(
+        &ancestor,
+        archived.join(ancestor.file_name().expect("filename")),
+    )
+    .expect("duplicate physical rollout ID");
+    let descendant = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
+    set_history_base(
+        &descendant,
+        HistoryPosition {
+            thread_id: ancestor_id,
+            end_ordinal_exclusive: 2,
+            end_byte_offset: 1,
+        },
+    );
+    let mut cache = super::super::lineage::LineageInspectionCache::default();
+    for _ in 0..2 {
+        assert!(
+            !super::super::lineage::contains_convertible_rollout_reference_cached(
+                home.path(),
+                &descendant,
+                &mut cache,
+            )
+            .await
+            .expect("inspect ambiguous lineage with the original traversal")
+        );
+    }
+    assert_eq!(cache.stats().path_indexes, 2);
+
+    let unique_id = ThreadId::new();
+    write_rollout(home.path(), unique_id, ThreadHistoryMode::Paginated);
+    let mut unique_descendants = Vec::new();
+    for _ in 0..2 {
+        let path = write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated);
+        set_history_base(
+            &path,
+            HistoryPosition {
+                thread_id: unique_id,
+                end_ordinal_exclusive: 2,
+                end_byte_offset: 1,
+            },
+        );
+        unique_descendants.push(path);
+    }
+    for path in &unique_descendants {
+        assert!(
+            !inspect_cached(home.path(), path, &mut cache)
+                .await
+                .expect("inspect an unambiguous lineage")
+        );
+    }
+    assert_eq!(cache.stats().path_indexes, 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn batch_migration_rechecks_a_shared_ancestor_between_threads() {
+    let home = TempDir::new().expect("create Codex home");
+    let ancestor_id = ThreadId::new();
+    let ancestor = write_rollout(home.path(), ancestor_id, ThreadHistoryMode::Paginated);
+    let mut original = fs::read(&ancestor).expect("read original ancestor");
+    prepend_rollout_reference(
+        &ancestor,
+        RolloutReferenceItem {
+            rollout_id: Some(ThreadId::new()),
+            rollout_path: home.path().join("missing-legacy-parent.jsonl"),
+            thread_id: Some(ThreadId::new()),
+            rollout_timestamp: None,
+            segment_id: Some(SegmentId::new()),
+            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        },
+    );
+    let reference = fs::read(&ancestor).expect("read reference-backed ancestor");
+    assert!(reference.len() > original.len());
+    original.resize(reference.len(), b' ');
+    fs::write(&ancestor, original).expect("restore equal-length ancestor");
+    let threads = [ThreadId::new(), ThreadId::new()];
+    for thread_id in threads {
+        let path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
+        set_history_base(
+            &path,
+            HistoryPosition {
+                thread_id: ancestor_id,
+                end_ordinal_exclusive: 2,
+                end_byte_offset: 1,
+            },
+        );
+    }
+    let store = indexed_store(home.path()).await;
+    let mut replaced = false;
+    let report = store
+        .migrate_rollouts_with_progress(
+            super::super::RolloutMigrationOptions {
+                thread_ids: threads.to_vec(),
+                ..Default::default()
+            },
+            |progress| {
+                if !replaced
+                    && progress.outcome_status
+                        == Some(super::super::RolloutMigrationStatus::AlreadyPaginated)
+                {
+                    fs::write(&ancestor, &reference).expect("rewrite shared ancestor");
+                    replaced = true;
+                }
+            },
+        )
+        .await
+        .expect("inspect both threads");
+    assert!(replaced);
+    assert_eq!(report.outcomes.len(), 2);
+    assert_eq!(
+        report.outcomes[0].status,
+        super::super::RolloutMigrationStatus::AlreadyPaginated
+    );
+    // The reference intentionally names a missing parent. A failed conversion plan proves the
+    // second thread was not incorrectly reported as already native using the cached ancestor.
+    assert_eq!(
+        report.outcomes[1].status,
+        super::super::RolloutMigrationStatus::Failed
+    );
+    assert_eq!(
+        report.outcomes[1].failure_reason,
+        Some(super::super::RolloutMigrationFailureReason::LegacyRolloutConversionFailed)
+    );
+}
+
 #[tokio::test]
 async fn records_and_advances_checked_thread() {
     let home = TempDir::new().expect("create Codex home");

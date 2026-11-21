@@ -41,7 +41,8 @@ use super::RolloutMigrationStatus;
 use super::dependencies::MigrationAdmission;
 use super::dependencies::discover_dependencies;
 use super::find_all_rollout_paths;
-use super::lineage::contains_convertible_rollout_reference;
+use super::lineage::LineageInspectionCache;
+use super::lineage::contains_convertible_rollout_reference_with_cache;
 use super::lineage::has_leading_filtered_rollout_reference;
 use super::migration_error;
 use super::publish::migration_journal_path;
@@ -711,8 +712,9 @@ pub(super) async fn migrate_rollouts_on_startup(store: &LocalThreadStore) -> Thr
     }
 
     let mut unresolved = false;
+    let mut lineage_cache = LineageInspectionCache::default();
     for path in candidates {
-        match inspect_rollout_path(store, path).await? {
+        match inspect_rollout_path_with_cache(store, path, Some(&mut lineage_cache)).await? {
             StartupInspection::Paginated
             | StartupInspection::Compatible
             | StartupInspection::Skipped => {}
@@ -888,14 +890,26 @@ async fn inspect_rollout_path(
     store: &LocalThreadStore,
     path: &Path,
 ) -> ThreadStoreResult<StartupInspection> {
+    inspect_rollout_path_with_cache(store, path, None).await
+}
+
+async fn inspect_rollout_path_with_cache(
+    store: &LocalThreadStore,
+    path: &Path,
+    cache: Option<&mut LineageInspectionCache>,
+) -> ThreadStoreResult<StartupInspection> {
     let before = rollout_fingerprint(path).await?;
     match codex_rollout::read_session_meta_line(path).await {
         Ok(metadata) if metadata.meta.history_mode == ThreadHistoryMode::Legacy => {
             Ok(StartupInspection::Legacy)
         }
         Ok(_) => {
-            if contains_convertible_rollout_reference(store.config.codex_home.as_path(), path)
-                .await?
+            if contains_convertible_rollout_reference_with_cache(
+                store.config.codex_home.as_path(),
+                path,
+                cache,
+            )
+            .await?
             {
                 Ok(StartupInspection::ReferenceBacked)
             } else if has_leading_filtered_rollout_reference(path).await? {
