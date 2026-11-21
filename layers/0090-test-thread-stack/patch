@@ -1,0 +1,14 @@
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index 4ec513fd421f8a80d2ab1b75f449f202d5b891f3..78640ac44a995829b060234c34ed7ab229b6f2b8 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -435,7 +435,8 @@ fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
+ where
+     F: Future<Output = Result<()>> + Send + 'static,
+ {
+-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
++    // An explicit thread stack does not inherit the test runner's RUST_MIN_STACK.
++    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
+
+     let handle = std::thread::Builder::new()
+         .name(name.to_string())
