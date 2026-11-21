@@ -1,6 +1,7 @@
 mod connect_options;
 mod discovery_recovery;
 mod discovery_v2;
+mod first_registration;
 pub use discovery_v2::supports_capability_discovery_v2;
 
 use std::collections::HashMap;
@@ -59,6 +60,8 @@ use tracing::instrument::WithSubscriber;
 mod accepted;
 
 pub use connect_options::RemoteEnvironmentOptions;
+use first_registration::FirstRegistration;
+use first_registration::FirstRegistrationWatches;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
@@ -106,10 +109,14 @@ pub enum ConnectionAttemptOutcome {
 pub struct EnvironmentManager {
     default_environment: Option<String>,
     pub(super) environments: RwLock<HashMap<String, Arc<Environment>>>,
+    first_registration_watches: FirstRegistrationWatches<Environment>,
     local_environment: Option<Arc<Environment>>,
     local_runtime_paths: Option<ExecServerRuntimeOptions>,
     http_client_factory: HttpClientFactory,
 }
+
+/// A one-shot capture of the current or first later registration for an environment ID.
+pub type FirstEnvironmentRegistration = FirstRegistration<Environment>;
 
 /// Information supplied by the environment owner when an environment is ready.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -157,6 +164,7 @@ impl EnvironmentManager {
                 LOCAL_ENVIRONMENT_ID.to_string(),
                 Arc::new(Environment::default_for_tests()),
             )])),
+            first_registration_watches: FirstRegistrationWatches::default(),
             local_environment: Some(Arc::new(Environment::default_for_tests())),
             local_runtime_paths: None,
             // Test-only construction has no application config from which to resolve proxy policy.
@@ -169,6 +177,7 @@ impl EnvironmentManager {
         Self {
             default_environment: None,
             environments: RwLock::new(HashMap::new()),
+            first_registration_watches: FirstRegistrationWatches::default(),
             local_environment: None,
             local_runtime_paths: None,
             http_client_factory,
@@ -250,6 +259,7 @@ impl EnvironmentManager {
         let manager = Self {
             default_environment: Some(REMOTE_ENVIRONMENT_ID.to_string()),
             environments: RwLock::new(HashMap::new()),
+            first_registration_watches: FirstRegistrationWatches::default(),
             local_environment: None,
             local_runtime_paths,
             http_client_factory,
@@ -366,6 +376,7 @@ impl EnvironmentManager {
         Ok(Self {
             default_environment,
             environments: RwLock::new(environment_map),
+            first_registration_watches: FirstRegistrationWatches::default(),
             local_environment,
             local_runtime_paths,
             http_client_factory,
@@ -428,6 +439,26 @@ impl EnvironmentManager {
             .cloned()
     }
 
+    /// Atomically captures the current registration or watches for the first registration.
+    /// Dropping the capture cancels an unfulfilled watch.
+    pub fn capture_first_environment_registration(
+        &self,
+        environment_id: &str,
+    ) -> FirstEnvironmentRegistration {
+        let environments = self
+            .environments
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.first_registration_watches
+            .capture(environment_id, environments.get(environment_id))
+    }
+
+    // The caller holds the environments write lock, so capture and insertion cannot cross.
+    fn capture_registered_environment(&self, environment_id: &str, environment: &Arc<Environment>) {
+        self.first_registration_watches
+            .inserted(environment_id, environment);
+    }
+
     /// Removes a registration without invalidating existing handles or changing the default ID.
     /// The caller must coordinate removal with use and registration. The returned environment
     /// remains alive until its last handle is dropped, outside the registry lock.
@@ -487,7 +518,8 @@ impl EnvironmentManager {
                 self.provisioning_noise_environment(provider_if_missing, Some(Err(error)))?,
             ),
         };
-        environments.insert(environment_id, Arc::clone(&environment));
+        environments.insert(environment_id.clone(), Arc::clone(&environment));
+        self.capture_registered_environment(&environment_id, &environment);
         Ok(Some(environment))
     }
 
@@ -567,7 +599,8 @@ impl EnvironmentManager {
 
         let environment =
             Arc::new(self.provisioning_noise_environment(provider, /*initial_result*/ None)?);
-        environments.insert(environment_id, Arc::clone(&environment));
+        environments.insert(environment_id.clone(), Arc::clone(&environment));
+        self.capture_registered_environment(&environment_id, &environment);
         Ok(environment)
     }
 
@@ -601,7 +634,8 @@ impl EnvironmentManager {
                 .environments
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let replaced = environments.insert(environment_id, Arc::clone(&environment));
+            let replaced = environments.insert(environment_id.clone(), Arc::clone(&environment));
+            self.capture_registered_environment(&environment_id, &environment);
             if let Some(client) = replaced.as_ref().and_then(|old| old.remote_client.as_ref()) {
                 client.retire_initial_recovery();
             }
@@ -1753,6 +1787,29 @@ mod tests {
         let manager = EnvironmentManager::default_for_tests();
 
         assert!(manager.get_environment("does-not-exist").is_none());
+    }
+
+    #[tokio::test]
+    async fn first_registration_capture_does_not_follow_replacement_before_use() {
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
+        let capture = manager.capture_first_environment_registration("executor-a");
+        assert!(capture.get().is_none());
+
+        let first = Arc::new(Environment::default_for_tests());
+        manager
+            .insert_environment("executor-a".to_string(), Arc::clone(&first))
+            .expect("register first environment");
+        let second = Arc::new(Environment::default_for_tests());
+        manager
+            .insert_environment("executor-a".to_string(), Arc::clone(&second))
+            .expect("replace environment");
+        assert!(Arc::ptr_eq(&capture.get().expect("captured first"), &first));
+        assert!(Arc::ptr_eq(
+            &manager.get_environment("executor-a").expect("current"),
+            &second
+        ));
+        drop(first);
+        assert!(capture.get().is_none());
     }
 
     #[tokio::test]

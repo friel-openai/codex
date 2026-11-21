@@ -611,6 +611,8 @@ pub(crate) struct StartupEnvironmentDiscovery {
     pub(crate) cold_resume: bool,
     /// Ordinary local conversation does not await registry secondaries.
     pub(crate) defer_registry_secondaries: bool,
+    /// Forks can verify the first registration for a saved, currently absent secondary.
+    pub(crate) capture_missing_secondaries: bool,
     /// Explicit exceptions for one cold resume, never part of saved settings.
     pub(crate) optional_on_resume: Arc<HashSet<String>>,
     /// Present only for the actual local-primary registry selection at a new app-server start.
@@ -681,6 +683,7 @@ impl StartThreadOptions {
                 implicit_selection,
                 cold_resume: false,
                 defer_registry_secondaries: implicit_selection,
+                capture_missing_secondaries: false,
                 optional_on_resume: Arc::default(),
                 default_registrations,
             });
@@ -791,6 +794,7 @@ impl StartThreadOptions {
                 implicit_selection,
                 cold_resume: true,
                 defer_registry_secondaries,
+                capture_missing_secondaries: false,
                 optional_on_resume: Arc::new(optional_on_resume),
                 default_registrations: HashMap::new(),
             });
@@ -2813,13 +2817,25 @@ impl ThreadManager {
         {
             meta.meta.multi_agent_version = Some(multi_agent_version);
         }
-        let mut environments = settings_history_override
+        let settings_history = settings_history_override
             .as_deref()
-            .map(|history| persisted_thread_environment_requests(history))
-            .unwrap_or_else(|| match model_history_override.as_deref() {
-                Some(model_history) => persisted_thread_environment_requests(model_history),
-                None => persisted_thread_environment_requests(response_history.as_ref()),
-            });
+            .or(model_history_override.as_deref())
+            .unwrap_or(response_history.as_ref());
+        let implicit_saved_selection = settings_history
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => Some(
+                    event
+                        .thread_settings
+                        .environments
+                        .as_ref()
+                        .is_some_and(|selection| selection.implicit_selection),
+                ),
+                _ => None,
+            })
+            .unwrap_or(false);
+        let mut environments = persisted_thread_environment_requests(settings_history);
         if options.config.workspace_roots_explicit
             && let Some(environments) = environments.as_mut()
         {
@@ -2846,7 +2862,42 @@ impl ThreadManager {
         }
         let agent_control = self.agent_control_for_config(&options.config);
         options.initial_history = history;
+        let inherited_selection = options.environments.is_none();
         options.environments = options.environments.or(environments);
+        if inherited_selection
+            && implicit_saved_selection
+            && options.inherited_environments.is_none()
+            && options
+                .thread_extension_init
+                .get::<StartupEnvironmentDiscovery>()
+                .is_none()
+            && options
+                .environments
+                .as_ref()
+                .and_then(|environments| environments.first())
+                .is_some_and(|primary| {
+                    primary.environment_id == LOCAL_ENVIRONMENT_ID
+                        && primary.config == EnvironmentConfigState::FromThread
+                })
+        {
+            // A fork inherits the parent's implicit default secondaries, not a new requirement
+            // that they be reachable before the child starts.
+            for selection in options.environments.as_mut().into_iter().flatten().skip(1) {
+                if selection.config == EnvironmentConfigState::StartupUnavailable {
+                    selection.config = EnvironmentConfigState::FromThread;
+                }
+            }
+            options
+                .thread_extension_init
+                .insert(StartupEnvironmentDiscovery {
+                    implicit_selection: true,
+                    cold_resume: true,
+                    defer_registry_secondaries: true,
+                    capture_missing_secondaries: true,
+                    optional_on_resume: Arc::default(),
+                    default_registrations: HashMap::new(),
+                });
+        }
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
         if let Some(native_persistence) = native_persistence {
