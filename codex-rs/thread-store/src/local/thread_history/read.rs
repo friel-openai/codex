@@ -21,7 +21,7 @@ use super::segment_paging::LazyPage;
 use super::segment_paging::SegmentPage;
 use super::segment_paging::certified_resume_backwards_cursors;
 use super::segment_paging::page_certified_ascending_item_rows;
-use super::segment_paging::page_certified_single_owner_item_rows;
+use super::segment_paging::page_certified_item_rows;
 use super::segment_paging::page_certified_single_owner_turn_rows;
 use super::segment_paging::page_indexed_item_rows;
 use super::segment_paging::page_indexed_turn_rows;
@@ -854,7 +854,7 @@ pub(in crate::local) async fn list_items(
         params.sort_direction = crate::SortDirection::Asc;
     }
     validate_page_size(params.page_size)?;
-    if let Some(page) = page_certified_single_owner_item_rows(store, &params).await? {
+    if let Some(page) = page_certified_item_rows(store, &params).await? {
         return match page {
             LazyPage::Page(page, _) => Ok(ItemPage {
                 items: page.rows.into_iter().map(|row| row.item).collect(),
