@@ -1,0 +1,152 @@
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 8e98832c61b682d4eb841864f217e0fec2d4d540..7685444621368151d5d31e1cb96345e1642dc40e 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -4192,6 +4192,147 @@ async fn certified_multi_owner_item_page_rejects_unmatched_root_row() {
+     );
+ }
+
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn certified_multi_owner_items_use_materialized_sources_and_cutoff() {
++    use std::io::Read;
++
++    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let parent_id = ThreadId::new();
++    let parent = rollout_path(home.path(), parent_id);
++    write_rollout(&parent, parent_id, None);
++    append_timeline_record(
++        &parent,
++        1,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "split".to_string(),
++            root_turn_id: None,
++            turn_attribution: None,
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &parent,
++        2,
++        timeline_user_item(parent_id, "split", "parent-item", "parent"),
++    );
++    let cutoff = history_position(&parent, parent_id, 3);
++    append_timeline_record(
++        &parent,
++        3,
++        timeline_user_item(parent_id, "split", "late-item", "late"),
++    );
++    let root = rollout_path(home.path(), child_id);
++    write_rollout_with_end(&root, child_id, Some(cutoff), 1);
++    append_timeline_record(
++        &root,
++        4,
++        timeline_user_item(child_id, "split", "child-item", "child"),
++    );
++
++    crate::local::thread_history_materialization::materialize_to_sqlite(&store, parent_id, &parent)
++        .await
++        .unwrap();
++    super::super::reset_projection_for_replacement(&store, child_id, 3)
++        .await
++        .unwrap();
++    crate::local::thread_history_materialization::materialize_to_sqlite(&store, child_id, &root)
++        .await
++        .unwrap();
++    let lineage = store
++        .resolve_rollout_lineage_for_history_page(child_id)
++        .await
++        .unwrap();
++    let stamps = lineage.projection_source_stamps().await.unwrap();
++    assert!(
++        super::super::ProjectionCertificate::capture(&lineage, &stamps)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    assert!(
++        store
++            .rebuild_history_projection_with_certificate(child_id)
++            .await
++            .unwrap()
++    );
++    assert!(
++        store
++            .has_current_history_certificate(child_id)
++            .await
++            .unwrap()
++    );
++
++    let mut watch = watch_history_file_opens(&parent);
++    let first = store
++        .list_items(item_params(
++            child_id,
++            Some("split"),
++            None,
++            1,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&first), ["child-item"]);
++    let second = store
++        .list_items(item_params(
++            child_id,
++            Some("split"),
++            first.next_cursor,
++            1,
++            SortDirection::Desc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&second), ["parent-item"]);
++    assert!(second.next_cursor.is_none());
++    let all = store
++        .list_items(item_params(
++            child_id,
++            Some("split"),
++            None,
++            10,
++            SortDirection::Asc,
++        ))
++        .await
++        .unwrap();
++    assert_eq!(item_ids(&all), ["parent-item", "child-item"]);
++    let mut events = [0; 256];
++    assert_eq!(
++        watch.read(&mut events).unwrap_err().kind(),
++        std::io::ErrorKind::WouldBlock
++    );
++
++    append_timeline_record(
++        &parent,
++        4,
++        timeline_user_item(parent_id, "split", "later-item", "later"),
++    );
++    assert!(
++        !store
++            .has_current_history_certificate(child_id)
++            .await
++            .unwrap()
++    );
++    fs::rename(&parent, parent.with_extension("jsonl.unavailable")).unwrap();
++    assert!(
++        store
++            .list_items(item_params(
++                child_id,
++                Some("split"),
++                None,
++                10,
++                SortDirection::Asc
++            ))
++            .await
++            .is_err()
++    );
++}
++
+ #[cfg(unix)]
+ async fn append_with_leaf_proof(
+     store: &LocalThreadStore,
