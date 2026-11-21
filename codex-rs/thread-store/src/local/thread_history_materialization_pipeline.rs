@@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
 use super::super::LocalThreadStore;
 use super::super::thread_history::RolloutProjectionStep;
 use super::super::thread_history::apply_projection;
+use super::super::rollout_lineage::AncestorReads;
 use super::ProjectionRollout;
 use super::read_projection_batches;
 use crate::ThreadStoreError;
@@ -32,6 +33,7 @@ pub(super) async fn read_and_apply(
 ) -> ThreadStoreResult<()> {
     // Two queued batches, one being produced and one being consumed. Each is limited by
     // source bytes and step count; an oversized individual record remains indivisible.
+    let reads = rollout.reads.clone();
     let (sender, receiver) = tokio::sync::mpsc::channel(QUEUED_BATCHES);
     let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
     let span = tracing::Span::current();
@@ -61,7 +63,7 @@ pub(super) async fn read_and_apply(
         };
         let _ = sender.blocking_send(completion);
     });
-    let result = apply_batches(store, thread_id, start_offset, initial_ordinal, receiver).await;
+    let result = apply_batches(store, thread_id, start_offset, initial_ordinal, receiver, &reads).await;
     // apply_batches drops the receiver on error, unblocking any pending producer send.
     drop(keep_running);
     worker.await.map_err(|err| ThreadStoreError::Internal {
@@ -76,6 +78,7 @@ pub(super) async fn apply_batches(
     mut start_offset: u64,
     initial_ordinal: u64,
     mut receiver: tokio::sync::mpsc::Receiver<ProjectionMessage>,
+    reads: &AncestorReads,
 ) -> ThreadStoreResult<()> {
     // Receive before opening the transaction so a slow reader cannot hold the SQLite writer.
     while let Some(message) = receiver.recv().await {
@@ -84,6 +87,9 @@ pub(super) async fn apply_batches(
                 projections,
                 next_offset,
             } => {
+                // A failed or cancelled commit can have an ambiguous outcome. Do not retry a
+                // different copy after attempting a batch transaction.
+                reads.prevent_retry();
                 apply_projection(
                     store,
                     thread_id,
