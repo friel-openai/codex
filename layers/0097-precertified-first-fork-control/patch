@@ -1,0 +1,86 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+index 194a8e1a229a0dc2ff3be9ab17359b84e07db9e4..5627bcd7a18bbfab750a52ba35a7c4192a649447 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+@@ -2703,6 +2703,30 @@ async fn compacted_paginated_fork_rollout_file_opens_are_bounded() -> Result<()>
+         .await
+ }
+
++#[test_case::test_case(8; "segments_8")]
++#[test_case::test_case(32; "segments_32")]
++#[test_case::test_case(128; "segments_128")]
++#[tokio::test]
++async fn precertified_compacted_fork_rollout_file_opens_are_bounded(
++    segment_count: usize,
++) -> Result<()> {
++    let count = paginated_fork_rollout_file_open_count_with_boundary(
++        segment_count,
++        IndexedForkSource::ColdCompacted,
++        IndexedForkPresentation::Durable,
++        /*boundary_from_tip*/ None,
++        /*production_checkpoints*/ false,
++        /*precertify*/ true,
++    )
++    .await?;
++    assert!(
++        count <= MAX_INDEXED_FORK_ROLLOUT_READER_OPENS,
++        "precertified durable fork with {segment_count} segments opened {count} rollout files; \
++         limit is {MAX_INDEXED_FORK_ROLLOUT_READER_OPENS}"
++    );
++    Ok(())
++}
++
+ #[test_case::test_case(8, IndexedForkPresentation::Durable; "durable_8")]
+ #[test_case::test_case(32, IndexedForkPresentation::Durable; "durable_32")]
+ #[test_case::test_case(128, IndexedForkPresentation::Durable; "durable_128")]
+@@ -2764,6 +2788,7 @@ async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded(
+         presentation,
+         Some(5),
+         /*production_checkpoints*/ true,
++        /*precertify*/ false,
+     )
+     .await?;
+     assert!(
+@@ -2785,6 +2810,7 @@ async fn native_history_base_latest_fork_without_turns_opens_are_bounded() -> Re
+             IndexedForkPresentation::DurableWithoutTurnsAfterWarmup,
+             /*boundary_from_tip*/ None,
+             /*production_checkpoints*/ true,
++            /*precertify*/ false,
+         )
+         .await?;
+         assert!(
+@@ -2893,6 +2919,7 @@ async fn paginated_fork_rollout_file_open_count(
+         presentation,
+         /*boundary_from_tip*/ None,
+         /*production_checkpoints*/ false,
++        /*precertify*/ false,
+     )
+     .await
+ }
+@@ -2903,6 +2930,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
+     presentation: IndexedForkPresentation,
+     boundary_from_tip: Option<usize>,
+     production_checkpoints: bool,
++    precertify: bool,
+ ) -> Result<usize> {
+     let server = create_mock_responses_server_repeating_assistant("Done").await;
+     let codex_home = TempDir::new()?;
+@@ -3078,6 +3106,18 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
+         }
+     }
+     store.shutdown_thread(source_thread_id).await?;
++    if precertify {
++        assert!(
++            store
++                .rebuild_history_projection_with_certificate(source_thread_id)
++                .await?
++        );
++        assert!(
++            store
++                .has_current_history_certificate(source_thread_id)
++                .await?
++        );
++    }
+     drop(store);
+
+     let mut mcp = TestAppServer::builder()
