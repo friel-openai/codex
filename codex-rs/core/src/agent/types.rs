@@ -17,6 +17,7 @@ pub struct AgentMetadata {
     pub agent_path: Option<AgentPath>,
     pub agent_nickname: Option<String>,
     pub agent_role: Option<String>,
+    pub last_task_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub struct SpawnAgentOptions {
     pub cyber_access_program: Option<CyberAccessProgram>,
     /// Parent selections apply to the first turn and may need adapting to the child's model.
     pub cyber_access_program_source: SpawnProgramSource,
+    pub initial_task_message: Option<String>,
 }
 
 /// Identity and status observed from a loaded agent, without a handle to its runtime.
