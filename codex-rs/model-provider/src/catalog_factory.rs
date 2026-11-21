@@ -1,9 +1,11 @@
 //! Host catalog construction from the provider and credentials selected for a thread.
 
 use crate::SharedModelProvider;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::openai_models::ModelsResponse;
+use std::collections::HashMap;
 
 /// Builds catalogs for the selected provider while retaining the host's cache policy.
 /// Provider-backed implementations must use the supplied provider, which carries the
@@ -14,6 +16,7 @@ pub trait ModelCatalogFactory: Send + Sync {
         provider: SharedModelProvider,
         config_model_catalog: Option<ModelsResponse>,
         api_key_model_discovery_default: bool,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager;
 
     /// Publish a live discovery setting to existing and future catalogs.
@@ -27,10 +30,11 @@ impl ModelCatalogFactory for ModelCatalogSettings {
         provider: SharedModelProvider,
         config_model_catalog: Option<ModelsResponse>,
         api_key_model_discovery_default: bool,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         let mut settings = self.clone();
         settings.api_key_model_discovery_default = api_key_model_discovery_default;
-        provider.models_manager_with_settings(config_model_catalog, settings)
+        provider.models_manager_with_settings(config_model_catalog, settings, custom_models)
     }
 
     fn set_api_key_model_discovery_enabled(&self, enabled: bool) {

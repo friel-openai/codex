@@ -53,6 +53,10 @@ pub fn fixed_model_catalog(
             _provider: codex_model_provider::SharedModelProvider,
             _config_model_catalog: Option<codex_protocol::openai_models::ModelsResponse>,
             _api_key_model_discovery_default: bool,
+            _custom_models: std::collections::HashMap<
+                String,
+                codex_models_manager::CustomModelConfig,
+            >,
         ) -> SharedModelsManager {
             Arc::clone(&self.0)
         }
@@ -254,7 +258,11 @@ pub fn models_manager_with_provider(
     provider: ModelProviderInfo,
 ) -> SharedModelsManager {
     let provider = create_model_provider(provider, Some(auth_manager));
-    provider.models_manager(codex_home, /*config_model_catalog*/ None)
+    provider.models_manager(
+        codex_home,
+        /*config_model_catalog*/ None,
+        Default::default(),
+    )
 }
 
 pub fn default_http_client_factory() -> HttpClientFactory {
