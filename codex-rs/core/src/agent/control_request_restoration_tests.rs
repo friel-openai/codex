@@ -7,6 +7,13 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::start_websocket_server;
 use pretty_assertions::assert_eq;
 
+fn client_text_input(text: &str) -> Vec<UserInput> {
+    text_input(text)
+        .iter()
+        .map(ResolvedUserInput::to_user_input)
+        .collect()
+}
+
 #[test]
 #[serial(fork_env)]
 fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume() -> anyhow::Result<()> {
@@ -125,7 +132,7 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     let parent_prompt_cache_key = parent_thread.session.prompt_cache_key();
     parent_thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input(
+        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
             "seed alias-backed guidance",
         )))
         .await?;
@@ -250,7 +257,7 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
         .try_ensure_rollout_materialized(PersistContext::Standard)
         .await?;
     resumed_thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input(
+        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
             "inspect resumed alias guidance",
         )))
         .await?;
@@ -444,7 +451,9 @@ async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key
     let parent_prompt_cache_key = parent.thread.session.prompt_cache_key();
     parent
         .thread
-        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
+        .start_or_steer_turn(TurnInputRequest::user_input(client_text_input(
+            "parent seed",
+        )))
         .await?;
     wait_for_turn_complete(parent.thread.as_ref()).await;
     parent

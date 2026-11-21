@@ -1782,10 +1782,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             config.clone(),
-            vec![UserInput::Text {
-                text: "worker".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("worker".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -1806,10 +1803,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             config,
-            vec![UserInput::Text {
-                text: "named parent child".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("named parent child".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: worker_thread_id,
                 depth: 2,
@@ -2129,10 +2123,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             config,
-            vec![UserInput::Text {
-                text: "inspect this repo".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("inspect this repo".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
