@@ -398,12 +398,13 @@ mod tests {
             ..primary.clone()
         };
         turn.model_routing_candidate = Some(primary.clone());
+        let step = StepContext::for_test(Arc::new(turn));
         let error = CodexErr::from(CodexErrorDetails::ServerOverloaded)
             .with_retry_after(RetryAfter::from_delay(Duration::from_secs(120)).unwrap());
         let failure = classify_model_routing_failure(&error).unwrap();
         for elapsed in [20, 40] {
             tokio::time::advance(Duration::from_secs(20)).await;
-            session.record_model_routing_failure(&turn, &failure).await;
+            session.record_model_routing_failure(&step, &failure).await;
             let mut state = session.state.lock().await;
             let current = now + chrono::Duration::seconds(elapsed);
             let candidates = [primary.clone(), fallback.clone()];
@@ -430,7 +431,7 @@ mod tests {
         let shorter = CodexErr::from(CodexErrorDetails::ServerOverloaded)
             .with_retry_after(RetryAfter::from_delay(Duration::from_secs(1)).unwrap());
         session
-            .record_model_routing_failure(&turn, &classify_model_routing_failure(&shorter).unwrap())
+            .record_model_routing_failure(&step, &classify_model_routing_failure(&shorter).unwrap())
             .await;
         assert_eq!(
             session.state.lock().await.model_routing.select_candidate(

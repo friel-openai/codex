@@ -7,6 +7,8 @@ use pretty_assertions::assert_eq;
 fn stored_root(config: &Config) -> StoredThread {
     let now = chrono::Utc::now();
     StoredThread {
+        creator_user_id: None,
+        creator_account_id: None,
         originator: None,
         thread_id: ThreadId::new(),
         extra_config: None,
@@ -17,6 +19,7 @@ fn stored_root(config: &Config) -> StoredThread {
                 .to_path_buf(),
         ),
         forked_from_id: None,
+        attached_to_thread_id: None,
         parent_thread_id: None,
         preview: "original root".to_string(),
         name: None,

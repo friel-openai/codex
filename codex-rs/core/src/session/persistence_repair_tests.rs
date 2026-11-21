@@ -54,9 +54,13 @@ fn recovery_presentation_preserves_distinct_user_ids_and_assistant_revisions() {
     });
     assert_eq!(serde_json::to_value(item).unwrap(), expected);
 
-    let hook = codex_protocol::items::build_hook_prompt_message(&[
-        codex_protocol::items::HookPromptFragment::from_single_hook("Retained hook text", "hook-1"),
-    ])
+    let hook = codex_protocol::items::build_hook_prompt_message(
+        &[codex_protocol::items::HookPromptFragment::from_single_hook(
+            "Retained hook text",
+            "hook-1",
+        )],
+        &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+    )
     .unwrap();
     let first = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
     let second = recovery_turn_item(&hook, "recovered-hook".to_owned(), &HashMap::new()).unwrap();
