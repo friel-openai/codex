@@ -9,11 +9,13 @@ use codex_login::AuthManager;
 use codex_model_provider::ModelCatalogFactory;
 use codex_model_provider::ProviderAuthContext;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::SessionSource;
 use codex_runtime_agent_instance::RuntimeAuthManager;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The startup catalog and the credential/runtime owner used to construct it.
@@ -52,6 +54,7 @@ pub fn build_startup_models(
         config.model_catalog.clone(),
         factory,
         config.features.enabled(Feature::ApiKeyModelDiscovery),
+        config.custom_models.clone(),
         ProviderAuthContext {
             credentials: Arc::clone(&credentials),
             runtime_auth: runtime.map(|runtime| (runtime, config.runtime_auth_mode)),
@@ -71,6 +74,7 @@ pub(super) struct ThreadModelCatalog {
     catalog: Option<ModelsResponse>,
     factory: Arc<dyn ModelCatalogFactory>,
     api_key_model_discovery_default: bool,
+    custom_models: HashMap<String, CustomModelConfig>,
     runtime_mode: Option<RuntimeAuthMode>,
 }
 
@@ -89,6 +93,7 @@ pub fn build_models_manager(
         auth.model_provider(config.model_provider.clone()),
         config.model_catalog.clone(),
         config.features.enabled(Feature::ApiKeyModelDiscovery),
+        config.custom_models.clone(),
     )
 }
 
@@ -98,6 +103,7 @@ impl ThreadModelCatalog {
         catalog: Option<ModelsResponse>,
         factory: Arc<dyn ModelCatalogFactory>,
         api_key_model_discovery_default: bool,
+        custom_models: HashMap<String, CustomModelConfig>,
         auth: ProviderAuthContext,
     ) -> Self {
         let runtime_mode = auth.runtime_auth.as_ref().map(|(_, mode)| *mode);
@@ -105,6 +111,7 @@ impl ThreadModelCatalog {
             auth.model_provider(provider.clone()),
             catalog.clone(),
             api_key_model_discovery_default,
+            custom_models.clone(),
         );
         Self {
             manager,
@@ -112,6 +119,7 @@ impl ThreadModelCatalog {
             catalog,
             factory,
             api_key_model_discovery_default,
+            custom_models,
             runtime_mode,
         }
     }
@@ -161,6 +169,7 @@ impl ThreadModelCatalog {
             && self.matches_catalog_provider(&config.model_provider)
             && self.catalog.as_ref() == models
             && self.api_key_model_discovery_default == api_key_model_discovery_default
+            && self.custom_models == config.custom_models
         {
             return Arc::clone(&self.manager);
         }
@@ -168,6 +177,7 @@ impl ThreadModelCatalog {
             auth.model_provider(config.model_provider.clone()),
             models.cloned(),
             api_key_model_discovery_default,
+            config.custom_models.clone(),
         )
     }
 
@@ -185,5 +195,48 @@ impl ThreadModelCatalog {
 
     pub(super) fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
         self.factory.set_api_key_model_discovery_enabled(enabled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::test_config;
+    use codex_login::CodexAuth;
+
+    #[tokio::test]
+    async fn changed_custom_models_rebuild_thread_catalog() {
+        let mut config = test_config().await;
+        let credentials = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+        let auth = || ProviderAuthContext {
+            credentials: Arc::clone(&credentials),
+            runtime_auth: None,
+        };
+        let factory = Arc::new(ModelCatalogSettings::default());
+        let catalog = ThreadModelCatalog::new(
+            config.model_provider.clone(),
+            config.model_catalog.clone(),
+            factory,
+            config.features.enabled(Feature::ApiKeyModelDiscovery),
+            config.custom_models.clone(),
+            auth(),
+        );
+        let unchanged = catalog.for_config(&config, config.model_catalog.as_ref(), auth(), true);
+        assert!(Arc::ptr_eq(&catalog.manager, &unchanged));
+
+        config.custom_models.insert(
+            "review-alias".to_string(),
+            CustomModelConfig {
+                model: "gpt-5.5".to_string(),
+                model_context_window: None,
+                model_auto_compact_token_limit: None,
+            },
+        );
+        let changed = catalog.for_config(&config, config.model_catalog.as_ref(), auth(), true);
+        assert!(!Arc::ptr_eq(&catalog.manager, &changed));
+        assert!(changed.custom_models().contains_key("review-alias"));
+        assert!(!catalog.manager.custom_models().contains_key("review-alias"));
+        assert!(changed.build_available_models(Vec::new()).iter().any(|preset| preset.model == "review-alias"));
+        assert!(!catalog.manager.build_available_models(Vec::new()).iter().any(|preset| preset.model == "review-alias"));
     }
 }

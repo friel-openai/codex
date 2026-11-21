@@ -200,7 +200,8 @@ async fn check_catalog(server: &str) {
             .runtime
             .unwrap();
         assert_eq!(selected.runtime().id(), "runtime-a");
-        let models = provider.models_manager_without_cache(/*config_model_catalog*/ None);
+        let models = provider
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
         models.set_api_key_model_discovery_enabled(/*enabled*/ true);
         let work = models.for_originator("codex_work_cca").unwrap();
         for manager in [models, work] {
@@ -221,7 +222,8 @@ async fn check_catalog(server: &str) {
         let mut other_info = ModelProviderInfo::create_openai_provider(Some(server.to_owned()));
         other_info.model_catalog_url = Some(format!("{server}/models").into());
         let other = context.model_provider(other_info);
-        let models = other.models_manager_without_cache(/*config_model_catalog*/ None);
+        let models = other
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
         models.set_api_key_model_discovery_enabled(/*enabled*/ true);
         let result = models
             .raw_model_catalog(
