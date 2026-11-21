@@ -183,6 +183,7 @@ impl PreparedTurnInputSettings {
             prompt_cache_ttl,
             cyber_access_program,
             helper_admission,
+            allow_initial_default_recovery: matches!(kind, TurnStartKind::User),
         };
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(
@@ -874,7 +875,14 @@ impl Session {
             tracing::debug!(%error, "rollout budget stopped a pending-work wake");
             return None;
         }
+        let state = self.state.lock().await;
+        // Shutdown aborts with Interrupted, which normally checks for queued work.
+        // Preserve the queue without starting another turn on the closing session.
+        if state.shutting_down {
+            return None;
+        }
         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+        drop(state);
         let previous_options = if has_trigger_turn {
             Default::default()
         } else {
