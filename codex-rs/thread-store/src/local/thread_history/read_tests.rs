@@ -221,6 +221,60 @@ async fn descending_pages_stop_in_the_parent_even_when_resuming_there() {
 }
 
 #[tokio::test]
+async fn post_adoption_stock_checkpoint_can_restore_positive_completeness() {
+    let home = TempDir::new().expect("temp dir");
+    let pool = codex_state::open_thread_history_db(&test_config(home.path()).sqlite)
+        .await
+        .expect("open stock thread history database");
+    for statement in [
+        "INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status) VALUES ('stock', 'turn', 1, 'inProgress')",
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES ('stock', 42, 2)",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("seed stock projection");
+    }
+    super::super::ensure_projection_integrity_triggers(&pool)
+        .await
+        .expect("adopt stock checkpoint");
+    let adopted = sqlx::query_scalar::<_, i64>(
+        "SELECT next_rollout_byte_offset FROM thread_history_projection_state WHERE thread_id = 'stock'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read adopted checkpoint");
+    assert_eq!(adopted, -43);
+
+    // Stock .156 writes a positive active-rollout checkpoint after its row updates. All six
+    // guards remain installed, so subsequent adoption cannot distinguish this stock writer.
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("start stock writer transaction");
+    for statement in [
+        "UPDATE thread_turns SET status = 'completed' WHERE thread_id = 'stock'",
+        "UPDATE thread_history_projection_state SET next_rollout_byte_offset = 84, next_rollout_ordinal = 3 WHERE thread_id = 'stock'",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *transaction)
+            .await
+            .expect("write stock projection");
+    }
+    transaction.commit().await.expect("commit stock projection");
+    super::super::ensure_projection_integrity_triggers(&pool)
+        .await
+        .expect("reopen adopted projection database");
+    let checkpoint = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = 'stock'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read post-adoption stock checkpoint");
+    assert_eq!(checkpoint, (84, 3));
+}
+
+#[tokio::test]
 async fn list_turns_pages_projected_rows_and_applies_item_views() {
     let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let db = history_db(&store).await;
@@ -347,6 +401,53 @@ async fn indexed_paginated_reads_trust_current_projection_for_immutable_predeces
         /*segment_count*/ 4, /*remove_projected_predecessor*/ true,
     )
     .await;
+}
+
+#[tokio::test]
+async fn fork_marked_projection_requires_ancestry_without_history_base() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let active_path = write_projected_same_thread_segments(home.path(), thread_id, 2);
+    let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&active_path)
+        .await
+        .expect("read active segment")
+        .0;
+    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
+        panic!("active segment must start with metadata");
+    };
+    // Older fork headers lack history_base and must use the ancestry-validating fallback.
+    meta.meta.forked_from_id = Some(ThreadId::new());
+    meta.meta.history_base = None;
+    let predecessor = match &lines[1].item {
+        RolloutItem::RolloutReference(reference) => reference.rollout_path.clone(),
+        _ => panic!("active segment must retain its predecessor reference"),
+    };
+    let mut encoded = Vec::new();
+    for line in &lines {
+        serde_json::to_writer(&mut encoded, line).expect("encode active record");
+        encoded.push(b'\n');
+    }
+    fs::write(&active_path, &encoded).expect("write old fork header");
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
+    )
+    .bind(thread_id.to_string())
+    .bind(i64::try_from(encoded.len()).expect("byte offset"))
+    .bind(8_i64)
+    .execute(history_db(&store).await)
+    .await
+    .expect("seed complete projection checkpoint");
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("valid ancestry")
+    );
+
+    fs::remove_file(predecessor).expect("remove required predecessor");
+    store
+        .has_history_projection(thread_id)
+        .await
+        .expect_err("a complete fallback checkpoint does not authenticate missing ancestry");
 }
 
 #[tokio::test]
@@ -1140,7 +1241,11 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
     .execute(db)
     .await
     .expect("project filtered developer message");
-    let lineage = RolloutLineage::from_segments(child_id, child_id, rollout_path(home.path(), child_id), vec![
+    let lineage = RolloutLineage::from_segments(
+        child_id,
+        child_id,
+        rollout_path(home.path(), child_id),
+        vec![
             RolloutLineageSegment {
                 thread_id: root_id,
                 rollout_id: root_id,
@@ -1179,7 +1284,8 @@ async fn item_anchors_reject_developer_messages_hidden_by_fork_filters() {
                 uses_history_base: false,
                 uses_fork_boundary: true,
             },
-        ]);
+        ],
+    );
     let mut params = item_params(
         child_id,
         Some("turn"),
@@ -2737,6 +2843,7 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
         message: String::new(),
         replacement_history: None,
         retained_context: None,
+        retained_context_replay: None,
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
@@ -3606,7 +3713,6 @@ async fn assert_native_lineage_pagination(
         (3, 4, 1, 1),
         "inherited pagination must leave parent turns and items parent-owned"
     );
-
 
     let first_occurrences = store
         .search_thread_occurrences(SearchThreadOccurrencesParams {

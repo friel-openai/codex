@@ -85,6 +85,10 @@ async fn handle_spawn_agent(
         .into_iter()
         .map(ResolvedUserInput::from_client)
         .collect();
+    step_context
+        .environments
+        .to_spawn_selections()
+        .map_err(collab_spawn_error)?;
     session
         .emit_turn_item_started(
             turn,
