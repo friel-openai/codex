@@ -203,7 +203,13 @@ fn native_import_items(thread_id: ThreadId, source: &[RolloutItem]) -> Option<Ve
             }
             RolloutItem::EventMsg(EventMsg::AgentMessage(event)) => {
                 Some(TurnItem::AgentMessage(AgentMessageItem {
-                    id,
+                    id: event.moderation.as_ref().map_or(id, |moderation| moderation.item_id.clone()),
+                    moderation: event.moderation.as_ref().map(|moderation| {
+                        codex_protocol::items::AgentMessageModeration {
+                            moderated: moderation.moderated,
+                            display: moderation.display.clone(),
+                        }
+                    }),
                     content: vec![AgentMessageContent::Text {
                         text: event.message.clone(),
                     }],
@@ -220,6 +226,7 @@ fn native_import_items(thread_id: ThreadId, source: &[RolloutItem]) -> Option<Ve
                 thread_id,
                 turn_id: turn_id.clone()?,
                 item,
+                content_token_count: None,
                 started_at_ms,
                 completed_at_ms: started_at_ms.unwrap_or_default(),
             })),
