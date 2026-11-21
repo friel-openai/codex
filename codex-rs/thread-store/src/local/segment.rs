@@ -1636,6 +1636,7 @@ pub(super) async fn freeze_paginated_prefix_reserved(
         prefix_rollout_path,
         end_ordinal_exclusive,
         end_byte_offset,
+        has_fallback,
         reservation,
         /*preserve_certified_immutable_reference*/ false,
     )
@@ -1813,6 +1814,7 @@ async fn freeze_paginated_prefix_reserved_inner(
     prefix_rollout_path: &Path,
     end_ordinal_exclusive: u64,
     end_byte_offset: u64,
+    has_fallback: bool,
     reservation: &RolloutWriterReservation,
     preserve_certified_immutable_reference: bool,
 ) -> ThreadStoreResult<FrozenRolloutSegment> {

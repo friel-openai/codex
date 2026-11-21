@@ -341,7 +341,9 @@ fn review_original(
             }
             message.complete
         }
-        RolloutItem::SessionMeta(_) | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
             anyhow::bail!("evidence history was replaced");
         }
         RolloutItem::RetainedContext(RetainedContextEvent::AcceptedFileAudio { .. })
@@ -372,4 +374,25 @@ fn review_original(
             });
     }
     Ok(Some(item))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::protocol::RolloutReferenceItem;
+
+    #[test]
+    fn unresolved_rollout_reference_rejects_evidence_capture() {
+        let reference = RolloutReferenceItem {
+            rollout_path: "old-rollout.jsonl".into(),
+            thread_id: None,
+            rollout_id: None,
+            rollout_timestamp: None,
+            segment_id: None,
+            max_depth: 1,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        };
+        assert!(review_original(RolloutItem::RolloutReference(reference)).is_err());
+    }
 }
