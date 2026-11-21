@@ -32,6 +32,9 @@ use crate::append_rollout_item_to_path;
 use crate::read_session_meta_line;
 use crate::search_rollout_matches;
 
+#[path = "compression/segment_tests.rs"]
+mod segment_tests;
+
 #[tokio::test]
 async fn full_scan_capacity_preserves_plain_and_compressed_records() -> anyhow::Result<()> {
     let home = TempDir::new()?;
