@@ -77,6 +77,7 @@ use tempfile::TempDir;
 
 use super::super::LocalThreadStore;
 use super::super::LocalThreadStoreConfig;
+use super::super::paginated_fork::inject_certified_context_pause;
 use super::super::paginated_fork::inject_lineage_persistence_pause;
 use super::super::test_support::test_config;
 use crate::AppendThreadItemsParams;
@@ -86,6 +87,7 @@ use crate::ForkBoundary;
 use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
+use crate::LoadThreadHistoryParams;
 use crate::PersistContext;
 use crate::PrepareForkParams;
 use crate::PreparedFork;
@@ -3840,6 +3842,459 @@ async fn ephemeral_latest_side_uses_certified_active_context_without_freezing_so
         prepared.frozen_segment.is_none(),
         "an ephemeral side must not snapshot or copy the source rollout"
     );
+}
+
+async fn certified_supervisor_source(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> (codex_protocol::RolloutId, Vec<std::path::PathBuf>) {
+    create_paginated_thread(store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist source metadata");
+    let mut predecessors = Vec::new();
+    for index in 0..8 {
+        let turn = format!("turn-{index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(&turn),
+                    user_message(&format!("ancestor message {index}")),
+                    turn_completed(&turn),
+                ],
+            })
+            .await
+            .expect("append ancestor turn");
+        predecessors.push(
+            store
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                        &format!("checkpoint {index}"),
+                    )),
+                )
+                .await
+                .expect("rotate certified source")
+                .reference
+                .rollout_path,
+        );
+    }
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("current-turn"),
+                user_message("current message"),
+            ],
+        })
+        .await
+        .expect("append open current turn");
+    index_paginated_source_metadata(store, thread_id).await;
+    let path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("active source path");
+    (
+        codex_rollout::rollout_id_from_path(&path).expect("active source rollout ID"),
+        predecessors,
+    )
+}
+
+#[cfg(target_os = "linux")]
+/// Counts opens of selected rollout files without instrumenting the production readers.
+struct RolloutOpenWatch(std::fs::File);
+
+#[cfg(target_os = "linux")]
+impl RolloutOpenWatch {
+    fn new(paths: &[std::path::PathBuf]) -> Self {
+        use std::os::fd::AsRawFd;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        // The descriptor is immediately owned by File and closed on drop.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(
+            fd >= 0,
+            "create inotify descriptor: {}",
+            std::io::Error::last_os_error()
+        );
+        // inotify_init1 returned a new owned descriptor.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        for path in paths {
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("rollout path");
+            // The C string is NUL-terminated and lives through the call.
+            let watch =
+                unsafe { libc::inotify_add_watch(file.as_raw_fd(), path.as_ptr(), libc::IN_OPEN) };
+            assert!(
+                watch >= 0,
+                "watch rollout opens: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Self(file)
+    }
+
+    fn open_events(&mut self) -> usize {
+        use std::io::Read;
+        let mut buffer = [0_u8; 4096];
+        let mut count = 0;
+        loop {
+            match self.0.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(bytes) => {
+                    let event_size = std::mem::size_of::<libc::inotify_event>();
+                    assert_eq!(bytes % event_size, 0, "file-watch events have no names");
+                    count += bytes / event_size;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("read rollout open events: {error}"),
+            }
+        }
+        count
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ephemeral_supervisor_context_does_not_open_older_predecessors() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    let (rollout_id, predecessors) = certified_supervisor_source(&store, thread_id).await;
+    let latest = store
+        .list_turns(ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 1,
+            sort_direction: SortDirection::Desc,
+            items_view: StoredTurnItemsView::NotLoaded,
+        })
+        .await
+        .expect("warm source-backed latest-turn read");
+    assert_eq!(latest.turns[0].turn_id, "current-turn");
+    let mut watch = RolloutOpenWatch::new(&predecessors[..predecessors.len() - 1]);
+
+    let prepared = store
+        .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
+        .await
+        .expect("prepare supervisor model context");
+    assert_eq!(
+        watch.open_events(),
+        0,
+        "certified context must not open older predecessors"
+    );
+    assert!(prepared.frozen_segment.is_none());
+    assert!(contains_user_message(
+        prepared.model_context.as_slice(),
+        "current message"
+    ));
+    assert!(prepared.model_context.iter().any(|item| {
+        matches!(item, RolloutItem::Compacted(checkpoint) if checkpoint.message == "checkpoint 7")
+    }));
+    drop(prepared);
+
+    let ordinary = store
+        .prepare_fork_without_response_history_for_rollout(
+            PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            },
+            rollout_id,
+            /*ephemeral_context_only*/ true,
+        )
+        .await
+        .expect("prepare ordinary ephemeral fork");
+    assert_eq!(
+        watch.open_events(),
+        0,
+        "ephemeral fork must reuse the source-backed latest turn"
+    );
+    assert!(ordinary.response_history.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == "current-turn")
+    }), "ordinary forks retain the in-progress-turn seed");
+    drop(ordinary);
+
+    let durable = store
+        .prepare_fork_without_response_history_for_rollout(
+            PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            },
+            rollout_id,
+            /*ephemeral_context_only*/ false,
+        )
+        .await
+        .expect("prepare durable fork");
+    assert_eq!(
+        watch.open_events(),
+        0,
+        "durable fork must reuse the source-backed latest turn"
+    );
+    assert!(durable.frozen_segment.is_some());
+    assert!(durable.response_history.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == "current-turn")
+    }));
+    drop(durable);
+
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check complete projection")
+    );
+    assert!(
+        watch.open_events() > 0,
+        "complete-projection control must open older predecessors"
+    );
+}
+
+#[tokio::test]
+async fn latest_context_snapshots_release_writer_and_retain_lifecycle_reservation() {
+    for mode in ["helper", "ephemeral", "durable"] {
+        let home = TempDir::new().expect("temp dir");
+        let store = projection_store(home.path()).await;
+        let thread_id = ThreadId::new();
+        let (rollout_id, _) = certified_supervisor_source(&store, thread_id).await;
+        store
+            .list_turns(ListTurnsParams {
+                thread_id,
+                include_archived: false,
+                cursor: None,
+                page_size: 1,
+                sort_direction: SortDirection::Desc,
+                items_view: StoredTurnItemsView::NotLoaded,
+            })
+            .await
+            .expect("warm source-backed latest turn");
+        let pause = inject_certified_context_pause(thread_id);
+        let preparation_store = store.clone();
+        let preparation = tokio::spawn(async move {
+            if mode == "helper" {
+                preparation_store
+                    .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
+                    .await
+            } else {
+                preparation_store
+                    .prepare_fork_without_response_history_for_rollout(
+                        PrepareForkParams {
+                            thread_id,
+                            boundary: ForkBoundary::Latest,
+                        },
+                        rollout_id,
+                        mode == "ephemeral",
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+            .await
+            .expect("preparation reaches the reserved snapshot");
+        let mut append = Box::pin(store.append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![user_message("after snapshot")],
+        }));
+        tokio::select! {
+            biased;
+            result = &mut append => panic!("writer passed the snapshot reservation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        let mut resume = Box::pin(store.load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        }));
+        tokio::select! {
+            biased;
+            result = &mut resume => panic!("resume passed the snapshot reservation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        pause.release.notify_one();
+        let prepared = preparation
+            .await
+            .expect("join preparation")
+            .expect("capture snapshot");
+        tokio::time::timeout(Duration::from_secs(10), append)
+            .await
+            .expect("writer must resume after snapshot capture")
+            .expect("append after snapshot");
+        tokio::time::timeout(Duration::from_secs(10), resume)
+            .await
+            .expect("resume must not wait for the prepared child")
+            .expect("resume source after snapshot");
+        assert!(!contains_user_message(
+            prepared.model_context.as_slice(),
+            "after snapshot"
+        ));
+
+        let mut delete = Box::pin(store.delete_thread(DeleteThreadParams { thread_id }));
+        tokio::select! {
+            biased;
+            result = &mut delete => panic!("source deletion outlived no reservation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        drop(prepared);
+        delete
+            .await
+            .expect("delete after releasing the prepared snapshot");
+    }
+}
+
+#[tokio::test]
+async fn latest_context_forks_preserve_turn_started_before_checkpoint_and_child_boundary() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist source");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("ancestor-turn"),
+                user_message("ancestor"),
+                turn_completed("ancestor-turn"),
+                turn_started_with_root("open-turn", "root-turn"),
+                user_message("open message"),
+            ],
+        })
+        .await
+        .expect("append inherited and open turns");
+    store
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                "open checkpoint",
+            )),
+        )
+        .await
+        .expect("rotate after open turn started");
+    index_paginated_source_metadata(&store, thread_id).await;
+    let path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("active path");
+    let rollout_id = codex_rollout::rollout_id_from_path(&path).expect("active rollout ID");
+    let mut frozen_base = None;
+    for ephemeral in [true, false] {
+        let prepared = store
+            .prepare_fork_without_response_history_for_rollout(
+                PrepareForkParams {
+                    thread_id,
+                    boundary: ForkBoundary::Latest,
+                },
+                rollout_id,
+                ephemeral,
+            )
+            .await
+            .expect("prepare latest context fork");
+        assert!(prepared.response_history.iter().any(|item| matches!(item,
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+                if event.turn_id == "open-turn" && event.root_turn_id.as_deref() == Some("root-turn")
+        )), "fork must seed the open turn even when its start precedes the checkpoint");
+        if !ephemeral {
+            frozen_base = prepared
+                .frozen_segment
+                .as_ref()
+                .and_then(|frozen| frozen.history_base);
+        }
+    }
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_completed("open-turn"),
+                turn_started("later-turn"),
+                user_message("later"),
+            ],
+        })
+        .await
+        .expect("append after durable fork snapshot");
+    let child_id = ThreadId::new();
+    create_paginated_subagent_thread(&store, child_id, frozen_base, None).await;
+    store
+        .persist_thread(child_id, PersistContext::Standard)
+        .await
+        .expect("persist child");
+    index_paginated_source_metadata(&store, child_id).await;
+    let child = store
+        .list_turns(ListTurnsParams {
+            thread_id: child_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 10,
+            sort_direction: SortDirection::Desc,
+            items_view: StoredTurnItemsView::NotLoaded,
+        })
+        .await
+        .expect("read inherited child turns");
+    let ids = child
+        .turns
+        .iter()
+        .map(|turn| turn.turn_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"ancestor-turn"));
+    assert!(ids.contains(&"open-turn"));
+    assert!(
+        !ids.contains(&"later-turn"),
+        "parent appends after the snapshot must not leak into the child"
+    );
+}
+
+#[tokio::test]
+async fn latest_context_snapshot_rejects_replaced_or_deleted_active_source() {
+    for mode in ["helper", "ephemeral", "durable"] {
+        for replace in [true, false] {
+            let home = TempDir::new().expect("temp dir");
+            let store = projection_store(home.path()).await;
+            let thread_id = ThreadId::new();
+            let (rollout_id, _) = certified_supervisor_source(&store, thread_id).await;
+            let path = store
+                .live_rollout_path(thread_id)
+                .await
+                .expect("active source path");
+            let pause = inject_certified_context_pause(thread_id);
+            let preparation_store = store.clone();
+            let preparation = tokio::spawn(async move {
+                if mode == "helper" {
+                    preparation_store
+                        .prepare_ephemeral_model_context_for_rollout(thread_id, rollout_id)
+                        .await
+                } else {
+                    preparation_store
+                        .prepare_fork_without_response_history_for_rollout(
+                            PrepareForkParams {
+                                thread_id,
+                                boundary: ForkBoundary::Latest,
+                            },
+                            rollout_id,
+                            mode == "ephemeral",
+                        )
+                        .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+                .await
+                .expect("preparation reaches the reserved snapshot");
+            if replace {
+                let replacement = path.with_extension("replacement");
+                fs::copy(&path, &replacement).expect("copy same-size replacement");
+                fs::rename(replacement, &path).expect("replace selected source");
+            } else {
+                fs::remove_file(&path).expect("delete selected source");
+            }
+            pause.release.notify_one();
+            let result = preparation.await.expect("join preparation");
+            assert!(
+                result.is_err(),
+                "changed source must not produce a snapshot"
+            );
+        }
+    }
 }
 
 fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
