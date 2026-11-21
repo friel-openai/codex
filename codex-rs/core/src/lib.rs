@@ -113,6 +113,7 @@ mod hook_environment_executor;
 mod hook_mcp_executor;
 mod hook_runtime;
 mod image_preparation;
+mod inherited_thread_state;
 pub(crate) mod mcp;
 mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
