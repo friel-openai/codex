@@ -304,7 +304,19 @@ struct SharedConnection {
     retirement: Mutex<RetirementCause>,
     shutdown_tasks: TaskTracker,
     shutdown_reservation: Mutex<Option<TaskTrackerToken>>,
+    #[cfg(test)]
+    retirement_events: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TestRetirementEvent>>>,
     _diagnostics_guard: GaugeGuard,
+}
+
+/// Records the cancellation decision taken for a pending operation.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TestRetirementEvent {
+    LeaseCancelled,
+    RouteClosed,
+    SoleRoute { cancelled: bool },
+    KeepRunningAbandoned,
 }
 
 impl SharedConnection {
@@ -336,7 +348,21 @@ impl SharedConnection {
             retirement: Mutex::new(RetirementCause::Active),
             shutdown_tasks,
             shutdown_reservation: Mutex::new(Some(shutdown_reservation)),
+            #[cfg(test)]
+            retirement_events: Mutex::new(None),
             _diagnostics_guard: LIVE_CONNECTIONS.track(),
+        }
+    }
+
+    #[cfg(test)]
+    fn record_retirement_event(&self, event: TestRetirementEvent) {
+        if let Some(sender) = self
+            .retirement_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let _ = sender.send(event);
         }
     }
 
@@ -2316,6 +2342,21 @@ impl McpPooledClient {
         self.connection.start_retired_shutdown();
     }
 
+    fn handle_owner_cancellation(&self, action: AbandonedOperationAction) {
+        match action {
+            AbandonedOperationAction::RetireConnection => {
+                self.retire_after_route_close_in_background();
+            }
+            AbandonedOperationAction::CancelIfSoleRoute | AbandonedOperationAction::KeepRunning => {
+                // Startup waiters have not sent a wire request, and another session can still
+                // own the initializer.
+                if let Some(slot) = self.slot.upgrade() {
+                    slot.cancel_startup_if_sole_route(&self.connection, &self.route);
+                }
+            }
+        }
+    }
+
     async fn retire_after_route_close(&self) {
         self.prepare_retirement_after_route_close();
         self.connection.start_retired_shutdown();
@@ -2448,11 +2489,22 @@ impl Drop for RetireConnectionOnDrop {
                     let Some(slot) = client.slot.upgrade() else {
                         return;
                     };
-                    if slot.cancel_startup_if_sole_route(&client.connection, &client.route) {
+                    let cancelled =
+                        slot.cancel_startup_if_sole_route(&client.connection, &client.route);
+                    #[cfg(test)]
+                    client
+                        .connection
+                        .record_retirement_event(TestRetirementEvent::SoleRoute { cancelled });
+                    if cancelled {
                         client.connection.shutdown().await;
                     }
                 }
-                AbandonedOperationAction::KeepRunning => {}
+                AbandonedOperationAction::KeepRunning => {
+                    #[cfg(test)]
+                    client
+                        .connection
+                        .record_retirement_event(TestRetirementEvent::KeepRunningAbandoned);
+                }
             }
         });
     }
@@ -2646,7 +2698,9 @@ impl McpConnectionLease {
                     tokio::select! {
                         biased;
                         () = lease_cancelled.cancelled() => {
-                            task_client.retire_after_route_close_in_background();
+                            task_client.handle_owner_cancellation(abandoned_operation_action);
+                            #[cfg(test)]
+                            task_client.connection.record_retirement_event(TestRetirementEvent::LeaseCancelled);
                             Err(anyhow!("MCP connection lease released"))
                         }
                         () = superseded => Err(anyhow!("shared MCP connection superseded")),
@@ -2654,7 +2708,9 @@ impl McpConnectionLease {
                             Err(anyhow!("shared MCP connection closed"))
                         }
                         () = route_for_task.closed() => {
-                            task_client.retire_after_route_close_in_background();
+                            task_client.handle_owner_cancellation(abandoned_operation_action);
+                            #[cfg(test)]
+                            task_client.connection.record_retirement_event(TestRetirementEvent::RouteClosed);
                             Err(anyhow!("MCP session route closed"))
                         }
                         value = operation(task_client.clone()) => Ok(value),
@@ -3407,6 +3463,39 @@ impl McpConnectionLease {
     #[cfg(test)]
     pub(crate) fn connection_cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.inner.slot.current().client.cancel_token.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_retirement_events(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<TestRetirementEvent> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *self
+            .inner
+            .slot
+            .current()
+            .retirement_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_routes_for_test(&self) -> Vec<Arc<McpSessionRoute>> {
+        self.inner
+            .slot
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|route| !route.is_closed())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_count_for_test(&self) -> usize {
+        self.inner.slot.active_leases.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
