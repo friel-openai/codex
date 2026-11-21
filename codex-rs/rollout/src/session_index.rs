@@ -201,9 +201,11 @@ pub async fn find_thread_name_entries_by_ids(
                 continue;
             };
             let name = entry.thread_name.trim();
-            // The first nonempty name seen for an id is its latest usable name.
-            if !name.is_empty() && remaining_ids.remove(&entry.id) {
-                names.insert(entry.id, entry);
+            // An empty latest entry clears the name and must hide older entries.
+            if remaining_ids.remove(&entry.id) {
+                if !name.is_empty() {
+                    names.insert(entry.id, entry);
+                }
                 if remaining_ids.is_empty() {
                     break;
                 }
