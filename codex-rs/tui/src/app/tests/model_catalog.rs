@@ -18,7 +18,7 @@ fn bedrock_model_presets() -> Vec<ModelPreset> {
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
         /*auth_manager*/ None,
     )
-    .models_manager_without_cache(/*config_model_catalog*/ None)
+    .models_manager_without_cache(/*config_model_catalog*/ None, Default::default())
     .try_list_models()
     .expect("Bedrock model catalog")
 }

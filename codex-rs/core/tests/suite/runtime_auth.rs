@@ -607,7 +607,8 @@ async fn exercise_provider_destinations(
                 /*turn_state*/ None,
             )
             .await?;
-        let models = provider.models_manager_without_cache(/*config_model_catalog*/ None);
+        let models = provider
+            .models_manager_without_cache(/*config_model_catalog*/ None, Default::default());
         models.set_api_key_model_discovery_enabled(/*enabled*/ true);
         models
             .raw_model_catalog(RefreshStrategy::Online, config.http_client_factory())
