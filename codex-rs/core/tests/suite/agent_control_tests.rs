@@ -688,6 +688,7 @@ async fn hosted_child_persists_inherited_session_id(
             manager
                 .fork_prepared_thread(child_options, prepared)
                 .await?
+                .0
         }
     };
     assert_ne!(SessionId::from(child.thread_id), root_session_id);
