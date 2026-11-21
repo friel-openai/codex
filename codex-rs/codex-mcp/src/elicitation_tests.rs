@@ -16,6 +16,45 @@ use std::sync::atomic::Ordering::Relaxed;
 
 type ReviewerResponse = std::result::Result<Option<ElicitationResponse>, &'static str>;
 
+#[test]
+fn request_authority_requires_shared_owner_and_responder_router() {
+    let config = test_elicitation_config(
+        "test",
+        AskForApproval::OnRequest,
+        PermissionProfile::default(),
+    );
+    let router = ElicitationRequestRouter::default();
+    let manager = ElicitationRequestManager::new(
+        Arc::clone(&config),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        router.clone(),
+    );
+    let independent = ElicitationRequestManager::new(
+        config, /*reviewer*/ None, /*lifecycle*/ None, router,
+    );
+    let different_responder_router = ElicitationRequestManager {
+        router: ElicitationRequestRouter::default(),
+        ..manager.clone()
+    };
+    let cloned = manager.clone();
+
+    assert!(manager.shares_request_authority_with(&cloned));
+    assert!(!manager.shares_request_authority_with(&independent));
+    assert!(!manager.shares_request_authority_with(&different_responder_router));
+    assert!(manager.update(
+        test_elicitation_config(
+            "updated",
+            AskForApproval::Never,
+            PermissionProfile::default()
+        ),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+    ));
+    assert!(manager.shares_request_authority_with(&cloned));
+    assert!(!manager.shares_request_authority_with(&different_responder_router));
+}
+
 #[tokio::test]
 async fn abandonment_is_ordered_and_exactly_once_when_the_native_waiter_is_dropped() {
     let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
@@ -29,13 +68,13 @@ async fn abandonment_is_ordered_and_exactly_once_when_the_native_waiter_is_dropp
         requested_schema: json!({"type": "object"}),
     };
     let mut first = Box::pin(router.request_user_interaction(
-        Some(tx),
+        Some(SendEvent::from_channel(tx)),
         &authority,
         McpServerKey::in_environment("first", "server"),
         request.clone(),
     ));
     let mut sibling = Box::pin(router.request_user_interaction(
-        Some(replacement_tx),
+        Some(SendEvent::from_channel(replacement_tx)),
         &authority,
         McpServerKey::in_environment("second", "server"),
         request,
@@ -118,7 +157,7 @@ async fn bounded_sources_preserve_backpressure_across_close() {
     .await
     .unwrap();
     let mut pending = Box::pin(router.request_user_interaction(
-        Some(tx),
+        Some(SendEvent::from_channel(tx)),
         &authority,
         McpServerKey::unscoped("server"),
         ElicitationRequest::Form {
@@ -161,7 +200,7 @@ async fn abandonment_closed_receiver_cleans_up_without_delivery_or_replay() {
             events.close();
         }
         let mut pending = Box::pin(router.request_user_interaction(
-            Some(tx),
+            Some(SendEvent::from_channel(tx)),
             &authority,
             McpServerKey::unscoped("server"),
             ElicitationRequest::Form {
@@ -199,7 +238,7 @@ async fn abandonment_close_joins_elected_actions_and_rejects_retained_router_adm
         requested_schema: json!({"type": "object"}),
     };
     let mut pending = Box::pin(router.request_user_interaction(
-        Some(tx.clone()),
+        Some(SendEvent::from_channel(tx.clone())),
         &authority,
         McpServerKey::unscoped("server"),
         request.clone(),
@@ -224,7 +263,7 @@ async fn abandonment_close_joins_elected_actions_and_rejects_retained_router_adm
     assert!(
         retained_router
             .request_user_interaction(
-                Some(tx.clone()),
+                Some(SendEvent::from_channel(tx.clone())),
                 &authority,
                 McpServerKey::unscoped("server"),
                 request.clone(),
@@ -254,10 +293,10 @@ async fn abandonment_close_joins_elected_actions_and_rejects_retained_router_adm
     assert!(
         retained_router
             .request_user_interaction(
-                Some(tx),
+                Some(SendEvent::from_channel(tx)),
                 &authority,
                 McpServerKey::unscoped("server"),
-                request
+                request,
             )
             .await
             .is_err()
@@ -272,7 +311,7 @@ async fn abandonment_close_invalidates_a_published_responder_before_returning() 
     let router = manager.router.clone();
     let (tx, events) = async_channel::unbounded();
     let mut pending = Box::pin(router.request_user_interaction(
-        Some(tx),
+        Some(SendEvent::from_channel(tx)),
         &authority,
         McpServerKey::unscoped("server"),
         ElicitationRequest::Form {
@@ -632,9 +671,10 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
         .expect("closed event channel must not leave an elicitation pending")
         .expect_err("closed event channel must fail the elicitation");
 
-    assert_eq!(
-        error.to_string(),
-        "failed to deliver MCP elicitation request"
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to deliver MCP elicitation request")
     );
     assert!(
         manager
@@ -763,6 +803,76 @@ async fn strict_auto_review_fails_closed_without_a_canonical_decision() {
         assert_declined(json!(true), Some(Ok(Some(response)))).await;
     }
     assert_declined(json!(true), /*response*/ None).await;
+}
+
+#[tokio::test]
+async fn retained_elicitation_sender_observes_approval_policy_updates() {
+    let (manager, events, sender) = elicitation_fixture(
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+        /*reviewer*/ None,
+    );
+    for policy in [
+        AskForApproval::OnRequest,
+        AskForApproval::Never,
+        AskForApproval::OnRequest,
+    ] {
+        assert!(manager.update(
+            test_elicitation_config("independent-mcp", policy, PermissionProfile::read_only()),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+        ));
+        let pending = tokio::spawn(sender(
+            RequestId::Number(7),
+            Elicitation::OpenAiForm {
+                meta: None,
+                message: "Review this request".into(),
+                requested_schema: json!({"type": "object"}),
+            },
+        ));
+        let response = if policy == AskForApproval::Never {
+            ElicitationResponse {
+                action: ElicitationAction::Decline,
+                content: None,
+                meta: None,
+            }
+        } else {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("current approval policy should prompt")
+                .unwrap();
+            let EventMsg::ElicitationRequest(request) = event.msg else {
+                panic!("expected MCP elicitation");
+            };
+            let ProtocolRequestId::String(id) = request.id else {
+                panic!("expected Codex-owned string request ID");
+            };
+            let response = ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: None,
+            };
+            manager
+                .resolve(
+                    request.server_name,
+                    RequestId::String(id.into()),
+                    response.clone(),
+                )
+                .await
+                .unwrap();
+            response
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                .await
+                .expect("current approval policy must complete the request")
+                .unwrap()
+                .unwrap(),
+            response
+        );
+        assert!(events.is_empty());
+        assert!(manager.router.requests.lock().unwrap().pending.is_empty());
+    }
 }
 
 #[tokio::test]

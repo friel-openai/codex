@@ -409,6 +409,42 @@ default_tools_approval_mode = "{approval_mode}"
 "#
     ))
     .expect("apps config should parse");
+    std::fs::write(
+        &user_config_path,
+        toml::to_string(&user_config).expect("serialize apps config"),
+    )
+    .expect("persist apps config for per-turn reload");
+    config.config_layer_stack = config
+        .config_layer_stack
+        .with_user_config(&user_config_path, user_config)
+        .expect("apps user config should be valid");
+}
+
+fn set_default_app_approval_mode_and_reviewer(
+    config: &mut Config,
+    approval_mode: AppToolApproval,
+    default_approvals_reviewer: ApprovalsReviewer,
+) {
+    let approval_mode = match approval_mode {
+        AppToolApproval::Auto => "auto",
+        AppToolApproval::Prompt => "prompt",
+        AppToolApproval::Writes => "writes",
+        AppToolApproval::Approve => "approve",
+    };
+    let user_config_path = config.codex_home.join("config.toml").abs();
+    let user_config = toml::from_str(&format!(
+        r#"
+[apps._default]
+approvals_reviewer = "{default_approvals_reviewer}"
+default_tools_approval_mode = "{approval_mode}"
+"#
+    ))
+    .expect("apps config should parse");
+    std::fs::write(
+        &user_config_path,
+        toml::to_string(&user_config).expect("serialize apps config"),
+    )
+    .expect("persist apps config for per-turn reload");
     config.config_layer_stack = config
         .config_layer_stack
         .with_user_config(&user_config_path, user_config)
@@ -889,6 +925,11 @@ approvals_reviewer = "auto_review"
 "#
                 ))
                 .expect("apps config should parse");
+                std::fs::write(
+                    config.codex_home.join("config.toml"),
+                    toml::to_string(&user_config).expect("serialize work-link config"),
+                )
+                .expect("persist work-link config for per-turn reload");
                 config.config_layer_stack = config
                     .config_layer_stack
                     .with_user_config(&config.codex_home.join("config.toml").abs(), user_config)
