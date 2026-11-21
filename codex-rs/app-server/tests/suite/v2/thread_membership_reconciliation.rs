@@ -244,6 +244,8 @@ async fn list_current_members(
         ClientRequest::ThreadList {
             request_id: next_request_id(),
             params: ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(200),
@@ -294,6 +296,8 @@ async fn wait_for_completed_current_tree(
             ClientRequest::ThreadList {
                 request_id: next_request_id(),
                 params: ThreadListParams {
+                    include_attached_threads: false,
+                    current_account_only: false,
                     excluded_thread_ids: None,
                     cursor: None,
                     limit: Some(200),
