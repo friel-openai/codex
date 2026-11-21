@@ -5574,6 +5574,7 @@ impl Session {
             executor_hook_sources,
             mcp,
             required_mcp_servers: required_servers.to_vec(),
+            dynamic_tools,
             tool_router,
             loaded_agents_md,
             context_transition: Default::default(),
