@@ -23,6 +23,8 @@ pub(crate) struct EnvironmentAttachment {
     pub(crate) environment: Arc<Environment>,
     pub(crate) detached: CancellationToken,
     _connection_events_task: Option<AbortOnDropHandle<()>>,
+    // A bound connection view retains the original attachment's event task and detach signal.
+    _source_attachment: Option<Arc<EnvironmentAttachment>>,
 }
 
 impl EnvironmentAttachment {
@@ -52,9 +54,19 @@ impl EnvironmentAttachment {
             environment,
             detached,
             _connection_events_task: connection_events_task,
+            _source_attachment: None,
         });
         let detach_on_drop = attachment.detached.clone().drop_guard();
         (attachment, detach_on_drop, events)
+    }
+
+    pub(crate) fn bind_environment(self: &Arc<Self>, environment: Arc<Environment>) -> Arc<Self> {
+        Arc::new(Self {
+            environment,
+            detached: self.detached.clone(),
+            _connection_events_task: None,
+            _source_attachment: Some(Arc::clone(self)),
+        })
     }
 }
 

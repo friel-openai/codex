@@ -701,6 +701,7 @@ impl Session {
             prompt_cache_ttl: start_options.prompt_cache_ttl,
             cyber_access_program: start_options.cyber_access_program,
             helper_admission: triggered.then_some(helper_admission).flatten(),
+            allow_initial_default_recovery: false,
         };
         let turn_context = match session_configuration {
             Some(configuration) => {
@@ -1178,6 +1179,7 @@ impl Session {
         };
         let saved_guardian_completion =
             matches!(event, EventMsg::TurnComplete(_)) && self.is_private_guardian_reviewer().await;
+        self.revoke_turn_initial_recovery(turn_context.as_ref());
         self.finish_turn_diff(&turn_context, &event).await;
         if !saved_guardian_completion {
             self.send_event(turn_context.as_ref(), event.clone()).await;
@@ -1299,6 +1301,7 @@ impl Session {
         error: Option<ErrorEvent>,
     ) {
         let sub_id = task.turn_context.sub_id.clone();
+        self.revoke_turn_initial_recovery(task.turn_context.as_ref());
         if task.cancellation_token.is_cancelled() {
             self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
                 .await;
