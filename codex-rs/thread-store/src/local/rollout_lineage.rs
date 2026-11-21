@@ -43,7 +43,7 @@ use crate::ThreadStoreResult;
 ///
 /// A thread may contribute multiple ranges after rollout rotation. Their ordinal ranges do not
 /// overlap, so the existing `(physical_thread_id, rollout_ordinal)` cursor remains unambiguous.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct RolloutLineageSegment {
     /// Stable thread identity from the segment's `SessionMeta`.
     pub(super) thread_id: ThreadId,
