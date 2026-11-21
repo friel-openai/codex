@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::time::Duration;
 
@@ -1084,6 +1086,812 @@ async fn source_index_reuses_ancestors_after_root_validation_fails() {
         .unwrap()
         .expect("restored root");
     assert!(std::sync::Arc::ptr_eq(&cached, &reused));
+}
+
+async fn large_source_item_race_fixture() -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    std::path::PathBuf,
+    String,
+) {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout_with_end(&predecessor, thread_id, None, 6);
+    append_timeline_record(
+        &predecessor,
+        6,
+        timeline_user_item(thread_id, "turn", "inherited", "ancestor"),
+    );
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 7)),
+    );
+    let mut metadata = codex_rollout::RolloutRecorder::load_rollout_lines(&root)
+        .await
+        .unwrap()
+        .0
+        .remove(0);
+    let RolloutItem::SessionMeta(meta) = &mut metadata.item else {
+        panic!("expected session metadata");
+    };
+    meta.meta.originator = "x".repeat(12_000);
+    fs::write(
+        &root,
+        format!("{}\n", serde_json::to_string(&metadata).unwrap()),
+    )
+    .unwrap();
+    append_timeline_record(
+        &root,
+        8,
+        RolloutItem::Compacted(Box::new(CompactedItem {
+            message: "x".repeat(872_000),
+            replacement_history: None,
+            retained_context: None,
+            retained_context_replay: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            resume_metadata: None,
+            segment_state_checkpoint: None,
+        })),
+    );
+    append_timeline_record(
+        &root,
+        9,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    for index in 0..7_u64 {
+        append_timeline_record(
+            &root,
+            10 + index,
+            timeline_user_item(thread_id, "turn", &format!("root-{index}"), "old"),
+        );
+    }
+    append_timeline_record(
+        &root,
+        17,
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn".to_string(),
+            root_turn_id: None,
+            last_agent_message: None,
+            error: None,
+            started_at: Some(10),
+            completed_at: Some(20),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        })),
+    );
+    append_timeline_record(
+        &root,
+        18,
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: "y".repeat(2_375_000),
+            ..Default::default()
+        })),
+    );
+    let size = fs::metadata(&root).unwrap().len();
+    assert!((3_200_000..3_400_000).contains(&size));
+    let (_, cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    (home, store, thread_id, root, cursor.unwrap())
+}
+
+fn append_verification_event(root: &std::path::Path, ordinal: u64) {
+    append_timeline_record(
+        root,
+        ordinal,
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: "neutral".to_string(),
+            ..Default::default()
+        })),
+    );
+}
+
+#[tokio::test]
+async fn source_page_refreshes_root_appended_before_scan() {
+    let (_home, store, thread_id, root, _) = large_source_item_race_fixture().await;
+    let pause = uncertified_items::inject_root_scan_pause(thread_id);
+    let reading_store = store.clone();
+    let request = tokio::spawn(async move {
+        reading_store
+            .list_items(item_params(
+                thread_id,
+                Some("turn"),
+                None,
+                100,
+                SortDirection::Desc,
+            ))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), pause.entered.notified())
+        .await
+        .expect("root scan reached pause");
+    append_timeline_record(
+        &root,
+        19,
+        timeline_user_item(thread_id, "turn", "late", "new"),
+    );
+    pause.release.notify_one();
+    let page = request.await.unwrap().expect("root append is retried");
+    assert_eq!(
+        item_ids(&page),
+        [
+            "late",
+            "root-6",
+            "root-5",
+            "root-4",
+            "root-3",
+            "root-2",
+            "root-1",
+            "root-0",
+            "inherited"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn five_cold_item_pages_survive_two_appends_during_index_validation() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout_with_end(&predecessor, thread_id, None, 6);
+    append_timeline_record(
+        &predecessor,
+        6,
+        timeline_user_item(thread_id, "turn", "inherited", "old"),
+    );
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 7)),
+    );
+    append_timeline_record(
+        &root,
+        8,
+        timeline_user_item(thread_id, "turn", "root-a", "a"),
+    );
+    append_timeline_record(
+        &root,
+        9,
+        timeline_user_item(thread_id, "turn", "root-b", "b"),
+    );
+    let pause = uncertified_items::inject_index_pause(thread_id);
+    let mut requests = Vec::new();
+    for _ in 0..5 {
+        let store = store.clone();
+        requests.push(tokio::spawn(async move {
+            store
+                .list_items(item_params(
+                    thread_id,
+                    Some("turn"),
+                    None,
+                    1,
+                    SortDirection::Desc,
+                ))
+                .await
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(30), pause.entered.notified())
+        .await
+        .expect("cold index validation reached pause");
+    append_verification_event(&root, 10);
+    append_verification_event(&root, 11);
+    pause.release.notify_one();
+    let mut expected = None;
+    for request in requests {
+        let page = request.await.unwrap().expect("concurrent page succeeds");
+        assert_eq!(item_ids(&page), ["root-b"]);
+        assert!(page.next_cursor.is_some());
+        let actual = serde_json::to_value(page).unwrap();
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected);
+        } else {
+            expected = Some(actual);
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_active_root_turn_preserves_late_split_and_sqlite_items() {
+    for case in ["late", "split", "sqlite"] {
+        let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+        let predecessor_id = ThreadId::new();
+        let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+        write_rollout_with_end(&predecessor, thread_id, None, 6);
+        let started = || {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn".to_string(),
+                root_turn_id: None,
+                turn_attribution: None,
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }))
+        };
+        if case == "split" {
+            append_timeline_record(&predecessor, 6, started());
+        } else {
+            append_verification_event(&predecessor, 6);
+        }
+        let physical_root_id = ThreadId::new();
+        let root = selected_rollout_path(home.path(), thread_id, physical_root_id);
+        write_rollout(
+            &root,
+            thread_id,
+            Some(history_position(&predecessor, predecessor_id, 7)),
+        );
+        select_rollout_path(&store, thread_id, root.clone()).await;
+        append_timeline_record(&root, 8, started());
+        if case == "sqlite" {
+            insert_item(history_db(&store).await, thread_id, "turn", "sqlite", 9).await;
+        }
+        let params = item_params(thread_id, Some("turn"), None, 100, SortDirection::Desc);
+        let result = super::source_backed_items(&store, &params).await.unwrap();
+        if case == "late" {
+            let page = result.expect("empty active turn is source-backed");
+            assert!(page.items.is_empty());
+            assert!(page.next_cursor.is_none());
+            assert!(page.backwards_cursor.is_none());
+            append_timeline_record(
+                &root,
+                9,
+                timeline_user_item(thread_id, "turn", "late", "new"),
+            );
+            let page = super::source_backed_items(&store, &params)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(item_ids(&page), ["late"]);
+        } else {
+            assert!(
+                result.is_none(),
+                "{case} must retain the compatibility reader"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_active_turn_linearizes_at_sqlite_query() {
+    for case in ["sqlite", "source"] {
+        let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+        let predecessor_id = ThreadId::new();
+        let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+        write_rollout_with_end(&predecessor, thread_id, None, 6);
+        append_verification_event(&predecessor, 6);
+        let physical_root_id = ThreadId::new();
+        let root = selected_rollout_path(home.path(), thread_id, physical_root_id);
+        write_rollout(
+            &root,
+            thread_id,
+            Some(history_position(&predecessor, predecessor_id, 7)),
+        );
+        select_rollout_path(&store, thread_id, root.clone()).await;
+        append_timeline_record(
+            &root,
+            8,
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn".to_string(),
+                root_turn_id: None,
+                turn_attribution: None,
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+        );
+        let pause = inject_source_item_pause(thread_id);
+        let reader = store.clone();
+        let params = item_params(thread_id, Some("turn"), None, 100, SortDirection::Desc);
+        let reading_params = params.clone();
+        let request =
+            tokio::spawn(async move { super::source_backed_items(&reader, &reading_params).await });
+        tokio::time::timeout(Duration::from_secs(30), pause.entered.notified())
+            .await
+            .expect("empty page reached post-query validation");
+        if case == "sqlite" {
+            insert_item(history_db(&store).await, thread_id, "turn", "sqlite", 9).await;
+        } else {
+            append_timeline_record(
+                &root,
+                9,
+                timeline_user_item(thread_id, "turn", "late", "new"),
+            );
+        }
+        pause.release.notify_one();
+        let result = request.await.unwrap();
+        if case == "sqlite" {
+            assert!(result.unwrap().unwrap().items.is_empty());
+            assert!(
+                super::source_backed_items(&store, &params)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(matches!(result, Err(ThreadStoreError::Conflict { .. })));
+            let page = super::source_backed_items(&store, &params)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(item_ids(&page), ["late"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_active_turn_old_cursor_excludes_late_item_and_fresh_cursor_includes_it() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout_with_end(&predecessor, thread_id, None, 6);
+    append_timeline_record(
+        &predecessor,
+        6,
+        timeline_user_item(thread_id, "older", "older-item", "old"),
+    );
+    let root_id = ThreadId::new();
+    let root = selected_rollout_path(home.path(), thread_id, root_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 7)),
+    );
+    select_rollout_path(&store, thread_id, root.clone()).await;
+    append_timeline_record(
+        &root,
+        8,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    let (_, old_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    let old_cursor = old_cursor.expect("predecessor item provides a cursor");
+    let old_params = item_params(
+        thread_id,
+        Some("turn"),
+        Some(old_cursor),
+        100,
+        SortDirection::Desc,
+    );
+    let empty = store.list_items(old_params.clone()).await.unwrap();
+    assert!(empty.items.is_empty());
+    append_timeline_record(
+        &root,
+        9,
+        timeline_user_item(thread_id, "turn", "late", "new"),
+    );
+    assert!(store.list_items(old_params).await.unwrap().items.is_empty());
+    let (_, fresh_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    let fresh_cursor = fresh_cursor.expect("new item provides a cursor");
+    let fresh = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn"),
+            Some(fresh_cursor),
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&fresh), ["late"]);
+}
+
+#[tokio::test]
+async fn cold_index_retries_when_root_grows_during_all_identity_attempts() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout_with_end(&predecessor, thread_id, None, 6);
+    append_timeline_record(
+        &predecessor,
+        6,
+        timeline_user_item(thread_id, "turn", "inherited", "old"),
+    );
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 7)),
+    );
+    append_timeline_record(
+        &root,
+        8,
+        timeline_user_item(thread_id, "turn", "root", "new"),
+    );
+    let pause = uncertified_items::inject_root_identity_pauses(thread_id, 4);
+    let reader = store.clone();
+    let request = tokio::spawn(async move {
+        reader
+            .list_items(item_params(
+                thread_id,
+                Some("turn"),
+                None,
+                100,
+                SortDirection::Desc,
+            ))
+            .await
+    });
+    for ordinal in 9..13 {
+        tokio::time::timeout(Duration::from_secs(30), pause.entered.notified())
+            .await
+            .expect("root identity attempt paused");
+        append_verification_event(&root, ordinal);
+        pause.release.notify_one();
+    }
+    let page = request
+        .await
+        .unwrap()
+        .expect("root growth retries cached discovery");
+    assert_eq!(item_ids(&page), ["root", "inherited"]);
+}
+
+async fn paused_large_item_verification(
+    point: uncertified_items::VerifyPausePoint,
+) -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    std::path::PathBuf,
+    std::sync::Arc<uncertified_items::VerifyPause>,
+    tokio::task::JoinHandle<ThreadStoreResult<ItemPage>>,
+) {
+    let (home, store, thread_id, root, cursor) = large_source_item_race_fixture().await;
+    let (page_pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
+    append_verification_event(&root, 19);
+    let verify_pause = uncertified_items::inject_verify_pause(&root, point);
+    page_pause.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), verify_pause.entered.notified())
+        .await
+        .expect("final prefix verification reached the requested point");
+    (home, store, thread_id, root, verify_pause, request)
+}
+
+async fn source_page_survives_eight_verification_appends(
+    point: uncertified_items::VerifyPausePoint,
+) {
+    let (_home, store, thread_id, root, pause, request) =
+        paused_large_item_verification(point).await;
+    for index in 0..8_u64 {
+        if index == 7 {
+            append_timeline_record(
+                &root,
+                20 + index,
+                timeline_user_item(thread_id, "turn", "late", "new"),
+            );
+        } else {
+            append_verification_event(&root, 20 + index);
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    pause.release();
+    let page = request
+        .await
+        .unwrap()
+        .expect("append-only writes preserve the captured page");
+    assert_eq!(
+        item_ids(&page),
+        [
+            "root-6",
+            "root-5",
+            "root-4",
+            "root-3",
+            "root-2",
+            "root-1",
+            "root-0",
+            "inherited",
+        ]
+    );
+    assert!(page.next_cursor.is_none());
+    let fresh = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        item_ids(&fresh),
+        [
+            "late",
+            "root-6",
+            "root-5",
+            "root-4",
+            "root-3",
+            "root-2",
+            "root-1",
+            "root-0",
+            "inherited",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn source_page_survives_eight_appends_during_prefix_hash() {
+    source_page_survives_eight_verification_appends(
+        uncertified_items::VerifyPausePoint::AfterFirstChunk,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn source_page_survives_eight_appends_after_prefix_hash() {
+    source_page_survives_eight_verification_appends(uncertified_items::VerifyPausePoint::AfterHash)
+        .await;
+}
+
+#[tokio::test]
+async fn turn_page_survives_eight_appends_during_prefix_hash() {
+    let (_home, store, thread_id, root, _) = large_source_item_race_fixture().await;
+    let page_pause = inject_source_item_pause(thread_id);
+    let reading_store = store.clone();
+    let request = tokio::spawn(async move {
+        reading_store
+            .list_turns(turn_params(
+                thread_id,
+                None,
+                5,
+                SortDirection::Desc,
+                StoredTurnItemsView::NotLoaded,
+            ))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), page_pause.entered.notified())
+        .await
+        .expect("turn page reached final validation");
+    append_verification_event(&root, 19);
+    let verify_pause = uncertified_items::inject_verify_pause(
+        &root,
+        uncertified_items::VerifyPausePoint::AfterFirstChunk,
+    );
+    page_pause.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), verify_pause.entered.notified())
+        .await
+        .expect("turn page reached prefix hashing");
+    for ordinal in 20..28 {
+        append_verification_event(&root, ordinal);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    verify_pause.release();
+    let page = request
+        .await
+        .unwrap()
+        .expect("append-only writes preserve the captured turn page");
+    assert_eq!(page.turns.len(), 1);
+    assert_eq!(page.turns[0].turn_id, "turn");
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn source_pages_with_live_120ms_writer() {
+    source_pages_with_live_writer(120).await;
+}
+
+#[tokio::test]
+async fn source_pages_with_live_12ms_writer() {
+    source_pages_with_live_writer(12).await;
+}
+
+async fn source_pages_with_live_writer(interval_ms: u64) {
+    let (_home, store, thread_id, root, cursor) = large_source_item_race_fixture().await;
+    let (page_pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
+    let started = std::time::Instant::now();
+    let (first_write, first_write_done) = tokio::sync::oneshot::channel();
+    let writer = std::thread::spawn(move || {
+        let mut first_write = Some(first_write);
+        for index in 0..8_u64 {
+            if index == 7 {
+                append_timeline_record(
+                    &root,
+                    19 + index,
+                    timeline_user_item(thread_id, "turn", "late", "new"),
+                );
+            } else {
+                append_verification_event(&root, 19 + index);
+            }
+            eprintln!("live append {index}: {:?}", started.elapsed());
+            if let Some(sender) = first_write.take() {
+                sender.send(()).unwrap();
+            }
+            if index != 7 {
+                std::thread::sleep(Duration::from_millis(interval_ms));
+            }
+        }
+    });
+    first_write_done.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(interval_ms / 2)).await;
+    page_pause.release.notify_one();
+    let mut errors = Vec::new();
+    match request.await.unwrap() {
+        Ok(page) => {
+            let ids = item_ids(&page);
+            if ids
+                != [
+                    "root-6",
+                    "root-5",
+                    "root-4",
+                    "root-3",
+                    "root-2",
+                    "root-1",
+                    "root-0",
+                    "inherited",
+                ]
+            {
+                errors.push(format!("captured item IDs: {ids:?}"));
+            }
+        }
+        Err(error) => errors.push(format!("captured item page: {error:?}")),
+    }
+    eprintln!("captured page completed: {:?}", started.elapsed());
+    let old_ids = [
+        "root-6",
+        "root-5",
+        "root-4",
+        "root-3",
+        "root-2",
+        "root-1",
+        "root-0",
+        "inherited",
+    ];
+    let new_ids = [
+        "late",
+        "root-6",
+        "root-5",
+        "root-4",
+        "root-3",
+        "root-2",
+        "root-1",
+        "root-0",
+        "inherited",
+    ];
+    for index in 0..4 {
+        let turns = store
+            .list_turns(turn_params(
+                thread_id,
+                None,
+                5,
+                SortDirection::Desc,
+                StoredTurnItemsView::NotLoaded,
+            ))
+            .await;
+        eprintln!("turn page {index} completed: {:?}", started.elapsed());
+        match turns {
+            Ok(page) if turn_ids(&page) == ["turn"] => {}
+            Ok(page) => errors.push(format!("turn page {index}: {:?}", turn_ids(&page))),
+            Err(error) => errors.push(format!("turn page {index}: {error:?}")),
+        }
+        let items = store
+            .list_items(item_params(
+                thread_id,
+                Some("turn"),
+                None,
+                100,
+                SortDirection::Desc,
+            ))
+            .await;
+        eprintln!("item page {index} completed: {:?}", started.elapsed());
+        match items {
+            Ok(page) => {
+                let ids = item_ids(&page);
+                if ids != old_ids && ids != new_ids {
+                    errors.push(format!("item page {index}: {ids:?}"));
+                }
+            }
+            Err(error) => errors.push(format!("item page {index}: {error:?}")),
+        }
+    }
+    writer.join().unwrap();
+    let fresh = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&fresh), new_ids);
+    assert!(errors.is_empty(), "live writer page failures: {errors:#?}");
+}
+
+#[tokio::test]
+async fn source_page_rejects_destructive_changes_during_prefix_verification() {
+    for change in ["truncate", "replace", "rewrite", "rewrite_and_append"] {
+        let (_home, _store, _thread_id, root, pause, request) =
+            paused_large_item_verification(uncertified_items::VerifyPausePoint::AfterFirstChunk)
+                .await;
+        let original = fs::read(&root).unwrap();
+        match change {
+            "truncate" => fs::OpenOptions::new()
+                .write(true)
+                .open(&root)
+                .unwrap()
+                .set_len(original.len() as u64 - 1)
+                .unwrap(),
+            "replace" => {
+                let replacement = root.with_extension("replacement");
+                fs::write(&replacement, &original).unwrap();
+                fs::rename(replacement, &root).unwrap();
+            }
+            _ => {
+                let offset = original
+                    .windows(32)
+                    .position(|window| window == [b'x'; 32])
+                    .unwrap();
+                assert!(offset < 64 * 1024);
+                let mut file = fs::OpenOptions::new().write(true).open(&root).unwrap();
+                file.seek(SeekFrom::Start(offset as u64)).unwrap();
+                file.write_all(b"z").unwrap();
+                assert_eq!(file.metadata().unwrap().len(), original.len() as u64);
+                drop(file);
+                if change == "rewrite_and_append" {
+                    append_verification_event(&root, 20);
+                }
+            }
+        }
+        pause.release();
+        assert!(
+            request.await.unwrap().is_err(),
+            "{change} must not return a captured stale page"
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_prefix_validation_reports_large_root_timing() {
+    let (_home, store, thread_id, root, _) = large_source_item_race_fixture().await;
+    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let root_scan = uncertified_items::scan_root_index(&graph, None)
+        .await
+        .unwrap()
+        .unwrap();
+    for ordinal in 19..24 {
+        append_verification_event(&root, ordinal);
+        let started = std::time::Instant::now();
+        assert!(
+            uncertified_items::sources_still_current(
+                &store,
+                thread_id,
+                &graph,
+                &scan,
+                root_scan.root_snapshot.as_ref(),
+            )
+            .await
+            .unwrap()
+        );
+        eprintln!("source revalidation elapsed={:?}", started.elapsed());
+    }
 }
 
 #[tokio::test]
