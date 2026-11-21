@@ -44,6 +44,1562 @@ use crate::local::test_support::test_config;
 use crate::local::thread_history::projection_state;
 use crate::local::thread_history::realtime;
 
+async fn source_item_race_fixture() -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    std::path::PathBuf,
+    String,
+) {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout_with_end(&predecessor, thread_id, None, 6);
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 6)),
+    );
+    append_timeline_record(
+        &root,
+        7,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &root,
+        8,
+        timeline_user_item(thread_id, "turn", "existing", "old"),
+    );
+    append_timeline_record(
+        &root,
+        9,
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn".to_string(),
+            root_turn_id: None,
+            last_agent_message: None,
+            error: None,
+            started_at: Some(10),
+            completed_at: Some(20),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        })),
+    );
+    let (_, item_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    (
+        home,
+        store,
+        thread_id,
+        root,
+        item_cursor.expect("existing item cursor"),
+    )
+}
+
+#[tokio::test]
+async fn resume_item_cursor_depends_on_ancestor_creation_not_root_checkpoint() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout(&predecessor, thread_id, None);
+    append_timeline_record(
+        &predecessor,
+        1,
+        timeline_user_item(thread_id, "turn", "shared", "same"),
+    );
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 2)),
+    );
+    append_timeline_record(
+        &root,
+        3,
+        timeline_user_item(thread_id, "turn", "shared", "same"),
+    );
+    let root_before = fs::read(&root).unwrap();
+    let db = history_db(&store).await;
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 4)",
+    )
+    .bind(thread_id.to_string())
+    .bind(i64::try_from(root_before.len()).unwrap())
+    .execute(db)
+    .await
+    .unwrap();
+
+    let item_ordinal = |cursor: Option<String>| {
+        parse_cursor(
+            cursor.as_deref(),
+            thread_id,
+            thread_id,
+            CursorScope::ItemsByCreatedAtOrdinal,
+        )
+        .unwrap()
+        .unwrap()
+        .rollout_ordinal
+    };
+    let (_, first) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    assert_eq!(item_ordinal(first), 1);
+
+    // Keep the root, checkpoint and predecessor boundary unchanged. Only the predecessor's
+    // item identity differs, so its record can no longer be the root item's creation.
+    let before = fs::read_to_string(&predecessor).unwrap();
+    let after = before.replace("shared", "otherx");
+    assert_ne!(before, after);
+    assert_eq!(before.len(), after.len());
+    fs::write(&predecessor, after).unwrap();
+    assert_eq!(fs::read(&root).unwrap(), root_before);
+
+    let (_, second) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    assert_eq!(item_ordinal(second), 3);
+}
+
+#[tokio::test]
+async fn descending_turn_page_depends_on_ancestor_start_not_root_checkpoint() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    let started = |id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: id.to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }))
+    };
+    write_rollout(&predecessor, thread_id, None);
+    append_timeline_record(&predecessor, 1, started("shared"));
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &root,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 2)),
+    );
+    append_timeline_record(&root, 3, started("newest"));
+    append_timeline_record(&root, 4, started("shared"));
+    let root_before = fs::read(&root).unwrap();
+    let db = history_db(&store).await;
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 5)",
+    )
+    .bind(thread_id.to_string())
+    .bind(i64::try_from(root_before.len()).unwrap())
+    .execute(db)
+    .await
+    .unwrap();
+    let params = turn_params(
+        thread_id,
+        None,
+        1,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    let first = store.list_turns(params.clone()).await.unwrap();
+    assert_eq!(turn_ids(&first), ["newest"]);
+
+    let before = fs::read_to_string(&predecessor).unwrap();
+    let after = before.replace("shared", "otherx");
+    assert_ne!(before, after);
+    assert_eq!(before.len(), after.len());
+    fs::write(&predecessor, after).unwrap();
+    assert_eq!(fs::read(&root).unwrap(), root_before);
+
+    let second = store.list_turns(params).await.unwrap();
+    assert_eq!(turn_ids(&second), ["shared"]);
+}
+
+async fn persistent_source_scan_fixture(
+    count: usize,
+) -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    std::path::PathBuf,
+    Vec<std::path::PathBuf>,
+) {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let inherited_owner = ThreadId::new();
+    let started = |turn_id: String| {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id,
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }))
+    };
+    let mut base: Option<HistoryPosition> = None;
+    let mut ancestors = Vec::new();
+    for index in 0..count {
+        let owner = if index < count / 2 {
+            inherited_owner
+        } else {
+            thread_id
+        };
+        let rollout_id = ThreadId::new();
+        let path = selected_rollout_path(home.path(), owner, rollout_id);
+        let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
+        write_rollout(&path, owner, base);
+        let turn = format!("turn-{index}");
+        append_timeline_record(&path, ordinal + 1, started(turn.clone()));
+        append_timeline_record(
+            &path,
+            ordinal + 2,
+            timeline_user_item(owner, &turn, &format!("item-{index}"), "old"),
+        );
+        base = Some(history_position(&path, rollout_id, ordinal + 3));
+        ancestors.push(path);
+    }
+    let root = rollout_path(home.path(), thread_id);
+    let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
+    write_rollout(&root, thread_id, base);
+    append_timeline_record(&root, ordinal + 1, started("local".to_string()));
+    append_timeline_record(
+        &root,
+        ordinal + 2,
+        timeline_user_item(thread_id, "local", "local-item", "local"),
+    );
+    let db = history_db(&store).await;
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
+    )
+    .bind(thread_id.to_string())
+    .bind(i64::try_from(fs::metadata(&root).unwrap().len()).unwrap())
+    .bind(i64::try_from(ordinal + 3).unwrap())
+    .execute(db)
+    .await
+    .unwrap();
+    (home, store, thread_id, root, ancestors)
+}
+
+async fn reopen_history_store(home: &std::path::Path) -> LocalThreadStore {
+    let config = test_config(home);
+    let runtime = codex_state::StateRuntime::init(
+        config.sqlite.clone(),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("reopen state runtime");
+    LocalThreadStore::new(config, Some(runtime))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rollout_path_snapshot_tracks_collisions_compression_and_directory_replacement()
+-> std::io::Result<()> {
+    use std::collections::HashSet;
+
+    let home = TempDir::new()?;
+    let rollout_id = ThreadId::new();
+    let ids = HashSet::from([rollout_id]);
+    let filename = format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl");
+    let archive = home.path().join("archived_sessions/2025/01/03");
+    let active = home.path().join("sessions/2025/01/03");
+    fs::create_dir_all(&archive)?;
+    let archived = archive.join(&filename);
+    fs::write(&archived, b"archived")?;
+
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&archived));
+    assert!(snapshot.is_current().await);
+
+    // An active copy wins over the archived copy even when the archived file is unchanged.
+    fs::create_dir_all(&active)?;
+    let plain = active.join(&filename);
+    fs::write(&plain, b"active")?;
+    assert!(!snapshot.is_current().await);
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
+
+    let compressed = active.join(format!("{filename}.zst"));
+    fs::write(&compressed, b"compressed")?;
+    assert!(!snapshot.is_current().await);
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
+    fs::remove_file(&plain)?;
+    assert!(!snapshot.is_current().await);
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&compressed));
+
+    fs::write(&plain, b"active again")?;
+    assert!(!snapshot.is_current().await);
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&plain));
+
+    // Replacing a directory with another directory must invalidate the old index.
+    let old = home.path().join("old-directory");
+    fs::rename(&active, &old)?;
+    fs::create_dir(&active)?;
+    assert!(!snapshot.is_current().await);
+    let snapshot = codex_rollout::snapshot_rollout_paths_by_rollout_id(home.path(), &ids)
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.get(&rollout_id), Some(&archived));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rollout_path_snapshot_falls_back_for_symlinked_storage_root() -> std::io::Result<()> {
+    use std::collections::HashSet;
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new()?;
+    let actual = home.path().join("actual");
+    fs::create_dir(&actual)?;
+    symlink(&actual, home.path().join("sessions"))?;
+    let rollout_id = ThreadId::new();
+    let path = actual.join(format!("rollout-2025-01-03T12-00-00-{rollout_id}.jsonl"));
+    fs::write(&path, b"")?;
+
+    assert!(
+        codex_rollout::snapshot_rollout_paths_by_rollout_id(
+            home.path(),
+            &HashSet::from([rollout_id])
+        )
+        .await?
+        .is_none()
+    );
+    assert!(
+        codex_rollout::index_rollout_paths_by_rollout_id(home.path())
+            .await?
+            .contains_key(&rollout_id)
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn verified_source_scan_survives_store_restart_and_root_append() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(348).await;
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let params = turn_params(
+        thread_id,
+        None,
+        5,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    let first = store.list_turns(params.clone()).await.unwrap();
+    assert_eq!(
+        turn_ids(&first),
+        ["local", "turn-347", "turn-346", "turn-345", "turn-344"]
+    );
+    let mut events = [0_u8; 256];
+    assert!(
+        watch.read(&mut events).unwrap() > 0,
+        "bootstrap scans ancestors"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frodex_source_scan_cache")
+        .fetch_one(history_db(&store).await)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    let last_ordinal = 348 * 3 + 3;
+    append_timeline_record(
+        &root,
+        last_ordinal,
+        timeline_user_item(thread_id, "turn-347", "late", "late"),
+    );
+    drop(store);
+    let store = reopen_history_store(home.path()).await;
+    let restarted = store.list_turns(params).await.unwrap();
+    assert_eq!(turn_ids(&restarted), turn_ids(&first));
+    let (_, cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    assert_eq!(
+        parse_cursor(
+            cursor.as_deref(),
+            thread_id,
+            thread_id,
+            CursorScope::ItemsByCreatedAtOrdinal,
+        )
+        .unwrap()
+        .unwrap()
+        .rollout_ordinal,
+        last_ordinal
+    );
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a process restart must not reopen verified predecessor contents"
+    );
+    let page = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn-347"),
+            cursor,
+            10,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&page), ["late", "item-347"]);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn persisted_source_scan_rejects_replaced_ancestor() {
+    use std::io::Read;
+
+    let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(4).await;
+    let params = turn_params(
+        thread_id,
+        None,
+        5,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    let first = store.list_turns(params.clone()).await.unwrap();
+    assert!(turn_ids(&first).contains(&"turn-0"));
+    drop(store);
+    let changed = fs::read_to_string(&ancestors[0])
+        .unwrap()
+        .replace("turn-0", "turn-x");
+    let replacement = ancestors[0].with_extension("replacement");
+    fs::write(&replacement, changed).unwrap();
+    fs::rename(replacement, &ancestors[0]).unwrap();
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let store = reopen_history_store(home.path()).await;
+    let page = store.list_turns(params).await.unwrap();
+    assert!(turn_ids(&page).contains(&"turn-x"));
+    assert!(!turn_ids(&page).contains(&"turn-0"));
+    let mut events = [0_u8; 256];
+    assert!(
+        watch.read(&mut events).unwrap() > 0,
+        "replacement requires a source scan"
+    );
+}
+
+#[tokio::test]
+async fn persisted_source_scan_is_removed_with_its_projection_row() {
+    let (_home, store, thread_id, _root, _ancestors) = persistent_source_scan_fixture(2).await;
+    store
+        .list_turns(turn_params(
+            thread_id,
+            None,
+            2,
+            SortDirection::Desc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .unwrap();
+    let db = history_db(&store).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
+            .fetch_one(db)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(db)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
+            .fetch_one(db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn invalid_persisted_source_scan_falls_back_to_sources() {
+    use std::io::Read;
+
+    for corrupt in ["version", "digest", "payload"] {
+        let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(2).await;
+        let params = turn_params(
+            thread_id,
+            None,
+            3,
+            SortDirection::Desc,
+            StoredTurnItemsView::NotLoaded,
+        );
+        let expected = store.list_turns(params.clone()).await.unwrap();
+        if corrupt == "payload" {
+            use sha2::Digest;
+            let bytes = b"{}";
+            let digest = sha2::Sha256::digest(bytes).to_vec();
+            sqlx::query("UPDATE frodex_source_scan_cache SET scan = ?, sha256 = ?")
+                .bind(bytes.as_slice())
+                .bind(digest)
+                .execute(history_db(&store).await)
+                .await
+                .unwrap();
+        } else {
+            let statement = if corrupt == "version" {
+                "UPDATE frodex_source_scan_cache SET version = 999"
+            } else {
+                "UPDATE frodex_source_scan_cache SET sha256 = X'00'"
+            };
+            sqlx::query(statement)
+                .execute(history_db(&store).await)
+                .await
+                .unwrap();
+        }
+        drop(store);
+        let mut watch = watch_history_file_opens(&ancestors[0]);
+        let store = reopen_history_store(home.path()).await;
+        let actual = store.list_turns(params).await.unwrap();
+        assert_eq!(turn_ids(&actual), turn_ids(&expected));
+        let mut events = [0_u8; 256];
+        assert!(
+            watch.read(&mut events).unwrap() > 0,
+            "{corrupt} requires a scan"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn persisted_source_scan_rejects_root_rotation() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(2).await;
+    let params = turn_params(
+        thread_id,
+        None,
+        4,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    store.list_turns(params.clone()).await.unwrap();
+    drop(store);
+    let prior_rollout_id = ThreadId::new();
+    let prior = selected_rollout_path(home.path(), thread_id, prior_rollout_id);
+    fs::rename(&root, &prior).unwrap();
+    let base = history_position(&prior, prior_rollout_id, 9);
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        10,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "new-root".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let store = reopen_history_store(home.path()).await;
+    let page = store.list_turns(params).await.unwrap();
+    assert_eq!(turn_ids(&page), ["new-root", "local", "turn-1", "turn-0"]);
+    let mut events = [0_u8; 256];
+    assert!(
+        watch.read(&mut events).unwrap() > 0,
+        "rotation requires a new scan"
+    );
+}
+
+#[tokio::test]
+async fn persisted_source_scan_does_not_hide_ancestor_truncation() {
+    let (home, store, thread_id, _root, ancestors) = persistent_source_scan_fixture(2).await;
+    let params = turn_params(
+        thread_id,
+        None,
+        3,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    store.list_turns(params.clone()).await.unwrap();
+    drop(store);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&ancestors[0])
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    let store = reopen_history_store(home.path()).await;
+    assert!(store.list_turns(params).await.is_err());
+}
+
+#[tokio::test]
+async fn persisted_source_scan_reads_current_root_after_rewrite() {
+    let (home, store, thread_id, root, _ancestors) = persistent_source_scan_fixture(2).await;
+    let params = turn_params(
+        thread_id,
+        None,
+        3,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    let before = store.list_turns(params.clone()).await.unwrap();
+    assert_eq!(turn_ids(&before)[0], "local");
+    drop(store);
+    let before = fs::read_to_string(&root).unwrap();
+    let after = before.replace("local", "newer");
+    assert_eq!(before.len(), after.len());
+    fs::write(&root, after).unwrap();
+    let store = reopen_history_store(home.path()).await;
+    let page = store.list_turns(params).await.unwrap();
+    assert_eq!(turn_ids(&page), ["newer", "turn-1", "turn-0"]);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn repeated_cursorless_turn_pages_reuse_scan_until_rotation() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) = persistent_source_scan_fixture(348).await;
+    let params = turn_params(
+        thread_id,
+        None,
+        7,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let bootstrap_start = std::time::Instant::now();
+    let first = store.list_turns(params.clone()).await.unwrap();
+    let bootstrap = bootstrap_start.elapsed();
+    assert_eq!(
+        turn_ids(&first),
+        [
+            "local", "turn-347", "turn-346", "turn-345", "turn-344", "turn-343", "turn-342"
+        ]
+    );
+    let expected = serde_json::to_value(&first).unwrap();
+    let mut events = [0_u8; 256];
+    assert!(watch.read(&mut events).unwrap() > 0);
+    let mut next_ordinal = 348 * 3 + 3;
+    let mut latencies = Vec::new();
+    for request in 0..507 {
+        if request % 20 == 0 {
+            let RolloutItem::EventMsg(event) =
+                timeline_user_item(thread_id, "local", &format!("appended-{request}"), "new")
+            else {
+                unreachable!();
+            };
+            append_with_leaf_proof(&store, thread_id, &root, next_ordinal, event).await;
+            next_ordinal += 1;
+        }
+        let start = std::time::Instant::now();
+        let page = store.list_turns(params.clone()).await.unwrap();
+        latencies.push(start.elapsed());
+        assert_eq!(serde_json::to_value(&page).unwrap(), expected);
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM frodex_source_scan_cache")
+            .fetch_one(history_db(&store).await)
+            .await
+            .unwrap(),
+        1,
+        "participating root appends must retain the persisted predecessor scan"
+    );
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "root appends must not cause predecessor content opens"
+    );
+    latencies.sort_unstable();
+    let median = latencies[latencies.len() / 2];
+
+    let prior_rollout_id = ThreadId::new();
+    let prior = selected_rollout_path(home.path(), thread_id, prior_rollout_id);
+    fs::rename(&root, &prior).unwrap();
+    let base = history_position(&prior, prior_rollout_id, next_ordinal);
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        next_ordinal + 1,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "new-root".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    let rotation_start = std::time::Instant::now();
+    let rotated = store.list_turns(params).await.unwrap();
+    let rotation = rotation_start.elapsed();
+    assert_eq!(turn_ids(&rotated)[..2], ["new-root", "local"]);
+    assert!(
+        watch.read(&mut events).unwrap() > 0,
+        "rotation currently invalidates the complete predecessor scan"
+    );
+    eprintln!(
+        "348 synthetic predecessors: first bootstrap={bootstrap:?}, 507 cursorless descending \
+         turn pages with 26 root appends median={median:?}, first page after rotation={rotation:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn warm_source_pages_do_not_enumerate_unrelated_rollouts() {
+    use std::io::Read;
+
+    let (home, store, thread_id, _root, _cursor) = source_item_race_fixture().await;
+    let unrelated = home.path().join("sessions/unrelated");
+    fs::create_dir_all(&unrelated).unwrap();
+    for _ in 0..512 {
+        let id = ThreadId::new();
+        fs::write(
+            unrelated.join(format!("rollout-2025-01-03T12-00-00-{id}.jsonl.zst")),
+            b"",
+        )
+        .unwrap();
+    }
+    let (_, initial_scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut watch = watch_history_file_opens(&unrelated);
+    for _ in 0..2 {
+        let (turn_cursor, item_cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+        assert!(turn_cursor.is_some());
+        assert!(item_cursor.is_some());
+        let turns = store
+            .list_turns(turn_params(
+                thread_id,
+                None,
+                5,
+                SortDirection::Desc,
+                StoredTurnItemsView::NotLoaded,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(turn_ids(&turns), ["turn"]);
+        let items = store
+            .list_items(item_params(
+                thread_id,
+                Some("turn"),
+                None,
+                5,
+                SortDirection::Desc,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(item_ids(&items), ["existing"]);
+    }
+    let mut events = [0; 1024];
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "unchanged source reads must not open the unrelated directory"
+    );
+
+    let id = ThreadId::new();
+    fs::write(
+        unrelated.join(format!("rollout-2025-01-03T12-00-00-{id}.jsonl.zst")),
+        b"",
+    )
+    .unwrap();
+    while watch.read(&mut events).is_ok() {}
+    let (_, refreshed_scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&initial_scan, &refreshed_scan));
+    assert!(
+        watch.read(&mut events).is_ok(),
+        "changed directory is reindexed"
+    );
+    uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the refreshed filename snapshot is reused"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cached_source_selection_rechecks_collisions_and_file_replacement() {
+    let (home, store, thread_id, _root, _cursor) = source_item_race_fixture().await;
+    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let ancestor = graph.lineage.segments()[0].rollout_path();
+    let collision = home
+        .path()
+        .join("sessions")
+        .join(ancestor.file_name().unwrap());
+
+    // The index visits files in sessions before files in its child directories.
+    fs::copy(ancestor, &collision).unwrap();
+    assert!(
+        uncertified_items::discover_cached(&store, thread_id, &scan)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fs::remove_file(&collision).unwrap();
+    assert!(
+        uncertified_items::discover_cached(&store, thread_id, &scan)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let replacement = home.path().join("replacement");
+    fs::copy(ancestor, &replacement).unwrap();
+    fs::rename(&replacement, ancestor).unwrap();
+    assert!(
+        uncertified_items::discover_cached(&store, thread_id, &scan)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fs::remove_file(ancestor).unwrap();
+    assert!(
+        uncertified_items::discover_cached(&store, thread_id, &scan)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn paused_source_item_request(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    cursor: String,
+) -> (
+    std::sync::Arc<SourceItemPause>,
+    tokio::task::JoinHandle<ThreadStoreResult<ItemPage>>,
+) {
+    let pause = inject_source_item_pause(thread_id);
+    let store = store.clone();
+    let request = tokio::spawn(async move {
+        store
+            .list_items(item_params(
+                thread_id,
+                Some("turn"),
+                Some(cursor),
+                100,
+                SortDirection::Desc,
+            ))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("item request reached final source revalidation");
+    (pause, request)
+}
+
+#[tokio::test]
+async fn source_item_page_survives_append_after_snapshot() {
+    let (_home, store, thread_id, root, cursor) = source_item_race_fixture().await;
+    let (pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
+    append_timeline_record(
+        &root,
+        10,
+        timeline_user_item(thread_id, "turn", "later", "new"),
+    );
+    pause.release.notify_one();
+    let page = request
+        .await
+        .unwrap()
+        .expect("append-only change preserves captured page");
+    assert_eq!(item_ids(&page), ["existing"]);
+    assert!(page.next_cursor.is_none());
+    let fresh = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .expect("fresh request observes appended item");
+    assert_eq!(item_ids(&fresh), ["later", "existing"]);
+}
+
+#[tokio::test]
+async fn source_index_survives_append_during_revalidation() {
+    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
+    store.uncertified_item_scans.lock().await.clear();
+    let pause = uncertified_items::inject_index_pause(thread_id);
+    let indexing_store = store.clone();
+    let request = tokio::spawn(async move {
+        uncertified_items::indexed_sources(&indexing_store, thread_id).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("indexing reached source revalidation");
+    append_timeline_record(
+        &root,
+        10,
+        timeline_user_item(thread_id, "turn", "later", "new"),
+    );
+    pause.release.notify_one();
+    let (graph, scan) = request
+        .await
+        .unwrap()
+        .expect("append does not invalidate the predecessor index")
+        .expect("rotated history sources");
+    let root_scan = uncertified_items::scan_root_index(&graph, None)
+        .await
+        .unwrap()
+        .expect("root snapshot");
+    let events = uncertified_items::scan_selected_items(
+        &graph,
+        &scan,
+        ["turn".to_string()].into_iter().collect(),
+        root_scan.root_snapshot.as_ref(),
+    )
+    .await
+    .unwrap()
+    .expect("selected items");
+    let (_, items) = reduce_aggregate_sources(events).unwrap();
+    let items = items.get(&(thread_id, "turn".to_string())).unwrap();
+    assert!(items.contains_key("existing"));
+    assert!(items.contains_key("later"));
+}
+
+#[tokio::test]
+async fn source_index_reuses_ancestors_after_root_validation_fails() {
+    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
+    store.uncertified_item_scans.lock().await.clear();
+    let original = fs::read(&root).unwrap();
+    let pause = uncertified_items::inject_index_pause(thread_id);
+    let indexing_store = store.clone();
+    let request = tokio::spawn(async move {
+        uncertified_items::indexed_sources(&indexing_store, thread_id).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("indexing reached source revalidation");
+    fs::write(&root, b"").unwrap();
+    pause.release.notify_one();
+    assert!(request.await.unwrap().is_err());
+    let slot = store
+        .uncertified_item_scans
+        .lock()
+        .await
+        .get(&thread_id)
+        .cloned()
+        .expect("index slot");
+    let cached = slot.lock().await.clone().expect("cached ancestor scan");
+    fs::write(&root, original).unwrap();
+    let (_, reused) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .expect("restored root");
+    assert!(std::sync::Arc::ptr_eq(&cached, &reused));
+}
+
+#[tokio::test]
+async fn source_scan_rejects_invalid_compacted_payload_after_fast_head() {
+    #[derive(serde::Serialize)]
+    struct OrderedRecord {
+        timestamp: &'static str,
+        ordinal: u64,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        payload: serde_json::Value,
+    }
+
+    let (_home, store, thread_id, root, _) = source_item_race_fixture().await;
+    let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&root)
+        .await
+        .unwrap()
+        .0;
+    for line in lines.iter_mut().skip(1) {
+        line.ordinal = line.ordinal.map(|ordinal| ordinal + 1);
+    }
+    let compacted = CompactedItem {
+        message: "x".repeat(70_000),
+        replacement_history: None,
+        retained_context: None,
+        retained_context_replay: None,
+        guardian_history: None,
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+        resume_metadata: None,
+        segment_state_checkpoint: None,
+    };
+    lines.insert(
+        1,
+        RolloutLine {
+            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
+            ordinal: Some(7),
+            item: RolloutItem::Compacted(Box::new(compacted.clone())),
+        },
+    );
+    let serialize = |lines: &[RolloutLine]| {
+        format!(
+            "{}\n",
+            lines
+                .iter()
+                .map(|line| serde_json::to_string(line).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    fs::write(&root, serialize(&lines)).unwrap();
+    store.uncertified_item_scans.lock().await.clear();
+    let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let cached_size = fs::metadata(&root).unwrap().len();
+    let mut payload = serde_json::to_value(&compacted).unwrap();
+    payload["message"] = serde_json::json!(1234567);
+    let invalid = OrderedRecord {
+        timestamp: "2026-07-16T00:00:00.000Z",
+        ordinal: 7,
+        kind: "compacted",
+        payload,
+    };
+    let mut rewritten = vec![serde_json::to_string(&lines[0]).unwrap()];
+    rewritten.push(serde_json::to_string(&invalid).unwrap());
+    rewritten.extend(
+        lines
+            .iter()
+            .skip(2)
+            .map(|line| serde_json::to_string(line).unwrap()),
+    );
+    fs::write(&root, format!("{}\n", rewritten.join("\n"))).unwrap();
+    assert!(
+        super::super::uncertified_root_head::read_cached_compacted_head(&root, Some(cached_size))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let graph = uncertified_items::discover_cached(&store, thread_id, &scan)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        uncertified_items::scan_root_index(&graph, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn compressed_compacted_predecessor_fixture() -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    ThreadId,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    HistoryPosition,
+) {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout(&predecessor, thread_id, None);
+    append_timeline_record(
+        &predecessor,
+        1,
+        RolloutItem::Compacted(Box::new(CompactedItem {
+            message: "x".repeat(2_000_000),
+            replacement_history: None,
+            retained_context: None,
+            retained_context_replay: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            resume_metadata: None,
+            segment_state_checkpoint: None,
+        })),
+    );
+    append_timeline_record(
+        &predecessor,
+        2,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "ancestor".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &predecessor,
+        3,
+        timeline_user_item(thread_id, "ancestor", "shared", "original"),
+    );
+    let base = history_position(&predecessor, predecessor_id, 4);
+    let compressed = predecessor.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(&predecessor).unwrap();
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        5,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "root-turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(20),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &root,
+        6,
+        timeline_user_item(thread_id, "ancestor", "shared", "updated"),
+    );
+    append_timeline_record(
+        &root,
+        7,
+        timeline_user_item(thread_id, "ancestor", "late", "late"),
+    );
+    (
+        home,
+        store,
+        thread_id,
+        predecessor_id,
+        compressed,
+        root,
+        base,
+    )
+}
+
+#[tokio::test]
+async fn deferred_compressed_compacted_predecessor_preserves_late_items_and_cursors() {
+    let (_home, store, thread_id, _id, predecessor, _root, _base) =
+        compressed_compacted_predecessor_fixture().await;
+    assert!(
+        super::super::uncertified_root_head::read_deferred_compacted_head(&predecessor)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let turns = store
+        .list_turns(turn_params(
+            thread_id,
+            None,
+            5,
+            SortDirection::Desc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(turn_ids(&turns), ["root-turn", "ancestor"]);
+    let first = store
+        .list_items(item_params(
+            thread_id,
+            Some("ancestor"),
+            None,
+            1,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&first), ["late"]);
+    let second = store
+        .list_items(item_params(
+            thread_id,
+            Some("ancestor"),
+            first.next_cursor,
+            1,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&second), ["shared"]);
+    let item: serde_json::Value = serde_json::from_slice(&second.items[0].item_json).unwrap();
+    assert_eq!(item["content"][0]["text"], "updated");
+    assert_eq!(second.items[0].updated_at_ordinal, 6);
+    let (_, cursor) = store.resume_backwards_cursors(thread_id).await.unwrap();
+    assert_eq!(
+        parse_cursor(
+            cursor.as_deref(),
+            thread_id,
+            thread_id,
+            CursorScope::ItemsByCreatedAtOrdinal,
+        )
+        .unwrap()
+        .unwrap()
+        .rollout_ordinal,
+        7
+    );
+}
+
+#[tokio::test]
+async fn deferred_compressed_compacted_predecessor_preserves_inherited_cutoff() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let parent_id = ThreadId::new();
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), parent_id, predecessor_id);
+    write_rollout(&predecessor, parent_id, None);
+    append_timeline_record(
+        &predecessor,
+        1,
+        RolloutItem::Compacted(Box::new(CompactedItem {
+            message: "x".repeat(2_000_000),
+            replacement_history: None,
+            retained_context: None,
+            retained_context_replay: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            resume_metadata: None,
+            segment_state_checkpoint: None,
+        })),
+    );
+    append_timeline_record(
+        &predecessor,
+        2,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "inherited".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &predecessor,
+        3,
+        timeline_user_item(parent_id, "inherited", "visible", "visible"),
+    );
+    let base = history_position(&predecessor, predecessor_id, 4);
+    append_timeline_record(
+        &predecessor,
+        4,
+        timeline_user_item(parent_id, "inherited", "excluded", "excluded"),
+    );
+    let compressed = predecessor.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(predecessor).unwrap();
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        5,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "root-turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(20),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    let turns = store
+        .list_turns(turn_params(
+            thread_id,
+            None,
+            5,
+            SortDirection::Desc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(turn_ids(&turns), ["root-turn", "inherited"]);
+    let page = store
+        .list_items(item_params(
+            thread_id,
+            Some("inherited"),
+            None,
+            10,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&page), ["visible"]);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn deferred_compressed_compacted_predecessor_enforces_selected_path_and_cutoff() {
+    let (home, store, thread_id, _id, predecessor, root, mut base) =
+        compressed_compacted_predecessor_fixture().await;
+    let selected = home
+        .path()
+        .join("sessions")
+        .join(predecessor.file_name().unwrap());
+    fs::copy(&predecessor, &selected).unwrap();
+    let graph = uncertified_items::discover(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.lineage.segments()[0].rollout_path(), selected);
+    assert!(
+        uncertified_items::scan_ancestors(&graph)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    base.end_byte_offset += 1;
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        5,
+        timeline_user_item(thread_id, "root", "root-item", "root"),
+    );
+    assert!(
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn deferred_compressed_compacted_predecessor_rejects_invalid_payload() {
+    #[derive(serde::Serialize)]
+    struct OrderedRecord {
+        timestamp: &'static str,
+        ordinal: u64,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        payload: serde_json::Value,
+    }
+
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout(&predecessor, thread_id, None);
+    let invalid = OrderedRecord {
+        timestamp: "2026-07-16T00:00:00.000Z",
+        ordinal: 1,
+        kind: "compacted",
+        payload: serde_json::json!({"message": 7}),
+    };
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&predecessor)
+            .unwrap(),
+        "{}",
+        serde_json::to_string(&invalid).unwrap()
+    )
+    .unwrap();
+    let base = HistoryPosition {
+        thread_id: predecessor_id,
+        end_ordinal_exclusive: 2,
+        end_byte_offset: fs::metadata(&predecessor).unwrap().len(),
+    };
+    let compressed = predecessor.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::encode_all(fs::read(&predecessor).unwrap().as_slice(), 0).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(predecessor).unwrap();
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(&root, thread_id, Some(base));
+    append_timeline_record(
+        &root,
+        3,
+        timeline_user_item(thread_id, "root", "root-item", "root"),
+    );
+    assert!(
+        super::super::uncertified_root_head::read_deferred_compacted_head(&compressed)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn deferred_compressed_compacted_predecessor_rejects_truncated_frame() {
+    let (_home, store, thread_id, _id, predecessor, _root, _base) =
+        compressed_compacted_predecessor_fixture().await;
+    let len = fs::metadata(&predecessor).unwrap().len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(predecessor)
+        .unwrap()
+        .set_len(len - 1)
+        .unwrap();
+    assert!(
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn source_item_scans_share_the_same_root_prefix_during_append() {
+    let (_home, store, thread_id, root, _cursor) = source_item_race_fixture().await;
+    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .expect("rotated history sources");
+    let first = uncertified_items::scan_root_index(&graph, None)
+        .await
+        .unwrap()
+        .expect("root snapshot");
+    append_timeline_record(
+        &root,
+        10,
+        timeline_user_item(thread_id, "turn", "later", "new"),
+    );
+    let events = uncertified_items::scan_selected_items(
+        &graph,
+        &scan,
+        ["turn".to_string()].into_iter().collect(),
+        first.root_snapshot.as_ref(),
+    )
+    .await
+    .unwrap()
+    .expect("selected items use captured root prefix");
+    let (_, items) = reduce_aggregate_sources(events).unwrap();
+    let items = items.get(&(thread_id, "turn".to_string())).unwrap();
+    assert!(items.contains_key("existing"));
+    assert!(!items.contains_key("later"));
+    assert!(
+        uncertified_items::sources_still_current(
+            &store,
+            thread_id,
+            &graph,
+            &scan,
+            first.root_snapshot.as_ref(),
+        )
+        .await
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn source_item_page_never_serves_stale_data_after_destructive_change() {
+    for change in ["truncate", "rewrite", "replace", "rewrite_and_append"] {
+        let (_home, store, thread_id, root, cursor) = source_item_race_fixture().await;
+        let (pause, request) = paused_source_item_request(&store, thread_id, cursor).await;
+        let original = fs::read(&root).unwrap();
+        if change == "truncate" {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&root)
+                .unwrap()
+                .set_len(u64::try_from(original.len() - 1).unwrap())
+                .unwrap();
+        } else {
+            let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&root)
+                .await
+                .unwrap()
+                .0;
+            let mut changed = false;
+            for line in &mut lines {
+                if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut line.item
+                    && let codex_protocol::items::TurnItem::UserMessage(message) = &mut event.item
+                    && let codex_protocol::user_input::UserInput::Text { text, .. } =
+                        &mut message.content[0]
+                {
+                    assert_eq!(text, "old");
+                    *text = "new".to_string();
+                    changed = true;
+                }
+            }
+            assert!(changed);
+            let rewritten = format!(
+                "{}\n",
+                lines
+                    .iter()
+                    .map(|line| serde_json::to_string(line).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            assert_eq!(rewritten.len(), original.len());
+            if change == "replace" {
+                let replacement = root.with_extension("replacement");
+                fs::write(&replacement, rewritten).unwrap();
+                fs::rename(replacement, &root).unwrap();
+            } else {
+                fs::write(&root, rewritten).unwrap();
+            }
+            if change == "rewrite_and_append" {
+                append_timeline_record(
+                    &root,
+                    10,
+                    timeline_user_item(thread_id, "turn", "later", "later"),
+                );
+            }
+        }
+        pause.release.notify_one();
+        let outcome = request.await.unwrap();
+        if change == "truncate" {
+            assert!(
+                outcome.is_err(),
+                "truncated source must not return a captured page"
+            );
+        } else if let Ok(page) = outcome {
+            assert_eq!(item_ids(&page), ["existing"]);
+            let item: serde_json::Value = serde_json::from_slice(&page.items[0].item_json).unwrap();
+            assert_eq!(
+                item["content"][0]["text"], "new",
+                "{change} must not return stale content"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn newest_indexed_pages_do_not_read_unused_ancestors() {
     let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
