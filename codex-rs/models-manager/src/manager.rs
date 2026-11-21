@@ -10,6 +10,7 @@ use crate::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use crate::config::CustomModelConfig;
 use crate::config::ModelsManagerConfig;
 use crate::model_info;
+use arc_swap::ArcSwap;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_http_client::HttpClientFactory;
@@ -262,8 +263,11 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Return the auth manager used for picker filtering.
     fn auth_manager(&self) -> Option<&AuthManager>;
 
-    /// Return configured user-defined model aliases.
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig>;
+    /// Return one consistent snapshot of the configured user-defined model aliases.
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>>;
+
+    /// Replace the user-defined model aliases after their configuration has been validated.
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>);
 
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
@@ -272,8 +276,8 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         let mut presets: Vec<ModelPreset> = remote_models.iter().cloned().map(Into::into).collect();
         let mut existing_models: HashSet<String> =
             presets.iter().map(|preset| preset.model.clone()).collect();
-        let mut custom_presets = self
-            .custom_models()
+        let custom_models = self.custom_models_snapshot();
+        let mut custom_presets = custom_models
             .iter()
             .filter(|(alias, _custom_model)| existing_models.insert((*alias).clone()))
             .map(|(alias, custom_model)| {
@@ -338,6 +342,24 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         )
     }
 
+    /// Select a default using a caller's picker view when the implementation supports it.
+    /// Other implementations retain their existing default-selection behavior.
+    fn get_default_model_with_view<'a>(
+        &'a self,
+        _view: &'a dyn ModelsManager,
+        model: &'a Option<String>,
+        allow_provider_model_fallback: bool,
+        refresh_strategy: RefreshStrategy,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        self.get_default_model(
+            model,
+            allow_provider_model_fallback,
+            refresh_strategy,
+            http_client_factory,
+        )
+    }
+
     // todo(aibrahim): look if we can tighten it to pub(crate)
     /// Resolve model metadata and its source, preserving provenance through config adjustments.
     fn get_model_info<'a>(
@@ -360,6 +382,122 @@ pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 
 /// Shared model manager handle used across runtime services.
 pub type SharedModelsManager = Arc<dyn ModelsManager>;
+
+/// A thread's validated aliases over a shared provider catalog.
+#[derive(Debug)]
+pub struct ThreadModelsManager {
+    inner: SharedModelsManager,
+    custom_models: Arc<ArcSwap<HashMap<String, CustomModelConfig>>>,
+}
+
+impl ThreadModelsManager {
+    pub fn new(
+        inner: SharedModelsManager,
+        custom_models: HashMap<String, CustomModelConfig>,
+    ) -> Self {
+        Self {
+            inner,
+            custom_models: Arc::new(ArcSwap::from_pointee(custom_models)),
+        }
+    }
+}
+
+impl ModelsManager for ThreadModelsManager {
+    fn ensure_initialized(&self, factory: HttpClientFactory) -> ModelsManagerFuture<'_, ()> {
+        self.inner.ensure_initialized(factory)
+    }
+    fn model_catalog_updates(&self) -> Option<watch::Receiver<Option<Arc<RefreshedModelCatalog>>>> {
+        self.inner.model_catalog_updates()
+    }
+    fn refreshed_model_catalog(&self) -> Option<Arc<[ModelInfo]>> {
+        self.inner.refreshed_model_catalog()
+    }
+    fn refresh_originator_catalogs(
+        &self,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        self.inner.refresh_originator_catalogs(factory)
+    }
+    fn for_originator(&self, originator: &str) -> Option<SharedModelsManager> {
+        self.inner.for_originator(originator).map(|inner| {
+            Arc::new(Self {
+                inner,
+                custom_models: Arc::clone(&self.custom_models),
+            }) as SharedModelsManager
+        })
+    }
+    fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
+        self.inner.set_api_key_model_discovery_enabled(enabled);
+    }
+    fn raw_model_catalog(
+        &self,
+        strategy: RefreshStrategy,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ModelsResponse> {
+        self.inner.raw_model_catalog(strategy, factory)
+    }
+    fn model_catalog_with_origins(
+        &self,
+        strategy: RefreshStrategy,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, Vec<CatalogModel>> {
+        self.inner.model_catalog_with_origins(strategy, factory)
+    }
+    fn refresh_after_auth_change(&self, factory: HttpClientFactory) -> ModelsManagerFuture<'_, ()> {
+        self.inner.refresh_after_auth_change(factory)
+    }
+    fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
+        self.inner.get_remote_models()
+    }
+    fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
+        self.inner.try_get_remote_models()
+    }
+    fn auth_manager(&self) -> Option<&AuthManager> {
+        self.inner.auth_manager()
+    }
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.custom_models.load_full()
+    }
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.custom_models.store(Arc::new(custom_models));
+    }
+    fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
+        self.inner.list_collaboration_modes()
+    }
+    fn get_default_model<'a>(
+        &'a self,
+        model: &'a Option<String>,
+        allow_fallback: bool,
+        strategy: RefreshStrategy,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        self.inner
+            .get_default_model_with_view(self, model, allow_fallback, strategy, factory)
+    }
+    fn get_model_info<'a>(
+        &'a self,
+        model: &'a str,
+        config: &'a ModelsManagerConfig,
+    ) -> ModelsManagerFuture<'a, CatalogModel> {
+        Box::pin(async move {
+            let mut config = config.clone();
+            if !config.custom_models_authoritative {
+                let mut custom_models = self.custom_models_snapshot().as_ref().clone();
+                custom_models.extend(config.custom_models);
+                config.custom_models = custom_models;
+            }
+            config.custom_models_authoritative = true;
+            self.inner.get_model_info(model, &config).await
+        })
+    }
+    fn refresh_if_new_etag(
+        &self,
+        etag: String,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        self.inner.refresh_if_new_etag(etag, factory)
+    }
+}
 
 /// Only explicit catalogs serialize refresh and suppress bundled fallback. Auth and discovery
 /// settings are still evaluated when models are requested.
@@ -431,7 +569,8 @@ pub struct OpenAiModelsManager {
     remote_models: RwLock<CatalogState>,
     catalog_updates: watch::Sender<Option<Arc<RefreshedModelCatalog>>>,
     settings: ModelCatalogSettings,
-    custom_models: HashMap<String, CustomModelConfig>,
+    // Alias refreshes apply to every originator partition of this provider.
+    custom_models: Arc<ArcSwap<HashMap<String, CustomModelConfig>>>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
     auth_manager: Option<Arc<AuthManager>>,
@@ -441,7 +580,7 @@ pub struct OpenAiModelsManager {
 #[derive(Debug)]
 pub struct StaticModelsManager {
     remote_models: Vec<ModelInfo>,
-    custom_models: HashMap<String, CustomModelConfig>,
+    custom_models: ArcSwap<HashMap<String, CustomModelConfig>>,
     auth_manager: Option<Arc<AuthManager>>,
     origin: ModelOrigin,
 }
@@ -547,7 +686,7 @@ impl OpenAiModelsManager {
                 models: load_remote_models_from_file().unwrap_or_default(),
             })),
             settings,
-            custom_models,
+            custom_models: Arc::new(ArcSwap::from_pointee(custom_models)),
             endpoint_client,
             catalog_source: CatalogSource::Default,
             auth_manager,
@@ -581,7 +720,7 @@ impl StaticModelsManager {
     ) -> Self {
         Self {
             remote_models: model_catalog.models,
-            custom_models,
+            custom_models: ArcSwap::from_pointee(custom_models),
             auth_manager,
             origin,
         }
@@ -589,6 +728,21 @@ impl StaticModelsManager {
 }
 
 impl ModelsManager for OpenAiModelsManager {
+    fn get_default_model_with_view<'a>(
+        &'a self,
+        view: &'a dyn ModelsManager,
+        model: &'a Option<String>,
+        _allow_fallback: bool,
+        strategy: RefreshStrategy,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        Box::pin(async move {
+            if let Some(model) = model {
+                return model.clone();
+            }
+            default_model_from_available(view.list_models(strategy, factory).await)
+        })
+    }
     fn ensure_initialized(
         &self,
         http_client_factory: HttpClientFactory,
@@ -681,8 +835,9 @@ impl ModelsManager for OpenAiModelsManager {
             settings,
             endpoint,
             self.auth_manager.clone(),
-            self.custom_models.clone(),
+            HashMap::new(),
         );
+        manager.custom_models = Arc::clone(&self.custom_models);
         if matches!(self.catalog_source, CatalogSource::ExplicitProvider(_)) {
             manager = manager.with_provider_catalog();
         }
@@ -761,11 +916,12 @@ impl ModelsManager for OpenAiModelsManager {
                     SelectedCatalog::CurrentSnapshot(models)
                     | SelectedCatalog::Fallback(models) => models,
                 };
-                if let Some(custom_model) = config
-                    .custom_models
-                    .get(model)
-                    .or_else(|| self.custom_models().get(model))
-                {
+                let custom_models = self.custom_models_snapshot();
+                if let Some(custom_model) = config.custom_models.get(model).or_else(|| {
+                    (!config.custom_models_authoritative)
+                        .then(|| custom_models.get(model))
+                        .flatten()
+                }) {
                     return resolve_custom_alias(model, models, config, custom_model, |slug| {
                         entry.model_origin(&selected, slug)
                     });
@@ -786,8 +942,12 @@ impl ModelsManager for OpenAiModelsManager {
         })
     }
 
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        &self.custom_models
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.custom_models.load_full()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.custom_models.store(Arc::new(custom_models));
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -1151,6 +1311,24 @@ impl OpenAiModelsManager {
 }
 
 impl ModelsManager for StaticModelsManager {
+    fn get_default_model_with_view<'a>(
+        &'a self,
+        view: &'a dyn ModelsManager,
+        model: &'a Option<String>,
+        allow_fallback: bool,
+        strategy: RefreshStrategy,
+        factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        Box::pin(async move {
+            let models = view.list_models(strategy, factory).await;
+            if allow_fallback && !requested_model_is_available(model.as_deref(), &models) {
+                return default_model_from_available(models);
+            }
+            model
+                .clone()
+                .unwrap_or_else(|| default_model_from_available(models))
+        })
+    }
     fn ensure_initialized(
         &self,
         _http_client_factory: HttpClientFactory,
@@ -1181,11 +1359,12 @@ impl ModelsManager for StaticModelsManager {
         config: &'a ModelsManagerConfig,
     ) -> ModelsManagerFuture<'a, CatalogModel> {
         Box::pin(async move {
-            if let Some(custom_model) = config
-                .custom_models
-                .get(model)
-                .or_else(|| self.custom_models().get(model))
-            {
+            let custom_models = self.custom_models_snapshot();
+            if let Some(custom_model) = config.custom_models.get(model).or_else(|| {
+                (!config.custom_models_authoritative)
+                    .then(|| custom_models.get(model))
+                    .flatten()
+            }) {
                 return resolve_custom_alias(
                     model,
                     &self.remote_models,
@@ -1246,8 +1425,12 @@ impl ModelsManager for StaticModelsManager {
         self.auth_manager.as_deref()
     }
 
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        &self.custom_models
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.custom_models.load_full()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.custom_models.store(Arc::new(custom_models));
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
