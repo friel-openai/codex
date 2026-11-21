@@ -1244,7 +1244,8 @@ fn identity_with_catalog_limit(
     let auth = has_runtime_auth.then(|| CodexAuth::from_api_key("test-runtime-auth"));
     let runtime_auth_provider = auth
         .as_ref()
-        .map(codex_model_provider::auth_provider_from_auth);
+        .map(codex_model_provider::auth_provider_from_auth)
+        .map(crate::auth::McpAuthProvider::Credentials);
     McpConnectionIdentity::new(
         "test",
         &server,
@@ -1255,6 +1256,7 @@ fn identity_with_catalog_limit(
         resolved_environment,
         &runtime_context,
         runtime_auth_provider.as_ref(),
+        /*runtime_auth_mode*/ None,
         auth.as_ref(),
         Some((PathBuf::from("/codex-home"), connector_context)),
         elicitation_capability.clone(),
@@ -1271,7 +1273,9 @@ fn identity_with_auth(auth: &CodexAuth) -> McpConnectionIdentity {
         Arc::new(environment_manager_without_environments()),
         PathBuf::from("/one"),
     );
-    let provider = codex_model_provider::auth_provider_from_auth(auth);
+    let provider = crate::auth::McpAuthProvider::Credentials(
+        codex_model_provider::auth_provider_from_auth(auth),
+    );
     McpConnectionIdentity::new(
         "test",
         &server,
@@ -1282,6 +1286,7 @@ fn identity_with_auth(auth: &CodexAuth) -> McpConnectionIdentity {
         &Ok(None),
         &runtime_context,
         Some(&provider),
+        /*runtime_auth_mode*/ None,
         Some(auth),
         Some((
             PathBuf::from("/codex-home"),
@@ -1314,6 +1319,7 @@ fn identity_with_agent_plugin(agent_plugin: bool) -> McpConnectionIdentity {
         &Ok(None),
         &runtime_context,
         /*runtime_auth_provider*/ None,
+        /*runtime_auth_mode*/ None,
         /*auth*/ None,
         Some((
             PathBuf::from("/codex-home"),
@@ -1606,6 +1612,7 @@ async fn connection_pool_reuse_and_replacement_isolate_credential_policies() {
             &Ok(None),
             &runtime_context,
             /*runtime_auth_provider*/ None,
+            /*runtime_auth_mode*/ None,
             /*auth*/ None,
             /*codex_apps_cache_identity*/ None,
             ElicitationCapability::default(),
@@ -1838,20 +1845,35 @@ async fn provisional_replacement_preserves_shared_generation_until_commit() {
 async fn publication_can_retire_an_old_generation_from_another_pool() {
     let old_pool = McpConnectionPool::default();
     let new_pool = McpConnectionPool::default();
+    let acquisition_slot = Arc::new(ConnectionSlot::default());
+    let client_slot = Arc::clone(&acquisition_slot);
     let old = old_pool.acquire_named(
         "server".to_string(),
         identity("server", "/tmp"),
         McpConnectionPoolMode::Reuse,
         &route(),
-        client,
+        move |router| {
+            let mut client = client(router);
+            client.connection_slot = Some(Arc::clone(&client_slot));
+            client
+        },
     );
     let physical = old.inner.slot.current();
     assert!(physical.check_new_request().is_ok());
+    assert!(matches!(
+        &*acquisition_slot.state.lock().unwrap(),
+        SlotState::Available
+    ));
     assert_eq!(
         new_pool.commit_provisional(std::iter::empty(), [&old]),
         ProvisionalCommit::Committed
     );
-    assert!(physical.check_new_request().is_err());
+    assert!(matches!(
+        &*acquisition_slot.state.lock().unwrap(),
+        SlotState::Retired
+    ));
+    // Retiring an acquisition must not revoke the already-held physical connection.
+    assert!(physical.check_new_request().is_ok());
 }
 
 #[tokio::test]
@@ -2940,7 +2962,11 @@ async fn pooled_capture_retains_raw_catalog_snapshot_when_connector_tools_are_fi
     );
 
     catalog
-        .refresh(|| async { Ok((raw_tools, None, ())) }, |_, _, ()| {})
+        .refresh(
+            || async { Ok((raw_tools, None, ())) },
+            || Some(()),
+            |_, _, ()| {},
+        )
         .await?;
     assert_eq!(
         catalog
@@ -3073,6 +3099,7 @@ async fn prepared_call_waits_for_refresh_route_before_locking_catalog() -> anyho
                             release_rx.await?;
                             Ok((Vec::new(), None, ()))
                         },
+                        || Some(()),
                         |_, _, ()| {},
                     )
                     .await
@@ -3127,8 +3154,11 @@ async fn cancelling_prepared_call_releases_route_and_catalog_locks() -> anyhow::
 
     let mut other_route = Box::pin(other_binding.acquire_route());
     assert!(futures::poll!(&mut other_route).is_pending());
-    let mut refresh =
-        Box::pin(catalog.refresh(|| async { Ok((Vec::new(), None, ())) }, |_, _, ()| {}));
+    let mut refresh = Box::pin(catalog.refresh(
+        || async { Ok((Vec::new(), None, ())) },
+        || Some(()),
+        |_, _, ()| {},
+    ));
     assert!(futures::poll!(&mut refresh).is_pending());
 
     drop(call);

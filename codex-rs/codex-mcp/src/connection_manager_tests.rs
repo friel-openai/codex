@@ -3231,17 +3231,17 @@ async fn selected_server_lists_do_not_start_unrelated_servers() {
     let (trigger, _receiver) = watch::channel(/*init*/ false);
     manager
         .servers
-        .get_mut("unrelated")
+        .get_mut(&McpServerKey::unscoped("unrelated"))
         .unwrap()
         .startup_trigger = Some(trigger.clone());
 
     let (server_infos, (tools, errors)) =
         tokio::time::timeout(Duration::from_millis(/*millis*/ 100), async {
             let server_infos = manager
-                .list_available_server_infos(|name| name == "selected")
+                .list_available_server_infos(|name| name == &McpServerKey::unscoped("selected"))
                 .await;
             let tools = manager
-                .list_tools_with_errors(|name| name == "selected")
+                .list_tools_with_errors(|name| name == &McpServerKey::unscoped("selected"))
                 .await;
             (server_infos, tools)
         })
@@ -3250,7 +3250,7 @@ async fn selected_server_lists_do_not_start_unrelated_servers() {
 
     assert_eq!(
         server_infos,
-        HashMap::from([("selected".to_string(), selected_info)])
+        HashMap::from([(McpServerKey::unscoped("selected"), selected_info)])
     );
     assert_eq!(errors, HashMap::new());
     assert_eq!(
@@ -3597,31 +3597,6 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
         "explicitly requested servers must wait"
     );
 
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(1),
-            binding.list_resources(
-                &McpServerKey::in_environment(
-                    codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
-                    "pending-one"
-                ),
-                /*params*/ None
-            ),
-        )
-        .await
-        .is_err(),
-        "resources must wait for an omitted server instead of failing immediately"
-    );
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(1),
-            binding.list_all_resources(|server| server.name() == "pending-one"),
-        )
-        .await
-        .is_ok(),
-        "resource discovery must not wait for an omitted optional server"
-    );
-
     for server_name in ["pending-one", "pending-selected"] {
         let required_servers = vec![McpServerKey::in_environment(
             codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
@@ -3692,6 +3667,31 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
         .await
         .is_err(),
         "configured-required selected plugin servers must wait beyond the optional grace"
+    );
+    // Dropping this explicit resource request cancels startup when it owns the only route.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            binding.list_resources(
+                &McpServerKey::in_environment(
+                    codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+                    "pending-one"
+                ),
+                /*params*/ None
+            ),
+        )
+        .await
+        .is_err(),
+        "resources must wait for an omitted server instead of failing immediately"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            binding.list_all_resources(|server| server.name() == "pending-one"),
+        )
+        .await
+        .is_ok(),
+        "resource discovery must not wait for an omitted optional server"
     );
 }
 
@@ -3991,7 +3991,9 @@ fn create_test_manager_with_catalog_ready_client(
         .get_mut(&McpServerKey::unscoped("cached"))
         .unwrap()
         .startup_readiness = config.startup_readiness;
-    manager.required_servers.push("cached".to_string());
+    manager
+        .required_servers
+        .push(McpServerKey::unscoped("cached"));
     manager
 }
 
@@ -4847,7 +4849,7 @@ async fn catalog_listing_preserves_legacy_apps_tools_during_failed_startup() {
         client.request_router = Default::default();
         manager
             .servers
-            .get_mut(CODEX_APPS_MCP_SERVER_NAME)
+            .get_mut(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))
             .expect("Apps server")
             .connection = client.into();
 
@@ -5919,7 +5921,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
         .await;
         let error = match manager
             .servers
-            .get("fake-first-party")
+            .get(&McpServerKey::unscoped("fake-first-party"))
             .expect("fake first-party server")
             .connection
             .run(Arc::clone(&manager.session_route), |client| async move {
@@ -6696,7 +6698,7 @@ async fn reconcile_ema_server(
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
-                "docs".to_string(),
+                McpServerKey::unscoped("docs"),
                 EffectiveMcpServer::from_host_config(config),
             )]),
             submit_id: "refresh-ema".to_string(),
@@ -6709,6 +6711,7 @@ async fn reconcile_ema_server(
             tool_catalog_cache: McpToolCatalogCache::default(),
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
             client_mcp_extensions: ClientMcpExtensions::default(),
+            runtime_auth: None,
             auth: None,
             auth_manager: None,
             elicitation_reviewer: None,
@@ -8311,7 +8314,11 @@ async fn reconciliation_reuses_active_pending_connection_when_identity_is_unchan
     let previous = Arc::new(previous);
     let startup = {
         let previous = Arc::clone(&previous);
-        tokio::spawn(async move { previous.wait_for_server_startup("docs").await })
+        tokio::spawn(async move {
+            previous
+                .wait_for_server_startup(&McpServerKey::unscoped("docs"))
+                .await
+        })
     };
     tokio::time::timeout(Duration::from_secs(1), startup_started)
         .await
@@ -8430,7 +8437,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
         .connection_id();
     let codex_home = tempdir().expect("tempdir");
     let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+    mcp_config.client.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
 
     let reconciled = McpConnectionSet::new(
         /*ema_auth*/ Arc::new(OnceLock::new()),
@@ -8447,7 +8454,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
-                "docs".to_string(),
+                McpServerKey::unscoped("docs"),
                 EffectiveMcpServer::from_host_config(config),
             )]),
             submit_id: "refresh".to_string(),
@@ -8462,6 +8469,7 @@ async fn reconciliation_replaces_dormant_connection_when_protocol_mode_changes()
                 /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
             client_mcp_extensions: ClientMcpExtensions::default(),
+            runtime_auth: None,
             auth: None,
             auth_manager: None,
             elicitation_reviewer: None,
