@@ -9046,18 +9046,85 @@ async fn source_history_preserves_attached_visibility() {
 
 #[tokio::test]
 async fn indexed_native_history_admission_preserves_attached_visibility() {
+    let (root_home, root_store, root_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let root_offset = i64::try_from(
+        fs::metadata(rollout_path(root_home.path(), root_id))
+            .unwrap()
+            .len(),
+    )
+    .expect("root byte offset fits SQLite");
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 1)",
+    )
+    .bind(root_id.to_string())
+    .bind(root_offset)
+    .execute(history_db(&root_store).await)
+    .await
+    .expect("seed complete root projection");
+    assert!(
+        super::indexed_same_thread_lineage(&root_store, root_id)
+            .await
+            .expect("inspect root indexed admission")
+            .is_some(),
+        "a complete root without a fork remains eligible"
+    );
+
     for attached in [false, true] {
         let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
         let parent_id = ThreadId::new();
         let parent_path = rollout_path(home.path(), parent_id);
-        write_rollout_with_end(
-            parent_path.as_path(),
-            parent_id,
-            /*history_base*/ None,
-            /*next_ordinal*/ 6,
+        let started = |turn_id: &str| {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.to_string(),
+                root_turn_id: None,
+                turn_attribution: None,
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }))
+        };
+        let completed = |turn_id: &str| {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                root_turn_id: None,
+                last_agent_message: None,
+                error: None,
+                started_at: Some(10),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+                time_to_first_token_ms: None,
+            }))
+        };
+        write_rollout(&parent_path, parent_id, /*history_base*/ None);
+        append_timeline_record(&parent_path, 1, started("parent-turn"));
+        append_timeline_record(
+            &parent_path,
+            2,
+            timeline_user_item(parent_id, "parent-turn", "parent-item", "parent-item"),
         );
+        append_timeline_record(&parent_path, 3, completed("parent-turn"));
+        for ordinal in 4..6 {
+            append_timeline_record(
+                &parent_path,
+                ordinal,
+                RolloutItem::EventMsg(EventMsg::ShutdownComplete),
+            );
+        }
+        append_timeline_record(&parent_path, 6, started("late-parent-turn"));
+        append_timeline_record(
+            &parent_path,
+            7,
+            timeline_user_item(
+                parent_id,
+                "late-parent-turn",
+                "late-parent-item",
+                "late-parent-item",
+            ),
+        );
+        append_timeline_record(&parent_path, 8, completed("late-parent-turn"));
         let path = rollout_path(home.path(), thread_id);
-        let mut lines = vec![RolloutLine {
+        let line = RolloutLine {
             timestamp: "2026-07-16T00:00:00.000Z".to_string(),
             ordinal: Some(6),
             item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
@@ -9077,59 +9144,54 @@ async fn indexed_native_history_admission_preserves_attached_visibility() {
                 },
                 git: None,
             })),
-        }];
-        for ordinal in 7..11 {
-            lines.push(RolloutLine {
-                timestamp: "2026-07-16T00:00:00.000Z".to_string(),
-                ordinal: Some(ordinal),
-                item: RolloutItem::EventMsg(EventMsg::ShutdownComplete),
-            });
-        }
+        };
         fs::write(
             path.as_path(),
             format!(
                 "{}\n",
-                lines
-                    .iter()
-                    .map(|line| serde_json::to_string(line).expect("serialize native history"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                serde_json::to_string(&line).expect("serialize native history")
             ),
         )
         .expect("write native history with an attached presentation boundary");
+        append_timeline_record(&path, 7, started("child-turn"));
+        append_timeline_record(
+            &path,
+            8,
+            timeline_user_item(thread_id, "child-turn", "child-item", "child-item"),
+        );
+        append_timeline_record(&path, 9, completed("child-turn"));
+        append_timeline_record(&path, 10, RolloutItem::EventMsg(EventMsg::ShutdownComplete));
+        assert!(
+            store
+                .rebuild_history_projection_with_certificate(thread_id)
+                .await
+                .expect("rebuild the selected history"),
+            "the fixture must have a complete root projection"
+        );
+        assert!(
+            projection_state(&store, thread_id)
+                .await
+                .expect("read projection state")
+                .expect("root projection exists")
+                .lineage_complete
+        );
         let db = history_db(&store).await;
-        for (turn_id, item_id, turn_ordinal, item_ordinal) in [
-            ("parent-turn", "parent-item", 1, 2),
-            ("child-turn", "child-item", 7, 8),
-        ] {
-            insert_turn(
-                db,
-                thread_id,
-                turn_id,
-                turn_ordinal,
-                "completed",
-                /*error_json*/ None,
-                Some(item_id),
-                /*final_agent*/ None,
-            )
-            .await;
-            insert_item(db, thread_id, turn_id, item_id, item_ordinal).await;
-        }
-        let byte_offset = i64::try_from(fs::metadata(&path).expect("active metadata").len())
-            .expect("active byte offset fits SQLite");
-        sqlx::query(
-            "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 11) ON CONFLICT(thread_id) DO UPDATE SET next_rollout_byte_offset = excluded.next_rollout_byte_offset, next_rollout_ordinal = excluded.next_rollout_ordinal",
+        let (root_parent_items, physical_parent_items): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM thread_items WHERE thread_id = ? AND item_id = 'parent-item'), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)",
         )
         .bind(thread_id.to_string())
-        .bind(byte_offset)
-        .execute(db)
+        .bind(parent_id.to_string())
+        .fetch_one(db)
         .await
-        .expect("seed a complete native projection matching the active file");
-
+        .expect("inspect projection ownership");
+        assert_eq!((root_parent_items, physical_parent_items), (1, 0));
         let indexed = super::indexed_same_thread_lineage(&store, thread_id)
             .await
             .expect("inspect indexed admission");
-        assert_eq!(indexed.is_some(), !attached);
+        assert!(
+            indexed.is_none(),
+            "forked histories require lineage resolution"
+        );
         let expected_turns = if attached {
             vec!["child-turn"]
         } else {
@@ -9189,6 +9251,25 @@ async fn indexed_native_history_admission_preserves_attached_visibility() {
                 vec!["parent-item"]
             }
         );
+        let mut missing_anchor =
+            item_params(thread_id, Some("child-turn"), None, 10, SortDirection::Asc);
+        missing_anchor.position = Some(ListItemsPosition::ItemAnchor {
+            item_id: "missing-item".to_string(),
+        });
+        assert!(matches!(
+            store.list_items(missing_anchor).await,
+            Err(ThreadStoreError::InvalidRequest { message })
+                if message == "cursor.itemId does not identify an item in the requested history scope"
+        ));
+        let mut missing_turn = item_params(thread_id, None, None, 10, SortDirection::Asc);
+        missing_turn.position = Some(ListItemsPosition::ItemAnchor {
+            item_id: "child-item".to_string(),
+        });
+        assert!(matches!(
+            store.list_items(missing_turn).await,
+            Err(ThreadStoreError::InvalidRequest { message })
+                if message == "turnId is required when cursor is an item anchor"
+        ));
         let mut anchor = item_params(thread_id, Some("parent-turn"), None, 10, SortDirection::Asc);
         anchor.position = Some(ListItemsPosition::ItemAnchor {
             item_id: "parent-item".to_string(),
@@ -9232,8 +9313,171 @@ async fn indexed_native_history_admission_preserves_attached_visibility() {
                 turn_ids(&from_cursor.expect("ordinary parent cursor remains eligible")),
                 vec!["parent-turn"]
             );
+
+            sqlx::query("UPDATE thread_history_projection_state SET next_rollout_byte_offset = -1 - next_rollout_byte_offset WHERE thread_id = ?")
+                .bind(thread_id.to_string())
+                .execute(db)
+                .await
+                .expect("mark root projection incomplete");
+            let incomplete = store
+                .search_thread_occurrences(SearchThreadOccurrencesParams {
+                    thread_id,
+                    search_term: "item".to_string(),
+                    cursor: None,
+                    page_size: 10,
+                })
+                .await
+                .expect("search incomplete physical projections");
+            assert_eq!(
+                incomplete
+                    .items
+                    .iter()
+                    .map(|item| item.item_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["child-item"],
+                "an incomplete root cannot supply inherited rows"
+            );
         }
     }
+}
+
+#[tokio::test]
+async fn complete_root_search_finds_item_after_turn_start_segment() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout(&predecessor, thread_id, /*history_base*/ None);
+    append_timeline_record(
+        &predecessor,
+        1,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "shared-turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &predecessor,
+        2,
+        timeline_user_item(thread_id, "shared-turn", "early-item", "early text"),
+    );
+    let active = rollout_path(home.path(), thread_id);
+    write_rollout(
+        &active,
+        thread_id,
+        Some(history_position(&predecessor, predecessor_id, 3)),
+    );
+    append_timeline_record(
+        &active,
+        4,
+        timeline_user_item(thread_id, "shared-turn", "late-item", "late-match"),
+    );
+    append_timeline_record(
+        &active,
+        5,
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "shared-turn".to_string(),
+            root_turn_id: None,
+            last_agent_message: None,
+            error: None,
+            started_at: Some(10),
+            completed_at: Some(20),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        })),
+    );
+    assert!(
+        store
+            .rebuild_history_projection_with_certificate(thread_id)
+            .await
+            .expect("rebuild split turn")
+    );
+    assert!(
+        store
+            .rebuild_history_projection_with_certificate(thread_id)
+            .await
+            .expect("certify split turn")
+    );
+    assert!(
+        super::super::certificate_is_current(&store, thread_id, active.as_path())
+            .await
+            .expect("inspect split-turn certificate")
+    );
+    let occurrences = store
+        .search_thread_occurrences(SearchThreadOccurrencesParams {
+            thread_id,
+            search_term: "late-match".to_string(),
+            cursor: None,
+            page_size: 10,
+        })
+        .await
+        .expect("search the later segment");
+    assert_eq!(occurrences.items.len(), 1);
+    assert_eq!(occurrences.items[0].item_id, "late-item");
+    let turn = store
+        .list_turns(turn_params(
+            thread_id,
+            Some(occurrences.items[0].turn_cursor.clone()),
+            1,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect("navigate to the earlier turn start");
+    assert_eq!(turn_ids(&turn), ["shared-turn"]);
+}
+
+#[tokio::test]
+async fn complete_root_search_preserves_latest_visible_duplicate_turn() {
+    let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let parent = ThreadId::new();
+    let middle = ThreadId::new();
+    let parent_path = rollout_path(home.path(), parent);
+    write_rollout_with_end(&parent_path, parent, None, 3);
+    let middle_path = rollout_path(home.path(), middle);
+    write_rollout_with_end(
+        &middle_path,
+        middle,
+        Some(history_position(&parent_path, parent, 3)),
+        3,
+    );
+    let child_path = rollout_path(home.path(), child);
+    write_rollout_with_end(
+        &child_path,
+        child,
+        Some(history_position(&middle_path, middle, 6)),
+        2,
+    );
+    let db = history_db(&store).await;
+    // A flattened root can retain the earlier row while a physical successor has a newer turn.
+    for (owner, ordinal) in [(parent, 1), (middle, 4), (child, 1)] {
+        insert_turn(db, owner, "shared", ordinal, "completed", None, None, None).await;
+    }
+    insert_item(db, child, "shared", "shared-item", 2).await;
+    sqlx::query("INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 8)")
+        .bind(child.to_string())
+        .bind(i64::try_from(fs::metadata(&child_path).unwrap().len()).unwrap())
+        .execute(db)
+        .await
+        .expect("seed complete root projection");
+
+    let occurrences = store
+        .search_thread_occurrences(SearchThreadOccurrencesParams {
+            thread_id: child,
+            search_term: "shared-item".to_string(),
+            cursor: None,
+            page_size: 10,
+        })
+        .await
+        .expect("search inherited item");
+    assert_eq!(occurrences.items.len(), 1);
+    let cursor: HistoryCursor =
+        serde_json::from_str(&occurrences.items[0].turn_cursor).expect("decode turn cursor");
+    assert_eq!(cursor.rollout_ordinal, 4);
 }
 
 #[tokio::test]

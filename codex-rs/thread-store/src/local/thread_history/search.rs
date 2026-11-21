@@ -153,8 +153,7 @@ FROM (
       )
       AND items.rollout_ordinal >= ?
       AND items.rollout_ordinal < ?
-      AND turns.rollout_ordinal >= ?
-      AND turns.rollout_ordinal < ?
+      AND (? OR (turns.rollout_ordinal >= ? AND turns.rollout_ordinal < ?))
 
     UNION ALL
 
@@ -173,8 +172,7 @@ FROM (
       AND turns.final_agent_item_id IS NOT NULL
       AND items.rollout_ordinal >= ?
       AND items.rollout_ordinal < ?
-      AND turns.rollout_ordinal >= ?
-      AND turns.rollout_ordinal < ?
+      AND (? OR (turns.rollout_ordinal >= ? AND turns.rollout_ordinal < ?))
 )
 ORDER BY rollout_ordinal ASC
         "#,
@@ -182,11 +180,13 @@ ORDER BY rollout_ordinal ASC
         .bind(projection_rollout_id.to_string())
         .bind(next_rollout_ordinal)
         .bind(end_rollout_ordinal)
+        .bind(complete_root_projection)
         .bind(segment_start_ordinal)
         .bind(end_rollout_ordinal)
         .bind(projection_rollout_id.to_string())
         .bind(next_rollout_ordinal)
         .bind(end_rollout_ordinal)
+        .bind(complete_root_projection)
         .bind(segment_start_ordinal)
         .bind(end_rollout_ordinal)
         .fetch(pool);
@@ -195,6 +195,15 @@ ORDER BY rollout_ordinal ASC
         let mut matching_occurrences = 0_usize;
         while let Some(row) = rows.try_next().await.map_err(thread_history_error)? {
             let row = candidate_row(row)?;
+            // A complete root can contain an item in a later segment than its turn start.
+            // The start must still be visible, especially across an attached fork boundary.
+            if complete_root_projection
+                && lineage
+                    .segment_index_for_ordinal(row.turn_rollout_ordinal as u64)
+                    .is_none()
+            {
+                continue;
+            }
             let item = serde_json::from_str::<ThreadItemPayload>(row.item_json.as_str()).map_err(
                 |err| ThreadStoreError::Internal {
                     message: format!("failed to deserialize stored thread item: {err}"),
@@ -241,9 +250,13 @@ ORDER BY rollout_ordinal ASC
             } else if let Some(ordinal) = effective_turn_ordinals.get(&row.turn_id) {
                 *ordinal
             } else {
-                let ordinal = find_visible_turn(pool, &lineage, row.turn_id.as_str())
-                    .await?
-                    .rollout_ordinal;
+                let ordinal = match find_visible_turn(pool, &lineage, row.turn_id.as_str()).await {
+                    Ok(turn) => turn.rollout_ordinal,
+                    Err(ThreadStoreError::InvalidRequest { .. }) if complete_root_projection => {
+                        row.turn_rollout_ordinal
+                    }
+                    Err(error) => return Err(error),
+                };
                 effective_turn_ordinals.insert(row.turn_id.clone(), ordinal);
                 ordinal
             };

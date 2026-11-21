@@ -925,14 +925,16 @@ pub(super) async fn source_backed_items(
         return Ok(None);
     }
     let turn_id = params.turn_id.as_deref();
-    if matches!(
-        params.position.as_ref(),
-        Some(ListItemsPosition::ItemAnchor { .. })
-    ) || params.item_ids.is_some()
-        || params.sort_key != crate::ItemSortKey::CreatedAtOrdinal
+    if params.sort_key != crate::ItemSortKey::CreatedAtOrdinal
         || params.after_updated_at_ordinal.is_some()
         || params.before_updated_at_ordinal.is_some()
     {
+        return Ok(None);
+    }
+    if let Some(ListItemsPosition::ItemAnchor { item_id }) = params.position.as_ref()
+        && (turn_id.is_none_or(str::is_empty) || item_id.is_empty())
+    {
+        // Preserve the compatibility reader's request validation for malformed anchors.
         return Ok(None);
     }
     let Some((graph, scan, root)) =
@@ -1111,6 +1113,35 @@ pub(super) async fn source_backed_items(
         // No canonical items were found; the compatibility reader does not certify SQLite.
         return Ok(None);
     }
+    let anchor_ordinal = if let Some(ListItemsPosition::ItemAnchor { item_id }) =
+        params.position.as_ref()
+    {
+        match all.iter().find(|item| item.item.item_id == *item_id) {
+            Some(item) => Some(item.ordinal),
+            None => {
+                if !uncertified_items::sources_still_current(
+                    store,
+                    params.thread_id,
+                    &graph,
+                    &scan,
+                    root.root_snapshot.as_ref(),
+                )
+                .await?
+                {
+                    return Err(ThreadStoreError::Conflict {
+                        message: "rotated thread sources changed while listing items".to_string(),
+                    });
+                }
+                return Err(ThreadStoreError::InvalidRequest {
+                    message:
+                        "cursor.itemId does not identify an item in the requested history scope"
+                            .to_string(),
+                });
+            }
+        }
+    } else {
+        None
+    };
     let by_ordinal: HashMap<u64, &AggregateItem> =
         all.iter().map(|item| (item.ordinal, item)).collect();
     if by_ordinal.len() != all.len() {
@@ -1125,6 +1156,9 @@ pub(super) async fn source_backed_items(
         .saturating_add(selected_turns.len())
         > 900
     {
+        if params.item_ids.is_some() || anchor_ordinal.is_some() {
+            return Ok(None);
+        }
         return Err(ThreadStoreError::Internal {
             message: "rotated history exceeds the SQLite comparison limit".to_string(),
         });
@@ -1187,6 +1221,19 @@ pub(super) async fn source_backed_items(
     let mut selected = all
         .into_iter()
         .filter(|item| {
+            if params
+                .item_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&item.item.item_id))
+            {
+                return false;
+            }
+            if let Some(anchor) = anchor_ordinal {
+                return match params.sort_direction {
+                    crate::SortDirection::Asc => item.ordinal > anchor,
+                    crate::SortDirection::Desc => item.ordinal < anchor,
+                };
+            }
             cursor.as_ref().is_none_or(|cursor| {
                 match (params.sort_direction, cursor.include_anchor) {
                     (crate::SortDirection::Asc, true) => item.ordinal >= cursor.rollout_ordinal,
