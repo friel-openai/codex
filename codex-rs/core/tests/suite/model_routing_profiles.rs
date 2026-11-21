@@ -9,7 +9,6 @@ use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_core::SleepFuture;
-use codex_core::TimeFuture;
 use codex_core::TimeProvider;
 use codex_core::TurnInputRequest;
 use codex_core::config::CurrentTimeReminderConfig;
@@ -89,12 +88,9 @@ impl RoutingTimeProvider {
 }
 
 impl TimeProvider for RoutingTimeProvider {
-    fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
+    fn current_time(&self, _thread_id: ThreadId) -> Result<DateTime<Utc>> {
         let timestamp = self.current_time.load(Ordering::Relaxed);
-        Box::pin(async move {
-            Ok(DateTime::<Utc>::from_timestamp(timestamp, 0)
-                .expect("test timestamp should be valid"))
-        })
+        Ok(DateTime::<Utc>::from_timestamp(timestamp, 0).expect("test timestamp should be valid"))
     }
 
     fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
@@ -141,12 +137,9 @@ impl BlockingRoutingTimeProvider {
 }
 
 impl TimeProvider for BlockingRoutingTimeProvider {
-    fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
+    fn current_time(&self, _thread_id: ThreadId) -> Result<DateTime<Utc>> {
         let timestamp = self.current_time.load(Ordering::Relaxed);
-        Box::pin(async move {
-            Ok(DateTime::<Utc>::from_timestamp(timestamp, 0)
-                .expect("test timestamp should be valid"))
-        })
+        Ok(DateTime::<Utc>::from_timestamp(timestamp, 0).expect("test timestamp should be valid"))
     }
 
     fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
