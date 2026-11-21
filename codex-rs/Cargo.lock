@@ -2217,6 +2217,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "zip",
+ "zstd 0.13.3",
 ]
 
 [[package]]
