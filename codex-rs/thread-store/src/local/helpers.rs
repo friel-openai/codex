@@ -295,17 +295,12 @@ pub(super) async fn resolve_thread_names(
     store: &LocalThreadStore,
     thread_history_modes: &HashMap<ThreadId, ThreadHistoryMode>,
 ) -> HashMap<ThreadId, String> {
-    let legacy_thread_ids = thread_history_modes
-        .iter()
-        .filter_map(|(&thread_id, &history_mode)| {
-            (history_mode == ThreadHistoryMode::Legacy).then_some(thread_id)
-        })
-        .collect::<HashSet<_>>();
-    let mut names = find_thread_names_by_ids(store.config.codex_home.as_path(), &legacy_thread_ids)
+    let thread_ids = thread_history_modes.keys().copied().collect::<Vec<_>>();
+    let indexed_ids = thread_ids.iter().copied().collect();
+    let mut names = find_thread_names_by_ids(store.config.codex_home.as_path(), &indexed_ids)
         .await
         .unwrap_or_default();
     if let Some(state_db_ctx) = store.state_db().await {
-        let thread_ids = thread_history_modes.keys().copied().collect::<Vec<_>>();
         let Ok(metadata_by_id) = state_db_ctx.get_threads(&thread_ids).await else {
             return names;
         };
@@ -324,10 +319,10 @@ pub(super) async fn resolve_thread_names(
 
 pub(super) async fn indexed_thread_names(
     store: &LocalThreadStore,
-    legacy_thread_ids: &HashSet<ThreadId>,
+    thread_ids: &HashSet<ThreadId>,
     use_state_db_only: bool,
 ) -> ThreadStoreResult<HashMap<ThreadId, String>> {
-    match find_thread_names_by_ids(store.config.codex_home.as_path(), legacy_thread_ids).await {
+    match find_thread_names_by_ids(store.config.codex_home.as_path(), thread_ids).await {
         Ok(names) => Ok(names),
         Err(err) if use_state_db_only => Err(ThreadStoreError::Internal {
             message: format!("failed to read indexed thread names: {err}"),
@@ -350,10 +345,10 @@ pub(super) fn listed_thread_name(
                 title.or(indexed_name)
             }
         }
+        ThreadHistoryMode::Paginated if metadata.name.is_none() => indexed_name,
         ThreadHistoryMode::Paginated => sqlite_thread_name(metadata),
     }
 }
-
 /// Identifies the derived Guardian label, which must yield to legacy indexed names.
 pub(super) fn has_guardian_default_title(metadata: &ThreadMetadata) -> bool {
     metadata.title.trim() == codex_state::GUARDIAN_THREAD_TITLE
