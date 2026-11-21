@@ -714,11 +714,16 @@ async fn prepare_with_response_history_once(
         end_byte_offset: latest_projection_state.next_byte_offset,
     };
     let pool = store.thread_history_db().await?;
+    let visible = if !matches!(boundary, ForkBoundary::Latest) && lineage.has_attached_visibility {
+        Some(lineage.for_history_page(store).await?)
+    } else {
+        None
+    };
+    let boundary_lineage = visible.as_ref().unwrap_or(&lineage);
     let position = match boundary {
         ForkBoundary::Latest => latest_position,
         ForkBoundary::ThroughTurn(turn_id) => {
-            let visible = lineage.for_history_page(store).await?;
-            let row = find_visible_turn(pool, &visible, turn_id.as_str()).await?;
+            let row = find_visible_turn(pool, boundary_lineage, turn_id.as_str()).await?;
             if row.status == "inProgress" {
                 return Err(ThreadStoreError::InvalidRequest {
                     message: format!("lastTurnId '{turn_id}' identifies an in-progress turn"),
@@ -741,8 +746,7 @@ async fn prepare_with_response_history_once(
             }
         }
         ForkBoundary::BeforeTurn(turn_id) => {
-            let visible = lineage.for_history_page(store).await?;
-            let row = find_source_turn(pool, &visible, turn_id.as_str()).await?;
+            let row = find_source_turn(pool, boundary_lineage, turn_id.as_str()).await?;
             if row.rollout_end_ordinal == Some(row.rollout_ordinal) {
                 return Err(ThreadStoreError::InvalidRequest {
                     message: format!("turn {turn_id} does not have a persisted start boundary"),
