@@ -183,6 +183,7 @@ pub use list::read_session_meta_line_exact;
 pub use list::read_thread_item_from_rollout;
 pub use list::read_thread_item_from_rollout_with_indexed_preview;
 pub use list::rollout_date_parts;
+pub use list::snapshot_all_rollout_paths_by_rollout_id;
 pub use list::snapshot_rollout_paths_by_rollout_id;
 pub use maintenance::MAX_CONCURRENT_ROLLOUT_MIGRATIONS;
 pub use maintenance::RolloutMaintenanceGuard;
