@@ -101,6 +101,38 @@ pub(super) fn source_can_share(source: &StoredThread) -> bool {
         && source_kind_can_share(&source.source, source.parent_thread_id)
 }
 
+/// Daemon recovery requires unambiguous root-owned metadata before sharing list admission.
+pub(super) fn history_can_share(history: &InitialHistory, require_source: bool) -> bool {
+    let source_can_share = match history.get_resumed_session_sources() {
+        Some((source, _)) => source_kind_can_share(&source, history.get_resumed_parent_thread_id()),
+        None => !require_source,
+    };
+    if !source_can_share || !require_source {
+        return source_can_share;
+    }
+    let InitialHistory::Resumed(resumed) = history else {
+        return false;
+    };
+    let mut found = false;
+    for item in resumed.history.iter() {
+        let RolloutItem::SessionMeta(line) = item else {
+            continue;
+        };
+        let meta = &line.meta;
+        if meta.id != resumed.conversation_id {
+            continue;
+        }
+        found = true;
+        if meta.attached_thread
+            || meta.subagent_history_start_ordinal.is_some()
+            || !source_kind_can_share(&meta.source, meta.parent_thread_id)
+        {
+            return false;
+        }
+    }
+    found
+}
+
 /// Agent-owned, unknown and parent-linked sources retain the original exclusive ordering.
 pub(super) fn source_kind_can_share(
     source: &SessionSource,

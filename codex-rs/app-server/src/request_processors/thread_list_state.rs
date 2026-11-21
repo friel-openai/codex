@@ -19,6 +19,14 @@ pub(crate) struct ThreadListState {
     admission: RwLock<()>,
     probe_order: Mutex<()>,
     semaphore: Semaphore,
+    #[cfg(test)]
+    resume_admission_attempt: tokio::sync::Notify,
+    #[cfg(test)]
+    resume_list_permit_acquired: tokio::sync::Notify,
+    #[cfg(test)]
+    resume_upgrade_attempt: tokio::sync::Notify,
+    #[cfg(test)]
+    resume_upgrade_acquired: tokio::sync::Notify,
 }
 
 impl Default for ThreadListState {
@@ -27,6 +35,14 @@ impl Default for ThreadListState {
             admission: RwLock::new(()),
             probe_order: Mutex::new(()),
             semaphore: Semaphore::new(PERMITS as usize),
+            #[cfg(test)]
+            resume_admission_attempt: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            resume_list_permit_acquired: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            resume_upgrade_attempt: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            resume_upgrade_acquired: tokio::sync::Notify::new(),
         }
     }
 }
@@ -50,8 +66,12 @@ impl ThreadListState {
         shared: bool,
     ) -> Result<ThreadListResumePermit<'_>, JSONRPCErrorError> {
         if shared {
+            #[cfg(test)]
+            self.resume_admission_attempt.notify_one();
             let admission = self.admission.read().await;
             let permit = self.acquire(/*count*/ 1).await?;
+            #[cfg(test)]
+            self.resume_list_permit_acquired.notify_one();
             let mut order: ProbeOrder<'_> = maybe_done(Box::pin(self.probe_order.lock()));
             // Poll once to reserve this probe's FIFO position without blocking other probes.
             let _ = futures::poll!(&mut order);
@@ -70,6 +90,26 @@ impl ThreadListState {
                 order: None,
             })
         }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_resume_admission_attempt(&self) {
+        self.resume_admission_attempt.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_resume_list_permit_acquired(&self) {
+        self.resume_list_permit_acquired.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_resume_upgrade_attempt(&self) {
+        self.resume_upgrade_attempt.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_resume_upgrade_acquired(&self) {
+        self.resume_upgrade_acquired.notified().await;
     }
 
     async fn acquire(&self, count: u32) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
@@ -104,11 +144,15 @@ impl<'a> ThreadListResumePermit<'a> {
             order,
         } = self;
         debug_assert!(admission.is_some());
+        #[cfg(test)]
+        state.resume_upgrade_attempt.notify_one();
         drop(permit);
         let mut order = order.ok_or_else(|| internal_error("missing probe reservation"))?;
         (&mut order).await;
         // The admission read guard keeps later writers out of the semaphore queue.
         let permit = state.acquire(PERMITS).await?;
+        #[cfg(test)]
+        state.resume_upgrade_acquired.notify_one();
         drop(order);
         drop(admission);
         Ok(Self {
