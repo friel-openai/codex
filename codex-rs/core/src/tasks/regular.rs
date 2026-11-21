@@ -9,7 +9,6 @@ use codex_protocol::protocol::SubAgentSource;
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::SamplingInterrupt;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::startup_prewarm::SessionStartupPrewarmResolution;
@@ -37,7 +36,7 @@ pub(crate) struct RegularTask;
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -145,50 +144,32 @@ impl RegularTask {
     pub(super) fn run_turns(
         sess: Arc<Session>,
         ctx: Arc<TurnContext>,
-        mut next_input: Vec<TurnInput>,
+        next_input: Vec<TurnInput>,
         mut mcp_startup_requirements: McpStartupRequirements,
         provider_startup: RunTurnProviderStartup,
         cancellation_token: CancellationToken,
     ) -> BoxFuture<'static, SessionTaskResult> {
         Box::pin(async move {
-            let mut provider_startup = Some(provider_startup);
             let run_turn_span = trace_span!(
                 "run_turn",
                 conversation.id = %sess.thread_id,
                 turn.id = %ctx.sub_id,
             );
-            loop {
-                // Leave stack room for nested event persistence while the turn is polled.
-                let last_agent_message = Box::pin(run_turn(
-                    Arc::clone(&sess),
-                    Arc::clone(&ctx),
-                    next_input,
-                    &mut mcp_startup_requirements,
-                    provider_startup.take().unwrap_or_else(|| {
-                        if ctx.model_routing_retry_at.is_some() {
-                            RunTurnProviderStartup::DeferredForRoutingCooldown
-                        } else {
-                            RunTurnProviderStartup::Ready(None)
-                        }
-                    }),
-                    cancellation_token.child_token(),
-                ))
-                .instrument(run_turn_span.clone())
-                .await?;
-                // Preserve pending input for the next turn after an error, exhausted budget,
-                // or interrupt instead of reopening this turn.
-                if ctx.terminal_error.lock().await.is_some()
-                    || sess.work_budget().is_exhausted()
-                    || SamplingInterrupt::is_requested_for(&sess, &ctx).await
-                    || !sess.input_queue.has_pending_input(&sess.active_turn).await
-                {
-                    return Ok(Some(RegularTaskOutput {
-                        last_agent_message,
-                        mcp_startup_requirements,
-                    }));
-                }
-                next_input = Vec::new();
-            }
+            // Leave stack room for nested event persistence while the turn is polled.
+            let last_agent_message = Box::pin(run_turn(
+                sess,
+                ctx,
+                next_input,
+                &mut mcp_startup_requirements,
+                provider_startup,
+                cancellation_token,
+            ))
+            .instrument(run_turn_span)
+            .await?;
+            Ok(Some(RegularTaskOutput {
+                last_agent_message,
+                mcp_startup_requirements,
+            }))
         })
     }
 }
