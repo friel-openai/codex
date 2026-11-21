@@ -246,6 +246,50 @@ impl<'de> Deserialize<'de> for UniqueFields {
 /// A rollout envelope with the same duplicate-field checks as `Record`.
 struct UniqueRolloutValue(serde_json::Value);
 
+/// Extracts an ordinal parsed before a truncated JSON value, without accepting valid JSON.
+fn truncated_record_ordinal(bytes: &[u8]) -> Option<u64> {
+    use serde::de::DeserializeSeed;
+    use serde::de::IgnoredAny;
+
+    struct Seed<'a>(&'a mut Option<u64>);
+    impl<'de> DeserializeSeed<'de> for Seed<'_> {
+        type Value = ();
+
+        fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+            struct PrefixVisitor<'a>(&'a mut Option<u64>);
+            impl<'de> Visitor<'de> for PrefixVisitor<'_> {
+                type Value = ();
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("a rollout record object")
+                }
+
+                fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
+                    while let Some(key) = map.next_key::<String>()? {
+                        if key == "ordinal" {
+                            if self.0.is_some() {
+                                return Err(serde::de::Error::custom("duplicate ordinal"));
+                            }
+                            *self.0 = Some(map.next_value()?);
+                        } else {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            deserializer.deserialize_map(PrefixVisitor(self.0))
+        }
+    }
+
+    let mut ordinal = None;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    match Seed(&mut ordinal).deserialize(&mut deserializer) {
+        Err(error) if error.is_eof() || error.is_syntax() => ordinal,
+        _ => None,
+    }
+}
+
 impl<'de> Deserialize<'de> for UniqueRolloutValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct RolloutVisitor;
@@ -1712,6 +1756,7 @@ fn scan_source(
     let mut bytes = Vec::new();
     let mut offset = 0_u64;
     let mut previous = None;
+    let mut pending_malformed_retry = false;
     let mut record_index = 0_usize;
     let mut result = SourceScan::default();
     let mut items: HashMap<String, (i64, StoredThreadItem)> = HashMap::new();
@@ -1762,6 +1807,20 @@ fn scan_source(
             (ordinal, None)
         } else {
             let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
+                // A terminated partial write may be followed by a complete retry at the same
+                // ordinal. The next valid record must prove continuity; an unfinished tail,
+                // ambiguous valid JSON, or a second malformed line still fails closed.
+                if root_guard.is_some()
+                    && previous.is_some()
+                    && !pending_malformed_retry
+                    && truncated_record_ordinal(&bytes)
+                        == previous.and_then(|ordinal: u64| ordinal.checked_add(1))
+                    && boundary.is_none_or(|(_, end)| next <= end)
+                {
+                    pending_malformed_retry = true;
+                    offset = next;
+                    continue;
+                }
                 return Ok(None);
             };
             if record_index == 1 && record.kind == "compacted" {
@@ -1791,6 +1850,7 @@ fn scan_source(
         if previous.is_some_and(|value: u64| value.checked_add(1) != Some(ordinal)) {
             return Ok(None);
         }
+        pending_malformed_retry = false;
         previous = Some(ordinal);
         if ordinal < segment.start_ordinal() && segment.history_page_start.is_some() {
             offset = next;
@@ -1956,6 +2016,9 @@ fn scan_source(
         }
         offset = next;
     }
+    if pending_malformed_retry {
+        return Ok(None);
+    }
     if let (Some(guard), Some(file), Some(digest)) = (root_guard, root_file, root_digest) {
         let Some(opened) = file_identity(&file.metadata()?) else {
             return Ok(None);
@@ -1991,6 +2054,96 @@ mod tests {
     use super::check_summary_source_size;
     use super::compare_item_json;
     use super::has_canonical_compacted_header;
+    use super::truncated_record_ordinal;
+
+    #[test]
+    fn truncated_retry_requires_an_unambiguous_ordinal() {
+        assert_eq!(
+            truncated_record_ordinal(b"{\"ordinal\":7,\"payload\":{\"text\":\"partial\n"),
+            Some(7)
+        );
+        assert_eq!(truncated_record_ordinal(b"{\"payload\":\"partial\n"), None);
+        assert_eq!(truncated_record_ordinal(b"{\"ordinal\":7}"), None);
+        assert_eq!(
+            truncated_record_ordinal(b"{\"ordinal\":7,\"ordinal\":8,\"payload\":\"partial\n"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_root_retry_requires_matching_ordinal_and_complete_successor() {
+        use super::RolloutLineageSegment;
+        use super::RootReadGuard;
+        use super::file_identity;
+        use super::scan_source;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let home = tempfile::tempdir().expect("temporary history");
+        let path = home.path().join("root.jsonl");
+        let id = codex_protocol::ThreadId::new();
+        let record = |ordinal| {
+            format!(
+                "{{\"ordinal\":{ordinal},\"timestamp\":\"2025-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{}}}}\n"
+            )
+        };
+        for (partial, successor, expected) in [
+            ("{\"ordinal\":1,\"payload\":\"partial\n", Some(1), true),
+            ("{\"ordinal\":2,\"payload\":\"partial\n", Some(1), false),
+            ("{\"ordinal\":1,\"payload\":\"partial\n", Some(2), false),
+            ("{\"ordinal\":1,\"payload\":\"partial\n", None, false),
+        ] {
+            let contents = format!(
+                "{}{}{}",
+                record(0),
+                partial,
+                successor.map(record).unwrap_or_default()
+            );
+            std::fs::write(&path, contents).expect("write root");
+            let metadata = std::fs::metadata(&path).expect("root metadata");
+            let identity = file_identity(&metadata).expect("root identity");
+            let segment = RolloutLineageSegment {
+                thread_id: id,
+                rollout_id: id,
+                segment_id: None,
+                rollout_path: path.clone(),
+                start_ordinal: 0,
+                physical_start_ordinal: 0,
+                history_page_visible: true,
+                history_page_start: None,
+                end_ordinal_exclusive: None,
+                jsonl_end_byte_offset: None,
+                end_byte_offset: None,
+                byte_boundary_recorded: false,
+                physical_size: Some(metadata.len()),
+                filter_texts: Vec::new(),
+                goal_supervisor_provenance: Default::default(),
+                uses_history_base: false,
+                uses_fork_boundary: false,
+            };
+            let guard = RootReadGuard {
+                identity,
+                require_exact_identity: true,
+                expected_digest: None,
+            };
+            let scan = scan_source(
+                &segment,
+                Some(""),
+                true,
+                None,
+                true,
+                &Arc::new(AtomicBool::new(false)),
+                Some(&guard),
+            )
+            .expect("scan root");
+            assert_eq!(
+                scan.is_some(),
+                expected,
+                "partial={partial:?}, successor={successor:?}"
+            );
+        }
+    }
 
     #[test]
     fn compacted_envelope_rejects_duplicate_known_fields() {
