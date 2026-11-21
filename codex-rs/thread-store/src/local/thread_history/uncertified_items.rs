@@ -283,9 +283,10 @@ fn truncated_record_ordinal(bytes: &[u8]) -> Option<u64> {
     }
 
     let mut ordinal = None;
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     match Seed(&mut ordinal).deserialize(&mut deserializer) {
-        Err(error) if error.is_eof() || error.is_syntax() => ordinal,
+        Err(error) if error.is_eof() => ordinal,
         _ => None,
     }
 }
@@ -2064,6 +2065,10 @@ mod tests {
         );
         assert_eq!(truncated_record_ordinal(b"{\"payload\":\"partial\n"), None);
         assert_eq!(truncated_record_ordinal(b"{\"ordinal\":7}"), None);
+        assert_eq!(
+            truncated_record_ordinal(b"{\"ordinal\":7,\"payload\":!}\n"),
+            None
+        );
         assert_eq!(
             truncated_record_ordinal(b"{\"ordinal\":7,\"ordinal\":8,\"payload\":\"partial\n"),
             None
