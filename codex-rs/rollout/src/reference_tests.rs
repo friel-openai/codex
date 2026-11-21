@@ -2761,6 +2761,55 @@ async fn resolver_excludes_failed_copy_without_changing_segment_identity() -> io
 }
 
 #[tokio::test]
+async fn resolver_relocated_fallback_excludes_failed_plain_copy() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let old_home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let timestamp = "2026-07-13T00-00-00";
+    let failed = active_rollout_path(home.path(), thread_id, timestamp);
+    write_rollout(&failed, &[meta_line(thread_id, segment_id, 0)])?;
+    let compressed = failed.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(fs::File::open(&failed)?, 1)?,
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: Some(thread_id),
+        rollout_path: active_rollout_path(old_home.path(), thread_id, timestamp),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+    let failed = fs::canonicalize(failed)?;
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference).await?,
+        failed
+    );
+    assert_eq!(
+        resolve_rollout_reference_path_excluding(home.path(), &reference, Some(&failed)).await?,
+        fs::canonicalize(&compressed)?
+    );
+
+    let wrong = home.path().join("wrong.jsonl");
+    write_rollout(&wrong, &[meta_line(thread_id, SegmentId::new(), 0)])?;
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(fs::File::open(&wrong)?, 1)?,
+    )?;
+    assert!(
+        resolve_rollout_reference_path_excluding(home.path(), &reference, Some(&failed))
+            .await
+            .is_err(),
+        "a failed plain copy or a different compressed segment must not be selected"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolver_ignores_old_home_path_and_finds_current_home_identity() -> io::Result<()> {
     let home = TempDir::new()?;
     let old_home = TempDir::new()?;
