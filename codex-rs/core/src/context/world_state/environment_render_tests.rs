@@ -70,6 +70,7 @@ fn environment_state(
         network,
         filesystem: None,
         subagents,
+        subagents_format: Default::default(),
     }
 }
 
