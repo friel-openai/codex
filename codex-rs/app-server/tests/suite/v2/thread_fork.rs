@@ -4335,6 +4335,7 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
             .send_thread_list_request(ThreadListParams {
                 include_attached_threads: false,
                 current_account_only: false,
+                included_thread_ids: None,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(50),

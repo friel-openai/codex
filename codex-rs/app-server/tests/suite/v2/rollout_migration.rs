@@ -1114,6 +1114,7 @@ async fn automatic_migration_keeps_list_nonblocking_and_gates_resume() -> Result
         .send_thread_list_request(ThreadListParams {
             include_attached_threads: false,
             current_account_only: false,
+            included_thread_ids: None,
             excluded_thread_ids: None,
             cursor: None,
             limit: Some(10),
