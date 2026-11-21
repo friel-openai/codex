@@ -29,7 +29,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutReferenceItem;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -124,6 +123,7 @@ fn agent_line(message: &str, ordinal: u64) -> RolloutLine {
         timestamp: "2026-07-13T00:00:01Z".to_string(),
         ordinal: Some(ordinal),
         item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+            moderation: None,
             message: message.to_string(),
             phase: None,
             memory_citation: None,
@@ -185,6 +185,7 @@ fn completed_user_item_line(
                     text_elements: Vec::new(),
                 }],
             }),
+            content_token_count: None,
             started_at_ms: None,
             completed_at_ms: 0,
         })),
@@ -231,13 +232,12 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(turn_id.to_string()),
             root_turn_id: None,
+            direct_only_tool_namespaces: None,
             cwd: serde_json::from_value(json!(root)).expect("absolute test cwd"),
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            file_system_sandbox_policy: None,
             model: "test-model".to_string(),
             comp_hash: None,
             collaboration_mode: None,
@@ -305,6 +305,7 @@ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
+            requested_approvals_reviewer: None,
             permission_profile: PermissionProfile::workspace_write(),
             active_permission_profile: None,
             cwd: cwd.clone(),
