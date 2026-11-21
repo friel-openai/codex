@@ -819,7 +819,20 @@ ON CONFLICT(child_thread_id) DO NOTHING
         page_size: usize,
         filters: ThreadFilterOptions<'_>,
     ) -> anyhow::Result<crate::ThreadsPage> {
-        self.list_threads_matching(page_size, filters, /*relation_filter*/ None)
+        self.list_threads_matching(page_size, filters, /*relation_filter*/ None, false)
+            .await
+    }
+
+    /// List metadata for content search with a stable thread ID tie-breaker.
+    pub async fn list_threads_for_content_search(
+        &self,
+        page_size: usize,
+        filters: ThreadFilterOptions<'_>,
+        include_attached_threads: bool,
+    ) -> anyhow::Result<crate::ThreadsPage> {
+        let relation =
+            include_attached_threads.then_some(crate::ThreadRelationFilter::IncludeAttached);
+        self.list_threads_matching(page_size, filters, relation, true)
             .await
     }
 
@@ -845,7 +858,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         relation_filter: crate::ThreadRelationFilter,
         filters: ThreadFilterOptions<'_>,
     ) -> anyhow::Result<crate::ThreadsPage> {
-        self.list_threads_matching(page_size, filters, Some(relation_filter))
+        self.list_threads_matching(page_size, filters, Some(relation_filter), false)
             .await
     }
 
@@ -854,11 +867,18 @@ ON CONFLICT(child_thread_id) DO NOTHING
         page_size: usize,
         filters: ThreadFilterOptions<'_>,
         relation_filter: Option<crate::ThreadRelationFilter>,
+        tie_break_updated_at: bool,
     ) -> anyhow::Result<crate::ThreadsPage> {
         let limit = page_size.saturating_add(1);
 
         let mut builder = QueryBuilder::<Sqlite>::new("");
-        push_list_threads_query(&mut builder, filters, relation_filter, limit);
+        push_list_threads_query_with_updated_at_tiebreaker(
+            &mut builder,
+            filters,
+            relation_filter,
+            limit,
+            tie_break_updated_at,
+        );
 
         let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
         let mut items = Vec::with_capacity(rows.len());
@@ -1766,11 +1786,28 @@ fn one_thread_id_from_rows(
     }
 }
 
+#[cfg(test)]
 fn push_list_threads_query(
     builder: &mut QueryBuilder<Sqlite>,
     filters: ThreadFilterOptions<'_>,
     relation_filter: Option<crate::ThreadRelationFilter>,
     limit: usize,
+) {
+    push_list_threads_query_with_updated_at_tiebreaker(
+        builder,
+        filters,
+        relation_filter,
+        limit,
+        false,
+    );
+}
+
+fn push_list_threads_query_with_updated_at_tiebreaker(
+    builder: &mut QueryBuilder<Sqlite>,
+    filters: ThreadFilterOptions<'_>,
+    relation_filter: Option<crate::ThreadRelationFilter>,
+    limit: usize,
+    _tie_break_updated_at: bool,
 ) {
     if let Some(ids) = filters.included_thread_ids {
         // Materialize only the requested primary keys before SQLite considers a scope or sort index.
