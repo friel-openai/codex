@@ -299,6 +299,7 @@ async fn indexed_same_thread_lineage(
             history_page_visible: true,
             history_page_start: None,
             end_ordinal_exclusive: None,
+            jsonl_end_byte_offset: None,
             end_byte_offset: None,
             byte_boundary_recorded: false,
             physical_size: None,
