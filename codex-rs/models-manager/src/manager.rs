@@ -71,6 +71,11 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool>;
 
+    /// Whether a failed first-party catalog refresh makes fallback capabilities unsafe.
+    fn requires_first_party_catalog(&self) -> bool {
+        false
+    }
+
     /// Returns whether this provider supports an authoritative catalog with OpenAI API keys.
     fn supports_api_key_models(&self) -> bool {
         false
@@ -389,6 +394,14 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         config: &'a ModelsManagerConfig,
     ) -> ModelsManagerFuture<'a, CatalogModel>;
 
+    /// Detect a fallback snapshot invalidated by a concurrent first-party catalog refresh.
+    fn fallback_snapshot_requires_refresh<'a>(
+        &'a self,
+        _model: &'a CatalogModel,
+    ) -> ModelsManagerFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
     /// Refresh models if the provided ETag differs from the cached ETag.
     ///
     /// Uses `Online` strategy to fetch latest models when ETags differ.
@@ -510,6 +523,12 @@ impl ModelsManager for ThreadModelsManager {
             config.custom_models_authoritative = true;
             self.inner.get_model_info(model, &config).await
         })
+    }
+    fn fallback_snapshot_requires_refresh<'a>(
+        &'a self,
+        model: &'a CatalogModel,
+    ) -> ModelsManagerFuture<'a, bool> {
+        self.inner.fallback_snapshot_requires_refresh(model)
     }
     fn refresh_if_new_etag(
         &self,
@@ -930,8 +949,13 @@ impl ModelsManager for OpenAiModelsManager {
         config: &'a ModelsManagerConfig,
     ) -> ModelsManagerFuture<'a, CatalogModel> {
         Box::pin(async move {
-            let remote = {
+            let first_party_catalog = self.endpoint_client.requires_first_party_catalog()
+                && matches!(&self.catalog_source, CatalogSource::Default);
+            let (remote, failed_catalog, failure_revision) = {
                 let entry = self.remote_models.read().await;
+                let failed_catalog = entry
+                    .failed_first_party_identities
+                    .contains(&self.endpoint_client.identity());
                 let selected = self.models_for_entry(&entry.entry);
                 let models = match &selected {
                     SelectedCatalog::CurrentSnapshot(models)
@@ -943,9 +967,16 @@ impl ModelsManager for OpenAiModelsManager {
                         .then(|| custom_models.get(model))
                         .flatten()
                 }) {
-                    return resolve_custom_alias(model, models, config, custom_model, |slug| {
-                        entry.model_origin(&selected, slug)
-                    });
+                    let resolved =
+                        resolve_custom_alias(model, models, config, custom_model, |slug| {
+                            entry.model_origin(&selected, slug)
+                        });
+                    return mark_catalog_fallback(
+                        resolved,
+                        first_party_catalog,
+                        failed_catalog,
+                        entry.first_party_failure_revision,
+                    );
                 }
                 let model = match &self.catalog_source {
                     CatalogSource::Default => find_model_from_candidates(model, models),
@@ -954,12 +985,61 @@ impl ModelsManager for OpenAiModelsManager {
                         .find(|candidate| candidate.slug == model)
                         .cloned(),
                 };
-                model.map(|model| CatalogModel {
-                    origin: entry.model_origin(&selected, &model.slug),
-                    model: model.into(),
-                })
+                (
+                    model.map(|model| CatalogModel {
+                        origin: entry.model_origin(&selected, &model.slug),
+                        model: model.into(),
+                    }),
+                    failed_catalog,
+                    entry.first_party_failure_revision,
+                )
             };
-            construct_model_info(model, remote, config)
+            mark_catalog_fallback(
+                construct_model_info(model, remote, config),
+                first_party_catalog,
+                failed_catalog,
+                failure_revision,
+            )
+        })
+    }
+
+    fn fallback_snapshot_requires_refresh<'a>(
+        &'a self,
+        model: &'a CatalogModel,
+    ) -> ModelsManagerFuture<'a, bool> {
+        Box::pin(async move {
+            if model.origin.catalog_refresh_failed() {
+                return true;
+            }
+            let snapshot_revision = match model.origin {
+                ModelOrigin::BundledFirstParty { failure_revision }
+                | ModelOrigin::SyntheticFirstParty { failure_revision } => failure_revision,
+                ModelOrigin::Bundled | ModelOrigin::Synthetic => 0,
+                _ => return false,
+            };
+            if !self.endpoint_client.requires_first_party_catalog()
+                || matches!(&self.catalog_source, CatalogSource::ExplicitProvider(_))
+            {
+                return false;
+            }
+            let state = self.remote_models.read().await;
+            let identity = self.endpoint_client.identity();
+            if state.failed_first_party_identities.contains(&identity) {
+                return true;
+            }
+            if snapshot_revision == state.first_party_failure_revision {
+                return false;
+            }
+            // A global revision also invalidates a snapshot when the identity
+            // changed after a failure. A current catalog can establish that the
+            // slug is still unknown without using a stale known-model fallback.
+            let selected = self.models_for_entry(&state.entry);
+            let SelectedCatalog::CurrentSnapshot(models) = selected else {
+                return true;
+            };
+            let slug = model.request_model.as_deref().unwrap_or(&model.slug);
+            find_model_from_candidates(slug, &models)
+                .is_some_and(|candidate| state.provider_model_ids.contains(&candidate.slug))
         })
     }
 
@@ -1124,6 +1204,20 @@ impl OpenAiModelsManager {
                 // explicitly rejected. Provider/auth identity checks still govern reuse.
                 let is_provider_catalog =
                     matches!(&self.catalog_source, CatalogSource::ExplicitProvider(_));
+                if !is_provider_catalog && self.endpoint_client.requires_first_party_catalog() {
+                    let mut current = self.remote_models.write().await;
+                    // An auth change during the request makes its failing identity
+                    // ambiguous. Neither identity may use fallback capabilities
+                    // until a catalog refresh succeeds for that identity.
+                    current
+                        .failed_first_party_identities
+                        .insert(request_identity.clone());
+                    current
+                        .failed_first_party_identities
+                        .insert(self.endpoint_client.identity());
+                    current.first_party_failure_revision =
+                        current.first_party_failure_revision.saturating_add(1);
+                }
                 let access_denied = matches!(error.http_status_code_value(), Some(401 | 403));
                 let credentials_rejected = matches!(
                     error.details(),
@@ -1138,6 +1232,7 @@ impl OpenAiModelsManager {
                             entry: current,
                             provider_model_ids,
                             initialized,
+                            ..
                         } = &mut *current;
                         if request_identity != self.endpoint_client.identity() {
                             return Err(error);
@@ -1248,6 +1343,11 @@ impl OpenAiModelsManager {
             return false;
         }
         let mut catalog = CatalogState::provider(entry);
+        catalog.failed_first_party_identities = current.failed_first_party_identities.clone();
+        catalog
+            .failed_first_party_identities
+            .remove(&catalog.entry.identity);
+        catalog.first_party_failure_revision = current.first_party_failure_revision;
         let entry = &mut catalog.entry;
         let remote_only = entry
             .models
@@ -1591,6 +1691,28 @@ fn construct_model_info(
     metadata.slug = model.to_owned();
     resolved.model = model_info::with_config_overrides(metadata, config).into();
     resolved
+}
+
+fn mark_catalog_fallback(
+    mut model: CatalogModel,
+    first_party_catalog: bool,
+    failed_catalog: bool,
+    failure_revision: u64,
+) -> CatalogModel {
+    if failed_catalog {
+        model.origin = match model.origin {
+            ModelOrigin::Bundled => ModelOrigin::BundledAfterCatalogFailure,
+            ModelOrigin::Synthetic => ModelOrigin::SyntheticAfterCatalogFailure,
+            origin => origin,
+        };
+    } else if first_party_catalog {
+        model.origin = match model.origin {
+            ModelOrigin::Bundled => ModelOrigin::BundledFirstParty { failure_revision },
+            ModelOrigin::Synthetic => ModelOrigin::SyntheticFirstParty { failure_revision },
+            origin => origin,
+        };
+    }
+    model
 }
 
 fn construct_model_info_for_custom_alias(

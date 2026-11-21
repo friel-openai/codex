@@ -548,6 +548,36 @@ pub enum ModelOrigin {
     ExplicitConfig,
     /// Generic metadata synthesized when no catalog entry matches the requested model.
     Synthetic,
+    /// Bundled metadata selected under a first-party catalog failure revision.
+    BundledFirstParty {
+        failure_revision: u64,
+    },
+    /// Synthetic metadata selected under a first-party catalog failure revision.
+    SyntheticFirstParty {
+        failure_revision: u64,
+    },
+    /// Bundled metadata selected after the first-party catalog refresh failed.
+    BundledAfterCatalogFailure,
+    /// Synthetic metadata selected after the first-party catalog refresh failed.
+    SyntheticAfterCatalogFailure,
+}
+
+impl ModelOrigin {
+    /// Whether the metadata is generic rather than supplied by a catalog.
+    pub fn is_synthetic(self) -> bool {
+        matches!(
+            self,
+            Self::Synthetic | Self::SyntheticFirstParty { .. } | Self::SyntheticAfterCatalogFailure
+        )
+    }
+
+    /// Whether the fallback metadata was selected after a first-party catalog failure.
+    pub fn catalog_refresh_failed(self) -> bool {
+        matches!(
+            self,
+            Self::BundledAfterCatalogFailure | Self::SyntheticAfterCatalogFailure
+        )
+    }
 }
 
 /// Model metadata and its locally determined source, retained together through resolution.
