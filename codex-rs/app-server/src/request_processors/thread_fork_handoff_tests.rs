@@ -25,11 +25,14 @@ fn fork_seed_preserves_immediate_source_cutoff_separately_from_ancestor() {
     let ancestor_id = ThreadId::new();
     let created_at = Utc::now();
     let source = StoredThread {
+        creator_user_id: None,
+        creator_account_id: None,
         originator: None,
         thread_id: source_id,
         extra_config: None,
         rollout_path: None,
         forked_from_id: Some(ancestor_id),
+        attached_to_thread_id: None,
         parent_thread_id: None,
         preview: "source".to_string(),
         name: None,
