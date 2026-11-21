@@ -1019,6 +1019,27 @@ impl LocalThreadStore {
         .await
     }
 
+    /// Captures model context for an ephemeral child without preparing response history.
+    ///
+    /// The caller must not use `response_history` to synthesize a fork interruption or persist a
+    /// child reference. The returned reservation keeps the source alive while it starts.
+    pub async fn prepare_ephemeral_model_context_for_rollout(
+        &self,
+        thread_id: ThreadId,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(thread_id).await?;
+        paginated_fork::prepare_ephemeral_model_context_for_rollout(
+            self,
+            PrepareForkParams {
+                thread_id,
+                boundary: crate::ForkBoundary::Latest,
+            },
+            expected_rollout_id,
+        )
+        .await
+    }
+
     /// Prepares a latest fork using a verified complete, in-memory source model context.
     pub async fn prepare_fork_with_model_context(
         &self,
