@@ -1,0 +1,232 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 8686d461969cf363ad4809c53afba0eb64308e4e..d01f5dbfad45f1b13068bbea988f2e4517b8de3c 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -4399,13 +4399,50 @@ impl ThreadRequestProcessor {
+                     err => internal_error(format!("failed to list thread history: {err}")),
+                 })?
+         };
++        let mut full_items = if matches!(items_view, TurnItemsView::Full)
++            && page.turns.len() > 1
++            && let Some(store) = self
++                .thread_store
++                .as_any()
++                .downcast_ref::<codex_thread_store::LocalThreadStore>()
++        {
++            let turn_ids = page
++                .turns
++                .iter()
++                .map(|turn| turn.turn_id.clone())
++                .collect::<Vec<_>>();
++            store
++                .try_source_backed_full_turn_items(thread_id, &turn_ids)
++                .await
++                .map_err(paginated_history_list_error)?
++        } else {
++            None
++        };
++        if full_items.is_some() && *HISTORY_IO_OBSERVATION_ENABLED {
++            tracing::event!(
++                target: "codex_history_io",
++                tracing::Level::TRACE,
++                event.name = "codex.history.turn_items.batch",
++                thread.id = %thread_id,
++                turn.count = page.turns.len(),
++                "read source-backed turn item batch"
++            );
++        }
+         let mut turns = Vec::with_capacity(page.turns.len());
+         for turn in page.turns {
+             let mut turn = stored_turn_to_api_turn(turn, items_view)?;
+             if matches!(items_view, TurnItemsView::Full) {
+-                turn.items = self
+-                    .paginated_turn_full_items(thread_id, turn.id.as_str())
+-                    .await?;
++                turn.items = if let Some(items) = full_items.as_mut() {
++                    items
++                        .remove(&turn.id)
++                        .ok_or_else(|| internal_error("source batch omitted a turn".to_string()))?
++                        .iter()
++                        .map(stored_thread_item_to_api_item)
++                        .collect::<Result<Vec<_>, _>>()?
++                } else {
++                    self.paginated_turn_full_items(thread_id, turn.id.as_str())
++                        .await?
++                };
+             }
+             turns.push(turn);
+         }
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index f32105cc02ec99c32ca363b7cf900428250a4c08..62cd95e4dbc392be3fca44128524f69ac47617c7 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -624,6 +624,15 @@ impl LocalThreadStore {
+         thread_history::try_list_uncertified_turn_items(self, params).await
+     }
+
++    /// Attempts one source-verified item snapshot for all selected turns.
++    pub async fn try_source_backed_full_turn_items(
++        &self,
++        thread_id: ThreadId,
++        turn_ids: &[String],
++    ) -> ThreadStoreResult<Option<HashMap<String, Vec<crate::StoredThreadItem>>>> {
++        thread_history::try_source_backed_full_turn_items(self, thread_id, turn_ids).await
++    }
++
+     /// Attempts to derive both resume cursors from the same verified source lineage.
+     pub async fn try_projected_source_resume_backwards_cursors(
+         &self,
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 76d648d06cebb7969f097f6306dffb8f72076ae0..9e871e5ecd168e88fc55b77e95f7d998e8a6bca9 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -37,6 +37,7 @@ pub(super) use read::list_segmented_legacy_turns;
+ pub(super) use read::list_turns;
+ pub(super) use read::resume_backwards_cursors;
+ pub(super) use read::try_list_source_backed_turns;
++pub(super) use read::try_source_backed_full_turn_items;
+ pub(super) use read::try_source_resume_backwards_cursors;
+ pub(super) use read::validate_thread_for_paginated_reads;
+ pub(super) use realtime::list_timeline;
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index 5e539af7209c6cbfa891558ce5c86b9ed75c5b13..37a3cdde7032d35b1109996cb894fb7c19373c54 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -996,6 +996,70 @@ pub(in crate::local) async fn list_items(
+ pub(super) async fn source_backed_items(
+     store: &LocalThreadStore,
+     params: &ListItemsParams,
++) -> ThreadStoreResult<Option<ItemPage>> {
++    source_backed_items_for_turns(store, params, None).await
++}
++
++/// Tries one source-verified snapshot for every turn in a Full compatibility page.
++pub(in crate::local) async fn try_source_backed_full_turn_items(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    turn_ids: &[String],
++) -> ThreadStoreResult<Option<HashMap<String, Vec<StoredThreadItem>>>> {
++    let selected_turns: HashSet<String> = turn_ids.iter().cloned().collect();
++    if selected_turns.is_empty() || selected_turns.len() != turn_ids.len() {
++        return Ok(None);
++    }
++    validate_thread_for_paginated_reads(store, thread_id, true, "list_items").await?;
++    if store.has_current_history_certificate(thread_id).await? {
++        return Ok(None);
++    }
++    let params = ListItemsParams {
++        item_ids: None,
++        thread_id,
++        turn_id: None,
++        include_archived: true,
++        position: None,
++        page_size: 40_000,
++        sort_direction: crate::SortDirection::Asc,
++        sort_key: crate::ItemSortKey::CreatedAtOrdinal,
++        after_updated_at_ordinal: None,
++        before_updated_at_ordinal: None,
++    };
++    let page = match source_backed_items_for_turns(store, &params, Some(&selected_turns)).await {
++        Ok(Some(page)) if page.next_cursor.is_none() => page,
++        Ok(_) => return Ok(None),
++        Err(ThreadStoreError::Internal { message })
++            if message == uncertified_items::SUMMARY_SOURCE_SIZE_LIMIT_ERROR
++                || message
++                    == format!(
++                        "failed to access thread history: {}",
++                        uncertified_items::SUMMARY_SOURCE_SIZE_LIMIT_ERROR
++                    ) =>
++        {
++            // Individual-source and aggregate limits use different error wrappers. The
++            // combined page can exceed either even when individual turns do not.
++            return Ok(None);
++        }
++        Err(error) => return Err(error),
++    };
++    if store.has_current_history_certificate(thread_id).await? {
++        return Ok(None);
++    }
++    let mut items = HashMap::new();
++    for item in page.items {
++        items
++            .entry(item.turn_id.clone())
++            .or_insert_with(Vec::new)
++            .push(item);
++    }
++    Ok(Some(items))
++}
++
++async fn source_backed_items_for_turns(
++    store: &LocalThreadStore,
++    params: &ListItemsParams,
++    requested_turns: Option<&HashSet<String>>,
+ ) -> ThreadStoreResult<Option<ItemPage>> {
+     if params.turn_id.as_deref() == Some("") {
+         return Ok(None);
+@@ -1041,7 +1105,9 @@ pub(super) async fn source_backed_items(
+             "position outside or ambiguous in thread lineage",
+         ));
+     }
+-    let selected_turns: std::collections::HashSet<String> = if let Some(turn) = turn_id {
++    let selected_turns: HashSet<String> = if let Some(turns) = requested_turns {
++        turns.clone()
++    } else if let Some(turn) = turn_id {
+         [turn.to_string()].into_iter().collect()
+     } else {
+         let mut first: HashMap<(ThreadId, &str, &str), u64> = HashMap::new();
+@@ -1124,6 +1190,16 @@ pub(super) async fn source_backed_items(
+         .into_iter()
+         .flat_map(|(_, items)| items.into_values())
+         .collect::<Vec<_>>();
++    if let Some(requested_turns) = requested_turns {
++        let present: HashSet<&str> = all.iter().map(|item| item.item.turn_id.as_str()).collect();
++        if all.len() > params.page_size
++            || requested_turns
++                .iter()
++                .any(|turn| !present.contains(turn.as_str()))
++        {
++            return Ok(None);
++        }
++    }
+     if all.is_empty() && !scan.attached {
+         // Only an active root-only turn with no SQLite items can be answered
+         // from an empty source scan; other empty scans may hide legacy rows.
+@@ -1232,7 +1308,7 @@ pub(super) async fn source_backed_items(
+         .saturating_add(selected_turns.len())
+         > 900
+     {
+-        if params.item_ids.is_some() || anchor_ordinal.is_some() {
++        if requested_turns.is_some() || params.item_ids.is_some() || anchor_ordinal.is_some() {
+             return Ok(None);
+         }
+         return Err(ThreadStoreError::Internal {
+@@ -1260,6 +1336,9 @@ pub(super) async fn source_backed_items(
+         .await
+         .map_err(super::thread_history_error)?;
+     if rows.len() > 40000 {
++        if requested_turns.is_some() {
++            return Ok(None);
++        }
+         return Err(ThreadStoreError::Internal {
+             message: "rotated item projection exceeds the comparison limit".to_string(),
+         });
+diff --git a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+index 38278b3a2d96960c55df0afc1cd6e63ba1aa0dc2..fd36ba6484bbba1d2728a2285126c426ace9560e 100644
+--- a/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
++++ b/codex-rs/thread-store/src/local/thread_history/uncertified_items.rs
+@@ -1699,11 +1699,14 @@ pub(super) struct SourceScan {
+     pub(super) root_snapshot: Option<RootSnapshot>,
+ }
+
++pub(super) const SUMMARY_SOURCE_SIZE_LIMIT_ERROR: &str =
++    "rotated turn-summary source verification exceeds its 64 MiB limit";
++
+ fn check_summary_source_size(bytes: usize) -> io::Result<()> {
+     if bytes > MAX_SUMMARY_SOURCE_BYTES {
+         return Err(io::Error::new(
+             io::ErrorKind::OutOfMemory,
+-            "rotated turn-summary source verification exceeds its 64 MiB limit",
++            SUMMARY_SOURCE_SIZE_LIMIT_ERROR,
+         ));
+     }
+     Ok(())
