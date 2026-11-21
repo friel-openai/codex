@@ -771,6 +771,22 @@ pub(in crate::local) async fn certificate_is_current(
     )
 }
 
+/// Confirms that a complete root projection contains only this thread's physical sources.
+pub(in crate::local) async fn certificate_is_current_for_single_owner(
+    store: &LocalThreadStore,
+    root_rollout_id: RolloutId,
+    root_path: &Path,
+    owner: codex_protocol::ThreadId,
+) -> ThreadStoreResult<bool> {
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    Ok(
+        certified_item_lower_bound(&mut transaction, root_rollout_id, root_path, "")
+            .await?
+            .is_some_and(|proof| proof.is_single_owner(owner)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::strict_source_records;

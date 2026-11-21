@@ -4729,6 +4729,16 @@ async fn certified_split_turn_pages_do_not_open_unneeded_ancestors() {
             .await
             .unwrap()
     );
+    assert!(
+        !super::super::projection_certificate::certificate_is_current_for_single_owner(
+            &store,
+            child_id,
+            &child_path,
+            child_id,
+        )
+        .await
+        .unwrap()
+    );
     let mut watch = watch_history_file_opens(&grandparent_path);
     let first = store
         .list_items(item_params(
@@ -4829,6 +4839,18 @@ async fn certified_same_thread_rotations_use_complete_root_projection() {
             .await
             .unwrap()
     );
+    let resolved =
+        super::super::super::thread_rollout_resolver::resolve_current_including_archived(
+            &store, thread_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        super::has_complete_root_projection_for_resolved(&store, thread_id, resolved.clone())
+            .await
+            .unwrap()
+    );
     let mut watch = watch_history_file_opens(&predecessor_path);
     let turns = store
         .list_turns(turn_params(
@@ -4874,6 +4896,20 @@ async fn certified_same_thread_rotations_use_complete_root_projection() {
     assert_eq!(
         watch.read(&mut events).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
+    );
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&predecessor_path)
+            .unwrap(),
+        " "
+    )
+    .unwrap();
+    assert!(
+        !super::has_complete_root_projection_for_resolved(&store, thread_id, resolved)
+            .await
+            .unwrap()
     );
 }
 
