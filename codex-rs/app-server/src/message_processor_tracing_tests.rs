@@ -57,6 +57,82 @@ use wiremock::MockServer;
 
 pub(super) const TEST_CONNECTION_ID: ConnectionId = ConnectionId(7);
 
+#[tokio::test]
+async fn concurrent_model_list_publishes_aliases_in_load_order() -> Result<()> {
+    use codex_app_server_protocol::ModelListParams;
+    use std::sync::atomic::Ordering;
+    use tokio::time::timeout;
+
+    let server = create_mock_responses_server_repeating_assistant("test").await;
+    let home = TempDir::new()?;
+    let config = build_test_config(home.path(), &server.uri()).await?;
+    let path = home.path().join("config.toml");
+    let base = std::fs::read_to_string(&path)?;
+    let write_alias = |alias: &str| {
+        std::fs::write(
+            &path,
+            format!("{base}\n[[custom_models]]\nname = \"{alias}\"\nmodel = \"gpt-5.1-codex\"\n"),
+        )
+    };
+    write_alias("alias-a")?;
+    let auth = AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("test"));
+    let (processor, _outgoing) = build_test_processor(Arc::new(config), auth).await;
+    let params = || ModelListParams {
+        model_provider: None,
+        cursor: None,
+        limit: None,
+        include_hidden: Some(true),
+    };
+    // Warm the current model catalog before pausing the alias publication itself.
+    processor
+        .catalog_processor
+        .model_list(params())
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let pause = Arc::clone(&processor.catalog_processor.alias_refresh_test_pause);
+    pause.armed.store(true, Ordering::SeqCst);
+    pause.observe_pre_lock.store(true, Ordering::SeqCst);
+    let first_processor = Arc::clone(&processor);
+    let first =
+        tokio::spawn(async move { first_processor.catalog_processor.model_list(params()).await });
+    timeout(Duration::from_secs(10), pause.pre_lock.notified()).await?;
+    timeout(Duration::from_secs(10), pause.reached.notified()).await?;
+    write_alias("alias-b")?;
+    let second_processor = Arc::clone(&processor);
+    let mut second = tokio::spawn(async move {
+        second_processor
+            .catalog_processor
+            .model_list(params())
+            .await
+    });
+    timeout(Duration::from_secs(10), pause.pre_lock.notified()).await?;
+    assert!(
+        timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_err()
+    );
+    pause.observe_pre_lock.store(false, Ordering::SeqCst);
+    pause.resume.notify_one();
+    first.await?.map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    second
+        .await?
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let aliases = processor.catalog_processor.custom_model_aliases_for_test();
+    assert!(aliases.contains_key("alias-b"));
+    assert!(!aliases.contains_key("alias-a"));
+    let result = processor
+        .catalog_processor
+        .model_list(params())
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?
+        .expect("model list response");
+    let result = serde_json::to_value(result)?;
+    let models = result["data"].as_array().expect("model list data");
+    assert!(models.iter().any(|model| model["id"] == "alias-b"));
+    assert!(!models.iter().any(|model| model["id"] == "alias-a"));
+    Ok(())
+}
+
 struct TestTracing {
     exporter: InMemorySpanExporter,
     provider: SdkTracerProvider,
