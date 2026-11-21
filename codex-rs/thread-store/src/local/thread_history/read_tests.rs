@@ -829,6 +829,221 @@ async fn repeated_cursorless_turn_pages_reuse_scan_until_rotation() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn rotated_source_index_extends_once_for_concurrent_readers() {
+    use std::io::Read;
+
+    let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(8).await;
+    let (_, original) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    append_timeline_record(
+        &old_root,
+        27,
+        timeline_user_item(thread_id, "local", "old-late", "late"),
+    );
+    let old_base = history_position(&old_root, thread_id, 28);
+    let compressed = old_root.with_extension("jsonl.zst");
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(fs::read(&old_root).unwrap().as_slice(), 0).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(&old_root).unwrap();
+
+    let middle_id = ThreadId::new();
+    let middle = selected_rollout_path(home.path(), thread_id, middle_id);
+    write_rollout(&middle, thread_id, Some(old_base));
+    append_timeline_record(
+        &middle,
+        29,
+        timeline_user_item(thread_id, "local", "middle", "split"),
+    );
+    let middle_base = history_position(&middle, middle_id, 30);
+    append_timeline_record(
+        &middle,
+        30,
+        timeline_user_item(thread_id, "local", "excluded", "after cutoff"),
+    );
+    let new_id = ThreadId::new();
+    let new_root = selected_rollout_path(home.path(), thread_id, new_id);
+    write_rollout(&new_root, thread_id, Some(middle_base));
+    append_timeline_record(
+        &new_root,
+        31,
+        timeline_user_item(thread_id, "local", "new-root", "split"),
+    );
+    select_rollout_path(&store, thread_id, new_root).await;
+
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let reader = store.clone();
+        readers.push(tokio::spawn(async move {
+            uncertified_items::indexed_sources(&reader, thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+        }));
+    }
+    let mut scans = Vec::new();
+    for reader in readers {
+        scans.push(reader.await.unwrap());
+    }
+    assert!(!std::sync::Arc::ptr_eq(&original, &scans[0]));
+    assert!(
+        scans
+            .iter()
+            .all(|scan| std::sync::Arc::ptr_eq(scan, &scans[0]))
+    );
+    let mut events = [0; 1024];
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "rotation must not reopen the already indexed ancestor"
+    );
+    let local = store
+        .list_items(item_params(
+            thread_id,
+            Some("local"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        item_ids(&local),
+        ["new-root", "middle", "old-late", "local-item"]
+    );
+    let inherited = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn-0"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&inherited), ["item-0"]);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rotated_source_index_rebuilds_for_changed_ancestor_or_cutoff() {
+    use std::io::Read;
+
+    for change in ["rewrite", "replacement", "collision", "cutoff"] {
+        let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(4).await;
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if change == "cutoff" {
+            let original = fs::read_to_string(&old_root).unwrap();
+            let (head, tail) = original.split_once('\n').unwrap();
+            let mut head = codex_rollout::parse_rollout_line_bytes(head.as_bytes()).unwrap();
+            let last = &ancestors[3];
+            let cutoff =
+                history_position(last, codex_rollout::rollout_id_from_path(last).unwrap(), 11);
+            let RolloutItem::SessionMeta(meta) = &mut head.item else {
+                panic!("expected session metadata");
+            };
+            meta.meta.history_base = Some(cutoff);
+            fs::write(
+                &old_root,
+                format!("{}\n{tail}", serde_json::to_string(&head).unwrap()),
+            )
+            .unwrap();
+        } else {
+            let original = fs::read_to_string(&ancestors[0]).unwrap();
+            let changed = original.replace("item-0", "item-x");
+            assert_eq!(original.len(), changed.len());
+            match change {
+                "rewrite" => fs::write(&ancestors[0], changed).unwrap(),
+                "replacement" => {
+                    let replacement = home.path().join("replacement");
+                    fs::write(&replacement, changed).unwrap();
+                    fs::rename(replacement, &ancestors[0]).unwrap();
+                }
+                "collision" => {
+                    let collision = home
+                        .path()
+                        .join("sessions")
+                        .join(ancestors[0].file_name().unwrap());
+                    fs::write(collision, changed).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        let base = history_position(&old_root, thread_id, 15);
+        let new_id = ThreadId::new();
+        let new_root = selected_rollout_path(home.path(), thread_id, new_id);
+        write_rollout(&new_root, thread_id, Some(base));
+        select_rollout_path(&store, thread_id, new_root).await;
+        let watched = if change == "collision" {
+            home.path()
+                .join("sessions")
+                .join(ancestors[0].file_name().unwrap())
+        } else {
+            ancestors[0].clone()
+        };
+        let mut watch = watch_history_file_opens(&watched);
+        let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut events = [0; 1024];
+        assert!(
+            watch.read(&mut events).is_ok(),
+            "{change} must rebuild the old index"
+        );
+        if change == "cutoff" {
+            assert!(!scan.anchors.iter().any(|anchor| anchor.item_id == "item-3"));
+            assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
+        } else {
+            assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-x"));
+            assert!(!scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rotated_source_index_after_restart_falls_back_to_full_scan() {
+    use std::io::Read;
+
+    let (home, store, thread_id, old_root, ancestors) = persistent_source_scan_fixture(4).await;
+    uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let base = history_position(&old_root, thread_id, 15);
+    let new_id = ThreadId::new();
+    let new_root = selected_rollout_path(home.path(), thread_id, new_id);
+    write_rollout(&new_root, thread_id, Some(base));
+    select_rollout_path(&store, thread_id, new_root).await;
+    drop(store);
+    let reopened = reopen_history_store(home.path()).await;
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let (_, scan) = uncertified_items::indexed_sources(&reopened, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut events = [0; 1024];
+    assert!(watch.read(&mut events).is_ok());
+    assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
+    assert!(
+        scan.anchors
+            .iter()
+            .any(|anchor| anchor.item_id == "local-item")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn warm_source_pages_do_not_enumerate_unrelated_rollouts() {
     use std::io::Read;
 
