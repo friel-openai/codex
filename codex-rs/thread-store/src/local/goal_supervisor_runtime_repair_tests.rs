@@ -353,7 +353,7 @@ async fn repair_preserves_at_eof_thread_history_database_bytes() {
         Utc::now(),
         SessionSource::Cli,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
     state_db
         .upsert_thread(&metadata.build(config.default_model_provider_id.as_str()))
         .await

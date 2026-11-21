@@ -228,7 +228,7 @@ async fn resume_compressed_selection_materializes_before_appending() {
             chrono::Utc::now(),
             SessionSource::Cli,
         );
-        metadata.history_mode = ThreadHistoryMode::Paginated;
+        metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
         db.upsert_thread(&metadata.build("test-provider"))
             .await
             .expect("select logical plain path");
@@ -299,7 +299,7 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
         chrono::Utc::now(),
         SessionSource::Cli,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
     db.upsert_thread(&metadata.build("test-provider"))
         .await
         .expect("select first");

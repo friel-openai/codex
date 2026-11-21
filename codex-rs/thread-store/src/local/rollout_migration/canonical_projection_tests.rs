@@ -59,6 +59,7 @@ fn selective_projection_matches_lifecycle_aliases_and_completed_items() {
                     client_id: None,
                     content: Vec::new(),
                 }),
+                content_token_count: None,
                 started_at_ms: Some(100),
                 completed_at_ms: 200,
             })),

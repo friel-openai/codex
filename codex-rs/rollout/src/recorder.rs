@@ -1098,6 +1098,9 @@ impl RolloutRecorder {
                     writer: None,
                     deferred_creation: true,
                     pending_items: Vec::new(),
+                    realtime_sync_pending: false,
+                    #[cfg(unix)]
+                    directories_to_sync: Vec::new(),
                     meta: Some(session_meta),
                     cwd: cwd.clone(),
                     rollout_path: path,

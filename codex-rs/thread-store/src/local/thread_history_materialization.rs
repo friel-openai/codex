@@ -17,6 +17,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
+use sha2::Digest;
 use tracing::warn;
 
 use super::LocalThreadStore;
@@ -63,6 +64,8 @@ pub(super) async fn ensure_fallback_projection_compatible(
 struct ProjectionRollout {
     path: PathBuf,
     reads: AncestorReads,
+    /// Identity captured before the live writer's durable suffix is read.
+    participating_leaf: Option<super::thread_history::ProjectionLeafIdentity>,
 }
 
 pub(super) async fn materialize_to_sqlite(
@@ -87,6 +90,7 @@ pub(super) async fn materialize_to_sqlite_with_reads(
         ProjectionRollout {
             path: rollout_path.to_owned(),
             reads: reads.clone(),
+            participating_leaf: None,
         },
         /*flushed_len*/ None,
         /*end*/ None,
@@ -100,12 +104,14 @@ pub(super) async fn materialize_durable_suffix(
     rollout_path: &Path,
     flushed_len: Option<u64>,
 ) -> ThreadStoreResult<()> {
+    let participating_leaf = super::thread_history::projection_leaf_identity(rollout_path).await;
     materialize_projection(
         store,
         thread_id,
         ProjectionRollout {
             path: rollout_path.to_owned(),
             reads: AncestorReads::default(),
+            participating_leaf,
         },
         flushed_len,
         /*end*/ None,
@@ -126,6 +132,7 @@ pub(super) async fn materialize_prefix_to_sqlite(
         ProjectionRollout {
             path: rollout_path.to_owned(),
             reads: AncestorReads::default(),
+            participating_leaf: None,
         },
         /*flushed_len*/ None,
         Some(end),
@@ -464,7 +471,7 @@ fn read_projection_batches(
     subagent_history_start_ordinal: Option<u64>,
     end: Option<HistoryPosition>,
     is_cancelled: impl Fn() -> bool,
-    mut emit: impl FnMut(Vec<RolloutProjectionStep>, u64) -> ThreadStoreResult<()>,
+    mut emit: impl FnMut(Vec<RolloutProjectionStep>, u64, Option<[u8; 32]>) -> ThreadStoreResult<()>,
 ) -> ThreadStoreResult<()> {
     let rollout_path = &rollout.path;
     let mut file = match rollout.reads.open(rollout_path, &is_cancelled) {
@@ -517,6 +524,10 @@ fn read_projection_batches(
     let mut line_start_offset = start_offset;
     let mut batch_start_offset = start_offset;
     let mut batch = Vec::new();
+    let mut batch_digest = rollout
+        .participating_leaf
+        .as_ref()
+        .map(|_| sha2::Sha256::new());
     loop {
         if is_cancelled() {
             return Err(thread_store_io_error(std::io::Error::other(
@@ -526,7 +537,13 @@ fn read_projection_batches(
         // Flush only between complete records: an ordinal gap and its following line must
         // share a checkpoint. Byte-only progress from skipped records also bounds batches.
         if next_offset - batch_start_offset >= BATCH_SOURCE_BYTES || batch.len() >= BATCH_STEPS {
-            emit(std::mem::take(&mut batch), next_offset)?;
+            emit(
+                std::mem::take(&mut batch),
+                next_offset,
+                batch_digest
+                    .as_mut()
+                    .map(|digest| digest.finalize_reset().into()),
+            )?;
             batch_start_offset = next_offset;
         }
         line_bytes.clear();
@@ -539,6 +556,9 @@ fn read_projection_batches(
         }
         if !line_bytes.ends_with(b"\n") {
             break;
+        }
+        if let Some(digest) = &mut batch_digest {
+            digest.update(&line_bytes);
         }
         let line_end_offset = line_start_offset
             .checked_add(u64::try_from(line_bytes.len()).map_err(|_| {
@@ -749,7 +769,11 @@ fn read_projection_batches(
         )));
     }
     if next_offset != batch_start_offset {
-        emit(batch, next_offset)?;
+        emit(
+            batch,
+            next_offset,
+            batch_digest.map(|digest| digest.finalize().into()),
+        )?;
     }
     Ok(())
 }

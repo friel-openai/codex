@@ -1249,6 +1249,9 @@ mod tests {
     fn empty_modern_metadata_does_not_restore_older_values() {
         let mut base = checkpoint();
         base.resume_metadata = Some(CompactionResumeMetadata {
+            next_item_ordinal: None,
+            observation_clock_floor_ms: None,
+            rejected_audio_file_ids: Default::default(),
             multi_agent_version: None,
             dynamic_tools: None,
             last_started_turn_id: None,

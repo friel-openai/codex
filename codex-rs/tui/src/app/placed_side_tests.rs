@@ -7,16 +7,23 @@ use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn placed_side_rejects_parent_after_active_thread_changes() -> color_eyre::Result<()> {
-    let mut app = make_test_app().await;
-    let original_parent = ThreadId::new();
-    app.active_thread_id = Some(ThreadId::new());
-    assert!(!app.placed_side_parent_is_current(original_parent));
+    let mut fixture = Box::pin(SidePaneFixture::new()).await?;
+    let original_parent = fixture.parent;
+    fixture.app.active_thread_id = Some(ThreadId::new());
+    assert!(!fixture.app.placed_side_parent_is_current(original_parent));
     let mut tui = crate::tui::test_support::make_test_tui()?;
     assert!(matches!(
-        app.handle_start_placed_side(&mut tui, original_parent, ForkPanePlacement::Right)
-            .await?,
+        Box::pin(fixture.app.handle_start_placed_side(
+            &mut tui,
+            &mut fixture.app_server,
+            original_parent,
+            ForkPanePlacement::Right,
+            &terminal(TerminalName::Unknown, /*multiplexer*/ None),
+        ))
+        .await?,
         AppRunControl::Continue
     ));
+    fixture.app_server.shutdown().await?;
     Ok(())
 }
 
@@ -124,7 +131,14 @@ impl SidePaneFixture {
         assert!(side.ephemeral);
         assert_eq!(side.path, None);
         assert_eq!(self.app.primary_thread_id, Some(self.parent));
-        assert!(Box::pin(self.app.maybe_return_from_side(tui, &mut self.app_server)).await);
+        let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(
+            Box::pin(
+                self.app
+                    .maybe_return_from_side(tui, &mut self.app_server, key)
+            )
+            .await
+        );
         assert_eq!(self.app.active_thread_id, Some(self.parent));
         assert!(self.app.side_threads.is_empty());
         Ok(())

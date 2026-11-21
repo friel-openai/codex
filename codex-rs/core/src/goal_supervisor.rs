@@ -21,7 +21,7 @@ use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::protocol::WarningEvent;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
@@ -1122,10 +1122,7 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
         .spawn(SpawnRequest {
             caller: session.thread_id,
             config: helper_config,
-            input: AgentInput::UserInput(vec![UserInput::Text {
-                text: prompt,
-                text_elements: Vec::new(),
-            }]),
+            input: AgentInput::UserInput(vec![ResolvedUserInput::text(prompt)]),
             source: session_source,
             options: SpawnAgentOptions {
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),

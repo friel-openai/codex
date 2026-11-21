@@ -896,9 +896,9 @@ mod tests {
                     Utc::now(),
                     SessionSource::Cli,
                 );
-                builder.model_provider = Some("sqlite-provider".to_string());
-                builder.cwd = external.path().join("workspace");
-                builder.cli_version = Some("sqlite-cli".to_string());
+                builder = builder.with_model_provider(Some("sqlite-provider".to_string()));
+                builder = builder.with_cwd(external.path().join("workspace"));
+                builder = builder.with_cli_version("sqlite-cli".to_string());
                 (thread_id, builder.build("sqlite-provider"))
             })
             .collect::<Vec<_>>();

@@ -2654,8 +2654,8 @@ impl ThreadRequestProcessor {
         );
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
             thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
-            thread.parent_thread_id = config_snapshot.parent_thread_id.map(|id| id.to_string());
             let config_snapshot = loaded_thread.config_snapshot().await;
+            thread.parent_thread_id = config_snapshot.parent_thread_id.map(|id| id.to_string());
             apply_live_thread_settings(&mut thread, &config_snapshot);
         }
         self.attach_thread_name(thread_uuid, &mut thread).await;
@@ -3241,7 +3241,7 @@ impl ThreadRequestProcessor {
         let included_thread_ids = included_thread_ids
             .map(|ids| parse_thread_list_ids(ids, "included"))
             .transpose()?;
-        let excluded_thread_ids =
+        let excluded_thread_ids: HashSet<ThreadId> =
             parse_thread_list_ids(excluded_thread_ids.unwrap_or_default(), "excluded")?;
         if originators
             .as_ref()
@@ -4322,7 +4322,9 @@ impl ThreadRequestProcessor {
                     .lock()
                     .await
                     .contains(&thread_id)
-                    || !self.has_paginated_history_projection(thread_id).await?
+                    || !(matches!(sort_direction, StoreSortDirection::Desc)
+                        && self.has_bounded_history_root_projection(thread_id).await?
+                        || self.has_paginated_history_projection(thread_id).await?)
             }
         };
         if use_unprojected_history
@@ -4411,6 +4413,44 @@ impl ThreadRequestProcessor {
             .map_err(|err| {
                 internal_error(format!("failed to read thread history projection: {err}"))
             })
+    }
+
+    async fn has_bounded_history_root_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let Some(store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        else {
+            return Ok(false);
+        };
+        store
+            .has_bounded_history_root_projection(thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to read thread history root projection: {err}"
+                ))
+            })
+    }
+
+    async fn has_current_history_certificate(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let Some(store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        else {
+            return Ok(false);
+        };
+        store
+            .has_current_history_certificate(thread_id)
+            .await
+            .map_err(|err| internal_error(format!("failed to read history certificate: {err}")))
     }
 
     async fn unprojected_paginated_thread_turns_list_response(
@@ -5115,18 +5155,61 @@ impl ThreadRequestProcessor {
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
             .clamp(1, THREAD_ITEMS_MAX_LIMIT);
         let sort_direction = sort_direction.unwrap_or(SortDirection::Asc);
-        let use_unprojected_history = match position.as_ref() {
-            Some(StoreListItemsPosition::Cursor(cursor)) => {
-                parse_thread_items_cursor(cursor).is_ok()
-            }
-            Some(StoreListItemsPosition::ItemAnchor { .. }) | None => {
-                self.unprojected_paginated_history_threads
-                    .lock()
-                    .await
-                    .contains(&thread_id)
-                    || !self.has_paginated_history_projection(thread_id).await?
-            }
+        let store_params = StoreListItemsParams {
+            item_ids: None,
+            thread_id,
+            turn_id: turn_id.clone(),
+            include_archived: true,
+            position: position.clone(),
+            page_size,
+            sort_direction: match sort_direction {
+                SortDirection::Asc => StoreSortDirection::Asc,
+                SortDirection::Desc => StoreSortDirection::Desc,
+            },
+            sort_key: StoreItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         };
+        let fast_page = if !has_anchor
+            && !self
+                .unprojected_paginated_history_threads
+                .lock()
+                .await
+                .contains(&thread_id)
+            && !self.has_current_history_certificate(thread_id).await?
+        {
+            match self
+                .thread_store
+                .as_any()
+                .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            {
+                Some(store) => store
+                    .try_list_uncertified_turn_items(&store_params)
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to check thread item sources: {err}"))
+                    })?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let use_unprojected_history = fast_page.is_none()
+            && match position.as_ref() {
+                Some(StoreListItemsPosition::Cursor(cursor)) => {
+                    parse_thread_items_cursor(cursor).is_ok()
+                }
+                Some(StoreListItemsPosition::ItemAnchor { .. }) | None => {
+                    self.unprojected_paginated_history_threads
+                        .lock()
+                        .await
+                        .contains(&thread_id)
+                        || !(matches!(sort_direction, SortDirection::Desc)
+                            && self.has_bounded_history_root_projection(thread_id).await?
+                            || self.has_current_history_certificate(thread_id).await?
+                            || self.has_paginated_history_projection(thread_id).await?)
+                }
+            };
         if use_unprojected_history
             && let Some(response) = self
                 .unprojected_paginated_thread_items_list_response(
@@ -5140,37 +5223,26 @@ impl ThreadRequestProcessor {
         {
             return Ok(response);
         }
-        let page = self
-            .thread_store
-            .list_items(StoreListItemsParams {
-                item_ids: None,
-                thread_id,
-                turn_id,
-                include_archived: true,
-                position,
-                page_size,
-                sort_direction: match sort_direction {
-                    SortDirection::Asc => StoreSortDirection::Asc,
-                    SortDirection::Desc => StoreSortDirection::Desc,
-                },
-                sort_key: StoreItemSortKey::CreatedAtOrdinal,
-                after_updated_at_ordinal: None,
-                before_updated_at_ordinal: None,
-            })
-            .await
-            .map_err(|err| match err {
-                ThreadStoreError::InvalidRequest { message } if has_anchor => {
-                    invalid_params(message)
-                }
-                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                ThreadStoreError::Unsupported { .. } => {
-                    method_not_found("thread/items/list is not supported yet")
-                }
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    invalid_request(format!("no rollout found for thread id {thread_id}"))
-                }
-                err => internal_error(format!("failed to list thread items: {err}")),
-            })?;
+        let page = if let Some(page) = fast_page {
+            page
+        } else {
+            self.thread_store
+                .list_items(store_params)
+                .await
+                .map_err(|err| match err {
+                    ThreadStoreError::InvalidRequest { message } if has_anchor => {
+                        invalid_params(message)
+                    }
+                    ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                    ThreadStoreError::Unsupported { .. } => {
+                        method_not_found("thread/items/list is not supported yet")
+                    }
+                    ThreadStoreError::ThreadNotFound { thread_id } => {
+                        invalid_request(format!("no rollout found for thread id {thread_id}"))
+                    }
+                    err => internal_error(format!("failed to list thread items: {err}")),
+                })?
+        };
         let mut data = Vec::with_capacity(page.items.len());
         for stored_item in page.items {
             let mut entry = stored_thread_item_to_entry(stored_item)?;
@@ -6016,7 +6088,15 @@ impl ThreadRequestProcessor {
         };
         let needs_paginated_projection = paginated_resume && include_turns;
         let paginated_projection_was_missing = if let Some(thread_id) = paginated_thread_id {
-            !self.has_paginated_history_projection(thread_id).await?
+            let bounded_resume = !include_turns
+                && initial_turns_page.as_ref().is_none_or(|page| {
+                    matches!(
+                        page.sort_direction.unwrap_or(SortDirection::Desc),
+                        SortDirection::Desc
+                    )
+                })
+                && self.has_bounded_history_root_projection(thread_id).await?;
+            !bounded_resume && !self.has_paginated_history_projection(thread_id).await?
         } else {
             false
         };

@@ -73,6 +73,7 @@ fn write_rollout(home: &Path, thread_id: ThreadId, history_mode: ThreadHistoryMo
                     text_elements: Vec::new(),
                 }],
             }),
+            content_token_count: None,
             started_at_ms: None,
             completed_at_ms: 0,
         })
@@ -903,6 +904,7 @@ async fn automatic_migration_runs_only_for_requested_thread_while_list_remains_n
                 archived: false,
                 search_term: None,
                 relation_filter: None,
+                included_thread_ids: None,
                 use_state_db_only: true,
             },
         ),
