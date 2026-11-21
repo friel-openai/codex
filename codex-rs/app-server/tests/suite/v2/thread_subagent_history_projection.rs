@@ -50,7 +50,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use uuid::Uuid;
 
 #[cfg(windows)]
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
@@ -157,7 +156,7 @@ impl SubagentHistoryFixture {
                 subagent_history_start_ordinal: None,
                 persistence_mode: Default::default(),
                 initial_rollout_ordinal: 0,
-                initial_window_id: Uuid::now_v7().to_string(),
+                initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
                 runtime_workspace_roots: None,
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(codex_home.path().to_path_buf()),
@@ -223,6 +222,7 @@ impl SubagentHistoryFixture {
             rollout_items.push(turn_started(&turn_id));
             rollout_items.extend(turn_items.into_iter().map(|item| {
                 RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id,
                     turn_id: turn_id.clone(),
                     item,
