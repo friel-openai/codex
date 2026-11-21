@@ -672,6 +672,22 @@ fn resolve_turn_environment_requests(
     thread_manager: &ThreadManager,
     environments: Option<Vec<TurnEnvironmentParams>>,
 ) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
+    let requests = parse_turn_environment_requests(environments)?;
+    if let Some(requests) = &requests {
+        validate_environment_ids_and_cwds(
+            &thread_manager.environment_manager(),
+            requests
+                .iter()
+                .map(|request| (request.environment_id.as_str(), &request.cwd)),
+        )
+        .map_err(environment_selection_error)?;
+    }
+    Ok(requests)
+}
+
+fn parse_turn_environment_requests(
+    environments: Option<Vec<TurnEnvironmentParams>>,
+) -> Result<Option<Vec<TurnEnvironmentRequest>>, JSONRPCErrorError> {
     let Some(environments) = environments else {
         return Ok(None);
     };
@@ -712,13 +728,6 @@ fn resolve_turn_environment_requests(
             config: EnvironmentConfigState::FromThread,
         });
     }
-    validate_environment_ids_and_cwds(
-        &thread_manager.environment_manager(),
-        requests
-            .iter()
-            .map(|request| (request.environment_id.as_str(), &request.cwd)),
-    )
-    .map_err(environment_selection_error)?;
     Ok(Some(requests))
 }
 
