@@ -4743,6 +4743,140 @@ async fn explicit_fork_rejects_missing_or_replaced_checkpoint_source() {
 }
 
 #[tokio::test]
+async fn explicit_fork_rejects_concurrent_replaced_inherited_source() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let ancestor = ThreadId::new();
+    create_paginated_thread(&store, ancestor).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: ancestor,
+            items: vec![
+                turn_started("ancestor-turn"),
+                user_message("ancestor message"),
+                turn_completed("ancestor-turn"),
+            ],
+        })
+        .await
+        .expect("append ancestor");
+    let snapshot = prepare_paginated_fork(&store, ancestor, ForkBoundary::Latest).await;
+    let base = snapshot.history_base.expect("ancestor boundary");
+    let predecessor = snapshot
+        .frozen_segment
+        .as_ref()
+        .expect("frozen source")
+        .reference
+        .rollout_path
+        .clone();
+    drop(snapshot);
+    let source = ThreadId::new();
+    create_paginated_subagent_thread(&store, source, Some(base), None).await;
+    store
+        .persist_thread(source, PersistContext::Standard)
+        .await
+        .expect("persist source");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: source,
+            items: vec![
+                turn_started("source-turn"),
+                user_message("source message"),
+                turn_completed("source-turn"),
+            ],
+        })
+        .await
+        .expect("append source");
+    let source_path = store.live_rollout_path(source).await.expect("source path");
+    let pause = inject_lineage_persistence_pause(source);
+    let fork_store = store.clone();
+    let task = tokio::spawn(async move {
+        fork_store
+            .prepare_fork(PrepareForkParams {
+                thread_id: source,
+                boundary: ForkBoundary::BeforeTurn("source-turn".to_string()),
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("lineage resolved");
+    let mut bytes = fs::read(&predecessor).expect("read predecessor");
+    bytes[0] = b'!';
+    let replacement = predecessor.with_extension("replacement");
+    fs::write(&replacement, bytes).expect("write replacement");
+    fs::rename(replacement, predecessor).expect("replace predecessor after lineage resolution");
+    pause.release.notify_one();
+    assert!(
+        task.await.expect("join preparation").is_err(),
+        "changed predecessor must not produce a fork"
+    );
+    let after = codex_rollout::read_session_meta_line(&source_path)
+        .await
+        .expect("source metadata")
+        .meta
+        .history_base
+        .expect("source boundary");
+    assert_eq!(after.end_ordinal_exclusive, base.end_ordinal_exclusive);
+    assert_eq!(after.end_byte_offset, base.end_byte_offset);
+}
+
+#[tokio::test]
+async fn explicit_fork_uses_latest_visible_duplicate_from_mixed_owners() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let ancestor = ThreadId::new();
+    create_paginated_thread(&store, ancestor).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: ancestor,
+            items: vec![
+                turn_started("shared"),
+                user_message("ancestor message"),
+                turn_completed("shared"),
+            ],
+        })
+        .await
+        .expect("append ancestor");
+    let snapshot = prepare_paginated_fork(&store, ancestor, ForkBoundary::Latest).await;
+    let base = snapshot.history_base.expect("ancestor boundary");
+    drop(snapshot);
+    let source = ThreadId::new();
+    create_paginated_subagent_thread(&store, source, Some(base), None).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: source,
+            items: vec![
+                turn_started("shared"),
+                user_message("newer owner message"),
+                turn_completed("shared"),
+                turn_started("later"),
+                user_message("excluded later message"),
+                turn_completed("later"),
+            ],
+        })
+        .await
+        .expect("append source");
+    let fork = store
+        .prepare_fork(PrepareForkParams {
+            thread_id: source,
+            boundary: ForkBoundary::ThroughTurn("shared".to_string()),
+        })
+        .await
+        .expect("prepare fork");
+    assert!(contains_user_message(
+        &fork.model_context,
+        "newer owner message"
+    ));
+    assert!(!contains_user_message(
+        &fork.model_context,
+        "excluded later message"
+    ));
+    let boundary = fork.history_base.expect("selected boundary");
+    assert_ne!(boundary.thread_id, base.thread_id);
+    assert!(boundary.end_ordinal_exclusive > base.end_ordinal_exclusive);
+}
+
+#[tokio::test]
 async fn indexed_latest_fork_rejects_missing_immediate_immutable_predecessor() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
