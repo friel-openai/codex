@@ -1307,7 +1307,7 @@
         "local::rollout_migration::archive_gate::tests::ordinary_marker_first_protects_a_damaged_sqlite_alias",
         "local::rollout_migration::archive_gate::tests::ordinary_move_first_and_rejected_publications_leave_history_and_journals_unchanged",
         "local::search_threads::tests::recency_cursor_includes_thread_id_tie_breaker",
-        "local::search_threads::tests::content_search_includes_authorized_attached_user_threads_only_when_requested",
+        "local::search_threads::tests::content_search_excludes_attached_threads_even_when_requested",
         "local::search_threads::tests::search_requires_classifiable_user_metadata",
         "local::search_threads::tests::search_requires_a_working_state_database",
         "local::search_threads::tests::search_does_not_open_unselected_or_internal_rollouts",
