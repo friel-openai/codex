@@ -124,6 +124,7 @@ fn mcp_completion_preserves_explicit_turn_and_app_ui() -> ThreadStoreResult<()> 
             invocation: McpInvocation {
                 server: "server".to_string(),
                 tool: "tool".to_string(),
+                environment_id: None,
                 arguments: Some(json!({"query": "test"})),
             },
             connector_id: Some("connector".to_string()),
@@ -149,6 +150,7 @@ fn mcp_completion_preserves_explicit_turn_and_app_ui() -> ThreadStoreResult<()> 
                     id: "call-original".to_string(),
                     server: "server".to_string(),
                     tool: "tool".to_string(),
+                    environment_id: None,
                     arguments: json!({"query": "test"}),
                     connector_id: Some("connector".to_string()),
                     mcp_app_resource_uri: Some("ui://legacy/resource".to_string()),

@@ -23,6 +23,9 @@ fn checkpoint() -> CompactedItem {
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: Some(CompactionResumeMetadata {
+            next_item_ordinal: None,
+            observation_clock_floor_ms: None,
+            rejected_audio_file_ids: Default::default(),
             multi_agent_version: None,
             dynamic_tools: None,
             last_started_turn_id: Some("parent".to_string()),

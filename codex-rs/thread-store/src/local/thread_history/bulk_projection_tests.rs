@@ -140,6 +140,7 @@ async fn bulk_projection_matches_ordered_sql_for_late_and_duplicate_events() {
             realtime_item: Some(RealtimeItem {
                 id: "transcript".to_string(),
                 realtime_session_id: "voice".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::TranscriptSegment {
                     role: RealtimeTranscriptRole::Assistant,
                     text: text.to_string(),

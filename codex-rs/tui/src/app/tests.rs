@@ -2651,6 +2651,7 @@ async fn relation_refresh_preserves_cold_ephemeral_agent_identity() -> Result<()
                 session_id: child_thread_id.to_string(),
                 forked_from_id: None,
                 parent_thread_id: Some(root_thread_id.to_string()),
+                attached_to_thread_id: None,
                 preview: String::new(),
                 ephemeral: true,
                 section: None,
@@ -3949,7 +3950,10 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
         boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
-            AppEvent::ForkCurrentSession { name: None }
+            AppEvent::ForkCurrentSession {
+                name: None,
+                placement: None,
+            }
         ))
         .await?;
         assert_ne!(app.current_displayed_thread_id(), Some(parent));

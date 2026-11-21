@@ -7,6 +7,7 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::agent_communication::MessageDelivery;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
@@ -277,10 +278,14 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        input: Vec<UserInput>,
+        input: Vec<ResolvedUserInput>,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
-        let last_task_message = non_empty_task_message(render_input_preview(&input));
+        let preview = input
+            .iter()
+            .map(ResolvedUserInput::to_user_input)
+            .collect::<Vec<_>>();
+        let last_task_message = non_empty_task_message(render_input_preview(&preview));
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
             .io

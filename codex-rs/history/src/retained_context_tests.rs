@@ -382,8 +382,12 @@ fn restored_input_order_accounts_for_surviving_local_sources() {
 #[test]
 fn input_order_observation_preserves_retained_evidence() {
     let mut captured = RetainedContext::default();
-    assert!(captured.record(&publish_answer()));
-    assert!(captured.record(&delivered_message("confirmed", "Already sent.", 1)));
+    let item_id_generator = uuid_v7_item_id_generator_for_test();
+    assert!(captured.record(&publish_answer(), &item_id_generator));
+    assert!(captured.record(
+        &delivered_message("confirmed", "Already sent.", 1),
+        &item_id_generator,
+    ));
     captured.mark_user_messages_incomplete();
     let inherited = CodexHarnessMetadata {
         user_input_order: Some(100),
@@ -417,7 +421,10 @@ fn input_order_observation_preserves_retained_evidence() {
 #[test]
 fn input_order_observation_saturates_at_maximum() {
     let mut captured = RetainedContext::default();
-    assert!(captured.record(&delivered_message("confirmed", "Already sent.", 0)));
+    assert!(captured.record(
+        &delivered_message("confirmed", "Already sent.", 0),
+        &uuid_v7_item_id_generator_for_test(),
+    ));
     let mut observed = captured.clone();
     observed.observe_input_order(RetainedInputSource::Local(Some(u64::MAX)));
     assert_eq!(observed.reserve_order(), u64::MAX);

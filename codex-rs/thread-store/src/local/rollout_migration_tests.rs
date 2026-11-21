@@ -31,6 +31,7 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
@@ -42,7 +43,6 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::RolloutReferenceItem;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -284,6 +284,7 @@ pub(super) fn write_paginated_segment(
                         .clone()
                         .unwrap_or_else(|| format!("native-fixture-turn-{next_ordinal}")),
                     item,
+                    content_token_count: None,
                     started_at_ms: None,
                     completed_at_ms: 1_735_905_601_000,
                 }))
@@ -424,6 +425,7 @@ async fn generated_id_rewrite_matches_replay_and_preserves_explicit_ids() {
                     summary_text: vec!["explicit".to_string()],
                     raw_content: Vec::new(),
                 }),
+                content_token_count: None,
                 started_at_ms: None,
                 completed_at_ms: 1,
             })),
@@ -680,6 +682,7 @@ pub(super) fn completed_user_message(
                 text_elements: Vec::new(),
             }],
         }),
+        content_token_count: None,
         started_at_ms: None,
         completed_at_ms: 1_735_905_601_000,
     }))
@@ -784,10 +787,9 @@ fn bounded_subagent_items(cwd: &Path) -> Vec<RolloutItem> {
             cwd: serde_json::from_value(json!(cwd)).expect("absolute cwd"),
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            file_system_sandbox_policy: None,
+            direct_only_tool_namespaces: None,
             model: "test-model".to_string(),
             comp_hash: None,
             collaboration_mode: None,
@@ -2800,6 +2802,7 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         })
         .await
         .expect("read interrupted turn items");
@@ -3162,6 +3165,7 @@ async fn migration_recovers_selected_token_count_ordinals_and_planned_restart() 
                 sort_direction: SortDirection::Asc,
                 sort_key: ItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .expect("read all recovered items");
@@ -4934,6 +4938,7 @@ async fn assert_context_dependent_migration_projection(
                 sort_direction: SortDirection::Asc,
                 sort_key: ItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .expect("list every migrated Paginated item");
@@ -5148,6 +5153,7 @@ async fn segmented_migration_recovers_frodo_697_source_lineage() {
                 sort_direction: SortDirection::Asc,
                 sort_key: ItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .expect("list migrated 697-source lineage");
@@ -7903,6 +7909,7 @@ async fn migration_preserves_subagent_activity_occurrence_time() {
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         })
         .await
         .expect("read materialized items");
@@ -10169,6 +10176,9 @@ async fn migration_selects_current_source_retained_context_for_older_readers() {
         checkpoint.replacement_history = Some(vec![inherited.clone()]);
         checkpoint.retained_context = Some(Default::default());
         checkpoint.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+            next_item_ordinal: None,
+            observation_clock_floor_ms: None,
+            rejected_audio_file_ids: Default::default(),
             multi_agent_version: None,
             dynamic_tools: None,
             last_started_turn_id: None,
@@ -10299,6 +10309,9 @@ async fn migration_preserves_post_completion_compaction_turn_after_rollback() {
         checkpoint.replacement_history = Some(vec![inherited.clone()]);
         checkpoint.retained_context = Some(Default::default());
         checkpoint.resume_metadata = Some(codex_rollout::CompactionResumeMetadata {
+            next_item_ordinal: None,
+            observation_clock_floor_ms: None,
+            rejected_audio_file_ids: Default::default(),
             multi_agent_version: None,
             dynamic_tools: None,
             last_started_turn_id: None,
@@ -10484,6 +10497,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 message: "superseded checkpoint".repeat(1024),
                 replacement_history: Some(Vec::new()),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
@@ -10512,6 +10526,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                     .into(),
                 ]),
                 retained_context: None,
+                retained_context_replay: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(2),
