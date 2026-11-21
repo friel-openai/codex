@@ -1337,7 +1337,7 @@
         "app::tests::approval_routing::pending_approval_label_updates_the_thread_with_a_duplicate_label",
         "app::tests::collab_receiver_notification_does_not_cache_not_found_thread",
         "app::tests::goal_supervisor_spawn_notification_is_hidden_without_thread_started",
-        "app_server_session::tests::cloud_bootstrap_uses_server_models_without_config_requirements",
+        "app_server_session::tests::cloud_bootstrap_waits_for_the_thread_to_supply_its_model",
         "chatwidget::tests::app_server::cold_collab_replay_uses_and_merges_inline_receiver_metadata",
         "chatwidget::tests::app_server::live_app_server_inter_agent_message_renders_agent_message_cell",
         "chatwidget::tests::app_server::live_app_server_sub_agent_activity_renders_once",
