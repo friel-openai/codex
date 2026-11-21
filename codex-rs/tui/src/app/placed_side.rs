@@ -3,6 +3,7 @@
 use super::side::SIDE_NO_STARTED_CONVERSATION_MESSAGE;
 use super::*;
 use crate::app_event::ForkPanePlacement;
+use crate::app_event::SideStartMode;
 use crate::ghostty_fork::ghostty_placement;
 use crate::ghostty_fork::spawn_standalone_side_in_ghostty_split;
 use crate::terminal_multiplexer::ForkPaneSpawnResult;
@@ -156,6 +157,7 @@ impl App {
                         app_server,
                         parent_thread_id,
                         /*user_message*/ None,
+                        SideStartMode::Reuse,
                     )
                     .await;
             }
