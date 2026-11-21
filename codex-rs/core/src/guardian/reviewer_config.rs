@@ -214,15 +214,24 @@ async fn resolve_catalog_review_model(
         .is_some_and(AuthManager::current_auth_uses_codex_backend);
     catalog.retain(|entry| {
         (uses_codex_backend || entry.supported_in_api)
-            && (parent_model.auto_review_model_override.is_some()
+            && (config.auto_review_use_ultrafast
+                || parent_model.auto_review_model_override.is_some()
                 || matches!(
                     entry.origin,
                     codex_models_manager::ModelOrigin::Provider
                         | codex_models_manager::ModelOrigin::ExplicitConfig
                 ))
     });
+    let parent_model_with_review_override = config.auto_review_use_ultrafast.then(|| {
+        let mut model = parent_model.clone();
+        model.auto_review_model_override =
+            Some(super::review::ULTRAFAST_AUTO_REVIEW_MODEL.to_owned());
+        model
+    });
     let (review_model, reviewer) = codex_guardian_reviewer::select_review_model(
-        parent_model,
+        parent_model_with_review_override
+            .as_ref()
+            .unwrap_or(parent_model),
         reasoning_effort,
         default_review_model_id,
         catalog,
