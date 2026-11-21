@@ -283,6 +283,7 @@ impl Handler {
             match submitted {
                 TurnInputSubmission::Started { turn_id, .. } => Ok(Execution::Started { turn_id }),
                 TurnInputSubmission::Steered { turn_id, .. } => Ok(Execution::Steered { turn_id }),
+                TurnInputSubmission::Accepted => unreachable!("response item input returns a turn outcome"),
                 TurnInputSubmission::NotSubmitted { reason } => {
                     Err(format!("initial assignment was not submitted: {reason:?}"))
                 }

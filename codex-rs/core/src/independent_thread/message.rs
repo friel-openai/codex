@@ -155,6 +155,7 @@ impl Handler {
         let (status, turn_id) = match submitted {
             TurnInputSubmission::Started { turn_id, .. } => (Delivery::Started, turn_id),
             TurnInputSubmission::Steered { turn_id, .. } => (Delivery::Steered, turn_id),
+            TurnInputSubmission::Accepted => unreachable!("response item input returns a turn outcome"),
             TurnInputSubmission::NotSubmitted { reason } => {
                 return Err(invalid(format!("message was not submitted: {reason:?}")));
             }
