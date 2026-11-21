@@ -130,7 +130,11 @@ WHERE thread_id =
         );
         query.push_bind(segment.rollout_id().to_string());
         push_segment_range(&mut query, segment, ordinal_column)?;
-        push_newer_turn_shadow_predicates(&mut query, segment, &lineage.segments()[segment_index + 1..])?;
+        push_newer_turn_shadow_predicates(
+            &mut query,
+            segment,
+            &lineage.segments()[segment_index + 1..],
+        )?;
         push_cursor_clause(&mut query, direction, segment_cursor, ordinal_column)?;
         push_order_and_limit(&mut query, direction, remaining, ordinal_column);
         if matches!(items_view, StoredTurnItemsView::Summary) {
@@ -645,13 +649,30 @@ WHERE thread_id =
             segment_cursor,
             ordinal_column,
         )?;
-        push_order_and_limit(&mut query, params.sort_direction, if segment.filters_items() { i64::MAX } else { remaining }, ordinal_column);
-        let segment_rows = query.build().fetch_all(pool).await.map_err(thread_history_error)?
-            .into_iter().map(stored_thread_item_row).collect::<ThreadStoreResult<Vec<_>>>()?;
+        push_order_and_limit(
+            &mut query,
+            params.sort_direction,
+            if segment.filters_items() {
+                i64::MAX
+            } else {
+                remaining
+            },
+            ordinal_column,
+        );
+        let segment_rows = query
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(thread_history_error)?
+            .into_iter()
+            .map(stored_thread_item_row)
+            .collect::<ThreadStoreResult<Vec<_>>>()?;
         for row in segment_rows {
             if segment.allows_stored_item(&row.item)? {
                 rows.push(row);
-                if remaining_limit(params.page_size, rows.len())? == 0 { break; }
+                if remaining_limit(params.page_size, rows.len())? == 0 {
+                    break;
+                }
             }
         }
     }
@@ -671,7 +692,11 @@ fn segments_from_cursor<'a>(
 ) -> ThreadStoreResult<Vec<(usize, &'a RolloutLineageSegment, Option<&'a HistoryCursor>)>> {
     let segments = lineage.segments();
     if segments.is_empty() {
-        return if cursor.is_some() { Err(invalid_cursor("position outside thread lineage")) } else { Ok(Vec::new()) };
+        return if cursor.is_some() {
+            Err(invalid_cursor("position outside thread lineage"))
+        } else {
+            Ok(Vec::new())
+        };
     }
     let cursor_index = cursor
         .map(|cursor| {
@@ -945,10 +970,15 @@ mod tests {
     #[test]
     fn cursor_selects_same_thread_segment_by_ordinal_range() {
         let thread_id = ThreadId::default();
-        let lineage = RolloutLineage::from_segments(thread_id, thread_id, PathBuf::from("second"), vec![
+        let lineage = RolloutLineage::from_segments(
+            thread_id,
+            thread_id,
+            PathBuf::from("second"),
+            vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(10)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(20)),
-            ]);
+            ],
+        );
         let cursor = HistoryCursor {
             requested_thread_id: thread_id,
             root_rollout_id: thread_id,
@@ -968,10 +998,15 @@ mod tests {
     #[test]
     fn cursor_rejects_overlapping_same_thread_segments() {
         let thread_id = ThreadId::default();
-        let lineage = RolloutLineage::from_segments(thread_id, thread_id, PathBuf::from("second"), vec![
+        let lineage = RolloutLineage::from_segments(
+            thread_id,
+            thread_id,
+            PathBuf::from("second"),
+            vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(20)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(30)),
-            ]);
+            ],
+        );
         let cursor = HistoryCursor {
             requested_thread_id: thread_id,
             root_rollout_id: thread_id,
