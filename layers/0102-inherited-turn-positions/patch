@@ -1,0 +1,117 @@
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index ccbfd28d238bfc8a86b7a4404ab71124c17a805f..5be67d45fa0fe35407ef241616bb335da68e5b9b 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -1,4 +1,5 @@
+ use std::collections::HashMap;
++use std::collections::HashSet;
+
+ use codex_app_server_protocol::ThreadHistoryTurnMetadata;
+ use codex_app_server_protocol::ThreadItem;
+@@ -33,6 +34,7 @@ use super::segment_paging::validate_page_size;
+ use super::sqlite_integer;
+ use super::turn_lookup::find_source_turn;
+ use super::uncertified_items;
++use super::uncertified_items::SourceItemAnchor;
+ use super::uncertified_items::SourceTurnEvent;
+ use crate::ItemPage;
+ use crate::ListItemsParams;
+@@ -385,6 +387,64 @@ fn reduce_aggregate_sources(
+     Ok((turns, items))
+ }
+
++/// Preserve the inherited start position only for a verified fork interruption.
++fn normalize_inherited_fork_interruptions(
++    events: &mut [SourceTurnEvent],
++    segments: &[RolloutLineageSegment],
++    predecessor_anchors: &[SourceItemAnchor],
++    root_anchors: &[SourceItemAnchor],
++) -> bool {
++    let mut active: HashMap<String, (ThreadId, ThreadHistoryTurnMetadata)> = HashMap::new();
++    let mut seen_owners = HashSet::new();
++    let mut last_event: Option<(ThreadId, String)> = None;
++    for event in events {
++        let SourceTurnEvent::Turn(ordinal, owner, turn) = event else {
++            continue;
++        };
++        let physical_owner = *owner;
++        let first_for_owner = seen_owners.insert(physical_owner);
++        if turn.status == TurnStatus::Interrupted
++            && let Some((previous_owner, previous)) = active.get(&turn.turn_id)
++            && *previous_owner != physical_owner
++        {
++            let mut matching = segments.iter().enumerate().filter(|(_, segment)| {
++                segment.thread_id() == physical_owner && segment.contains_ordinal(*ordinal)
++            });
++            let segment = matching.next();
++            let verified = matching.next().is_none()
++                && segment.is_some_and(|(index, segment)| {
++                    segment.uses_history_base
++                        && index > 0
++                        && segments[index - 1].thread_id() != physical_owner
++                        && segment.history_page_start.is_none()
++                        && segment.start_ordinal == segment.physical_start_ordinal
++                        && !segment.filters_items()
++                })
++                && first_for_owner
++                && last_event.as_ref() == Some(&(*previous_owner, turn.turn_id.clone()))
++                && previous.started_at == turn.started_at
++                && previous.root_turn_id == turn.root_turn_id
++                && !predecessor_anchors
++                    .iter()
++                    .chain(root_anchors)
++                    .any(|anchor| anchor.owner == physical_owner && anchor.ordinal < *ordinal);
++            if !verified {
++                return false;
++            }
++            // The child persisted the abort before any local turn or item. Its start and
++            // summary items remain in the source turn, as in ThreadHistoryBuilder.
++            *owner = *previous_owner;
++        }
++        if turn.status == TurnStatus::InProgress {
++            active.insert(turn.turn_id.clone(), (*owner, turn.clone()));
++        } else {
++            active.remove(&turn.turn_id);
++        }
++        last_event = Some((physical_owner, turn.turn_id.clone()));
++    }
++    true
++}
++
+ /// Pages canonical turn records when SQLite projections span multiple physical rollout IDs.
+ async fn source_backed_turns(
+     store: &LocalThreadStore,
+@@ -398,26 +458,13 @@ async fn source_backed_turns(
+     let mut events = scan.turn_events.clone();
+     events.extend(root.turns);
+     events.sort_by_key(SourceTurnEvent::ordinal);
+-    if params.cursor.is_some() {
+-        let mut active_owners = HashMap::new();
+-        for event in &events {
+-            if let SourceTurnEvent::Turn(_, owner, turn) = event {
+-                if turn.status == TurnStatus::Interrupted
+-                    && active_owners
+-                        .get(&turn.turn_id)
+-                        .is_some_and(|previous| previous != owner)
+-                {
+-                    // A child can interrupt an inherited turn without starting a new one.
+-                    // The source aggregate cannot distinguish that from a reused turn ID.
+-                    return Ok(None);
+-                }
+-                if turn.status == TurnStatus::InProgress {
+-                    active_owners.insert(turn.turn_id.clone(), *owner);
+-                } else {
+-                    active_owners.remove(&turn.turn_id);
+-                }
+-            }
+-        }
++    if !normalize_inherited_fork_interruptions(
++        &mut events,
++        graph.lineage.segments(),
++        &scan.anchors,
++        &root.anchors,
++    ) {
++        return Ok(None);
+     }
+     let (initial, _) = reduce_aggregate_sources(events.clone())?;
+     if initial.is_empty() && !scan.attached {
