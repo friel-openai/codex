@@ -2855,35 +2855,34 @@ impl ThreadManager {
         let inherited_selection = options.environments.is_none();
         options.environments = options.environments.or(environments);
         if inherited_selection
-            && implicit_saved_selection
             && options.inherited_environments.is_none()
             && options
                 .thread_extension_init
                 .get::<StartupEnvironmentDiscovery>()
                 .is_none()
-            && options
-                .environments
-                .as_ref()
-                .and_then(|environments| environments.first())
-                .is_some_and(|primary| {
+            && let Some(environments) = options.environments.as_mut()
+        {
+            let defer_implicit_secondaries = implicit_saved_selection
+                && environments.first().is_some_and(|primary| {
                     primary.environment_id == LOCAL_ENVIRONMENT_ID
                         && primary.config == EnvironmentConfigState::FromThread
-                })
-        {
-            // A fork inherits the parent's implicit default secondaries, not a new requirement
-            // that they be reachable before the child starts.
-            for selection in options.environments.as_mut().into_iter().flatten().skip(1) {
-                if selection.config == EnvironmentConfigState::StartupUnavailable {
-                    selection.config = EnvironmentConfigState::FromThread;
+                });
+            if defer_implicit_secondaries {
+                // A fork inherits the parent's implicit default secondaries, not a new requirement
+                // that they be reachable before the child starts.
+                for selection in environments.iter_mut().skip(1) {
+                    if selection.config == EnvironmentConfigState::StartupUnavailable {
+                        selection.config = EnvironmentConfigState::FromThread;
+                    }
                 }
             }
             options
                 .thread_extension_init
                 .insert(StartupEnvironmentDiscovery {
-                    implicit_selection: true,
+                    implicit_selection: implicit_saved_selection,
                     cold_resume: true,
-                    defer_registry_secondaries: true,
-                    capture_missing_secondaries: true,
+                    defer_registry_secondaries: defer_implicit_secondaries,
+                    capture_missing_secondaries: defer_implicit_secondaries,
                     optional_on_resume: Arc::default(),
                     default_registrations: HashMap::new(),
                 });
