@@ -6650,6 +6650,10 @@ impl ThreadRequestProcessor {
         clippy::await_holding_invalid_type,
         reason = "listener state creation must be serialized against terminal listener cleanup"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the reserved source identity must be checked before attaching a listener"
+    )]
     #[tracing::instrument(level = "trace", skip_all)]
     async fn resume_running_thread(
         &self,
@@ -6682,6 +6686,7 @@ impl ThreadRequestProcessor {
             )
             .await?
         {
+            permit.check_id(existing_thread_id)?;
             let source_thread = crate::thread_state::ThreadResumeTimings::measure(
                 &mut timings.lookup,
                 self.read_stored_thread_for_resume(
@@ -6703,6 +6708,7 @@ impl ThreadRequestProcessor {
             )
             .await?;
             let existing_thread_id = source_thread.thread_id;
+            permit.check_id(existing_thread_id)?;
             match crate::thread_state::ThreadResumeTimings::measure(
                 &mut timings.lookup,
                 get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id),

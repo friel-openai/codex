@@ -18,6 +18,7 @@ use anyhow::Result;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
@@ -90,6 +91,70 @@ async fn test_processor(
         Arc::new(SampleResponseRegistry::default()),
     );
     Ok((processor, outgoing_rx))
+}
+
+#[tokio::test]
+async fn loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_state() -> Result<()>
+{
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    let (processor, _messages) = test_processor(&test).await?;
+    let connection_id = ConnectionId(1);
+    processor
+        .connection_initialized(connection_id, ConnectionCapabilities::default())
+        .await;
+    let mut held = processor
+        .thread_list_state_permit
+        .acquire_resume(/*shared*/ true)
+        .await
+        .map_err(|error| anyhow::anyhow!("permit failed: {}", error.message))?;
+    held.finish_probe();
+    let resume_id = ConnectionRequestId {
+        connection_id,
+        request_id: RequestId::Integer(1),
+    };
+    let resume = tokio::time::timeout(
+        Duration::from_secs(10),
+        processor.thread_resume(
+            ThreadResumeTarget::Client(resume_id),
+            ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            /*app_server_client_name*/ None,
+            /*app_server_client_version*/ None,
+            Default::default(),
+        ),
+    )
+    .await
+    .context("loaded resume blocked by an unrelated held list-state permit")?
+    .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
+    assert!(resume.is_none());
+    let read_id = ConnectionRequestId {
+        connection_id,
+        request_id: RequestId::Integer(2),
+    };
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        processor.thread_read(
+            &read_id,
+            ThreadReadParams {
+                thread_id: thread_id.to_string(),
+                include_turns: false,
+            },
+        ),
+    )
+    .await
+    .context("thread read blocked by an unrelated held list-state permit")?
+    .map_err(|error| anyhow::anyhow!("read failed: {}", error.message))?;
+    assert!(read.is_some());
+    drop(held);
+    Ok(())
 }
 
 #[tokio::test]
