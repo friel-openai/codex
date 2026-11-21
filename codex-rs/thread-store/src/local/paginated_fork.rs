@@ -899,16 +899,19 @@ async fn prepare_with_response_history_once(
     } else {
         Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?)
     };
-    let preview_before_compaction =
-        if let [RolloutItem::SessionMeta(_), RolloutItem::Compacted(_), ..] =
-            model_context.as_slice()
-            && let Some(end) = history_base
-        {
-            let prefix = lineage.clone().truncate_at(end).await?;
-            super::thread_history::first_user_preview(store, &prefix).await?
-        } else {
-            None
-        };
+    let preview_before_compaction = if let Some(end) = history_base
+        && (!matches!(boundary, ForkBoundary::Latest)
+            || matches!(
+                model_context.as_slice(),
+                [RolloutItem::SessionMeta(_), RolloutItem::Compacted(_), ..]
+            )) {
+        // Explicit boundaries must use the first visible user item even when the model
+        // context starts with a later message or no longer contains the opening message.
+        let prefix = lineage.clone().truncate_at(end).await?;
+        super::thread_history::first_user_preview(store, &prefix).await?
+    } else {
+        None
+    };
     let copied_history = if lineage.requires_copied_history().await? {
         let mut copied = model_context::load_full_for_fork(lineage.clone(), history_base).await?;
         if let Some(RolloutItem::SessionMeta(meta)) = copied.first_mut() {
