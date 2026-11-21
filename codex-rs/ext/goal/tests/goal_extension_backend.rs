@@ -53,6 +53,9 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
+#[path = "goal_extension_backend/goal_resume_tests.rs"]
+mod goal_resume_tests;
+
 #[tokio::test]
 async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
@@ -320,6 +323,7 @@ async fn ephemeral_goal_tools_preserve_specs_but_reject_execution() -> anyhow::R
         tools.iter().map(|tool| tool.spec()).collect::<Vec<_>>(),
         parent_tools
             .iter()
+            .filter(|tool| tool.tool_name().is_default_namespace())
             .map(|tool| tool.spec())
             .collect::<Vec<_>>(),
     );
