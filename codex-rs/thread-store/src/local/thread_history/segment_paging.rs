@@ -273,11 +273,17 @@ WHERE thread_id =
  )
         "#,
     );
-    push_cursor_clause(&mut query, direction, cursor.as_ref())?;
+    push_cursor_clause(
+        &mut query,
+        direction,
+        cursor.as_ref(),
+        HistoryOrdinalColumn::Rollout,
+    )?;
     push_order_and_limit(
         &mut query,
         direction,
         remaining_limit(page_size, /*row_count*/ 0)?,
+        HistoryOrdinalColumn::Rollout,
     );
     let rows = query
         .build()
@@ -302,6 +308,15 @@ pub(super) async fn page_indexed_item_rows(
     rollout_id: RolloutId,
     params: &ListItemsParams,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
+    if params.sort_key != ItemSortKey::CreatedAtOrdinal
+        || params.after_updated_at_ordinal.is_some()
+        || params.before_updated_at_ordinal.is_some()
+        || params.item_ids.is_some()
+    {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: "legacy projected items support creation-order paging without update boundaries or item IDs".to_string(),
+        });
+    }
     let scope = CursorScope::ItemsByCreatedAtOrdinal;
     let cursor = if let Some((turn_id, item_id)) = item_anchor(params)? {
         let ordinal = sqlx::query_scalar::<_, i64>(
@@ -343,11 +358,17 @@ WHERE thread_id =
     if let Some(turn_id) = params.turn_id.as_deref() {
         query.push(" AND turn_id = ").push_bind(turn_id);
     }
-    push_cursor_clause(&mut query, params.sort_direction, cursor.as_ref())?;
+    push_cursor_clause(
+        &mut query,
+        params.sort_direction,
+        cursor.as_ref(),
+        HistoryOrdinalColumn::Rollout,
+    )?;
     push_order_and_limit(
         &mut query,
         params.sort_direction,
         remaining_limit(params.page_size, /*row_count*/ 0)?,
+        HistoryOrdinalColumn::Rollout,
     );
     let rows = query
         .build()
@@ -876,7 +897,9 @@ fn item_anchor(params: &ListItemsParams) -> ThreadStoreResult<Option<(&str, &str
     let Some(ListItemsPosition::ItemAnchor { item_id }) = params.position.as_ref() else {
         return Ok(None);
     };
-    if params.sort_key != ItemSortKey::CreatedAtOrdinal || params.after_updated_at_ordinal.is_some()
+    if params.sort_key != ItemSortKey::CreatedAtOrdinal
+        || params.after_updated_at_ordinal.is_some()
+        || params.before_updated_at_ordinal.is_some()
     {
         return Err(ThreadStoreError::InvalidRequest {
             message: "item anchors require creation-order paging without an update watermark"
