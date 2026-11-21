@@ -398,22 +398,24 @@ async fn source_backed_turns(
     let mut events = scan.turn_events.clone();
     events.extend(root.turns);
     events.sort_by_key(SourceTurnEvent::ordinal);
-    let mut active_owners = HashMap::new();
-    for event in &events {
-        if let SourceTurnEvent::Turn(_, owner, turn) = event {
-            if turn.status == TurnStatus::Interrupted
-                && active_owners
-                    .get(&turn.turn_id)
-                    .is_some_and(|previous| previous != owner)
-            {
-                // A child can interrupt an inherited turn without starting a new one.
-                // The source aggregate cannot distinguish that from a reused turn ID.
-                return Ok(None);
-            }
-            if turn.status == TurnStatus::InProgress {
-                active_owners.insert(turn.turn_id.clone(), *owner);
-            } else {
-                active_owners.remove(&turn.turn_id);
+    if params.cursor.is_some() {
+        let mut active_owners = HashMap::new();
+        for event in &events {
+            if let SourceTurnEvent::Turn(_, owner, turn) = event {
+                if turn.status == TurnStatus::Interrupted
+                    && active_owners
+                        .get(&turn.turn_id)
+                        .is_some_and(|previous| previous != owner)
+                {
+                    // A child can interrupt an inherited turn without starting a new one.
+                    // The source aggregate cannot distinguish that from a reused turn ID.
+                    return Ok(None);
+                }
+                if turn.status == TurnStatus::InProgress {
+                    active_owners.insert(turn.turn_id.clone(), *owner);
+                } else {
+                    active_owners.remove(&turn.turn_id);
+                }
             }
         }
     }
