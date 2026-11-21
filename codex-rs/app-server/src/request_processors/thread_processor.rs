@@ -3916,17 +3916,19 @@ impl ThreadRequestProcessor {
                 "ephemeral threads do not support includeTurns".to_string(),
             ));
         }
-
+        let fallback_thread =
+            build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
         let mut thread = if let Some(mut thread) = persisted {
             if thread.path.is_none() {
-                thread.path = loaded_thread.rollout_path();
+                thread.path = fallback_thread.path.clone();
             }
-            thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
-            thread.ephemeral = config_snapshot.ephemeral;
-            thread.can_accept_direct_input = Some(can_accept_direct_input(
-                loaded_thread.multi_agent_version(),
-                &config_snapshot.session_source,
-            ));
+            thread.session_id.clone_from(&fallback_thread.session_id);
+            // Adoption can change the live parent without rewriting the rollout head.
+            thread
+                .parent_thread_id
+                .clone_from(&fallback_thread.parent_thread_id);
+            thread.ephemeral = fallback_thread.ephemeral;
+            thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             apply_live_thread_settings(&mut thread, &config_snapshot);
             if !include_turns {
                 if let Some(title) = display_thread_title(
@@ -3940,8 +3942,9 @@ impl ThreadRequestProcessor {
             }
             thread
         } else {
-            build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread)
+            fallback_thread
         };
+        apply_live_thread_settings(&mut thread, &config_snapshot);
         self.attach_thread_name(thread_id, &mut thread).await;
         if include_turns {
             thread.turns = match thread.history_mode {
@@ -5019,6 +5022,15 @@ impl ThreadRequestProcessor {
         thread_store: &dyn ThreadStore,
         thread_id: ThreadId,
     ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
+        if let Some(store) = thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            return store
+                .resume_backwards_cursors(thread_id)
+                .await
+                .map_err(paginated_history_list_error);
+        }
         let turns_page = thread_store
             .list_turns(StoreListTurnsParams {
                 thread_id,
