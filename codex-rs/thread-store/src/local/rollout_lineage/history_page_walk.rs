@@ -100,6 +100,11 @@ impl<'a> HistoryPageWalk<'a> {
         self.next.is_none()
     }
 
+    /// The history-base cutoff recorded by the most recently opened segment.
+    pub(in crate::local) fn next_history_position(&self) -> Option<HistoryPosition> {
+        self.next.as_ref().and_then(|(_, _, end)| *end)
+    }
+
     pub(in crate::local) fn snapshot(&self) -> RolloutLineage {
         let mut segments = self.segments.clone();
         segments.reverse();
