@@ -31,6 +31,10 @@ pub(crate) struct CatalogState {
     pub provider_model_ids: HashSet<String>,
     // Distinguishes a successfully loaded empty catalog from the initial bundled seed.
     pub initialized: bool,
+    /// First-party identities whose most recent refresh failed.
+    pub failed_first_party_identities: HashSet<Option<String>>,
+    /// Changes when any first-party identity's catalog refresh fails.
+    pub first_party_failure_revision: u64,
 }
 
 impl CatalogState {
@@ -39,6 +43,8 @@ impl CatalogState {
             entry,
             provider_model_ids: HashSet::new(),
             initialized: false,
+            failed_first_party_identities: HashSet::new(),
+            first_party_failure_revision: 0,
         }
     }
 
@@ -53,6 +59,8 @@ impl CatalogState {
             entry,
             provider_model_ids,
             initialized: true,
+            failed_first_party_identities: HashSet::new(),
+            first_party_failure_revision: 0,
         }
     }
 

@@ -4,7 +4,6 @@
 //! the shared wire estimate reserves image tokens without counting base64 as text.
 
 use codex_protocol::openai_models::CatalogModel;
-use codex_protocol::openai_models::ModelOrigin;
 use std::io::Write;
 
 use codex_protocol::models::AudioReference;
@@ -93,7 +92,7 @@ pub fn effective_input_token_limit(model: &CatalogModel, configured_window: Opti
     let supported = model
         .resolved_context_window()
         .unwrap_or(DEFAULT_MAX_INPUT_TOKENS as i64);
-    let supported = if model.origin == ModelOrigin::Synthetic {
+    let supported = if model.origin.is_synthetic() {
         supported.min(DEFAULT_MAX_INPUT_TOKENS as i64)
     } else {
         supported
