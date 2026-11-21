@@ -133,6 +133,7 @@ async fn overlapping_apps_startups_share_tools_and_keep_their_own_connections() 
             /*arguments*/ None,
             |_| Ok(None),
             Some(DEFAULT_TOOL_TIMEOUT),
+            /*lease*/ None,
         )
         .await?;
     assert!(!reply.is_error.unwrap_or(false));
