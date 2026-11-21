@@ -552,6 +552,95 @@ fn collect_user_messages_filters_legacy_warnings() {
     );
 }
 
+#[test]
+fn collect_user_messages_deduplicates_only_consecutive_user_messages() {
+    let items = vec![
+        user_message("repeat"),
+        user_message("repeat"),
+        user_message("Warning: The maximum number of unified exec processes is 60"),
+        user_message("repeat"),
+        user_message("repeat"),
+        ResponseItem::Other,
+        user_message("repeat"),
+    ];
+
+    assert_eq!(
+        collect_user_messages(&items),
+        vec![
+            compacted_user_message("repeat", &items[0]),
+            compacted_user_message("repeat", &items[3]),
+            compacted_user_message("repeat", &items[6]),
+        ]
+    );
+}
+
+#[test]
+fn compacted_deduplicated_user_message_preserves_content_and_identity() {
+    let original = ResponseItemEnvelope {
+        item: serde_json::from_value(json!({
+            "type": "message", "role": "user",
+            "id": ResponseItemId::with_suffix("msg", "first"),
+            "content": [
+                {"type": "input_text", "text": "first"},
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "second"}
+            ],
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": "turn-1",
+                "content_item_metadata": vec![ContentItemMetadata::user(); 3]
+            }
+        }))
+        .unwrap(),
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let mut duplicate = original.clone();
+    duplicate
+        .item
+        .set_id(Some(ResponseItemId::with_suffix("msg", "duplicate")));
+    let items = vec![original.clone(), duplicate];
+
+    let history = build_compacted_history_with_limit(
+        &items,
+        "summary",
+        COMPACT_USER_MESSAGE_MAX_TOKENS,
+        &FileAudioDurations::default(),
+    );
+
+    assert_eq!(
+        history,
+        vec![
+            original,
+            ResponseItemEnvelope::new(ContextualUserFragment::into(CompactionSummary::new(
+                "summary"
+            ))),
+        ]
+    );
+}
+
+#[test]
+fn compacted_user_messages_keep_original_positions_after_deduplication() {
+    let items = vec![
+        ResponseItemEnvelope::new(user_message("same")),
+        ResponseItemEnvelope::new(user_message("same")),
+        ResponseItemEnvelope::new(user_message("")),
+        ResponseItemEnvelope::new(user_message("same")),
+        ResponseItemEnvelope::new(ResponseItem::Other),
+        ResponseItemEnvelope::new(user_message("same")),
+        ResponseItemEnvelope::new(user_message("new")),
+    ];
+    let retained = annotated_user_messages(&items)
+        .map(|(position, message)| (position, message.message))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        vec![
+            (0, "same".to_string()),
+            (5, "same".to_string()),
+            (6, "new".to_string()),
+        ]
+    );
+}
+
 #[test_case(1, None; "legacy")]
 #[test_case(1, Some(vec![ContentItemMetadata::user()]); "user")]
 #[test_case(2, Some(vec![ContentItemMetadata::user(); 2]); "multiple user parts")]

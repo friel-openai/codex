@@ -823,6 +823,7 @@ impl Session {
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_thread_state: InheritedThreadState,
         analytics_events_client: Option<AnalyticsEventsClient>,
         image_store: Arc<dyn AttachmentStore>,
         thread_store: Arc<dyn ThreadStore>,
@@ -1847,6 +1848,8 @@ impl Session {
                 );
             let reasoning_effort_override_enabled =
                 config.features.enabled(Feature::ReasoningEffortOverride) && !title_request;
+            let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
+            let mcp_tool_snapshot = inherited_thread_state.mcp_tool_snapshot();
             let model_client = ModelClient::new(
                 Arc::clone(&session_configuration.provider),
                 if config.features.enabled(Feature::UseAgentIdentity) {
@@ -1875,6 +1878,10 @@ impl Session {
                 extensions.model_request_contributors().to_vec(),
             )
             .with_budget_policy(budget_policy.clone())
+            .with_inherited_response(
+                prompt_cache_key_override,
+                inherited_thread_state.response_continuation(),
+            )
             .with_executed_tool_calls(executed_tool_calls.clone())
             .with_restored_history(matches!(
                 &initial_history,
@@ -1979,6 +1986,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
+                mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
                 model_client,
                 executed_tool_calls: executed_tool_calls.clone(),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
