@@ -6,6 +6,7 @@ use super::turn_context::TurnContext;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::state::PreparedAutoCompactWindowAdvance;
 use crate::state::SessionState;
 use codex_history::ResponseItemEnvelope;
 use codex_login::AuthOwner;
@@ -21,6 +22,7 @@ pub(crate) struct PrefixCompactionInstallation<'a> {
     pub(crate) model_info: &'a ModelInfo,
     pub(crate) compaction_response_id: String,
     pub(crate) reviewer_compaction_hash: Option<String>,
+    pub(crate) prepared_window_advance: PreparedAutoCompactWindowAdvance,
     pub(crate) turn_context: &'a TurnContext,
     pub(crate) started_item: Option<&'a TurnItem>,
 }
@@ -85,15 +87,13 @@ impl<'a> PrefixCompactionInstallation<'a> {
         }
         // Prefix replacement already retains all edits in the live suffix.
         let input_goal_ids = Default::default();
-        let (window_number, window_ids) = state.advance_auto_compact_window();
         Some(CompactedHistoryReplacement {
             items,
             world_state_baseline,
             metadata: CompactedHistoryMetadata {
                 input_goal_ids,
                 message: String::new(),
-                window_number,
-                window_ids,
+                prepared_window_advance: self.prepared_window_advance,
                 compaction_response_id: Some(self.compaction_response_id),
                 compaction_model_hash: self.model_info.comp_hash.clone(),
                 reviewer_compaction_hash: self.reviewer_compaction_hash,
