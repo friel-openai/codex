@@ -157,6 +157,414 @@ async fn loaded_resume_and_read_complete_while_an_unrelated_resume_holds_list_st
     Ok(())
 }
 
+// The cold-resume test fixtures create futures that exceed CI's 8 MiB test stack in debug builds.
+fn run_cold_daemon_test<F, Fut>(test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(test())
+        })?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+#[test]
+fn cold_daemon_resume_shares_list_permit_with_an_unrelated_resume() -> Result<()> {
+    run_cold_daemon_test(cold_daemon_resume_shares_list_permit_with_an_unrelated_resume_inner)
+}
+
+async fn cold_daemon_resume_shares_list_permit_with_an_unrelated_resume_inner() -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    test.codex.shutdown_and_wait().await?;
+    test.thread_manager.remove_thread(&thread_id).await;
+    let (processor, _messages) = test_processor(&test).await?;
+    let mut other = processor
+        .thread_list_state_permit
+        .acquire_resume(/*shared*/ true)
+        .await
+        .map_err(|error| anyhow::anyhow!("permit failed: {}", error.message))?;
+    other.finish_probe();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        Box::pin(processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        )),
+    )
+    .await;
+    drop(other);
+    result
+        .context("cold daemon root waited for an unrelated shared list permit")?
+        .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
+    assert!(test.thread_manager.get_thread(thread_id).await.is_ok());
+    Ok(())
+}
+
+#[test]
+fn cold_daemon_resume_waits_behind_a_queued_list_writer() -> Result<()> {
+    run_cold_daemon_test(cold_daemon_resume_waits_behind_a_queued_list_writer_inner)
+}
+
+async fn cold_daemon_resume_waits_behind_a_queued_list_writer_inner() -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    test.codex.shutdown_and_wait().await?;
+    test.thread_manager.remove_thread(&thread_id).await;
+    let (processor, _messages) = test_processor(&test).await?;
+    let mut other = processor
+        .thread_list_state_permit
+        .acquire_resume(/*shared*/ true)
+        .await
+        .map_err(|error| anyhow::anyhow!("permit failed: {}", error.message))?;
+    other.finish_probe();
+    processor
+        .thread_list_state_permit
+        .wait_for_resume_admission_attempt()
+        .await;
+    processor
+        .thread_list_state_permit
+        .wait_for_resume_list_permit_acquired()
+        .await;
+    let writer = processor.thread_list_state_permit.acquire_exclusive();
+    tokio::pin!(writer);
+    assert!(futures::poll!(&mut writer).is_pending());
+    let resume_processor = processor.clone();
+    let resume = tokio::spawn(async move {
+        Box::pin(resume_processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        ))
+        .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        processor
+            .thread_list_state_permit
+            .wait_for_resume_admission_attempt(),
+    )
+    .await
+    .context("daemon did not reach shared list admission")?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            processor
+                .thread_list_state_permit
+                .wait_for_resume_list_permit_acquired(),
+        )
+        .await
+        .is_err(),
+        "daemon acquired a shared list permit ahead of the queued writer"
+    );
+    drop(other);
+    let writer = tokio::time::timeout(Duration::from_secs(10), &mut writer)
+        .await
+        .context("queued writer did not acquire after the earlier resume")?
+        .map_err(|error| anyhow::anyhow!("writer permit failed: {}", error.message))?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            processor
+                .thread_list_state_permit
+                .wait_for_resume_list_permit_acquired(),
+        )
+        .await
+        .is_err(),
+        "daemon acquired a shared list permit while the writer held it"
+    );
+    drop(writer);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        processor
+            .thread_list_state_permit
+            .wait_for_resume_list_permit_acquired(),
+    )
+    .await
+    .context("daemon did not acquire a shared list permit after the writer")?;
+    tokio::time::timeout(Duration::from_secs(15), resume)
+        .await
+        .context("cold daemon resume did not proceed after the writer")?
+        .context("daemon resume task failed")?
+        .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
+    Ok(())
+}
+
+#[test]
+fn cold_daemon_same_id_waiter_can_be_cancelled_without_blocking_another_root() -> Result<()> {
+    run_cold_daemon_test(
+        cold_daemon_same_id_waiter_can_be_cancelled_without_blocking_another_root_inner,
+    )
+}
+
+async fn cold_daemon_same_id_waiter_can_be_cancelled_without_blocking_another_root_inner()
+-> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let first_id = test.session_configured.thread_id;
+    let second = Box::pin(
+        test.thread_manager
+            .start_thread(test.start_thread_options().await),
+    )
+    .await?;
+    let second_id = second.thread_id;
+    for (thread_id, thread) in [(first_id, &test.codex), (second_id, &second.thread)] {
+        test.thread_store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await?;
+        thread.shutdown_and_wait().await?;
+        test.thread_manager.remove_thread(&thread_id).await;
+    }
+    let (processor, _messages) = test_processor(&test).await?;
+    let same_id_reservation = processor.thread_state_manager.lock_resume(first_id).await;
+    assert_eq!(
+        processor
+            .thread_state_manager
+            .resume_reservation_strong_count(first_id)
+            .await,
+        1
+    );
+    let waiting_processor = processor.clone();
+    let waiting = tokio::spawn(async move {
+        Box::pin(waiting_processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: first_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        ))
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while processor
+            .thread_state_manager
+            .resume_reservation_strong_count(first_id)
+            .await
+            < 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("same-ID daemon did not reach the held reservation")?;
+    let other = tokio::time::timeout(
+        Duration::from_secs(15),
+        Box::pin(processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: second_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        )),
+    )
+    .await
+    .context("a same-ID waiter blocked an unrelated daemon root")?
+    .map_err(|error| anyhow::anyhow!("unrelated resume failed: {}", error.message))?;
+    assert!(other.is_none());
+    assert!(
+        !waiting.is_finished(),
+        "same-ID resume bypassed its reservation"
+    );
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        processor
+            .thread_state_manager
+            .resume_reservation_strong_count(first_id)
+            .await,
+        1,
+        "cancelled waiter retained the reservation"
+    );
+    drop(same_id_reservation);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        Box::pin(processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: first_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        )),
+    )
+    .await
+    .context("cancelled same-ID waiter left its reservation held")?
+    .map_err(|error| anyhow::anyhow!("retry failed: {}", error.message))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn loaded_daemon_resume_keeps_exclusive_list_ordering() -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    let (processor, _messages) = test_processor(&test).await?;
+    let mut other = processor
+        .thread_list_state_permit
+        .acquire_resume(/*shared*/ true)
+        .await
+        .map_err(|error| anyhow::anyhow!("permit failed: {}", error.message))?;
+    other.finish_probe();
+    let resume = processor.thread_resume(
+        ThreadResumeTarget::DaemonRecovery(None),
+        ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            ..Default::default()
+        },
+        None,
+        None,
+        Default::default(),
+    );
+    tokio::pin!(resume);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut resume)
+            .await
+            .is_err(),
+        "loaded daemon recovery must retain exclusive list ordering"
+    );
+    drop(other);
+    tokio::time::timeout(Duration::from_secs(15), &mut resume)
+        .await
+        .context("loaded daemon recovery did not proceed after the other permit released")?
+        .map_err(|error| anyhow::anyhow!("resume failed: {}", error.message))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn daemon_resume_without_loaded_history_source_upgrades_before_startup() -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    test.codex.shutdown_and_wait().await?;
+    test.thread_manager.remove_thread(&thread_id).await;
+    let source = test
+        .thread_store
+        .read_thread(codex_thread_store::ReadThreadParams {
+            thread_id,
+            include_archived: true,
+            include_history: false,
+        })
+        .await?;
+    assert!(source.attached_to_thread_id.is_none());
+    assert!(source.parent_thread_id.is_none());
+    assert!(!source.source.is_non_root_agent());
+    assert!(!matches!(
+        source.source,
+        codex_protocol::protocol::SessionSource::Unknown
+    ));
+
+    let (processor, _messages) = test_processor(&test).await?;
+    processor
+        .missing_resume_history_sources
+        .lock()
+        .unwrap()
+        .insert(thread_id);
+    let mut other = processor
+        .thread_list_state_permit
+        .acquire_resume(/*shared*/ true)
+        .await
+        .map_err(|error| anyhow::anyhow!("permit failed: {}", error.message))?;
+    other.finish_probe();
+    let resume_processor = processor.clone();
+    let request = tokio::spawn(async move {
+        Box::pin(resume_processor.thread_resume(
+            ThreadResumeTarget::DaemonRecovery(None),
+            ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+            None,
+            None,
+            Default::default(),
+        ))
+        .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        processor.missing_resume_history_applied.notified(),
+    )
+    .await
+    .context("daemon did not reach the real history loader")?;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        processor
+            .thread_list_state_permit
+            .wait_for_resume_upgrade_attempt(),
+    )
+    .await
+    .context("missing history source did not trigger an exclusive upgrade")?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            processor
+                .thread_list_state_permit
+                .wait_for_resume_upgrade_acquired(),
+        )
+        .await
+        .is_err(),
+        "daemon acquired exclusive admission while another resume held it"
+    );
+    drop(other);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        processor
+            .thread_list_state_permit
+            .wait_for_resume_upgrade_acquired(),
+    )
+    .await
+    .context("daemon did not acquire exclusive admission after the other resume")?;
+    request.abort();
+    let _ = request.await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn late_command_cancellation_reaches_the_current_subscriber() -> Result<()> {
     let server = wiremock::MockServer::start().await;
