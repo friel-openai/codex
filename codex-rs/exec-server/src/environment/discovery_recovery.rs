@@ -19,6 +19,13 @@ impl Environment {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, ExecServerError>>,
     {
+        if self
+            .remote_client
+            .as_ref()
+            .is_some_and(crate::client::LazyRemoteExecServerClient::is_attachment_bound)
+        {
+            return discover().await;
+        }
         match discover().await {
             Err(error) if is_retryable_recovery_error(&error) => {
                 tracing::warn!(%error, "replaying capability discovery after executor recovery");

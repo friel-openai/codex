@@ -129,6 +129,22 @@ pub(crate) async fn load_project_instructions_with_startup(
             continue;
         }
 
+        if let Some(verified) = &turn_environment.verified_project_instructions {
+            for entry in &verified.entries {
+                if remaining == 0 {
+                    break;
+                }
+                let mut entry = entry.clone();
+                let end = entry.contents.floor_char_boundary(remaining);
+                entry.contents.truncate(end);
+                remaining = remaining.saturating_sub(entry.contents.len());
+                if !entry.contents.trim().is_empty() {
+                    loaded.entries.push(entry);
+                }
+            }
+            continue;
+        }
+
         let sandbox = instruction_discovery_sandbox(turn_environment);
         let read = read_environment_agents_md(
             config,
@@ -163,7 +179,8 @@ pub(crate) async fn load_project_instructions_with_startup(
                 }
             }
             Ok(None) => {}
-            Err(error) if sandbox.is_none() => {
+            // Do not build a prompt when a required remote's instruction scan failed.
+            Err(error) if sandbox.is_none() && !turn_environment.environment().is_remote() => {
                 error!(
                     environment_id = turn_environment.selection.environment_id,
                     "error trying to find AGENTS.md docs: {error:#}"
@@ -214,6 +231,31 @@ pub(crate) async fn read_startup_project_instructions(
     .await
 }
 
+/// Captures instructions on the exact executor connection that will be used by the turn.
+/// The caller binds the connection and applies a deadline before admitting the environment.
+pub(crate) async fn verify_remote_project_instructions(
+    config: &Config,
+    environment: &TurnEnvironment,
+) -> io::Result<LoadedAgentsMd> {
+    if config.active_project.is_untrusted() {
+        return Ok(LoadedAgentsMd::default());
+    }
+    let sandbox = instruction_discovery_sandbox(environment);
+    let mut warnings = Vec::new();
+    read_agents_md_with_policy(
+        config,
+        environment.environment().get_filesystem().as_ref(),
+        &environment.selection.environment_id,
+        environment.cwd(),
+        config.project_doc_max_bytes,
+        sandbox.as_ref(),
+        FindUpErrorPolicy::Propagate,
+        &mut warnings,
+    )
+    .await
+    .map(Option::unwrap_or_default)
+}
+
 async fn read_environment_agents_md(
     config: &Config,
     environment: &TurnEnvironment,
@@ -221,13 +263,18 @@ async fn read_environment_agents_md(
     sandbox: Option<&FileSystemSandboxContext>,
     warnings: &mut Vec<String>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
-    read_agents_md(
+    read_agents_md_with_policy(
         config,
         environment.environment().get_filesystem().as_ref(),
         &environment.selection.environment_id,
         environment.cwd(),
         max_total,
         sandbox,
+        if environment.environment().is_remote() {
+            FindUpErrorPolicy::Propagate
+        } else {
+            FindUpErrorPolicy::Ignore
+        },
         warnings,
     )
     .await
@@ -239,7 +286,7 @@ async fn read_environment_agents_md(
 /// discovered doc. If no documentation file is found the function returns
 /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
 /// decide how to handle them.
-#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
+#[cfg(test)]
 async fn read_agents_md(
     config: &Config,
     fs: &dyn ExecutorFileSystem,
@@ -249,7 +296,39 @@ async fn read_agents_md(
     sandbox: Option<&FileSystemSandboxContext>,
     warnings: &mut Vec<String>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
-    let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
+    read_agents_md_with_policy(
+        config,
+        fs,
+        environment_id,
+        cwd,
+        max_total,
+        sandbox,
+        FindUpErrorPolicy::Ignore,
+        warnings,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
+async fn read_agents_md_with_policy(
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+    environment_id: &str,
+    cwd: &PathUri,
+    max_total: usize,
+    sandbox: Option<&FileSystemSandboxContext>,
+    error_policy: FindUpErrorPolicy,
+    warnings: &mut Vec<String>,
+) -> io::Result<Option<LoadedAgentsMd>> {
+    if max_total == 0 {
+        return Ok(None);
+    }
+
+    let paths = agents_md_paths_with_policy(config, cwd, fs, sandbox, error_policy).await?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+
     let mut remaining = max_total;
     let mut loaded = LoadedAgentsMd::default();
 
@@ -265,7 +344,12 @@ async fn read_agents_md(
 
         let mut data = match fs.read_file(&p, ReadFileOptions::default(), sandbox).await {
             Ok(data) => data,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound
+                    && error_policy == FindUpErrorPolicy::Ignore =>
+            {
+                continue;
+            }
             Err(err) => return Err(err),
         };
         let size = data.len();
@@ -304,14 +388,25 @@ async fn read_agents_md(
     }
 }
 
-/// Discovers AGENTS.md files from the project root to the current working
-/// directory, inclusive. Symlinks are allowed.
-#[tracing::instrument(name = "agents_md.discover", skip_all)]
+#[cfg(test)]
 async fn agents_md_paths(
     config: &Config,
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
+) -> io::Result<Vec<PathUri>> {
+    agents_md_paths_with_policy(config, cwd, fs, sandbox, FindUpErrorPolicy::Ignore).await
+}
+
+/// Discovers AGENTS.md files from the project root to the current working
+/// directory, inclusive. Symlinks are allowed.
+#[tracing::instrument(name = "agents_md.discover", skip_all)]
+async fn agents_md_paths_with_policy(
+    config: &Config,
+    cwd: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    error_policy: FindUpErrorPolicy,
 ) -> io::Result<Vec<PathUri>> {
     let dir = cwd.clone();
 
@@ -330,14 +425,9 @@ async fn agents_md_paths(
             default_project_root_markers()
         }
     };
-    let project_root = find_nearest_ancestor_with_markers(
-        fs,
-        &dir,
-        project_root_markers,
-        FindUpErrorPolicy::Ignore,
-        sandbox,
-    )
-    .await?;
+    let project_root =
+        find_nearest_ancestor_with_markers(fs, &dir, project_root_markers, error_policy, sandbox)
+            .await?;
     let search_dirs = if let Some(root) = project_root {
         let mut dirs = Vec::new();
         let mut cursor = dir.clone();
