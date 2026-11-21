@@ -969,6 +969,14 @@ impl McpRuntime {
             .environments_match(selections, ready_environments)
     }
 
+    pub fn elicitations_auto_deny(&self) -> bool {
+        self.elicitation_router.auto_deny()
+    }
+
+    pub fn set_elicitations_auto_deny(&self, auto_deny: bool) {
+        self.elicitation_router.set_auto_deny(auto_deny);
+    }
+
     pub fn enable_full_access_form_input(&self) {
         self.elicitation_router.enable_full_access_form_input();
     }
