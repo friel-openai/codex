@@ -319,7 +319,6 @@ pub(super) fn classify_model_routing_failure(error: &CodexErr) -> Option<ModelRo
 mod tests {
     use super::*;
     use crate::current_time::SleepFuture;
-    use crate::current_time::TimeFuture;
     use crate::current_time::TimeProvider;
     use codex_protocol::ThreadId;
     use std::time::Duration;
@@ -360,10 +359,8 @@ mod tests {
     }
 
     impl TimeProvider for RoutingTestClock {
-        fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
-            Box::pin(async {
-                Ok(self.wall_time + chrono::Duration::from_std(self.started_at.elapsed()).unwrap())
-            })
+        fn current_time(&self, _thread_id: ThreadId) -> anyhow::Result<DateTime<Utc>> {
+            Ok(self.wall_time + chrono::Duration::from_std(self.started_at.elapsed()).unwrap())
         }
 
         fn sleep(&self, _thread_id: ThreadId, duration: Duration) -> SleepFuture<'_> {
