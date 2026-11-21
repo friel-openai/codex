@@ -380,6 +380,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             Some(json!({"codex/connectionLease": "forged"})),
@@ -394,6 +395,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
             test.session_configured.thread_id,
             StartThreadOptions {
                 config: test.config.clone(),
+                request_country: test.codex.config_snapshot().await.request_country,
                 prompt_cache_key: codex_core::PromptCacheKey::SessionDerived,
                 thread_instructions_provider: None,
                 allow_provider_model_fallback: false,
@@ -422,6 +424,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
         .thread
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             Some(json!({"codex/connectionLease": "forged"})),
@@ -445,7 +448,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
     child.thread.shutdown_and_wait().await?;
     let continued = test
         .codex
-        .call_mcp_tool(MCP_SERVER_NAME, "shared_counter", None, None)
+        .call_mcp_tool(MCP_SERVER_NAME, None, "shared_counter", None, None)
         .await?;
     assert_eq!(
         continued
@@ -1190,6 +1193,7 @@ async fn child_shutdown_cancels_unanswered_elicitation_and_recovers_root() -> Re
             child_thread
                 .call_mcp_tool(
                     MCP_SERVER_NAME,
+                    /*environment_id*/ None,
                     "request_elicitation",
                     /*arguments*/ None,
                     /*meta*/ None,
@@ -1230,6 +1234,7 @@ async fn child_shutdown_cancels_unanswered_elicitation_and_recovers_root() -> Re
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1330,6 +1335,7 @@ async fn timed_out_child_call_recovers_tree_without_routing_late_elicitation_to_
     let error = child_thread
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "delayed_elicitation",
             Some(json!({ "delay_ms": 1_000 })),
             /*meta*/ None,
@@ -1367,6 +1373,7 @@ async fn timed_out_child_call_recovers_tree_without_routing_late_elicitation_to_
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1425,7 +1432,11 @@ async fn timed_out_child_resource_request_recovers_tree_without_late_elicitation
     let old_pid = wait_for_pid_file(&pid_file).await?;
 
     let error = child_thread
-        .read_mcp_resource(MCP_SERVER_NAME, ReadResourceRequestParams::new(MEMO_URI))
+        .read_mcp_resource(
+            MCP_SERVER_NAME,
+            None,
+            ReadResourceRequestParams::new(MEMO_URI),
+        )
         .await
         .expect_err("the delayed resource request should exceed its configured timeout");
     let error_chain = format!("{error:#}");
@@ -1459,6 +1470,7 @@ async fn timed_out_child_resource_request_recovers_tree_without_late_elicitation
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1636,6 +1648,7 @@ async fn crashed_shared_server_can_be_replaced_for_the_tree() -> Result<()> {
     child_thread
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "crash",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1649,6 +1662,7 @@ async fn crashed_shared_server_can_be_replaced_for_the_tree() -> Result<()> {
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1735,6 +1749,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1743,6 +1758,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
     let child_before = child_thread
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1769,6 +1785,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
         .codex
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1788,6 +1805,7 @@ async fn explicit_root_refresh_replaces_the_shared_tree_connection() -> Result<(
     let child_after = child_thread
         .call_mcp_tool(
             MCP_SERVER_NAME,
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,
@@ -1876,6 +1894,7 @@ async fn calls_from_different_agents_enter_the_shared_server_serially() -> Resul
         async move {
             root.call_mcp_tool(
                 MCP_SERVER_NAME,
+                /*environment_id*/ None,
                 "serialized_probe",
                 Some(json!({
                     "label": "root",
@@ -1902,6 +1921,7 @@ async fn calls_from_different_agents_enter_the_shared_server_serially() -> Resul
             child_thread
                 .call_mcp_tool(
                     MCP_SERVER_NAME,
+                    /*environment_id*/ None,
                     "serialized_probe",
                     Some(json!({
                         "label": "child",

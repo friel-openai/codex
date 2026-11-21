@@ -50,7 +50,6 @@ use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
 use core_test_support::apps_test_server::recorded_apps_tool_call_by_call_id;
 use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::apps_test_server::search_capable_apps_builder;
-use core_test_support::apps_test_server::set_default_app_approval_mode_and_reviewer;
 use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
