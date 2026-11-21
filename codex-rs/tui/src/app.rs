@@ -260,6 +260,7 @@ mod pending_interactive_replay;
 mod pending_thread_approvals;
 mod permission_shortcuts;
 mod pets;
+mod placed_side;
 mod platform_actions;
 mod plugin_mentions;
 pub(crate) mod provider;
@@ -293,6 +294,7 @@ mod sidebar_document;
 mod sidebar_files;
 pub(crate) mod sidebar_loading;
 mod sidebar_subagents;
+mod standalone_side;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
@@ -701,6 +703,7 @@ pub(crate) struct App {
     passive_link_drag: Option<(ThreadId, Rect)>,
     sidebar_press: Option<side_focus::SidebarPress>,
     abandoned_side_threads: HashSet<ThreadId>,
+    standalone_side_active: bool,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     primary_thread_id: Option<ThreadId>,

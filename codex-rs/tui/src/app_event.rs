@@ -576,6 +576,12 @@ pub(crate) enum AppEvent {
         result: Result<SavedSideChatData, String>,
     },
 
+    /// Open a blank standalone side conversation in a separate terminal pane.
+    StartPlacedSide {
+        parent_thread_id: ThreadId,
+        placement: ForkPanePlacement,
+    },
+
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {
         thread_id: ThreadId,
@@ -877,6 +883,7 @@ pub(crate) enum AppEvent {
     /// Fork the current session into a new thread, optionally assigning it a name.
     ForkCurrentSession {
         name: Option<String>,
+        placement: Option<ForkPanePlacement>,
     },
 
     /// Revert before a selected prompt, retaining its identity across queued history pages.
@@ -2067,6 +2074,15 @@ pub(crate) struct PermissionProfileSelection {
     pub display_label: String,
 }
 
+/// Requested terminal pane position, independent of the terminal-specific launch command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPanePlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    Float,
+}
 /// The exit strategy requested by the UI layer.
 ///
 /// Most user-initiated exits should use `ShutdownFirst` so core cleanup runs and the UI exits only
