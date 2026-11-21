@@ -108,7 +108,8 @@ mod lineage_projection_tests;
 use canonicalizer::LegacyRolloutCanonicalizer;
 use dependencies::MigrationAdmission;
 use lineage::LegacyLineageMigrationPlan;
-use lineage::contains_convertible_rollout_reference;
+use lineage::LineageInspectionCache;
+use lineage::contains_convertible_rollout_reference_with_cache;
 use lineage::plan_legacy_lineage;
 pub use lineage_manifest::RolloutMigrationAdditionalFreeSpace;
 pub use lineage_manifest::RolloutMigrationHistoryBaseDependency;
@@ -448,6 +449,7 @@ impl LocalThreadStore {
                     &mut limiter,
                     admission,
                     Some(guard),
+                    None,
                 )
                 .await;
             if matches!(admission, MigrationAdmission::RequiresExclusive) {
@@ -596,6 +598,7 @@ impl LocalThreadStore {
         };
         let total_paths = paths.len();
         let mut report = RolloutMigrationReport::default();
+        let mut lineage_cache = LineageInspectionCache::default();
 
         for (index, path) in paths.into_iter().enumerate() {
             let job_guard = match options.mode {
@@ -614,6 +617,7 @@ impl LocalThreadStore {
                     &mut limiter,
                     &mut MigrationAdmission::Manual,
                     job_guard,
+                    Some(&mut lineage_cache),
                 )
                 .await?;
             let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
@@ -638,6 +642,7 @@ impl LocalThreadStore {
         limiter: &mut RolloutMigrationRateLimiter,
         admission: &mut MigrationAdmission,
         job_guard: Option<RolloutMaintenanceJobGuard>,
+        mut lineage_cache: Option<&mut LineageInspectionCache>,
     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
         let job_guard = job_guard.map(Arc::new);
         let mut retried_moved_path = false;
@@ -759,9 +764,10 @@ impl LocalThreadStore {
                 .map_err(migration_error)?;
         let paginated_reference_lineage = metadata.meta.history_mode
             == ThreadHistoryMode::Paginated
-            && contains_convertible_rollout_reference(
+            && contains_convertible_rollout_reference_with_cache(
                 self.config.codex_home.as_path(),
                 path.as_path(),
+                lineage_cache.as_deref_mut(),
             )
             .await?;
         if metadata.meta.history_mode == ThreadHistoryMode::Paginated
@@ -1009,9 +1015,10 @@ impl LocalThreadStore {
         }
         let locked_reference_lineage = locked_metadata.meta.history_mode
             == ThreadHistoryMode::Paginated
-            && contains_convertible_rollout_reference(
+            && contains_convertible_rollout_reference_with_cache(
                 self.config.codex_home.as_path(),
                 path.as_path(),
+                lineage_cache,
             )
             .await?;
         if locked_metadata.meta.id != thread_id
