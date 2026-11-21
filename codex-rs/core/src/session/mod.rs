@@ -186,6 +186,7 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::materialize_model_context_rollout_items_from;
@@ -193,6 +194,7 @@ use codex_rollout::materialize_recent_rollout_lines_from;
 use codex_rollout::resolve_rollout_reference_path;
 use codex_rollout::should_persist_response_item;
 use codex_rollout::state_db;
+use codex_rollout::validated_segment_state_checkpoint;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
@@ -224,6 +226,7 @@ use rmcp::model::RequestId;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -467,6 +470,7 @@ use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingApproval;
 use crate::state::PendingRequestPermissions;
+use crate::state::PreparedAutoCompactWindowAdvance;
 use crate::state::ReasoningEffortPin;
 use crate::state::SessionServices;
 use crate::state::SessionState;
@@ -523,6 +527,8 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::DeprecationNoticeEvent;
+#[cfg(test)]
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
@@ -538,6 +544,7 @@ use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::RequestUserInputEvent;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionNetworkProxyRuntime;
 use codex_protocol::protocol::StreamErrorEvent;
@@ -639,6 +646,12 @@ impl From<CompactedHistoryMetadata> for CompactedHistoryInstallation<'_> {
     }
 }
 
+/// Selects which auto-compaction window identity full initial context describes.
+enum InitialContextAutoCompactWindow {
+    Current,
+    Prepared(AutoCompactWindowIds),
+}
+
 /// Resume keeps its bounded replay, while a new fork needs complete logical model context.
 enum ForkedHistoryMaterialization {
     Recent,
@@ -660,6 +673,8 @@ pub(crate) struct ForkModelState {
     turn_attribution: Option<codex_history::TurnAttribution>,
     /// Latest usage accounting paired with the captured transcript.
     latest_token_usage_record: Option<TokenUsageRecord>,
+    /// Latest provider quota snapshot paired with the shared model history.
+    latest_rate_limits: Option<RateLimitSnapshot>,
     /// Active compaction window identity inherited by the child's model context.
     window_number: u64,
     window_ids: AutoCompactWindowIds,
@@ -2256,9 +2271,14 @@ impl Session {
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items) {
+                if let Some(token_count) =
+                    Self::restored_token_count_from_rollout(&logical_rollout_items)
+                {
                     let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                    state.set_token_info(token_count.info);
+                    if let Some(rate_limits) = token_count.rate_limits {
+                        state.set_rate_limits(rate_limits);
+                    }
                 }
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&logical_rollout_items);
@@ -2402,6 +2422,24 @@ impl Session {
                 for item in &mut startup_response_items {
                     self.assign_missing_response_item_id(item);
                 }
+                // Seed usage info from the recorded rollout so UIs can show token counts
+                // immediately on resume/fork.
+                if !has_authoritative_model_state
+                    && let Some(token_count) =
+                        Self::restored_token_count_from_rollout(&logical_rollout_items)
+                {
+                    let mut state = self.state.lock().await;
+                    state.set_token_info(token_count.info);
+                    if let Some(rate_limits) = token_count.rate_limits {
+                        state.set_rate_limits(rate_limits);
+                    }
+                }
+                if !has_authoritative_model_state {
+                    self.state.lock().await.latest_token_usage_record =
+                        Self::last_token_usage_record_from_rollout(&logical_rollout_items);
+                }
+                let fork_checkpoint_items =
+                    self.current_segment_state_checkpoint().await.into_items();
                 if !startup_response_items.is_empty() {
                     let mut state = self.state.lock().await;
                     state.history.record_items(
@@ -2415,26 +2453,7 @@ impl Session {
                     .map(RolloutItem::ResponseItem)
                     .collect::<Vec<_>>();
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if !has_authoritative_model_state
-                    && let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items)
-                {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
-                }
-                if !has_authoritative_model_state {
-                    self.state.lock().await.latest_token_usage_record =
-                        Self::last_token_usage_record_from_rollout(&logical_rollout_items);
-                }
-
-                let thread_settings_applied =
-                    RolloutItem::EventMsg(thread_settings::applied_event(self).await);
-                let mut persisted_rollout_items = rollout_items
-                    .iter()
-                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let mut persisted_rollout_items;
                 match &self.fork_persistence {
                     ForkPersistence::Referenced {
                         inherited_item_count,
@@ -2448,22 +2467,25 @@ impl Session {
                             .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
                             .cloned()
                             .collect();
-                        persisted_rollout_items.insert(0, thread_settings_applied);
                     }
                     ForkPersistence::Copied | ForkPersistence::CopiedDeferred
                         if is_paginated_subagent && !has_rollout_reference =>
                     {
                         // Paginated subagents already persist inherited context when their live
                         // thread is created.
-                        persisted_rollout_items.clear();
-                        persisted_rollout_items.push(thread_settings_applied);
+                        persisted_rollout_items = Vec::new();
                     }
                     ForkPersistence::Copied | ForkPersistence::CopiedDeferred => {
                         // Keep the copied prefix and effective child settings in one append so a
                         // cold resume cannot observe inherited settings as the latest value.
-                        persisted_rollout_items.push(thread_settings_applied);
+                        persisted_rollout_items = rollout_items
+                            .iter()
+                            .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                            .cloned()
+                            .collect();
                     }
                 }
+                persisted_rollout_items.extend(fork_checkpoint_items);
                 persisted_rollout_items.append(&mut startup_rollout_items);
                 self.persist_initial_rollout_items(&persisted_rollout_items)
                     .await?;
@@ -2602,7 +2624,7 @@ impl Session {
 
     async fn apply_rollout_reconstruction_with_shared_history(
         &self,
-        turn_context: &TurnContext,
+        turn_context: &Arc<TurnContext>,
         rollout_items: &[RolloutItem],
         shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
         shared_model_state: Option<ForkModelState>,
@@ -2614,26 +2636,14 @@ impl Session {
                 .observation_clock
                 .restore(rollout_items);
         }
-        let rollout_reconstruction::RolloutReconstruction {
-            mut history,
-            rejected_audio_file_ids,
-            retained_context,
-            guardian_history,
-            last_started_turn_id,
-            previous_turn_settings,
-            reference_context_item,
-            turn_attribution,
-            world_state_baseline,
-            window_number,
-            first_window_id,
-            previous_window_id,
-            window_id,
-        } = self
-            .reconstruct_history_from_rollout(turn_context, rollout_items)
+        let reconstruction = self
+            .prepare_rollout_reconstruction(
+                turn_context,
+                rollout_items,
+                shared_model_response_items.is_some(),
+            )
             .await;
-        // An automatic turn can have a persisted routing override without establishing the
-        // user-turn context baseline. Recover its own latest context by surviving turn ID.
-        let restored_turn_routing = turn_attribution.as_ref().and_then(|turn| {
+        let restored_turn_routing = reconstruction.turn_attribution.as_ref().and_then(|turn| {
             rollout_items
                 .iter()
                 .rev()
@@ -2648,21 +2658,6 @@ impl Session {
                 .and_then(|context| context.direct_only_tool_namespaces.clone())
                 .map(|namespaces| (turn.turn_id.clone(), namespaces))
         });
-        // Replay prepares inline media without modifying the stored rollout.
-        if shared_model_response_items.is_none() {
-            let _ = Box::pin(prepare_image_response_items(
-                &self.thread_id.to_string(),
-                turn_context.config.ephemeral,
-                &mut history,
-                ImagePreparationMode::for_replay(&turn_context.config.features),
-                ImageResizeNoticeMode::Disabled,
-                &InlineAttachmentStore,
-            ))
-            .await;
-            for envelope in &mut history {
-                prepare_audio_response_items(std::slice::from_mut(&mut envelope.item));
-            }
-        }
         file_audio::resolve(
             self,
             file_audio::file_ids(
@@ -2670,7 +2665,7 @@ impl Session {
                     .as_ref()
                     .map(|state| state.history.annotated_items())
                     .or_else(|| shared_model_response_items.as_deref().map(Vec::as_slice))
-                    .unwrap_or(&history),
+                    .unwrap_or(&reconstruction.history),
             )
             .cloned()
             .collect(),
@@ -2683,7 +2678,7 @@ impl Session {
                 shared_model_response_items
                     .as_deref()
                     .map(Vec::as_slice)
-                    .unwrap_or(&history),
+                    .unwrap_or(&reconstruction.history),
             )
             .is_some_and(codex_history::CompactionCheckpoint::is_usable)
             && turn_context
@@ -2697,62 +2692,18 @@ impl Session {
         } else {
             None
         };
-        {
+        let previous_turn_settings = {
             let mut state = self.state.lock().await;
-            if let Some(source_model_state) = shared_model_state {
-                state.replace_shared_history_snapshot(&source_model_state.history);
-                state.history.invalidate_restored_command_sessions();
-                state.last_started_turn_id = source_model_state.last_started_turn_id;
-                state.turn_attribution = source_model_state.turn_attribution;
-                state.latest_token_usage_record = source_model_state.latest_token_usage_record;
-                state.restore_auto_compact_window(
-                    source_model_state.window_number,
-                    source_model_state.window_ids,
-                );
-                state.set_previous_turn_settings(source_model_state.previous_turn_settings);
-            } else {
-                state.last_started_turn_id = last_started_turn_id;
-                state.turn_attribution = turn_attribution;
-                if let Some(shared_model_response_items) = shared_model_response_items {
-                    state.replace_shared_history(
-                        shared_model_response_items,
-                        reference_context_item,
-                    );
-                } else {
-                    state.replace_annotated_history(
-                        history,
-                        reference_context_item,
-                        HistoryReplacement::Reset,
-                    );
-                }
-                state.history.restored_through_sequence = state.history.input_sequence();
-                state
-                    .history
-                    .restore_rejected_audio_file_ids(rejected_audio_file_ids);
-                state.history.restore_review_context(
-                    Some(&retained_context),
-                    guardian_history.as_ref(),
-                    reviewer_compaction_hash.as_deref(),
-                );
-                if let Some(mut world_state) = world_state_baseline {
-                    // Runtime handles from the saved checkpoint are no longer valid.
-                    world_state.invalidate_section("command_sessions");
-                    state.history.set_world_state_baseline(world_state);
-                }
-                let fallback_ids = state.auto_compact_window_ids();
-                let window_id = window_id.unwrap_or(fallback_ids.window_id);
-                state.restore_auto_compact_window(
-                    window_number,
-                    AutoCompactWindowIds {
-                        first_window_id: first_window_id.unwrap_or(window_id),
-                        previous_window_id,
-                        window_id,
-                    },
-                );
-                state.set_previous_turn_settings(previous_turn_settings.clone());
-            }
+            let previous = Self::install_rollout_reconstruction_in_state(
+                &mut state,
+                reconstruction,
+                shared_model_response_items,
+                shared_model_state,
+                reviewer_compaction_hash.as_deref(),
+            );
             state.restored_turn_routing = restored_turn_routing;
-        }
+            previous
+        };
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
             AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -2766,6 +2717,113 @@ impl Session {
         if let Some(prefix_tokens) = prefix_tokens {
             self.set_auto_compact_window_estimated_prefill_for_scope(turn_context, prefix_tokens)
                 .await;
+        }
+        previous_turn_settings
+    }
+
+    async fn prepare_rollout_reconstruction(
+        &self,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+        has_shared_model_response_items: bool,
+    ) -> rollout_reconstruction::RolloutReconstruction {
+        let mut reconstruction = self
+            .reconstruct_history_from_rollout(turn_context, rollout_items)
+            .await;
+        // Keep the recorded rollout unchanged. Prepare its reconstructed history before
+        // installing it, so legacy media is processed once for this resume or fork and
+        // will be processed again if the rollout is reconstructed in a future session.
+        // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
+        // the prior batch behavior and carry history-only metadata in a positional sidecar.
+        if !has_shared_model_response_items {
+            let _ = Box::pin(prepare_image_response_items(
+                &self.thread_id.to_string(),
+                turn_context.config.ephemeral,
+                &mut reconstruction.history,
+                ImagePreparationMode::for_replay(&turn_context.config.features),
+                ImageResizeNoticeMode::Disabled,
+                &InlineAttachmentStore,
+            ))
+            .await;
+            for envelope in &mut reconstruction.history {
+                prepare_audio_response_items(std::slice::from_mut(&mut envelope.item));
+            }
+        }
+        reconstruction
+    }
+
+    fn install_rollout_reconstruction_in_state(
+        state: &mut SessionState,
+        reconstruction: rollout_reconstruction::RolloutReconstruction,
+        shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
+        shared_model_state: Option<ForkModelState>,
+        reviewer_compaction_hash: Option<&str>,
+    ) -> Option<PreviousTurnSettings> {
+        let rollout_reconstruction::RolloutReconstruction {
+            history,
+            rejected_audio_file_ids,
+            retained_context,
+            guardian_history,
+            last_started_turn_id,
+            previous_turn_settings,
+            reference_context_item,
+            turn_attribution,
+            world_state_baseline,
+            window_number,
+            first_window_id,
+            previous_window_id,
+            window_id,
+        } = reconstruction;
+        if let Some(source_model_state) = shared_model_state {
+            state.replace_shared_history_snapshot(&source_model_state.history);
+            state.history.invalidate_restored_command_sessions();
+            state.last_started_turn_id = source_model_state.last_started_turn_id;
+            state.turn_attribution = source_model_state.turn_attribution;
+            state.latest_token_usage_record = source_model_state.latest_token_usage_record;
+            state.restore_auto_compact_window(
+                source_model_state.window_number,
+                source_model_state.window_ids,
+            );
+            state.set_previous_turn_settings(source_model_state.previous_turn_settings);
+            if let Some(rate_limits) = source_model_state.latest_rate_limits {
+                state.set_rate_limits(rate_limits);
+            }
+        } else {
+            state.last_started_turn_id = last_started_turn_id;
+            if let Some(shared_model_response_items) = shared_model_response_items {
+                state.replace_shared_history(shared_model_response_items, reference_context_item);
+            } else {
+                state.replace_annotated_history(
+                    history,
+                    reference_context_item,
+                    HistoryReplacement::Reset,
+                );
+            }
+            state.turn_attribution = turn_attribution;
+            state.history.restored_through_sequence = state.history.input_sequence();
+            state
+                .history
+                .restore_rejected_audio_file_ids(rejected_audio_file_ids);
+            state.history.restore_review_context(
+                Some(&retained_context),
+                guardian_history.as_ref(),
+                reviewer_compaction_hash,
+            );
+            if let Some(mut world_state) = world_state_baseline {
+                world_state.invalidate_section("command_sessions");
+                state.history.set_world_state_baseline(world_state);
+            }
+            let fallback_ids = state.auto_compact_window_ids();
+            let window_id = window_id.unwrap_or(fallback_ids.window_id);
+            state.restore_auto_compact_window(
+                window_number,
+                AutoCompactWindowIds {
+                    first_window_id: first_window_id.unwrap_or_else(|| window_id.clone()),
+                    previous_window_id,
+                    window_id,
+                },
+            );
+            state.set_previous_turn_settings(previous_turn_settings.clone());
         }
         previous_turn_settings
     }
@@ -2786,11 +2844,96 @@ impl Session {
         state.set_auto_compact_window_estimated_prefill(tokens);
     }
 
-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
-        rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
-            _ => None,
-        })
+    fn restored_token_count_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenCountEvent> {
+        let mut found_token_count = false;
+        let mut info = None;
+        let mut rate_limits = None;
+        for (index, item) in rollout_items.iter().enumerate().rev() {
+            if let RolloutItem::Compacted(compacted) = item
+                && validated_segment_state_checkpoint(compacted, &rollout_items[index + 1..])
+                    .is_some()
+            {
+                // A certified token snapshot is complete even when either field is empty.
+                break;
+            }
+            let RolloutItem::EventMsg(EventMsg::TokenCount(event)) = item else {
+                continue;
+            };
+            found_token_count = true;
+            if info.is_none() {
+                info.clone_from(&event.info);
+            }
+            if rate_limits.is_none() {
+                rate_limits.clone_from(&event.rate_limits);
+            }
+            if info.is_some() && rate_limits.is_some() {
+                break;
+            }
+        }
+        found_token_count.then_some(TokenCountEvent { info, rate_limits })
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "checkpoint fields are constructed from one locked session-state snapshot"
+    )]
+    fn segment_state_checkpoint_from_state(
+        &self,
+        state: &SessionState,
+        observation_clock_floor_ms: Option<i64>,
+    ) -> CertifiedSegmentStateCheckpoint {
+        let (info, rate_limits) = state.token_info_and_rate_limits();
+        let window_ids = state.auto_compact_window_ids();
+        CertifiedSegmentStateCheckpoint::new(
+            CompactedItem {
+                message: String::new(),
+                replacement_history: Some(state.clone_history().annotated_items().to_vec()),
+                retained_context: Some(state.history.retained_context().clone()),
+                guardian_history: state.history.guardian_history_checkpoint(),
+                mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
+                compaction_response_id: None,
+                latest_token_usage_record: state.latest_token_usage_record.clone(),
+                window_number: Some(state.auto_compact_window_number()),
+                first_window_id: Some(window_ids.first_window_id),
+                previous_window_id: window_ids.previous_window_id,
+                window_id: Some(window_ids.window_id),
+                segment_state_checkpoint: None,
+                resume_metadata: Some(CompactionResumeMetadata {
+                    observation_clock_floor_ms,
+                    ..self.compaction_resume_metadata(state)
+                }),
+            },
+            state
+                .previous_turn_settings()
+                .map(|settings| SegmentPreviousTurnSettings {
+                    model: settings.model,
+                    cyber_access_program: settings.cyber_access_program,
+                    comp_hash: settings.comp_hash,
+                    realtime_active: settings.realtime_active,
+                }),
+            state
+                .history
+                .world_state_baseline()
+                .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
+            state.reference_context_item(),
+            ThreadSettingsAppliedEvent {
+                thread_id: Some(self.conversation_id),
+                thread_settings: state
+                    .session_configuration
+                    .thread_settings_snapshot(&state.session_configuration.environments),
+            },
+            TokenCountEvent { info, rate_limits },
+        )
+        .expect("live session state constructs a complete segment-state checkpoint")
+    }
+
+    async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
+        let observation_clock_floor_ms = match &self.realtime_history {
+            Some(history) => history.lock().await.observation_clock.floor_ms(),
+            None => None,
+        };
+        let state = self.state.lock().await;
+        self.segment_state_checkpoint_from_state(&state, observation_clock_floor_ms)
     }
 
     fn last_token_usage_record_from_rollout(
@@ -2857,6 +3000,11 @@ impl Session {
             credential_masking_warning,
         ) = {
             let mut state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                return Err(crate::config::ConstraintError::empty_field(
+                    "thread_settings_restart_required",
+                ));
+            }
             let mut updated =
                 match self.apply_session_settings(&state.session_configuration, &updates) {
                     Ok(updated) => updated,
@@ -5557,8 +5705,13 @@ impl Session {
         state.replace_history(items, reference_context_item);
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "checkpoint capture and publication must exclude concurrent session-state mutation"
+    )]
     pub(crate) async fn replace_compacted_history<'a>(
         &self,
+        turn_context: &Arc<TurnContext>,
         mut items: Vec<ResponseItemEnvelope>,
         reference_context_item: TurnContextItem,
         world_state_baseline: WorldStateSnapshot,
@@ -5597,151 +5750,201 @@ impl Session {
                 .get_or_insert_default()
                 .compaction_model_hash = compaction_model_hash.clone();
         }
-        // Wait for accepted updates to finish persisting, then keep later updates from
-        // overtaking the current settings snapshot while its checkpoint is written.
+        // Retain checkpoint admission and session state through commit classification. A queued
+        // settings transaction must observe the classified outcome before it can mutate state.
+        let _checkpoint_admission = self.checkpoint_admission_lock.lock().await;
+        if self.persistence_restart_required() {
+            return Err(CodexErr::Fatal(
+                "compacted-history persistence requires the thread to be restarted".to_string(),
+            ));
+        }
+        let has_durable_writer = self.live_thread().is_some();
+        // Keep the settings snapshot ordered after accepted settings writes.
         let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
         let observation_clock_floor_ms = match &self.realtime_history {
             Some(history) => history.lock().await.observation_clock.floor_ms(),
             None => None,
         };
-        // Prepare the checkpoint without replacing live history before publication commits.
-        let (compacted_item, world_state_baseline, started_item, reviewer_compaction_hash, items) = {
-            let mut state = self.state.lock().await;
-            let complete_replacement =
-                matches!(&installation, CompactedHistoryInstallation::Complete(..));
-            let replacement = match installation {
-                CompactedHistoryInstallation::Complete(metadata, _) => {
-                    let context = state
-                        .additional_context
-                        .restore_compacted_items(state.history.annotated_items(), &mut items);
-                    if !context.is_empty() {
-                        items = compact::insert_initial_context_before_last_real_user_or_summary(
-                            items, context,
-                        );
-                    }
-                    CompactedHistoryReplacement {
-                        items,
-                        world_state_baseline,
-                        metadata,
-                        started_item: None,
-                    }
+        let mut state = self.state.lock().await;
+        let prior_state = state.checkpoint_mutation_snapshot();
+        let complete_replacement =
+            matches!(&installation, CompactedHistoryInstallation::Complete(..));
+        let replacement = match installation {
+            CompactedHistoryInstallation::Complete(metadata, _) => {
+                let context = state
+                    .additional_context
+                    .restore_compacted_items(state.history.annotated_items(), &mut items);
+                if !context.is_empty() {
+                    items = compact::insert_initial_context_before_last_real_user_or_summary(
+                        items, context,
+                    );
                 }
-                CompactedHistoryInstallation::Prefix(prefix) => {
-                    let Some(replacement) = prefix.assemble_replacement(
-                        &mut state,
-                        items,
-                        world_state_baseline,
-                        self.services.model_client.auth_owner(),
-                    ) else {
-                        return Ok(false);
-                    };
-                    replacement
+                CompactedHistoryReplacement {
+                    items,
+                    world_state_baseline,
+                    metadata,
+                    started_item: None,
                 }
-            };
-            let CompactedHistoryReplacement {
-                mut items,
-                world_state_baseline,
-                metadata,
-                started_item,
-            } = replacement;
-            for envelope in &mut items {
-                self.assign_missing_response_item_id(&mut envelope.item);
             }
-            // Goal edits are published outside the running task. Keep edits accepted after
-            // the compaction input snapshot, in their original order, after its replacement.
-            if complete_replacement {
-                let replacement_goal_ids = crate::context::UserGoalUpdate::message_ids(
-                    items.iter().map(|envelope| &envelope.item),
-                );
-                items.extend(
-                    state
-                        .history
-                        .annotated_items()
-                        .iter()
-                        .filter(|envelope| {
-                            crate::context::UserGoalUpdate::message_text(&envelope.item).is_some()
-                                && envelope.item.id().is_some_and(|id| {
-                                    !metadata.input_goal_ids.contains(id)
-                                        && !replacement_goal_ids.contains(id)
-                                })
-                        })
-                        .cloned(),
-                );
+            CompactedHistoryInstallation::Prefix(prefix) => {
+                let Some(replacement) = prefix.assemble_replacement(
+                    &mut state,
+                    items,
+                    world_state_baseline,
+                    self.services.model_client.auth_owner(),
+                ) else {
+                    return Ok(false);
+                };
+                replacement
             }
-            state.history.checkpoint_sampling(&mut items);
-            let mut checkpoint_history = state.history.clone();
-            checkpoint_history.extend_rejected_audio_file_ids(rejected_audio_file_ids.clone());
-            checkpoint_history
-                .replace_compacted(items.clone(), metadata.reviewer_compaction_hash.as_deref());
-            let resume_metadata = CompactionResumeMetadata {
-                observation_clock_floor_ms,
-                rejected_audio_file_ids: checkpoint_history.rejected_audio_file_ids(),
-                ..self.compaction_resume_metadata(&state)
-            };
-            let compacted_item = CompactedItem {
-                message: metadata.message,
-                replacement_history: Some(items.clone()),
-                guardian_history: checkpoint_history.guardian_history_checkpoint(),
-                retained_context: Some(checkpoint_history.retained_context().clone()),
-                mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
-                window_number: Some(metadata.window_number),
-                first_window_id: Some(metadata.window_ids.first_window_id),
-                previous_window_id: metadata.window_ids.previous_window_id,
-                window_id: Some(metadata.window_ids.window_id),
-                compaction_response_id: metadata.compaction_response_id,
-                latest_token_usage_record: state.latest_token_usage_record.clone(),
-                resume_metadata: Some(resume_metadata),
-            };
-            (
-                compacted_item,
-                world_state_baseline,
-                started_item,
-                metadata.reviewer_compaction_hash,
-                items,
-            )
         };
-
-        // Use the replacement captured under the state lock, including goal edits retained
-        // by the installer. A later edit or token recomputation cannot change this checkpoint.
-        if let Some((trace, input)) = trace
-            && let Some(replacement) = &compacted_item.replacement_history
-        {
-            trace.record_local_install(
-                input.raw_items(),
-                replacement.iter().map(|entry| &entry.item),
+        let CompactedHistoryReplacement {
+            mut items,
+            world_state_baseline,
+            metadata,
+            started_item,
+        } = replacement;
+        for envelope in &mut items {
+            self.assign_missing_response_item_id(&mut envelope.item);
+        }
+        // Goal edits are published outside the running task. Keep edits accepted after
+        // the compaction input snapshot, in their original order, after its replacement.
+        if complete_replacement {
+            let replacement_goal_ids = crate::context::UserGoalUpdate::message_ids(
+                items.iter().map(|envelope| &envelope.item),
+            );
+            items.extend(
+                state
+                    .history
+                    .annotated_items()
+                    .iter()
+                    .filter(|envelope| {
+                        crate::context::UserGoalUpdate::message_text(&envelope.item).is_some()
+                            && envelope.item.id().is_some_and(|id| {
+                                !metadata.input_goal_ids.contains(id)
+                                    && !replacement_goal_ids.contains(id)
+                            })
+                    })
+                    .cloned(),
             );
         }
-
-        if let Some((turn_context, item)) = started_item {
-            // The prefix is now known to be valid; announce the install before checkpoint I/O.
-            self.emit_turn_item_started(turn_context, item).await;
+        state.history.checkpoint_sampling(&mut items);
+        if let Some((trace, input)) = trace {
+            trace.record_local_install(input.raw_items(), items.iter().map(|entry| &entry.item));
         }
-        let world_state_item = WorldStateItem::full(world_state_baseline.clone().into_object());
-        let mut replacement_items = vec![
-            RolloutItem::Compacted(Box::new(compacted_item)),
-            RolloutItem::WorldState(world_state_item),
-            RolloutItem::TurnContext(reference_context_item.clone()),
-        ];
-        // The frozen turn context must not override current settings in persisted metadata.
-        replacement_items.push(RolloutItem::EventMsg(
-            thread_settings::applied_event(self).await,
-        ));
-        let checkpoint_outcome = if let Some(live_thread) = self.live_thread() {
-            if self.persistence_restart_required() {
-                return Err(CodexErr::Fatal(
-                    "compacted-history persistence requires the thread to be restarted".to_string(),
-                ));
-            }
-            // Keep the session fenced while publication is in flight. If this future is
-            // cancelled, the detached LiveThread publication owner may still commit the
-            // checkpoint, so only the code paths that establish a consistent durable and
-            // in-memory state may clear this flag.
+        let CompactedHistoryMetadata {
+            input_goal_ids: _,
+            message,
+            prepared_window_advance,
+            compaction_response_id,
+            compaction_model_hash: _,
+            reviewer_compaction_hash,
+        } = metadata;
+        if has_durable_writer {
+            // Cancellation after checkpointed state changes begin is indeterminate until the
+            // detached publication owner classifies its result.
             self.persistence_restart_required
                 .store(true, Ordering::Release);
+        }
+        let Some((window_number, window_ids)) =
+            state.commit_prepared_auto_compact_window_advance(prepared_window_advance)
+        else {
+            state.restore_checkpoint_mutation(prior_state);
+            if has_durable_writer {
+                self.persistence_restart_required
+                    .store(false, Ordering::Release);
+            }
+            return Err(CodexErr::Fatal(
+                "prepared auto-compaction window no longer matches session state".to_string(),
+            ));
+        };
+        let mut compacted_item = CompactedItem {
+            message,
+            replacement_history: Some(items.clone()),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
+            compaction_response_id,
+            latest_token_usage_record: state.latest_token_usage_record.clone(),
+            window_number: Some(window_number),
+            first_window_id: Some(window_ids.first_window_id),
+            previous_window_id: window_ids.previous_window_id,
+            window_id: Some(window_ids.window_id),
+            segment_state_checkpoint: None,
+            resume_metadata: Some(CompactionResumeMetadata {
+                observation_clock_floor_ms,
+                rejected_audio_file_ids: {
+                    let mut ids = state.history.rejected_audio_file_ids();
+                    Arc::make_mut(&mut ids).extend(rejected_audio_file_ids.iter().cloned());
+                    ids
+                },
+                ..self.compaction_resume_metadata(&state)
+            }),
+        };
+        state
+            .history
+            .extend_rejected_audio_file_ids(rejected_audio_file_ids);
+        let invalidate_reviews = state.stage_annotated_history(
+            items,
+            Some(reference_context_item.clone()),
+            HistoryReplacement::Compaction {
+                reviewer_compaction_hash,
+            },
+        );
+        // The state mutex hides the candidate until commit classification; a non-commit restores
+        // prior_state, including its Guardian history. Persist the candidate's review checkpoint.
+        compacted_item.guardian_history = state.history.guardian_history_checkpoint();
+        compacted_item.retained_context = Some(state.history.retained_context().clone());
+        // Persist the same mandatory full baseline used to render the replacement window.
+        let world_state_item = WorldStateItem::full(world_state_baseline.clone().into_object());
+        state.history.set_world_state_baseline(world_state_baseline);
+        let recomputed_token_count =
+            Self::recompute_token_usage_state_in_state(&mut state, turn_context.as_ref());
+        let previous_turn_settings =
+            state
+                .previous_turn_settings()
+                .map(|settings| SegmentPreviousTurnSettings {
+                    model: settings.model,
+                    cyber_access_program: settings.cyber_access_program,
+                    comp_hash: settings.comp_hash,
+                    realtime_active: settings.realtime_active,
+                });
+        let thread_settings = ThreadSettingsAppliedEvent {
+            thread_id: Some(self.conversation_id),
+            thread_settings: state
+                .session_configuration
+                .thread_settings_snapshot(&state.session_configuration.environments),
+        };
+        let (token_info, rate_limits) = state.token_info_and_rate_limits();
+        let checkpoint = match CertifiedSegmentStateCheckpoint::new(
+            compacted_item,
+            previous_turn_settings,
+            Some(world_state_item),
+            Some(reference_context_item.clone()),
+            thread_settings,
+            TokenCountEvent {
+                info: token_info,
+                rate_limits,
+            },
+        ) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                state.restore_checkpoint_mutation(prior_state);
+                if has_durable_writer {
+                    self.persistence_restart_required
+                        .store(false, Ordering::Release);
+                }
+                return Err(CodexErr::Fatal(format!(
+                    "failed to certify compacted history: {error}"
+                )));
+            }
+        };
+        let replacement_items = checkpoint.items().to_vec();
+        let checkpoint_outcome = if let Some(live_thread) = self.live_thread() {
             Some(
                 live_thread
-                    .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(
-                        replacement_items.clone(),
+                    .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate_checkpoint(
+                        checkpoint,
                     ))
                     .await,
             )
@@ -5752,6 +5955,7 @@ impl Session {
         let persisted = match checkpoint_outcome {
             Some(SegmentCheckpointPersistenceOutcome::Committed) => true,
             Some(SegmentCheckpointPersistenceOutcome::NotCommitted { error }) => {
+                state.restore_checkpoint_mutation(prior_state);
                 self.persistence_restart_required
                     .store(false, Ordering::Release);
                 warn!(%error, "failed to persist compacted history without changing durable history");
@@ -5773,25 +5977,30 @@ impl Session {
                 .executed_tool_calls
                 .mark_mcp_attribution_persisted(revision);
         }
-        {
-            let mut state = self.state.lock().await;
-            state
-                .history
-                .extend_rejected_audio_file_ids(rejected_audio_file_ids);
-            state.replace_annotated_history(
-                items,
-                Some(reference_context_item),
-                HistoryReplacement::Compaction {
-                    reviewer_compaction_hash,
-                },
-            );
-            state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
-            state.history.set_world_state_baseline(world_state_baseline);
-            state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
+        if invalidate_reviews {
+            std::mem::take(&mut state.history_reset).cancel();
         }
+        state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
+        state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
+        drop(state);
         if persisted_checkpoint {
             self.persistence_restart_required
                 .store(false, Ordering::Release);
+        }
+        if let Some((turn_context, item)) = started_item {
+            // Event publication can acquire state. Keep it outside the transaction and emit
+            // nothing for rejected prefixes or checkpoints that did not commit.
+            self.emit_turn_item_started(turn_context, item).await;
+        }
+        if let Some(token_count) = recomputed_token_count {
+            self.send_event_raw_with_persistence(
+                Event {
+                    id: turn_context.sub_id.clone(),
+                    msg: EventMsg::TokenCount(token_count),
+                },
+                /*persist*/ false,
+            )
+            .await;
         }
         Ok(true)
     }
@@ -5801,6 +6010,22 @@ impl Session {
             || self
                 .live_thread()
                 .is_some_and(LiveThread::persistence_restart_required)
+    }
+
+    /// Admits a settings transaction only after an in-flight checkpoint is classified.
+    pub(crate) async fn lock_checkpoint_admission(
+        &self,
+        operation: &str,
+    ) -> anyhow::Result<OwnedMutexGuard<()>> {
+        let admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
+        if self.persistence_restart_required() {
+            anyhow::bail!(
+                "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+            );
+        }
+        Ok(admission)
     }
 
     fn require_restart_after_checkpoint_failure(&self) {
@@ -5909,30 +6134,85 @@ impl Session {
         world_state: &WorldState,
     ) -> (Vec<WorldStateUpdate>, WorldStateSnapshot) {
         let rendered = world_state.render_full_with_host_roster().await;
-        self.assemble_initial_context(step_context, rendered).await
+        self.build_initial_context_with_world_state_inner(
+            step_context,
+            rendered,
+            InitialContextAutoCompactWindow::Current,
+        )
+        .await
     }
 
-    pub(crate) async fn assemble_initial_context(
+    pub(crate) async fn build_initial_context_with_new_auto_compact_window(
+        &self,
+        step_context: &StepContext,
+        world_state: &WorldState,
+    ) -> (
+        Vec<WorldStateUpdate>,
+        WorldStateSnapshot,
+        PreparedAutoCompactWindowAdvance,
+    ) {
+        // Resolve the roster before allocating a new context window.
+        let rendered = world_state.render_full_with_host_roster().await;
+        let prepared_window_advance = self.prepare_auto_compact_window_advance().await;
+        let (updates, snapshot) = self
+            .build_initial_context_with_world_state_inner(
+                step_context,
+                rendered,
+                InitialContextAutoCompactWindow::Prepared(prepared_window_advance.ids()),
+            )
+            .await;
+        (updates, snapshot, prepared_window_advance)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn build_initial_context_with_world_state_for_auto_compact_window(
+        &self,
+        step_context: &StepContext,
+        world_state: &WorldState,
+        prepared_window_advance: &PreparedAutoCompactWindowAdvance,
+    ) -> (Vec<WorldStateUpdate>, WorldStateSnapshot) {
+        let rendered = world_state.render_full_with_host_roster().await;
+        self.build_initial_context_with_world_state_inner(
+            step_context,
+            rendered,
+            InitialContextAutoCompactWindow::Prepared(prepared_window_advance.ids()),
+        )
+        .await
+    }
+
+    async fn build_initial_context_with_world_state_inner(
         &self,
         step_context: &StepContext,
         (snapshot, updates): (WorldStateSnapshot, Vec<WorldStateUpdate>),
+        auto_compact_window: InitialContextAutoCompactWindow,
     ) -> (Vec<WorldStateUpdate>, WorldStateSnapshot) {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
         let mut standalone_items = Vec::<ResponseItem>::new();
         let mut context_window_hints = Vec::new();
+        let replaces_history = matches!(
+            &auto_compact_window,
+            InitialContextAutoCompactWindow::Prepared(_)
+        );
         let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
+            let auto_compact_window_ids = match auto_compact_window {
+                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids(),
+                InitialContextAutoCompactWindow::Prepared(ids) => ids,
+            };
             (
                 state.session_configuration.session_source.clone(),
-                state.auto_compact_window_ids().clone(),
+                auto_compact_window_ids,
                 state.history.clone(),
             )
         };
         if let Some(role_prompt) =
             load_agent_role_prompt(&turn_context.config, &session_source).await
-            && !history_contains_developer_text(&history, &role_prompt)
+            // A prepared checkpoint replaces the old history only after durable
+            // publication. Its instructions must not be deduplicated against
+            // the old history that remains visible during preparation.
+            && (replaces_history || !history_contains_developer_text(&history, &role_prompt))
         {
             developer_sections.push(DeveloperInstructions::new(&role_prompt).render_fragment());
         }
@@ -6290,6 +6570,7 @@ impl Session {
                 last_started_turn_id: state.last_started_turn_id.clone(),
                 turn_attribution: state.turn_attribution.clone(),
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
+                latest_rate_limits: state.token_info_and_rate_limits().1,
                 window_number: state.auto_compact_window_number(),
                 window_ids: state.auto_compact_window_ids(),
             }
@@ -6306,6 +6587,7 @@ impl Session {
             || state.last_started_turn_id != source_model_state.last_started_turn_id
             || state.turn_attribution != source_model_state.turn_attribution
             || state.latest_token_usage_record != source_model_state.latest_token_usage_record
+            || state.token_info_and_rate_limits().1 != source_model_state.latest_rate_limits
             || state.auto_compact_window_number() != source_model_state.window_number
             || state.auto_compact_window_ids() != source_model_state.window_ids
         {
@@ -6337,6 +6619,14 @@ impl Session {
         )
     }
 
+    pub(crate) async fn prepare_auto_compact_window_advance(
+        &self,
+    ) -> PreparedAutoCompactWindowAdvance {
+        let state = self.state.lock().await;
+        state.prepare_auto_compact_window_advance()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn advance_auto_compact_window(&self) -> (u64, AutoCompactWindowIds) {
         let mut state = self.state.lock().await;
         state.advance_auto_compact_window()
@@ -6358,7 +6648,6 @@ impl Session {
         world_state: Arc<WorldState>,
         trace: &CompactionTraceContext,
     ) -> CodexResult<u64> {
-        let turn_context = step_context.turn.as_ref();
         let history = self.clone_history().await;
         let input_goal_ids = crate::context::UserGoalUpdate::message_ids(history.raw_items());
         let retained_client_items = crate::compact_remote_v2::retained_client_items(
@@ -6367,15 +6656,14 @@ impl Session {
             |item| {
                 crate::compact_remote_v2::should_retain_client_item(
                     item,
-                    &turn_context.config.features,
+                    &step_context.turn.config.features,
                 )
             },
         );
-        // Resolve the roster before allocating a new context window.
-        let rendered = world_state.render_full_with_host_roster().await;
-        let (window_number, window_ids) = self.state.lock().await.start_new_context_window();
-        let (context_updates, world_state_snapshot) =
-            self.assemble_initial_context(step_context, rendered).await;
+        let (context_updates, world_state_snapshot, mut prepared_window_advance) = self
+            .build_initial_context_with_new_auto_compact_window(step_context, world_state.as_ref())
+            .await;
+        prepared_window_advance.clear_prefill_on_commit();
         let context_items =
             crate::context_manager::updates::merge_world_state_updates(context_updates)
                 .into_iter()
@@ -6384,6 +6672,7 @@ impl Session {
                 .collect();
         let turn_context_item = step_context.to_turn_context_item();
         self.replace_compacted_history(
+            &step_context.turn,
             context_items,
             turn_context_item,
             world_state_snapshot,
@@ -6392,18 +6681,16 @@ impl Session {
                 CompactedHistoryMetadata {
                     input_goal_ids,
                     message: String::new(),
-                    window_number,
-                    window_ids,
                     compaction_response_id: None,
                     compaction_model_hash: None,
                     reviewer_compaction_hash: None,
+                    prepared_window_advance,
                 },
                 Some((trace, &history)),
             ),
         )
         .await?;
-        self.recompute_token_usage(turn_context).await;
-        Ok(window_number)
+        Ok(self.current_auto_compact_window_number().await)
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
@@ -6705,49 +6992,61 @@ impl Session {
         budget_result
     }
 
+    #[cfg(test)]
     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
-        let history = self.clone_history().await;
-        let base_instructions = self.get_base_instructions().await;
-        let Some(estimated_total_tokens) =
-            history.estimate_token_count_with_base_instructions(&base_instructions)
-        else {
-            return;
-        };
-        {
+        let token_count = {
             let mut state = self.state.lock().await;
-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
-                total_token_usage: TokenUsage::default(),
-                last_usage_includes_reasoning: None,
-                last_token_usage: TokenUsage::default(),
-                model_context_window: None,
-            });
-
-            info.last_token_usage = TokenUsage {
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-                total_tokens: estimated_total_tokens.max(0),
-                codex_rollout_budget_units: None,
-            };
-
-            if let Some(model_context_window) = turn_context.model_context_window() {
-                info.model_context_window = Some(model_context_window);
-            }
-
-            // The local estimate already includes every retained reasoning item.
-            info.last_usage_includes_reasoning = Some(true);
-            state
-                .history
-                .set_token_info_with_boundary(Some(info), history.raw_items().len());
+            Self::recompute_token_usage_state_in_state(&mut state, turn_context)
+        };
+        if token_count.is_none() {
+            return;
         }
-        self.set_auto_compact_window_estimated_prefill_for_scope(
-            turn_context,
-            estimated_total_tokens,
-        )
-        .await;
         self.send_token_count_event(turn_context).await;
+    }
+
+    fn recompute_token_usage_state_in_state(
+        state: &mut SessionState,
+        turn_context: &TurnContext,
+    ) -> Option<TokenCountEvent> {
+        let base_instructions = BaseInstructions {
+            text: state.session_configuration.base_instructions.clone(),
+            provenance: state.base_instructions_provenance.clone(),
+        };
+        let estimated_total_tokens = state
+            .history
+            .estimate_token_count_with_base_instructions(&base_instructions)?;
+        let mut info = state.token_info().unwrap_or(TokenUsageInfo {
+            total_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
+            last_token_usage: TokenUsage::default(),
+            model_context_window: None,
+        });
+        info.last_token_usage = TokenUsage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: estimated_total_tokens.max(0),
+            codex_rollout_budget_units: None,
+        };
+        if let Some(model_context_window) = turn_context.model_context_window() {
+            info.model_context_window = Some(model_context_window);
+        }
+        // The local estimate already includes every retained reasoning item.
+        info.last_usage_includes_reasoning = Some(true);
+        let covered_items = state.history.raw_items().len();
+        state
+            .history
+            .set_token_info_with_boundary(Some(info), covered_items);
+        if matches!(
+            turn_context.config.model_auto_compact_token_limit_scope,
+            AutoCompactTokenLimitScope::BodyAfterPrefix
+        ) {
+            state.set_auto_compact_window_estimated_prefill(estimated_total_tokens);
+        }
+        let (info, rate_limits) = state.token_info_and_rate_limits();
+        Some(TokenCountEvent { info, rate_limits })
     }
 
     pub(crate) async fn update_rate_limits(
