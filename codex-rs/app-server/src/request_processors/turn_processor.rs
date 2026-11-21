@@ -21,9 +21,80 @@ use codex_protocol::turn_input::AnnotatedResponseItem;
 use codex_protocol::turn_input::InjectedResponseItem;
 use codex_protocol::turn_input::ResponseItemAnnotations;
 use codex_utils_path_uri::PathUri;
+use futures::FutureExt;
 
+use crate::error_code::OVERLOADED_ERROR_CODE;
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
+
+/// Removes a pending listener confirmation if its reply task ends unexpectedly.
+struct PendingThreadSettingsCleanup {
+    state: Arc<tokio::sync::Mutex<crate::thread_state::ThreadState>>,
+    submission_id: Option<String>,
+}
+
+impl Drop for PendingThreadSettingsCleanup {
+    fn drop(&mut self) {
+        if let Some(submission_id) = self.submission_id.take() {
+            let state = Arc::clone(&self.state);
+            tokio::spawn(async move {
+                state
+                    .lock()
+                    .await
+                    .pending_thread_settings_confirmations
+                    .remove(&submission_id);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_thread_settings_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn aborted_reply_task_removes_pending_confirmation() {
+        let state = Arc::new(tokio::sync::Mutex::new(
+            crate::thread_state::ThreadState::default(),
+        ));
+        state
+            .lock()
+            .await
+            .pending_thread_settings_confirmations
+            .insert("request".to_string());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let state = Arc::clone(&state);
+            let started = Arc::clone(&started);
+            async move {
+                let _cleanup = PendingThreadSettingsCleanup {
+                    state,
+                    submission_id: Some("request".to_string()),
+                };
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !state
+                    .lock()
+                    .await
+                    .pending_thread_settings_confirmations
+                    .contains("request")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted reply task should remove the pending confirmation");
+    }
+}
 
 pub(super) fn validate_user_input_image_urls(
     input: &[V2UserInput],
@@ -1012,7 +1083,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
-        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
@@ -1049,23 +1120,65 @@ impl TurnRequestProcessor {
 
         if thread_settings != codex_protocol::protocol::ThreadSettingsOverrides::default() {
             let (reply, outcome) = oneshot::channel();
-            self.submit_core_op(
-                request_id,
-                thread.as_ref(),
-                Op::ThreadSettings {
-                    thread_settings,
-                    reply: Some(reply),
-                },
-            )
-            .await
-            .map_err(|err| internal_error(format!("failed to update thread settings: {err}")))?;
-            outcome
-                .await
-                .map_err(|_| internal_error("thread settings operation ended before replying"))?
-                .map_err(|err| match err.details() {
-                    CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
-                    _ => internal_error(format!("failed to update thread settings: {err}")),
+            let trace = self.request_trace_context(request_id).await;
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let mut state = thread_state.lock().await;
+            // Register before the listener can consume the result, but never wait for
+            // queue capacity while holding its lock. A pending send has not enqueued the op.
+            let submission_id = thread
+                .submit_with_trace(
+                    Op::ThreadSettings {
+                        thread_settings,
+                        reply: Some(reply),
+                    },
+                    trace,
+                )
+                .now_or_never()
+                .ok_or_else(|| JSONRPCErrorError {
+                    code: OVERLOADED_ERROR_CODE,
+                    message: "Thread settings queue is full; retry after pending requests complete"
+                        .into(),
+                    data: None,
+                })?
+                .map_err(|err| {
+                    internal_error(format!("failed to update thread settings: {err}"))
                 })?;
+            if state.listener_matches(&thread) && state.listener_command_tx().is_some() {
+                state
+                    .pending_thread_settings_confirmations
+                    .insert(submission_id.clone());
+            }
+            drop(state);
+            // Keep the cleanup alive if the requesting connection goes away.
+            let completion = tokio::spawn(async move {
+                let mut cleanup = PendingThreadSettingsCleanup {
+                    state: Arc::clone(&thread_state),
+                    submission_id: Some(submission_id.clone()),
+                };
+                let outcome = outcome
+                    .await
+                    .map_err(|_| internal_error("thread settings operation ended before replying"))
+                    .and_then(|result| {
+                        result.map_err(|err| match err.details() {
+                            CodexErrorDetails::InvalidRequest(message) => {
+                                invalid_request(message.clone())
+                            }
+                            _ => internal_error(format!("failed to update thread settings: {err}")),
+                        })
+                    });
+                if outcome.is_err() {
+                    thread_state
+                        .lock()
+                        .await
+                        .pending_thread_settings_confirmations
+                        .remove(&submission_id);
+                }
+                cleanup.submission_id = None;
+                outcome
+            });
+            completion.await.map_err(|err| {
+                internal_error(format!("thread settings reply task failed: {err}"))
+            })??;
         }
 
         Ok(ThreadSettingsUpdateResponse {})
