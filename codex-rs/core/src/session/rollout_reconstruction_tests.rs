@@ -39,6 +39,15 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use test_case::test_case;
 
+fn context_for_test(session: &Session, turn: &TurnContext) -> ContextManager {
+    ContextManager::for_session(
+        turn.root_capabilities_restricted,
+        &turn.config.features,
+        turn.config.guardian_context_budgeting(),
+        Arc::clone(&session.item_id_generator),
+    )
+}
+
 #[tokio::test]
 async fn recorded_questions_share_queued_input_order_across_resume() {
     let (session, turn) = make_session_and_context().await;
@@ -225,7 +234,8 @@ async fn recorded_local_input_order_preserves_checkpoint_evidence(
                 phase: None,
             },
             acceptance_order: 0,
-        }
+        },
+        &session.item_id_generator,
     ));
     retained.mark_user_messages_incomplete();
     let mut saved_retained = serde_json::to_value(&retained).expect("saved retained evidence");
@@ -597,6 +607,7 @@ fn complete_thread_settings() -> ThreadSettingsAppliedEvent {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            requested_approvals_reviewer: None,
             permission_profile: PermissionProfile::workspace_write(),
             active_permission_profile: None,
             cwd: serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
@@ -842,8 +853,7 @@ async fn complete_history_rollback_does_not_restore_removed_checkpoint_authoriza
         user_message("keep original"),
         assistant_message("original answer"),
     ]);
-    let mut captured =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut captured = context_for_test(&session, &turn_context);
     captured.record_annotated_items(
         &mut retained,
         turn_context.model_info().truncation_policy.into(),
@@ -907,8 +917,7 @@ async fn checkpoint_only_rollback_preserves_retained_authorization(
         assistant_message("kept").into(),
     ];
     let mut removed = retained_user_message("remove", "Publish the removed result.", 2);
-    let mut captured =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut captured = context_for_test(&session, &turn_context);
     captured.record_annotated_items(
         &mut kept,
         turn_context.model_info().truncation_policy.into(),
@@ -985,8 +994,7 @@ async fn modern_certified_checkpoint_rollback_preserves_authoritative_metadata(
         GuardianContextMode::Independent => unreachable!("checkpoint-based review fixture"),
     };
     let mut kept = vec![kept_user, assistant_message("kept").into()];
-    let mut captured =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut captured = context_for_test(&session, &turn_context);
     if guardian_mode == GuardianContextMode::ThreadOwned {
         captured.record_annotated_items(
             &mut kept,
@@ -1123,7 +1131,7 @@ async fn modern_certified_checkpoint_rollback_preserves_authoritative_metadata(
         })
     );
     assert_eq!(bounded.window_number, 8);
-    assert_eq!(bounded.window_id.map(|id| id.to_string()), window_id);
+    assert_eq!(bounded.window_id, window_id);
     assert_eq!(
         bounded.reference_context_item,
         rollback_newer_turn.then_some(reference)
@@ -3225,6 +3233,7 @@ async fn completed_certified_companion_restores_its_settings(late_completion: bo
     };
     let mut compacted = checkpoint_compacted(vec![user_message("checkpoint")]);
     compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: Some(attribution.turn_id.clone()),
@@ -4566,7 +4575,12 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
         },
         assistant("reply-B", "B", "Temporary answer.", 6),
     ];
-    let mut captured = ContextManager::for_session(&worker_source, &turn_context.config.features);
+    let mut captured = ContextManager::for_session(
+        worker_source.is_non_root_agent(),
+        &turn_context.config.features,
+        turn_context.config.guardian_context_budgeting(),
+        Arc::clone(&session.item_id_generator),
+    );
     let policy = turn_context.model_info().truncation_policy.into();
     captured.record_annotated_items(&mut kept, policy);
     captured.record_annotated_items(&mut queued, policy);
@@ -4588,6 +4602,7 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
     // Starting from this checkpoint checks their original revision as well as their order.
     checkpoint.retained_context = Some(captured.retained_context().clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: Some("B".to_owned()),
@@ -4668,6 +4683,7 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
     for source in [worker_source, SessionSource::Cli] {
         let is_root = !source.is_non_root_agent();
+        turn_context.root_capabilities_restricted = source.is_non_root_agent();
         turn_context.session_source = source;
         let before = session
             .reconstruct_history_from_rollout(&turn_context, &items)
@@ -4780,9 +4796,9 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.history_mode = ThreadHistoryMode::Paginated;
     let thread_id = session.thread_id;
-    let initial_window_id = Uuid::now_v7();
-    let previous_window_id = Uuid::now_v7();
-    let checkpoint_window_id = Uuid::now_v7();
+    let initial_window_id = ContextWindowId::new_uuid_v7();
+    let previous_window_id = ContextWindowId::new_uuid_v7();
+    let checkpoint_window_id = ContextWindowId::new_uuid_v7();
     let meta = SessionMetaLine {
         meta: SessionMeta {
             id: thread_id,
@@ -4835,10 +4851,7 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
     let mut checkpoint = checkpoint_compacted(Vec::new());
     let mut expected_retained = codex_history::RetainedContext::default();
     if identified_messages {
-        let mut captured = ContextManager::for_session(
-            &turn_context.session_source,
-            &turn_context.config.features,
-        );
+        let mut captured = context_for_test(&session, &turn_context);
         captured.record_annotated_items(
             &mut kept,
             turn_context.model_info().truncation_policy.into(),
@@ -4877,11 +4890,13 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
                     phase: None,
                 },
                 codex_history::RetainedInputSource::Local(None),
+                &session.item_id_generator,
             );
         }
     }
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: expected_runtime,
         dynamic_tools: None,
         last_started_turn_id: (!empty_resume_metadata).then(|| "B".to_string()),
@@ -4889,9 +4904,9 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
         previous_turn_settings: previous_settings.clone(),
     });
     checkpoint.window_number = Some(8);
-    checkpoint.first_window_id = Some(initial_window_id.to_string());
-    checkpoint.previous_window_id = Some(previous_window_id.to_string());
-    checkpoint.window_id = Some(checkpoint_window_id.to_string());
+    checkpoint.first_window_id = Some(initial_window_id.clone());
+    checkpoint.previous_window_id = Some(previous_window_id.clone());
+    checkpoint.window_id = Some(checkpoint_window_id.clone());
     let mut usage = codex_protocol::protocol::TokenUsageRecord {
         thread_id,
         session_id: thread_id.into(),
@@ -5220,14 +5235,12 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
     let mut replacement = (0..8)
         .map(|index| retained_user_message(&format!("kept-{index}"), "Keep this private.", index))
         .collect::<Vec<_>>();
-    let mut captured =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut captured = context_for_test(&session, &turn_context);
     captured.record_annotated_items(
         &mut replacement,
         turn_context.model_info().truncation_policy.into(),
     );
-    let mut surviving =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut surviving = context_for_test(&session, &turn_context);
     for envelope in &replacement[2..] {
         surviving
             .replay_annotated_item(envelope, turn_context.model_info().truncation_policy.into());
@@ -5252,6 +5265,7 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
     });
     checkpoint.guardian_history = guardian_baseline.clone();
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: Some("kept-7".to_string()),
@@ -5312,6 +5326,7 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
         });
     for source in [turn_context.session_source.clone(), worker_source] {
         let is_root = !source.is_non_root_agent();
+        turn_context.root_capabilities_restricted = source.is_non_root_agent();
         turn_context.session_source = source;
         let before = session
             .reconstruct_history_from_rollout(&turn_context, &items)
@@ -5388,6 +5403,7 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
     checkpoint.retained_context = Some(Default::default());
     checkpoint.window_number = Some(1);
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -5454,6 +5470,7 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
     let (_, full, bounded) =
         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
     for source in [worker_source, SessionSource::Cli] {
+        turn_context.root_capabilities_restricted = source.is_non_root_agent();
         turn_context.session_source = source;
         let original = session
             .reconstruct_history_from_rollout(&turn_context, &items)
@@ -5543,6 +5560,7 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.retained_context = Some(worker_retained);
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: Some("worker-task".to_string()),
@@ -5603,6 +5621,7 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
         migrate_checkpoint_fixture(home.path(), session.thread_id, &items).await;
     for source in [worker_source.clone(), SessionSource::Cli] {
         let root_thread_owned = !source.is_non_root_agent();
+        turn_context.root_capabilities_restricted = source.is_non_root_agent();
         turn_context.session_source = source;
         let before = session
             .reconstruct_history_from_rollout(&turn_context, &items)
@@ -5647,10 +5666,9 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
             {
                 let mut state = resumed_session.state.lock().await;
                 state.session_configuration.session_source = turn_context.session_source.clone();
-                state.history = ContextManager::for_session(
-                    &turn_context.session_source,
-                    &turn_context.config.features,
-                );
+                state.session_configuration.root_capabilities_restricted =
+                    turn_context.root_capabilities_restricted;
+                state.history = context_for_test(&resumed_session, &turn_context);
             }
             resumed_session
                 .record_initial_history(InitialHistory::Resumed(ResumedHistory {
@@ -5693,6 +5711,7 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash: 
     let mut checkpoint = checkpoint_compacted(Vec::new());
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -5789,10 +5808,7 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash: 
             assert_eq!(reconstructed, before);
             let (installed, _) = make_session_and_context().await;
             let mut state = installed.state.lock().await;
-            state.history = ContextManager::for_session(
-                &turn_context.session_source,
-                &turn_context.config.features,
-            );
+            state.history = context_for_test(&installed, &turn_context);
             assert_eq!(
                 Session::install_rollout_reconstruction_in_state(
                     &mut state,
@@ -5838,6 +5854,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
         baseline.clone().into(),
     ]));
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -5946,8 +5963,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
         review_input: Some(position),
         resolved_review_input: None,
     });
-    let mut inferred =
-        ContextManager::for_session(&turn_context.session_source, &turn_context.config.features);
+    let mut inferred = context_for_test(&session, &turn_context);
     inferred.replace_annotated(checkpoint.replacement_history.clone().unwrap());
     inferred.restore_replayed_review_context(&thread_owned, Some(&expected_guardian), None);
     // Without explicitly restoring None, the final opaque model activates this fallback.
@@ -5989,6 +6005,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
         });
     for source in [turn_context.session_source.clone(), worker_source] {
         let is_root = !source.is_non_root_agent();
+        turn_context.root_capabilities_restricted = source.is_non_root_agent();
         turn_context.session_source = source;
         let original = session
             .reconstruct_history_from_rollout(&turn_context, &items)
@@ -6036,6 +6053,7 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
         unreachable!()
     };
     *root_retains_legacy_transcript = None;
+    turn_context.root_capabilities_restricted = false;
     turn_context.session_source = SessionSource::Cli;
     let predecessor = session
         .reconstruct_history_from_rollout(&turn_context, &replayed_items)
@@ -6067,6 +6085,7 @@ async fn migration_preserves_review_eviction_under_current_model_policy(has_guar
     let mut checkpoint = checkpoint_compacted(baseline.clone());
     checkpoint.guardian_history = has_guardian_backup.then(|| guardian_baseline.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -6159,6 +6178,7 @@ async fn review_input_resolution_follows_reconstruction_checkpoint() {
     let mut selected = checkpoint_compacted(vec![user_message("A")]);
     selected.segment_state_checkpoint = None;
     selected.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -6254,6 +6274,7 @@ fn modern_state_only_checkpoint_is_invisible_without_hiding_real_compaction() {
     checkpoint.message.clear();
     checkpoint.segment_state_checkpoint = None;
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -6288,6 +6309,7 @@ fn nonempty_summary_compaction_remains_visible(modern: bool) {
     checkpoint.segment_state_checkpoint = None;
     checkpoint.compaction_response_id = None;
     checkpoint.resume_metadata = modern.then_some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,
@@ -6313,6 +6335,7 @@ fn incomplete_modern_checkpoint_without_window_remains_visible() {
     checkpoint.window_number = None;
     checkpoint.compaction_response_id = None;
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
         last_started_turn_id: None,

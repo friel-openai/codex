@@ -231,6 +231,7 @@ mod tests {
             "review-alias".to_string(),
             CustomModelConfig {
                 model: "gpt-5.5".to_string(),
+                trust_candidate_constraints: false,
                 model_context_window: None,
                 routing_profile: None,
                 model_auto_compact_token_limit: None,
