@@ -43,15 +43,15 @@ async fn thread_list_relation_filters_ignore_historical_edges_for_unloaded_root(
         ),
     ] {
         let created_at = DateTime::parse_from_rfc3339(created_at)?.with_timezone(&Utc);
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
             codex_home.path().join(format!("{thread_id}.jsonl")),
             created_at,
             source,
-        );
-        builder.model_provider = Some(model_provider.to_string());
-        builder.cwd = codex_home.path().to_path_buf();
-        builder.cli_version = Some("0.0.0".to_string());
+        )
+        .with_model_provider(Some(model_provider.to_string()))
+        .with_cwd(codex_home.path().to_path_buf())
+        .with_cli_version("0.0.0".to_string());
         let mut metadata = builder.build(model_provider);
         metadata.preview = Some("child thread".to_string());
         metadata.first_user_message = metadata.preview.clone();
@@ -125,15 +125,15 @@ async fn thread_list_relation_filters_do_not_page_historical_edges_for_unloaded_
             agent_nickname: Some(format!("worker-{index}")),
             agent_role: None,
         });
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             child_id,
             codex_home.path().join(format!("{child_id}.jsonl")),
             created_at + chrono::Duration::seconds(index),
             source,
-        );
-        builder.model_provider = Some("mock_provider".to_string());
-        builder.cwd = codex_home.path().to_path_buf();
-        builder.cli_version = Some("0.0.0".to_string());
+        )
+        .with_model_provider(Some("mock_provider".to_string()))
+        .with_cwd(codex_home.path().to_path_buf())
+        .with_cli_version("0.0.0".to_string());
         state_db
             .upsert_thread(&builder.build("mock_provider"))
             .await?;
