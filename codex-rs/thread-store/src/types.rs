@@ -302,6 +302,8 @@ impl FreezeRolloutSegmentParams {
 pub struct FrozenRolloutSegment {
     /// Reference to the immutable source prefix.
     pub reference: RolloutReferenceItem,
+    /// Native upstream pointer to the same immutable prefix for paginated history.
+    pub history_base: Option<HistoryPosition>,
     /// Canonical metadata line copied from the source segment before it was frozen.
     pub source_session_meta: SessionMetaLine,
     /// Persisted history mode inherited by continuations and full-history forks.
@@ -384,10 +386,27 @@ pub struct RevertThreadParams {
 pub struct PreparedFork {
     /// Immediate source thread, even when the normalized history base names an ancestor.
     pub source_thread_id: ThreadId,
+    /// Exclusive ordinal selected in the source before normalizing a boundary into its ancestor.
+    /// Context-only forks retain this cutoff even when they do not freeze a source segment.
+    /// Native backends without an ordinal-backed source leave it absent.
+    pub source_end_ordinal_exclusive: Option<u64>,
     /// Compatibility position selected while normalizing the paginated lineage.
     pub history_base: Option<HistoryPosition>,
+    /// Canonical immutable rollout prefix inherited by a durable child.
+    ///
+    /// Context-only ephemeral forks do not persist a child rollout, so they retain the bounded
+    /// model context instead of freezing the source rollout.
+    pub frozen_segment: Option<FrozenRolloutSegment>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
+    /// Latest source model context used for inherited settings.
+    pub latest_model_context: Arc<Vec<RolloutItem>>,
+    /// Logical history returned for the selected fork boundary.
+    pub response_history: Arc<Vec<RolloutItem>>,
+    /// Complete source history copied when a reference cannot represent the selected boundary.
+    pub copied_history: Option<Arc<Vec<RolloutItem>>>,
+    /// Whether a latest-state fork synthesizes an interruption for an open turn.
+    pub interrupt_if_open: bool,
     /// Backend-specific history retained for this fork.
     pub history: PreparedForkHistory,
     /// Opening preview from the frozen transcript when compaction omitted it from model context.
@@ -406,29 +425,14 @@ pub enum PreparedForkHistory {
     NativeReference,
     /// Complete history copied from an externally owned source instead of a mutable reference.
     Copied {
-        latest_model_context: Arc<Vec<RolloutItem>>,
-        response_history: Arc<Vec<RolloutItem>>,
         /// Selected source boundary retained for attached-child visibility.
         forked_from_ordinal_exclusive: Option<u64>,
-        interrupt_if_open: bool,
     },
     FrozenRollout {
-    /// Canonical immutable rollout prefix inherited by the child.
-    frozen_segment: FrozenRolloutSegment,
-    /// Latest source context used for settings that follow the source thread rather than the
-    /// selected history boundary.
-    latest_model_context: Arc<Vec<RolloutItem>>,
-    /// Complete logical history selected by the requested fork boundary.
-    response_history: Arc<Vec<RolloutItem>>,
-    /// Complete logical history that must be copied because a `history_base` edge cannot be
-    /// represented by the frozen segment reference.
-    copied_history: Option<Arc<Vec<RolloutItem>>>,
-    /// Complete projected parent turns when indexed fork preparation avoids JSONL replay.
-    projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
-    /// Authoritative copy-on-write model history retained without copying parent response items.
-    shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
-    /// Whether a latest-state fork should synthesize an interruption for an open turn.
-    interrupt_if_open: bool,
+        /// Complete projected parent turns when indexed fork preparation avoids JSONL replay.
+        projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
+        /// Authoritative copy-on-write model history retained without copying parent response items.
+        shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
     },
 }
 
@@ -453,14 +457,26 @@ impl PreparedFork {
         model_context: Arc<Vec<RolloutItem>>,
         latest_model_context: Arc<Vec<RolloutItem>>,
         response_history: Arc<Vec<RolloutItem>>,
+        copied_history: Arc<Vec<RolloutItem>>,
         forked_from_ordinal_exclusive: Option<u64>,
         interrupt_if_open: bool,
         source_reservation: impl std::fmt::Debug + Send + 'static,
     ) -> Self {
         Self {
-            source_thread_id, history_base, model_context, preview_before_compaction: None,
+            source_thread_id,
+            source_end_ordinal_exclusive: forked_from_ordinal_exclusive,
+            history_base,
+            frozen_segment: None,
+            model_context,
+            latest_model_context,
+            response_history,
+            copied_history: Some(copied_history),
+            interrupt_if_open,
+            preview_before_compaction: None,
             _source_reservation: Some(Box::new(source_reservation)),
-            history: PreparedForkHistory::Copied { latest_model_context, response_history, forked_from_ordinal_exclusive, interrupt_if_open },
+            history: PreparedForkHistory::Copied {
+                forked_from_ordinal_exclusive,
+            },
         }
     }
 
@@ -468,8 +484,9 @@ impl PreparedFork {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_thread_id: ThreadId,
+        source_end_ordinal_exclusive: u64,
         history_base: Option<HistoryPosition>,
-        frozen_segment: FrozenRolloutSegment,
+        frozen_segment: Option<FrozenRolloutSegment>,
         model_context: Arc<Vec<RolloutItem>>,
         latest_model_context: Arc<Vec<RolloutItem>>,
         response_history: Arc<Vec<RolloutItem>>,
@@ -478,18 +495,19 @@ impl PreparedFork {
     ) -> Self {
         Self {
             source_thread_id,
+            source_end_ordinal_exclusive: Some(source_end_ordinal_exclusive),
             history_base,
-            model_context,
-            preview_before_compaction: None,
-            _source_reservation: Some(Box::new(source_reservation)),
-            history: PreparedForkHistory::FrozenRollout {
             frozen_segment,
+            model_context,
             latest_model_context,
             response_history,
             copied_history: None,
-            projected_response_turns: None,
-            shared_model_response_items: None,
             interrupt_if_open,
+            preview_before_compaction: None,
+            _source_reservation: Some(Box::new(source_reservation)),
+            history: PreparedForkHistory::FrozenRollout {
+                projected_response_turns: None,
+                shared_model_response_items: None,
             },
         }
     }
@@ -501,12 +519,42 @@ impl PreparedFork {
         model_context: Arc<Vec<RolloutItem>>,
         source_reservation: impl std::fmt::Debug + Send + 'static,
     ) -> Self {
-        Self { source_thread_id, history_base, model_context, history: PreparedForkHistory::NativeReference, preview_before_compaction: None, _source_reservation: Some(Box::new(source_reservation)) }
+        Self {
+            source_thread_id,
+            source_end_ordinal_exclusive: None,
+            history_base,
+            frozen_segment: None,
+            latest_model_context: Arc::clone(&model_context),
+            response_history: Arc::clone(&model_context),
+            copied_history: None,
+            interrupt_if_open: true,
+            model_context,
+            history: PreparedForkHistory::NativeReference,
+            preview_before_compaction: None,
+            _source_reservation: Some(Box::new(source_reservation)),
+        }
     }
 
     /// Creates a native reference whose backend revalidates the source at finalization.
-    pub fn with_source_revalidation(source_thread_id: ThreadId, history_base: Option<HistoryPosition>, model_context: Arc<Vec<RolloutItem>>) -> Self {
-        Self { source_thread_id, history_base, model_context, history: PreparedForkHistory::NativeReference, preview_before_compaction: None, _source_reservation: None }
+    pub fn with_source_revalidation(
+        source_thread_id: ThreadId,
+        history_base: Option<HistoryPosition>,
+        model_context: Arc<Vec<RolloutItem>>,
+    ) -> Self {
+        Self {
+            source_thread_id,
+            source_end_ordinal_exclusive: None,
+            history_base,
+            frozen_segment: None,
+            latest_model_context: Arc::clone(&model_context),
+            response_history: Arc::clone(&model_context),
+            copied_history: None,
+            interrupt_if_open: true,
+            model_context,
+            history: PreparedForkHistory::NativeReference,
+            preview_before_compaction: None,
+            _source_reservation: None,
+        }
     }
 }
 
