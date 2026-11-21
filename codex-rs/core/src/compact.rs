@@ -22,6 +22,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+pub(crate) use crate::independent_thread::retention::is_independent_thread_message;
+pub(crate) use crate::independent_thread::retention::retain_independent_thread_messages;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::FileAudioDurations;
@@ -477,6 +479,7 @@ async fn run_compact_task_inner_impl(
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
 
     let mut new_history = build_compacted_history(&history_snapshot, &summary_text);
+    retain_independent_thread_messages(history_snapshot.annotated_items(), &mut new_history);
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
