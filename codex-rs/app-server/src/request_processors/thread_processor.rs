@@ -8545,10 +8545,8 @@ impl ThreadRequestProcessor {
         )
         .await?;
         if session_configured.rollout_path.is_some() {
-            let preview = if native_reference {
+            let preview = if native_reference || paginated_source {
                 bounded_thread_preview(inherited_preview.clone())
-            } else if paginated_source && last_turn_id.is_none() && before_turn_id.is_none() {
-                bounded_thread_preview(source_thread.preview.clone())
             } else {
                 preview_from_rollout_items(&response_history_items)
             };
@@ -8659,10 +8657,8 @@ impl ThreadRequestProcessor {
                 &config_snapshot,
                 /*path*/ None,
             );
-            thread.preview = if native_reference {
+            thread.preview = if native_reference || paginated_source {
                 bounded_thread_preview(inherited_preview)
-            } else if paginated_source && last_turn_id.is_none() && before_turn_id.is_none() {
-                bounded_thread_preview(source_thread.preview.clone())
             } else {
                 preview_from_rollout_items(&response_history_items)
             };

@@ -94,6 +94,39 @@ pub(in crate::local) async fn find_visible_turn(
     })?
     .is_some_and(|encoded_offset| encoded_offset >= 0);
     if complete_root_projection
+        && let Some(root_segment) = lineage.segments().last()
+        && root_segment.rollout_id() == root_rollout_id
+        && !root_segment.filters_items()
+        && let Some(row) = query_projected_turn(pool, root_rollout_id, turn_id).await?
+        && row.status == "interrupted"
+        && let (Ok(start), Some(end)) = (
+            u64::try_from(row.rollout_ordinal),
+            row.rollout_end_ordinal
+                .and_then(|ordinal| u64::try_from(ordinal).ok()),
+        )
+        && start < root_segment.start_ordinal()
+        && end >= root_segment.start_ordinal()
+        && root_segment.end_ordinal().is_none_or(|limit| end < limit)
+        && row.rollout_end_byte_offset.is_some()
+        && let Ok(source) = find_turn(
+            pool,
+            lineage.segments()[..lineage.segments().len() - 1]
+                .iter()
+                .rev(),
+            turn_id,
+        )
+        .await
+        && source.status == "inProgress"
+        && source.rollout_end_ordinal.is_none()
+        && source.rollout_ordinal == row.rollout_ordinal
+        && source.rollout_byte_offset.is_some()
+        && source.rollout_byte_offset == row.rollout_byte_offset
+    {
+        // A fork can interrupt an inherited turn in its own rollout. The projected turn
+        // starts in the predecessor, but its terminal boundary belongs to this segment.
+        return Ok(row);
+    }
+    if complete_root_projection
         && lineage.segments().len() == 1
         && !lineage.segments()[0].filters_items()
         && let Some(mut row) = query_projected_turn(pool, root_rollout_id, turn_id).await?

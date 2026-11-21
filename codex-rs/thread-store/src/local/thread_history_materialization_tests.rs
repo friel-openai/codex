@@ -3282,6 +3282,76 @@ async fn paginated_fork_without_response_history_reuses_bounded_model_context() 
 }
 
 #[tokio::test]
+async fn explicit_fork_preview_uses_first_visible_user_before_compaction() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    let item = |turn_id: &str, text: &str| {
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            content_token_count: None,
+            thread_id,
+            turn_id: turn_id.to_string(),
+            item: TurnItem::UserMessage(UserMessageItem {
+                id: format!("{turn_id}-item"),
+                client_id: None,
+                content: vec![codex_protocol::user_input::UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            }),
+            started_at_ms: None,
+            completed_at_ms: 0,
+        }))
+    };
+    let compacted = RolloutItem::Compacted(
+        serde_json::from_value(serde_json::json!({
+            "message": "summary", "replacement_history": [], "window_number": 1
+        }))
+        .expect("compaction"),
+    );
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("first"),
+                user_message("first message"),
+                item("first", "first message"),
+                turn_completed("first"),
+                turn_started("second"),
+                user_message("second message"),
+                item("second", "second message"),
+                turn_completed("second"),
+                compacted,
+                turn_started("after-compaction"),
+            ],
+        })
+        .await
+        .expect("append history");
+    store.shutdown_thread(thread_id).await.expect("shutdown");
+    let prepared = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::BeforeTurn("after-compaction".to_string()),
+        })
+        .await
+        .expect("prepare fork");
+    assert_eq!(
+        prepared.preview_before_compaction.as_deref(),
+        Some("first message")
+    );
+    drop(prepared);
+    let empty = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::BeforeTurn("first".to_string()),
+        })
+        .await
+        .expect("prepare empty fork");
+    assert!(empty.preview_before_compaction.is_none());
+}
+
+#[tokio::test]
 async fn segmented_paginated_explicit_fork_fails_closed_without_a_recent_checkpoint() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
@@ -4617,6 +4687,58 @@ async fn check_nested_user_cutoff(filter_text: Option<&str>) {
             copied.as_slice(),
             "cutoff message 1"
         ));
+    }
+}
+
+#[tokio::test]
+async fn explicit_fork_rejects_missing_or_replaced_checkpoint_source() {
+    for replace in [false, true] {
+        let home = TempDir::new().expect("temp dir");
+        let store = projection_store(home.path()).await;
+        let thread_id = ThreadId::new();
+        let (rollout_id, predecessors) = certified_supervisor_source(&store, thread_id).await;
+        let path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("active source");
+        let before = codex_rollout::read_session_meta_line(&path)
+            .await
+            .expect("read active metadata")
+            .meta
+            .history_base
+            .expect("history base");
+        let predecessor = predecessors.last().expect("immediate predecessor");
+        if replace {
+            let mut bytes = fs::read(predecessor).expect("read predecessor");
+            bytes[0] = b'!';
+            let replacement = predecessor.with_extension("replacement");
+            fs::write(&replacement, bytes).expect("write replacement");
+            fs::rename(replacement, predecessor).expect("replace predecessor");
+        } else {
+            fs::remove_file(predecessor).expect("remove predecessor");
+        }
+        let result = store
+            .prepare_fork_without_response_history_for_rollout(
+                PrepareForkParams {
+                    thread_id,
+                    boundary: ForkBoundary::BeforeTurn("current-turn".to_string()),
+                },
+                rollout_id,
+                false,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "missing or changed predecessor must not produce a fork"
+        );
+        let after = codex_rollout::read_session_meta_line(&path)
+            .await
+            .expect("read unchanged active metadata")
+            .meta
+            .history_base
+            .expect("history base");
+        assert_eq!(after.end_ordinal_exclusive, before.end_ordinal_exclusive);
+        assert_eq!(after.end_byte_offset, before.end_byte_offset);
     }
 }
 

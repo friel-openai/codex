@@ -10413,6 +10413,48 @@ async fn complete_root_search_preserves_latest_visible_duplicate_turn() {
 }
 
 #[tokio::test]
+async fn visible_fork_lookup_does_not_select_an_older_foreign_duplicate() {
+    let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let parent = ThreadId::new();
+    let middle = ThreadId::new();
+    let parent_path = rollout_path(home.path(), parent);
+    write_rollout_with_end(&parent_path, parent, None, 3);
+    let middle_path = rollout_path(home.path(), middle);
+    write_rollout_with_end(
+        &middle_path,
+        middle,
+        Some(history_position(&parent_path, parent, 3)),
+        3,
+    );
+    let child_path = rollout_path(home.path(), child);
+    write_rollout_with_end(
+        &child_path,
+        child,
+        Some(history_position(&middle_path, middle, 6)),
+        2,
+    );
+    let db = history_db(&store).await;
+    insert_turn(db, parent, "shared", 1, "inProgress", None, None, None).await;
+    insert_turn(db, middle, "shared", 4, "completed", None, None, None).await;
+    insert_turn(db, child, "shared", 1, "interrupted", None, None, None).await;
+    sqlx::query("UPDATE thread_turns SET rollout_end_ordinal = 7, rollout_end_byte_offset = 1 WHERE thread_id = ? AND turn_id = 'shared'")
+        .bind(child.to_string()).execute(db).await.expect("seed interrupted root row");
+    sqlx::query("INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 8)")
+        .bind(child.to_string()).bind(i64::try_from(fs::metadata(&child_path).unwrap().len()).unwrap())
+        .execute(db).await.expect("seed complete projection");
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(child)
+        .await
+        .expect("lineage");
+    let selected = super::super::turn_lookup::find_visible_turn(db, &lineage, "shared")
+        .await
+        .expect("visible duplicate");
+    assert_eq!(selected.rollout_id, middle);
+    assert_eq!(selected.rollout_ordinal, 4);
+    assert_eq!(selected.status, "completed");
+}
+
+#[tokio::test]
 async fn lineage_reads_page_across_parent_and_child_segments() {
     assert_native_lineage_pagination(
         /*adopt_stock_projection*/ false, /*same_thread_history_base*/ false,
