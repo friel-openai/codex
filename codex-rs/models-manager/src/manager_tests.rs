@@ -1018,6 +1018,7 @@ async fn thread_view_preserves_manager_default_selection_policy() {
         CustomModelConfig {
             model: "gpt-real".to_string(),
             routing_profile: None,
+            trust_candidate_constraints: false,
             model_context_window: None,
             model_auto_compact_token_limit: None,
         },

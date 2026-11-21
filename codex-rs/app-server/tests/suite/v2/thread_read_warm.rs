@@ -40,7 +40,7 @@ async fn complete_native_projection_reads_and_resumes_without_opening_ancestors(
             subagent_history_start_ordinal: None,
             persistence_mode: Default::default(),
             initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
