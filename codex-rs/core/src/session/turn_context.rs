@@ -2,10 +2,12 @@ use super::step_settings::ResolvedStepSettings;
 use super::token_budget::has_explicit_settings;
 use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::agents_md::LoadedAgentsMd;
 use crate::config::TokenBudgetConfig;
 use crate::cyber_access_program;
 use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::EnvironmentConfigOrigin;
+use crate::environment_selection::InitialTurnEnvironmentRecovery;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshot;
@@ -83,6 +85,10 @@ pub(crate) struct TurnEnvironment {
     pub(crate) selection: TurnEnvironmentSelection,
     pub(crate) config_origin: EnvironmentConfigOrigin,
     pub(crate) attachment: Arc<EnvironmentAttachment>,
+    /// Empty is a verified absence of project instructions on the bound connection.
+    pub(crate) verified_project_instructions: Option<Arc<LoadedAgentsMd>>,
+    /// A verified initial recovery is active-turn only; child snapshots retain this rejection.
+    pub(crate) initial_recovery: Option<Arc<InitialTurnEnvironmentRecovery>>,
     /// Cached from the selected executor; `None` means it did not report one.
     pub(crate) user_home_dir: Option<PathUri>,
     /// Cached from the selected executor; `None` means it did not report them.
@@ -97,7 +103,6 @@ pub(crate) struct TurnEnvironment {
 }
 
 impl TurnEnvironment {
-    #[cfg(test)]
     pub(crate) fn new(
         selection: TurnEnvironmentSelection,
         config_origin: EnvironmentConfigOrigin,
@@ -106,7 +111,7 @@ impl TurnEnvironment {
     ) -> Self {
         let (attachment, guard, _) =
             EnvironmentAttachment::new(&selection.environment_id, environment);
-        // Standalone test snapshots have no thread selection to signal detach.
+        // Standalone snapshots have no thread selection to signal detach.
         guard.disarm();
         Self::from_attachment(selection, config_origin, attachment, shell)
     }
@@ -122,6 +127,8 @@ impl TurnEnvironment {
             selection,
             config_origin,
             attachment,
+            verified_project_instructions: None,
+            initial_recovery: None,
             user_home_dir: None,
             temporary_directories: None,
             shell,
@@ -351,6 +358,8 @@ pub(crate) struct NewTurnContextOptions {
     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
     pub(crate) helper_admission: Option<crate::agent::helper_daybreak::turn::HelperTurnAdmission>,
+    /// Automatic, context-only, and recovery tasks cannot activate a new startup recovery.
+    pub(crate) allow_initial_default_recovery: bool,
 }
 
 /// The context needed for a single turn of the thread.
@@ -446,6 +455,9 @@ enum TurnContextBuildMode {
     /// Captures recording settings without updating shared model/multi-agent metadata
     /// or discovering skills. Must not initialize context or capture an execution step.
     InjectItems,
+
+    /// Builds a shutdown hook context without preparing a new turn.
+    SessionEnd,
 }
 
 impl TurnContext {
@@ -1488,7 +1500,9 @@ impl Session {
         if let Some(service_tier) = service_tier_for_turn {
             Arc::make_mut(&mut configuration.step_settings).service_tier = Some(service_tier);
         }
-        let turn_environments = self.activate_turn_environments(&configuration).await;
+        let turn_environments = self
+            .activate_turn_environments(&configuration, options.allow_initial_default_recovery)
+            .await;
         let turn_context = self
             .new_turn_from_configuration(sub_id, configuration, turn_environments, options)
             .await;
@@ -1582,12 +1596,12 @@ impl Session {
                     .insert_arc(Arc::clone(&model_info.model));
                 self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
             }
-            TurnContextBuildMode::StartupPrewarm | TurnContextBuildMode::InjectItems => {
-                per_turn_config.multi_agent_version_for_model(
-                    self.multi_agent_version()
-                        .or(model_info.multi_agent_version),
-                )
-            }
+            TurnContextBuildMode::StartupPrewarm
+            | TurnContextBuildMode::InjectItems
+            | TurnContextBuildMode::SessionEnd => per_turn_config.multi_agent_version_for_model(
+                self.multi_agent_version()
+                    .or(model_info.multi_agent_version),
+            ),
         };
         let plugins_input = per_turn_config.plugins_config_input();
         let plugin_outcome = self
@@ -1600,12 +1614,15 @@ impl Session {
             &plugin_outcome,
             per_turn_config.codex_home.as_path(),
         );
-        let skill_discovery = if matches!(build_mode, TurnContextBuildMode::InjectItems)
-            || crate::guardian::is_basic_session_source(&session_configuration.session_source)
-            || (per_turn_config
-                .features
-                .enabled(Feature::SkipHostSkillDiscovery)
-                && !self.services.extensions.requires_host_skill_discovery())
+        let skill_discovery = if matches!(
+            build_mode,
+            TurnContextBuildMode::InjectItems | TurnContextBuildMode::SessionEnd
+        ) || crate::guardian::is_basic_session_source(
+            &session_configuration.session_source,
+        ) || (per_turn_config
+            .features
+            .enabled(Feature::SkipHostSkillDiscovery)
+            && !self.services.extensions.requires_host_skill_discovery())
         {
             // Executor and orchestrator catalogs are supplied independently of host skills.
             None
@@ -1815,6 +1832,24 @@ impl Session {
             .await
     }
 
+    /// Uses the same readiness snapshot that selected the shutdown hooks.
+    pub(crate) async fn new_session_end_context(
+        &self,
+        environments: TurnEnvironmentSnapshot,
+    ) -> Arc<TurnContext> {
+        let session_configuration = self.default_turn_configuration().await;
+        Box::pin(self.new_turn_context_from_configuration(
+            self.next_internal_sub_id(),
+            session_configuration,
+            environments,
+            NewTurnContextOptions::default(),
+            TurnContextBuildMode::SessionEnd,
+            GitEnrichmentPolicy::Skip,
+            /*resolve_model_routing*/ false,
+        ))
+        .await
+    }
+
     async fn new_default_turn_for(&self, build_mode: TurnContextBuildMode) -> Arc<TurnContext> {
         let session_configuration = self.default_turn_configuration().await;
         let turn_environments = self.services.turn_environments.snapshot().await;
@@ -1849,7 +1884,10 @@ impl Session {
         options: NewTurnContextOptions,
     ) -> Arc<TurnContext> {
         let turn_environments = self
-            .activate_turn_environments(&session_configuration)
+            .activate_turn_environments(
+                &session_configuration,
+                options.allow_initial_default_recovery,
+            )
             .await;
         self.new_turn_from_configuration(sub_id, session_configuration, turn_environments, options)
             .await
@@ -1879,7 +1917,9 @@ impl Session {
                 environments,
                 NewTurnContextOptions {
                     final_output_json_schema: current.final_output_json_schema.clone(),
+                    allow_initial_default_recovery: false,
                     cyber_access_program: current.cyber_access_program,
+                    ..Default::default()
                 },
                 TurnContextBuildMode::StartupPrewarm,
                 self.git_enrichment_policy,
