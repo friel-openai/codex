@@ -522,8 +522,10 @@ impl App {
                 && (modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT)
             {
                 self.chat_widget.fork_in_progress = true;
-                self.app_event_tx
-                    .send(AppEvent::ForkCurrentSession { name: None });
+                self.app_event_tx.send(AppEvent::ForkCurrentSession {
+                    name: None,
+                    placement: None,
+                });
                 return;
             }
             let recovery_key = if self.chat_widget.is_archived_view() {
