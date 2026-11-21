@@ -779,6 +779,7 @@ pub(super) async fn submission_loop(
                                         misalignment: None,
                                         message,
                                         codex_error_info: Some(CodexErrorInfo::Other),
+                                        rejected_audio_file_ids: Vec::new(),
                                     }),
                                 })
                                 .await;
