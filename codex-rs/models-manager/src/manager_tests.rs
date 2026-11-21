@@ -48,6 +48,339 @@ mod catalog_origin_tests;
 const DEFAULT_HTTP_CLIENT_FACTORY: HttpClientFactory =
     HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
 
+#[tokio::test]
+async fn catalog_safety_failure_marks_fallback_and_retains_provider_snapshot() {
+    let mut model = remote_model("future-test-model", "Test Model", 0);
+    model.supports_search_tool = true;
+    model.tool_mode = Some(codex_protocol::openai_models::ToolMode::CodeModeOnly);
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        requires_first_party_catalog: true,
+        responses: Mutex::new(
+            vec![
+                Err(catalog_http_error(400)),
+                Ok(vec![model.clone()]),
+                Err(CodexErr::RequestTimeout),
+            ]
+            .into(),
+        ),
+        ..TestModelsEndpoint::default()
+    });
+    let manager = OpenAiModelsManager::new_without_cache(endpoint, /*auth_manager*/ None);
+    let config = ModelsManagerConfig::default();
+    let before_failure = manager.get_model_info("future-test-model", &config).await;
+    let unknown_before_failure = manager
+        .get_model_info("unknown-after-recovery", &config)
+        .await;
+    assert_eq!(
+        before_failure.origin,
+        ModelOrigin::SyntheticFirstParty {
+            failure_revision: 0
+        }
+    );
+    assert!(
+        !manager
+            .fallback_snapshot_requires_refresh(&before_failure)
+            .await
+    );
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert!(
+        manager
+            .fallback_snapshot_requires_refresh(&before_failure)
+            .await,
+        "a fallback captured before the failure must not escape the guard"
+    );
+    let fallback = manager.get_model_info("future-test-model", &config).await;
+    assert_eq!(fallback.origin, ModelOrigin::SyntheticAfterCatalogFailure);
+    assert!(!fallback.supports_search_tool);
+    let bundled = manager.get_model_info("gpt-6-sol", &config).await;
+    assert_eq!(bundled.origin, ModelOrigin::BundledAfterCatalogFailure);
+
+    manager
+        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let recovered = manager.get_model_info("future-test-model", &config).await;
+    assert_eq!(recovered.origin, ModelOrigin::Provider);
+    assert!(recovered.supports_search_tool);
+    assert_eq!(
+        recovered.tool_mode,
+        Some(codex_protocol::openai_models::ToolMode::CodeModeOnly)
+    );
+    assert!(
+        fallback.origin.catalog_refresh_failed(),
+        "a captured fallback stays marked after recovery"
+    );
+    assert!(
+        manager
+            .fallback_snapshot_requires_refresh(&before_failure)
+            .await,
+        "a fallback captured before recovery must not replace provider capabilities"
+    );
+    assert!(!manager.fallback_snapshot_requires_refresh(&recovered).await);
+    let unknown_after_recovery = manager
+        .get_model_info("unknown-after-recovery", &config)
+        .await;
+    assert_eq!(
+        unknown_after_recovery.origin,
+        ModelOrigin::SyntheticFirstParty {
+            failure_revision: 1
+        }
+    );
+    assert!(
+        !manager
+            .fallback_snapshot_requires_refresh(&unknown_after_recovery)
+            .await
+    );
+    assert!(
+        !manager
+            .fallback_snapshot_requires_refresh(&unknown_before_failure)
+            .await,
+        "a successful catalog that does not know the slug keeps unknown-model behavior"
+    );
+
+    manager
+        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let retained = manager.get_model_info("future-test-model", &config).await;
+    assert_eq!(
+        retained, recovered,
+        "a failed refresh keeps the current provider snapshot"
+    );
+    assert!(!manager.fallback_snapshot_requires_refresh(&retained).await);
+}
+
+#[tokio::test]
+async fn catalog_safety_explicit_provider_and_unattempted_catalog_keep_unknown_model_behavior() {
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        requires_first_party_catalog: true,
+        responses: Mutex::new(vec![Err(CodexErr::RequestTimeout)].into()),
+        ..TestModelsEndpoint::default()
+    });
+    let manager = OpenAiModelsManager::new_without_cache(endpoint, /*auth_manager*/ None)
+        .with_provider_catalog();
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let config = ModelsManagerConfig::default();
+    assert_eq!(
+        manager
+            .get_model_info("unknown-model", &config)
+            .await
+            .origin,
+        ModelOrigin::Synthetic
+    );
+
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        responses: Mutex::new(vec![Err(CodexErr::RequestTimeout)].into()),
+        ..TestModelsEndpoint::default()
+    });
+    let manager = OpenAiModelsManager::new_without_cache(endpoint, /*auth_manager*/ None);
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(
+        manager
+            .get_model_info("unknown-model", &config)
+            .await
+            .origin,
+        ModelOrigin::Synthetic
+    );
+
+    let manager = OpenAiModelsManager::new_without_cache(
+        TestModelsEndpoint::without_refresh(Vec::new()),
+        /*auth_manager*/ None,
+    );
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(
+        manager
+            .get_model_info("unknown-model", &config)
+            .await
+            .origin,
+        ModelOrigin::Synthetic
+    );
+
+    let endpoint = Arc::new(TestModelsEndpoint {
+        requires_first_party_catalog: true,
+        ..TestModelsEndpoint::default()
+    });
+    let manager = OpenAiModelsManager::new_without_cache(endpoint, /*auth_manager*/ None);
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let offline = manager.get_model_info("unknown-model", &config).await;
+    assert!(offline.origin.is_synthetic());
+    assert!(!manager.fallback_snapshot_requires_refresh(&offline).await);
+}
+
+#[tokio::test]
+async fn catalog_safety_identity_change_during_failure_blocks_both_uncertain_identities() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        requires_first_party_catalog: true,
+        list_started: Some(Arc::clone(&started)),
+        list_release: Some(Arc::clone(&release)),
+        responses: Mutex::new(vec![Err(CodexErr::RequestTimeout)].into()),
+        ..TestModelsEndpoint::default()
+    });
+    let manager = Arc::new(OpenAiModelsManager::new_without_cache(
+        endpoint.clone(),
+        /*auth_manager*/ None,
+    ));
+    let task_manager = Arc::clone(&manager);
+    let request = tokio::spawn(async move {
+        task_manager
+            .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+    });
+    started.notified().await;
+    *endpoint.identity_override.lock().unwrap() = Some(Some("other-provider".to_string()));
+    release.notify_one();
+    request.await.expect("catalog request task");
+
+    let config = ModelsManagerConfig::default();
+    assert!(
+        manager
+            .get_model_info("missing-model", &config)
+            .await
+            .origin
+            .catalog_refresh_failed()
+    );
+    *endpoint.identity_override.lock().unwrap() = Some(Some("test-provider".to_string()));
+    assert!(
+        manager
+            .get_model_info("missing-model", &config)
+            .await
+            .origin
+            .catalog_refresh_failed()
+    );
+}
+
+#[tokio::test]
+async fn catalog_safety_failure_uses_only_matching_provider_cache_and_identity() {
+    let mut model = remote_model("cached-test-model", "Test Model", 0);
+    model.supports_search_tool = true;
+    let cache = TestModelsCache::with_entry(ModelsCacheEntry {
+        fetched_at: Utc::now(),
+        etag: None,
+        client_version: Some(crate::client_version_to_whole()),
+        identity: Some("test-provider".to_string()),
+        models: vec![model],
+    });
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        requires_first_party_catalog: true,
+        responses: Mutex::new(vec![Err(CodexErr::RequestTimeout)].into()),
+        ..TestModelsEndpoint::default()
+    });
+    let manager =
+        OpenAiModelsManager::new_with_cache(cache, endpoint.clone(), /*auth_manager*/ None);
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(
+        endpoint.fetch_count(),
+        0,
+        "a matching fresh cache is a provider snapshot"
+    );
+    let config = ModelsManagerConfig::default();
+    let cached = manager.get_model_info("cached-test-model", &config).await;
+    let before_failure = manager.get_model_info("missing-model", &config).await;
+    assert_eq!(cached.origin, ModelOrigin::Provider);
+    assert!(cached.supports_search_tool);
+    manager
+        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(
+        manager.get_model_info("cached-test-model", &config).await,
+        cached
+    );
+    assert!(
+        manager
+            .get_model_info("missing-model", &config)
+            .await
+            .origin
+            .catalog_refresh_failed()
+    );
+
+    *endpoint.identity_override.lock().unwrap() = Some(Some("other-provider".to_string()));
+    let changed = manager.get_model_info("missing-model", &config).await;
+    assert_eq!(
+        changed.origin,
+        ModelOrigin::SyntheticFirstParty {
+            failure_revision: 1
+        },
+        "failure state must not cross identities"
+    );
+    assert!(
+        manager
+            .fallback_snapshot_requires_refresh(&before_failure)
+            .await,
+        "an identity change must not erase a failure after the snapshot was captured"
+    );
+    assert!(
+        !manager.fallback_snapshot_requires_refresh(&changed).await,
+        "a newly resolved fallback for the other identity remains available"
+    );
+    assert_eq!(
+        manager
+            .get_model_info("cached-test-model", &config)
+            .await
+            .origin,
+        ModelOrigin::SyntheticFirstParty {
+            failure_revision: 1
+        },
+        "provider metadata must not cross identities"
+    );
+    endpoint
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(Ok(vec![remote_model("other-model", "Other", 0)]));
+    manager
+        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    *endpoint.identity_override.lock().unwrap() = Some(Some("test-provider".to_string()));
+    assert_eq!(
+        manager
+            .get_model_info("missing-model", &config)
+            .await
+            .origin,
+        ModelOrigin::SyntheticAfterCatalogFailure,
+        "another identity's success must not clear an unresolved failure"
+    );
+}
+
+#[tokio::test]
+async fn catalog_safety_successful_catalog_keeps_unknown_model_compatibility() {
+    let endpoint = Arc::new(TestModelsEndpoint {
+        uses_codex_backend: true,
+        requires_first_party_catalog: true,
+        responses: Mutex::new(vec![Ok(vec![remote_model("known", "Known", 0)])].into()),
+        ..TestModelsEndpoint::default()
+    });
+    let manager = OpenAiModelsManager::new_without_cache(endpoint, /*auth_manager*/ None);
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(
+        manager
+            .get_model_info("unknown-model", &ModelsManagerConfig::default())
+            .await
+            .origin,
+        ModelOrigin::SyntheticFirstParty {
+            failure_revision: 0
+        }
+    );
+}
+
 fn remote_model(slug: &str, display: &str, priority: i32) -> ModelInfo {
     remote_model_with_visibility(slug, display, priority, "list")
 }
@@ -103,6 +436,10 @@ struct TestModelsEndpoint {
     originator_endpoint: Option<Arc<TestModelsEndpoint>>,
     has_command_auth: bool,
     uses_codex_backend: bool,
+    requires_first_party_catalog: bool,
+    identity_override: Mutex<Option<Option<String>>>,
+    list_started: Option<Arc<tokio::sync::Notify>>,
+    list_release: Option<Arc<tokio::sync::Notify>>,
     responses: Mutex<VecDeque<CoreResult<Vec<ModelInfo>>>>,
     etag: Option<String>,
     fetch_count: AtomicUsize,
@@ -238,6 +575,10 @@ impl TestModelsEndpoint {
 
     async fn list_models(&self) -> CoreResult<ModelsEndpointResponse> {
         self.fetch_count.fetch_add(1, Ordering::SeqCst);
+        if let (Some(started), Some(release)) = (&self.list_started, &self.list_release) {
+            started.notify_one();
+            release.notified().await;
+        }
         let models = self
             .responses
             .lock()
@@ -298,8 +639,16 @@ impl ModelsEndpointClient for TestModelsEndpoint {
         true
     }
 
+    fn requires_first_party_catalog(&self) -> bool {
+        self.requires_first_party_catalog
+    }
+
     fn identity(&self) -> Option<String> {
-        Some("test-provider".to_string())
+        self.identity_override
+            .lock()
+            .expect("identity lock should not be poisoned")
+            .clone()
+            .unwrap_or_else(|| Some("test-provider".to_string()))
     }
 
     fn has_command_auth(&self) -> bool {
