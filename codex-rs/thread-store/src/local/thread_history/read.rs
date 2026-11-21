@@ -180,6 +180,7 @@ pub(in crate::local) async fn resume_backwards_cursors(
             sort_direction: crate::SortDirection::Desc,
             sort_key: crate::ItemSortKey::CreatedAtOrdinal,
             after_updated_at_ordinal: None,
+            before_updated_at_ordinal: None,
         },
     )
     .await?;
