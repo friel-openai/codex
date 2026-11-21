@@ -37,6 +37,7 @@ pub(super) use read::list_segmented_legacy_turns;
 pub(super) use read::list_turns;
 pub(super) use read::resume_backwards_cursors;
 pub(super) use read::try_list_source_backed_turns;
+pub(super) use read::try_source_backed_full_turn_items;
 pub(super) use read::try_source_resume_backwards_cursors;
 pub(super) use read::validate_thread_for_paginated_reads;
 pub(super) use realtime::list_timeline;

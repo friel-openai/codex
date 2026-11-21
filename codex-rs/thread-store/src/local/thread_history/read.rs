@@ -997,6 +997,70 @@ pub(super) async fn source_backed_items(
     store: &LocalThreadStore,
     params: &ListItemsParams,
 ) -> ThreadStoreResult<Option<ItemPage>> {
+    source_backed_items_for_turns(store, params, None).await
+}
+
+/// Tries one source-verified snapshot for every turn in a Full compatibility page.
+pub(in crate::local) async fn try_source_backed_full_turn_items(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    turn_ids: &[String],
+) -> ThreadStoreResult<Option<HashMap<String, Vec<StoredThreadItem>>>> {
+    let selected_turns: HashSet<String> = turn_ids.iter().cloned().collect();
+    if selected_turns.is_empty() || selected_turns.len() != turn_ids.len() {
+        return Ok(None);
+    }
+    validate_thread_for_paginated_reads(store, thread_id, true, "list_items").await?;
+    if store.has_current_history_certificate(thread_id).await? {
+        return Ok(None);
+    }
+    let params = ListItemsParams {
+        item_ids: None,
+        thread_id,
+        turn_id: None,
+        include_archived: true,
+        position: None,
+        page_size: 40_000,
+        sort_direction: crate::SortDirection::Asc,
+        sort_key: crate::ItemSortKey::CreatedAtOrdinal,
+        after_updated_at_ordinal: None,
+        before_updated_at_ordinal: None,
+    };
+    let page = match source_backed_items_for_turns(store, &params, Some(&selected_turns)).await {
+        Ok(Some(page)) if page.next_cursor.is_none() => page,
+        Ok(_) => return Ok(None),
+        Err(ThreadStoreError::Internal { message })
+            if message == uncertified_items::SUMMARY_SOURCE_SIZE_LIMIT_ERROR
+                || message
+                    == format!(
+                        "failed to access thread history: {}",
+                        uncertified_items::SUMMARY_SOURCE_SIZE_LIMIT_ERROR
+                    ) =>
+        {
+            // Individual-source and aggregate limits use different error wrappers. The
+            // combined page can exceed either even when individual turns do not.
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if store.has_current_history_certificate(thread_id).await? {
+        return Ok(None);
+    }
+    let mut items = HashMap::new();
+    for item in page.items {
+        items
+            .entry(item.turn_id.clone())
+            .or_insert_with(Vec::new)
+            .push(item);
+    }
+    Ok(Some(items))
+}
+
+async fn source_backed_items_for_turns(
+    store: &LocalThreadStore,
+    params: &ListItemsParams,
+    requested_turns: Option<&HashSet<String>>,
+) -> ThreadStoreResult<Option<ItemPage>> {
     if params.turn_id.as_deref() == Some("") {
         return Ok(None);
     }
@@ -1041,7 +1105,9 @@ pub(super) async fn source_backed_items(
             "position outside or ambiguous in thread lineage",
         ));
     }
-    let selected_turns: std::collections::HashSet<String> = if let Some(turn) = turn_id {
+    let selected_turns: HashSet<String> = if let Some(turns) = requested_turns {
+        turns.clone()
+    } else if let Some(turn) = turn_id {
         [turn.to_string()].into_iter().collect()
     } else {
         let mut first: HashMap<(ThreadId, &str, &str), u64> = HashMap::new();
@@ -1124,6 +1190,16 @@ pub(super) async fn source_backed_items(
         .into_iter()
         .flat_map(|(_, items)| items.into_values())
         .collect::<Vec<_>>();
+    if let Some(requested_turns) = requested_turns {
+        let present: HashSet<&str> = all.iter().map(|item| item.item.turn_id.as_str()).collect();
+        if all.len() > params.page_size
+            || requested_turns
+                .iter()
+                .any(|turn| !present.contains(turn.as_str()))
+        {
+            return Ok(None);
+        }
+    }
     if all.is_empty() && !scan.attached {
         // Only an active root-only turn with no SQLite items can be answered
         // from an empty source scan; other empty scans may hide legacy rows.
@@ -1232,7 +1308,7 @@ pub(super) async fn source_backed_items(
         .saturating_add(selected_turns.len())
         > 900
     {
-        if params.item_ids.is_some() || anchor_ordinal.is_some() {
+        if requested_turns.is_some() || params.item_ids.is_some() || anchor_ordinal.is_some() {
             return Ok(None);
         }
         return Err(ThreadStoreError::Internal {
@@ -1260,6 +1336,9 @@ pub(super) async fn source_backed_items(
         .await
         .map_err(super::thread_history_error)?;
     if rows.len() > 40000 {
+        if requested_turns.is_some() {
+            return Ok(None);
+        }
         return Err(ThreadStoreError::Internal {
             message: "rotated item projection exceeds the comparison limit".to_string(),
         });

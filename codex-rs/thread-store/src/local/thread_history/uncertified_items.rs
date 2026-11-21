@@ -1699,11 +1699,14 @@ pub(super) struct SourceScan {
     pub(super) root_snapshot: Option<RootSnapshot>,
 }
 
+pub(super) const SUMMARY_SOURCE_SIZE_LIMIT_ERROR: &str =
+    "rotated turn-summary source verification exceeds its 64 MiB limit";
+
 fn check_summary_source_size(bytes: usize) -> io::Result<()> {
     if bytes > MAX_SUMMARY_SOURCE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
-            "rotated turn-summary source verification exceeds its 64 MiB limit",
+            SUMMARY_SOURCE_SIZE_LIMIT_ERROR,
         ));
     }
     Ok(())

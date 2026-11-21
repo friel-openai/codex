@@ -4399,13 +4399,50 @@ impl ThreadRequestProcessor {
                     err => internal_error(format!("failed to list thread history: {err}")),
                 })?
         };
+        let mut full_items = if matches!(items_view, TurnItemsView::Full)
+            && page.turns.len() > 1
+            && let Some(store) = self
+                .thread_store
+                .as_any()
+                .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            let turn_ids = page
+                .turns
+                .iter()
+                .map(|turn| turn.turn_id.clone())
+                .collect::<Vec<_>>();
+            store
+                .try_source_backed_full_turn_items(thread_id, &turn_ids)
+                .await
+                .map_err(paginated_history_list_error)?
+        } else {
+            None
+        };
+        if full_items.is_some() && *HISTORY_IO_OBSERVATION_ENABLED {
+            tracing::event!(
+                target: "codex_history_io",
+                tracing::Level::TRACE,
+                event.name = "codex.history.turn_items.batch",
+                thread.id = %thread_id,
+                turn.count = page.turns.len(),
+                "read source-backed turn item batch"
+            );
+        }
         let mut turns = Vec::with_capacity(page.turns.len());
         for turn in page.turns {
             let mut turn = stored_turn_to_api_turn(turn, items_view)?;
             if matches!(items_view, TurnItemsView::Full) {
-                turn.items = self
-                    .paginated_turn_full_items(thread_id, turn.id.as_str())
-                    .await?;
+                turn.items = if let Some(items) = full_items.as_mut() {
+                    items
+                        .remove(&turn.id)
+                        .ok_or_else(|| internal_error("source batch omitted a turn".to_string()))?
+                        .iter()
+                        .map(stored_thread_item_to_api_item)
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    self.paginated_turn_full_items(thread_id, turn.id.as_str())
+                        .await?
+                };
             }
             turns.push(turn);
         }

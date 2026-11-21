@@ -624,6 +624,15 @@ impl LocalThreadStore {
         thread_history::try_list_uncertified_turn_items(self, params).await
     }
 
+    /// Attempts one source-verified item snapshot for all selected turns.
+    pub async fn try_source_backed_full_turn_items(
+        &self,
+        thread_id: ThreadId,
+        turn_ids: &[String],
+    ) -> ThreadStoreResult<Option<HashMap<String, Vec<crate::StoredThreadItem>>>> {
+        thread_history::try_source_backed_full_turn_items(self, thread_id, turn_ids).await
+    }
+
     /// Attempts to derive both resume cursors from the same verified source lineage.
     pub async fn try_projected_source_resume_backwards_cursors(
         &self,
