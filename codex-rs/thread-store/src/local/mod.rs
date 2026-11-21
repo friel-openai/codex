@@ -18,6 +18,7 @@ mod paginated_fork;
 mod pending_thread_metadata;
 mod projection_rebuild;
 mod projects;
+mod prune_archived;
 mod read_thread;
 mod revert_thread;
 mod rollout_migration;
@@ -148,6 +149,7 @@ use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
 use crate::UpdatedProject;
 
+pub use prune_archived::ArchivedRetentionReport;
 pub use rollout_migration::RolloutMigrationAdditionalFreeSpace;
 pub use rollout_migration::RolloutMigrationFailureReason;
 pub use rollout_migration::RolloutMigrationHistoryBaseDependency;
