@@ -410,6 +410,7 @@ fn minimal_current_agent_thread(
             extra: None,
             session_id: thread_id,
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: Some(member.parent_thread_id.to_string()),
             preview: String::new(),
             ephemeral: true,
