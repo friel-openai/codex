@@ -310,14 +310,7 @@ pub(super) async fn prepare_forked_history(
             // Ephemeral helpers never publish a child reference. Freezing their source
             // would retain a full snapshot after every check-in, including failed spawns.
             let prepared = store
-                .prepare_fork_without_response_history_for_rollout(
-                    codex_thread_store::PrepareForkParams {
-                        thread_id: parent_thread_id,
-                        boundary: codex_thread_store::ForkBoundary::Latest,
-                    },
-                    rollout_id,
-                    /*ephemeral_context_only*/ true,
-                )
+                .prepare_ephemeral_model_context_for_rollout(parent_thread_id, rollout_id)
                 .await
                 .map_err(|err| CodexErr::Fatal(err.to_string()))?;
             let mut cursor = None;

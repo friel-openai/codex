@@ -544,7 +544,7 @@ pub(super) async fn scan_active_model_context_snapshot(
     active_model_context_scan_or_fallback(result)
 }
 
-fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
+pub(super) fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
     if before.len() != after.len() || before.modified()? != after.modified()? {
         return Ok(false);
     }
