@@ -69,23 +69,27 @@ impl McpBinding {
         )]));
         let client = &call.client;
         let limit = Duration::from_secs(5);
-        let listed = collect_paginated_with_limit(
-            "tools/list",
-            /*overall_timeout*/ None,
-            MAX_CODEX_APPS_TOOL_CATALOG_ITEMS,
-            |params| {
-                let mut params = params.unwrap_or_default();
-                params.meta = Some(meta.clone());
-                async move {
-                    let page = client
-                        .client
-                        .list_tools_with_connector_ids(Some(params), /*timeout*/ None)
-                        .await?;
-                    Ok((page.tools, page.next_cursor))
-                }
-            },
-        );
-        let listed = tokio::time::timeout(limit, client.with_lease_request(listed)).await;
+        let listed = client.run(move |client| async move {
+            collect_paginated_with_limit(
+                "tools/list",
+                /*overall_timeout*/ None,
+                MAX_CODEX_APPS_TOOL_CATALOG_ITEMS,
+                |params| {
+                    let mut params = params.unwrap_or_default();
+                    params.meta = Some(meta.clone());
+                    let client = Arc::clone(&client);
+                    async move {
+                        let page = client
+                            .client
+                            .list_tools_with_connector_ids(Some(params), /*timeout*/ None)
+                            .await?;
+                        Ok((page.tools, page.next_cursor))
+                    }
+                },
+            )
+            .await
+        });
+        let listed = tokio::time::timeout(limit, listed).await;
         let tools = match listed {
             Err(_) => return SearchDiscovery::Critical("discovery_timeout"),
             Ok(Err(err)) => {
