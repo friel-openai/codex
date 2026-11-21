@@ -1497,12 +1497,7 @@ impl ThreadManager {
         else {
             return;
         };
-        let store = store.clone();
-        tokio::spawn(async move {
-            if let Err(err) = store.migrate_rollouts_on_startup().await {
-                warn!("failed to migrate legacy rollouts on startup: {err}");
-            }
-        });
+        store.start_automatic_rollout_migration();
     }
 
     /// Refreshes every loaded thread and marks threads that are still being created.
