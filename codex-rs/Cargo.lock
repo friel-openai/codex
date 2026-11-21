@@ -2134,6 +2134,7 @@ dependencies = [
  "codex-goal-extension",
  "codex-guardian-v2",
  "codex-guardian-v3",
+ "codex-history",
  "codex-history-notes-extension",
  "codex-home",
  "codex-hooks",
