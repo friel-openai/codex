@@ -1,0 +1,245 @@
+diff --git a/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs b/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
+index f479fc031480318151a4cb37e629fef939281894..ea199115c46b9fe87e4ff6c97fdc3d02d6b530ff 100644
+--- a/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
++++ b/codex-rs/thread-store/src/local/thread_history/projection_certificate.rs
+@@ -652,6 +652,21 @@ impl CertifiedItemBound {
+             .count()
+             == 1
+     }
++
++    /// Identifies the one certified physical source containing a creation ordinal.
++    pub(super) fn source_for_ordinal(
++        &self,
++        ordinal: u64,
++    ) -> Option<(codex_protocol::ThreadId, RolloutId)> {
++        let mut matches = self.certificate.sources.iter().filter(|source| {
++            ordinal >= source.start_ordinal && source.end_ordinal.is_none_or(|end| ordinal < end)
++        });
++        let source = matches.next()?;
++        matches
++            .next()
++            .is_none()
++            .then_some((source.owner_id, source.rollout_id))
++    }
+ }
+
+ async fn proof_storage_is_valid(
+@@ -789,6 +804,10 @@ pub(in crate::local) async fn certificate_is_current_for_single_owner(
+
+ #[cfg(test)]
+ mod tests {
++    use super::CertifiedItemBound;
++    use super::CertifiedSource;
++    use super::FileIdentity;
++    use super::ProjectionCertificate;
+     use super::strict_source_records;
+     use codex_protocol::protocol::RolloutReferenceItem;
+     use codex_protocol::protocol::SessionMeta;
+@@ -796,6 +815,43 @@ mod tests {
+     use codex_rollout::RolloutItem;
+     use codex_rollout::RolloutLine;
+
++    #[test]
++    fn source_ordinal_requires_one_certified_range() {
++        let first = codex_protocol::ThreadId::new();
++        let second = codex_protocol::ThreadId::new();
++        let identity = FileIdentity {
++            device: 1,
++            inode: 1,
++            size: 1,
++            mtime: 0,
++            mtime_nsec: 0,
++            ctime: 0,
++            ctime_nsec: 0,
++        };
++        let source = |owner_id, start_ordinal, end_ordinal| CertifiedSource {
++            owner_id,
++            rollout_id: owner_id,
++            path: std::path::PathBuf::from("source"),
++            start_ordinal,
++            end_ordinal,
++            end_byte_offset: None,
++            identity: identity.clone(),
++        };
++        let proof = CertifiedItemBound {
++            certificate: ProjectionCertificate {
++                version: 1,
++                root_rollout_id: second,
++                root_path: std::path::PathBuf::from("root"),
++                sources: vec![source(first, 0, Some(5)), source(second, 4, None)],
++                root_sha256: None,
++            },
++            minimum: None,
++        };
++        assert_eq!(proof.source_for_ordinal(3), Some((first, first)));
++        assert_eq!(proof.source_for_ordinal(4), None);
++        assert_eq!(proof.source_for_ordinal(5), Some((second, second)));
++    }
++
+     #[tokio::test]
+     async fn reference_and_subagent_history_do_not_get_coverage_certificates() {
+         let home = tempfile::tempdir().unwrap();
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index e1fe8b326e20c6622af6ebbb687377820faa9937..9f7266bce85869ef78ad6fb96008c1647d5936c2 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -21,7 +21,7 @@ use super::segment_paging::LazyPage;
+ use super::segment_paging::SegmentPage;
+ use super::segment_paging::certified_resume_backwards_cursors;
+ use super::segment_paging::page_certified_ascending_item_rows;
+-use super::segment_paging::page_certified_single_owner_item_rows;
++use super::segment_paging::page_certified_item_rows;
+ use super::segment_paging::page_certified_single_owner_turn_rows;
+ use super::segment_paging::page_indexed_item_rows;
+ use super::segment_paging::page_indexed_turn_rows;
+@@ -854,7 +854,7 @@ pub(in crate::local) async fn list_items(
+         params.sort_direction = crate::SortDirection::Asc;
+     }
+     validate_page_size(params.page_size)?;
+-    if let Some(page) = page_certified_single_owner_item_rows(store, &params).await? {
++    if let Some(page) = page_certified_item_rows(store, &params).await? {
+         return match page {
+             LazyPage::Page(page, _) => Ok(ItemPage {
+                 items: page.rows.into_iter().map(|row| row.item).collect(),
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 8e484c0bce06a416b9e1d2a057d5b11052c39476..8e98832c61b682d4eb841864f217e0fec2d4d540 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -4096,6 +4096,25 @@ async fn certified_split_fixture(
+     ThreadId,
+     ThreadId,
+     std::path::PathBuf,
++) {
++    certified_split_fixture_with_extra(
++        include_grandparent_checkpoint,
++        include_parent_in_staging,
++        false,
++    )
++    .await
++}
++
++async fn certified_split_fixture_with_extra(
++    include_grandparent_checkpoint: bool,
++    include_parent_in_staging: bool,
++    include_extra_in_staging: bool,
++) -> (
++    TempDir,
++    LocalThreadStore,
++    ThreadId,
++    ThreadId,
++    std::path::PathBuf,
+ ) {
+     let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+     let grandparent = ThreadId::new();
+@@ -4123,6 +4142,9 @@ async fn certified_split_fixture(
+     if include_parent_in_staging {
+         insert_item(db, staging, "split", "parent-item", 5).await;
+     }
++    if include_extra_in_staging {
++        insert_item(db, staging, "split", "extra-item", 6).await;
++    }
+     insert_item(db, staging, "split", "child-item", 9).await;
+     for (id, path) in [
+         (grandparent, &grandparent_path),
+@@ -4157,6 +4179,19 @@ async fn certified_split_fixture(
+     (home, store, child_id, parent, grandparent_path)
+ }
+
++#[tokio::test]
++async fn certified_multi_owner_item_page_rejects_unmatched_root_row() {
++    let (_home, store, child_id, _parent, _grandparent) =
++        certified_split_fixture_with_extra(true, true, true).await;
++    let params = item_params(child_id, Some("split"), None, 10, SortDirection::Desc);
++    assert!(
++        super::super::segment_paging::page_certified_item_rows(&store, &params)
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
+ #[cfg(unix)]
+ async fn append_with_leaf_proof(
+     store: &LocalThreadStore,
+diff --git a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
+index 99954b73bcbd027a1d6bd910c5d0738628a774c4..dfe05b09aae0994e6f31fa23c77089412fd3f482 100644
+--- a/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
++++ b/codex-rs/thread-store/src/local/thread_history/segment_paging.rs
+@@ -172,7 +172,8 @@ pub(super) async fn page_certified_single_owner_turn_rows(
+     Ok(Some(LazyPage::Page(page, lineage)))
+ }
+
+-pub(super) async fn page_certified_single_owner_item_rows(
++/// Pages a root projection whose certificate authenticates all contributing sources.
++pub(super) async fn page_certified_item_rows(
+     store: &super::super::LocalThreadStore,
+     params: &ListItemsParams,
+ ) -> ThreadStoreResult<Option<LazyPage<StoredThreadItemRow>>> {
+@@ -189,7 +190,19 @@ pub(super) async fn page_certified_single_owner_item_rows(
+     else {
+         return Ok(None);
+     };
+-    if !proof.is_single_owner(params.thread_id) {
++    let single_owner = proof.is_single_owner(params.thread_id);
++    // Cross-owner cursors cannot use item anchors or update ordering without retaining the
++    // physical source of each item. Creation ordinals must identify exactly one source range.
++    if !single_owner
++        && (params.sort_key != ItemSortKey::CreatedAtOrdinal
++            || params.after_updated_at_ordinal.is_some()
++            || params.before_updated_at_ordinal.is_some()
++            || params.item_ids.is_some()
++            || matches!(
++                params.position.as_ref(),
++                Some(ListItemsPosition::ItemAnchor { .. })
++            ))
++    {
+         return Ok(None);
+     }
+     let scope = match params.sort_key {
+@@ -211,6 +224,46 @@ pub(super) async fn page_certified_single_owner_item_rows(
+     }
+     let lineage = certified_root_lineage(&walk, params.thread_id);
+     let page = page_item_rows_with_connection(&mut transaction, &lineage, params).await?;
++    if !single_owner {
++        for row in &page.rows {
++            let Some((owner, source_id)) = u64::try_from(row.position.rollout_ordinal)
++                .ok()
++                .and_then(|ordinal| proof.source_for_ordinal(ordinal))
++            else {
++                return Ok(None);
++            };
++            if owner != params.thread_id {
++                let item = &row.item;
++                let Ok(item_json) = std::str::from_utf8(&item.item_json) else {
++                    return Ok(None);
++                };
++                let Ok(updated_at_ordinal) = i64::try_from(item.updated_at_ordinal) else {
++                    return Ok(None);
++                };
++                let matches_source: i64 = sqlx::query_scalar(
++                    "SELECT EXISTS(SELECT 1 FROM thread_items WHERE thread_id = ? \
++                     AND turn_id = ? AND item_id = ? AND rollout_ordinal = ? \
++                     AND updated_at_ordinal = ? AND created_at_ms = ? \
++                     AND started_at_ms IS ? AND completed_at_ms IS ? AND item_json = ?)",
++                )
++                .bind(source_id.to_string())
++                .bind(&item.turn_id)
++                .bind(&item.item_id)
++                .bind(row.position.rollout_ordinal)
++                .bind(updated_at_ordinal)
++                .bind(item.created_at_ms)
++                .bind(item.started_at_ms)
++                .bind(item.completed_at_ms)
++                .bind(item_json)
++                .fetch_one(&mut *transaction)
++                .await
++                .map_err(thread_history_error)?;
++                if matches_source == 0 {
++                    return Ok(None);
++                }
++            }
++        }
++    }
+     if !proof.files_unchanged().await || !walk.selected_is_current().await? {
+         drop(transaction);
+         return Ok(Some(LazyPage::Full(walk.resolve_full().await?)));
