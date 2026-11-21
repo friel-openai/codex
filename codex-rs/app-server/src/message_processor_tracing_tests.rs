@@ -435,7 +435,8 @@ fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
 where
     F: Future<Output = Result<()>> + Send + 'static,
 {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    // An explicit thread stack does not inherit the test runner's RUST_MIN_STACK.
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .name(name.to_string())
