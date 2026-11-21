@@ -718,6 +718,7 @@ pub(super) async fn cached_stdio_first_use_scenario() -> anyhow::Result<Vec<Valu
     wait_for_mcp_server(&required_thread, SERVER_NAME).await?;
     required_thread.shutdown_and_wait().await?;
     let cached_process = process_label(&required_pid);
+    fixture.codex.shutdown_and_wait().await?;
 
     fs.remove(
         &barrier_file,
@@ -902,7 +903,6 @@ pub(super) async fn cached_stdio_first_use_scenario() -> anyhow::Result<Vec<Valu
         .context("an unrelated tool should complete while cached MCP startup is pending")?
         .context("the unrelated tool should emit its plan update")?;
 
-    fixture.codex.shutdown_and_wait().await?;
     fs.write_file(
         &barrier_file,
         b"ready".to_vec(),

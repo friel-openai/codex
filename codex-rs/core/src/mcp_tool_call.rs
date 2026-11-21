@@ -534,8 +534,9 @@ async fn handle_approved_mcp_tool_call(
     let mut elicitation_type = None;
     let mut request_error_code = None;
     let mut admission_error = None;
-    let admit = || {
-        let reason = sess
+    let admission_session = Arc::clone(sess);
+    let admit = move || {
+        let reason = admission_session
             .tool_start_denial()
             .map_err(|error| McpAdmissionError(FunctionCallError::Fatal(error.to_string())))?;
         if let Some(reason) = reason {
