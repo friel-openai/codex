@@ -2249,6 +2249,7 @@ async fn cancelled_v2_send_finishes_reload_registration() {
     let (home, mut config) = test_config().await;
     config.features.enable(Feature::MultiAgentV2).unwrap();
     config.features.enable(Feature::Sqlite).unwrap();
+    config.service_tier = None;
     // The root leaves exactly one resident child slot available.
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     let harness = AgentControlHarness::new_with_config(home, config).await;
@@ -2287,6 +2288,7 @@ async fn cancelled_v2_send_finishes_reload_registration() {
     let mut sender_config = harness.config.clone();
     sender_config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     sender_config.requested_approvals_reviewer = Some(ApprovalsReviewer::AutoReview);
+    sender_config.service_tier = Some("priority".to_string());
     let followup_request = |message: &str| SendRequest {
         caller: parent_id,
         target: AgentTarget::Id(child_id),
@@ -2342,6 +2344,11 @@ async fn cancelled_v2_send_finishes_reload_registration() {
         reloaded.config_snapshot().await.approvals_reviewer,
         ApprovalsReviewer::User,
         "reload must preserve the worker's reviewer instead of inheriting its sender's request",
+    );
+    assert_eq!(
+        reloaded.config_snapshot().await.service_tier,
+        None,
+        "reload must use the root tier instead of the sender's tier",
     );
     // Evict and reload again with the single child slot. This also catches a leaked
     // pin or pending residency reservation left behind by the cancelled sender.

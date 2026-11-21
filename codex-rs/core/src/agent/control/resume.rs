@@ -281,6 +281,7 @@ impl LocalAgentControl {
                 &config,
             )
             .await;
+        let evicted_environments = self.runtime.registry.evicted_environments(thread_id);
         let mut config = config;
         let runtime_approvals_reviewer = config.approvals_reviewer;
         if let Some(role) = stored_thread
@@ -315,27 +316,42 @@ impl LocalAgentControl {
             config.model = Some(model.clone());
         }
         config.model_reasoning_effort = stored_thread.reasoning_effort.clone();
-        config
-            .permissions
-            .approval_policy
-            .set(stored_thread.approval_mode)
-            .map_err(|err| {
-                CodexErr::InvalidRequest(format!(
-                    "cannot restore the stored agent approval policy: {err}"
-                ))
-            })?;
-        config
-            .permissions
-            .set_permission_profile_from_session_snapshot(
-                crate::config::PermissionProfileSnapshot::legacy(
-                    stored_thread.permission_profile.clone(),
-                ),
-            )
-            .map_err(|err| {
-                CodexErr::InvalidRequest(format!(
-                    "cannot restore the stored agent permission profile: {err}"
-                ))
-            })?;
+        if multi_agent_version == MultiAgentVersion::V2
+            && let Some(evicted) = &evicted_environments
+        {
+            config.permissions = evicted.config.permissions.clone();
+            config.approvals_reviewer = evicted.config.approvals_reviewer;
+            config.requested_approvals_reviewer = evicted.config.requested_approvals_reviewer;
+        } else {
+            config
+                .permissions
+                .approval_policy
+                .set(stored_thread.approval_mode)
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!(
+                        "cannot restore the stored agent approval policy: {err}"
+                    ))
+                })?;
+            config
+                .permissions
+                .set_permission_profile_from_session_snapshot(
+                    crate::config::PermissionProfileSnapshot::legacy(
+                        stored_thread.permission_profile.clone(),
+                    ),
+                )
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!(
+                        "cannot restore the stored agent permission profile: {err}"
+                    ))
+                })?;
+        }
+        if multi_agent_version == MultiAgentVersion::V2 {
+            config.service_tier = evicted_environments
+                .as_ref()
+                .filter(|evicted| evicted.has_independent_service_tier)
+                .map(|evicted| evicted.config.service_tier.clone())
+                .unwrap_or_else(|| self.root_service_tier());
+        }
         // Reserving a resident can unload a nested parent. Capture its applied instructions
         // and attachments before a later live lookup can lose them.
         let parent_thread_id = initial_history
@@ -368,7 +384,6 @@ impl LocalAgentControl {
         } else {
             (None, None)
         };
-        let evicted_environments = self.runtime.registry.evicted_environments(thread_id);
         let environment_selections = evicted_environments
             .as_ref()
             .map(|environments| environments.selections.clone());
