@@ -1951,6 +1951,7 @@ impl ThreadRequestProcessor {
             }
         }
 
+        let implicit_environment_selection = environment_requests.is_none();
         let environment_requests = environment_requests.unwrap_or_else(|| {
             listener_task_context
                 .thread_manager
@@ -1977,6 +1978,8 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
+        start_options.thread_extension_init = thread_extension_init;
+        start_options.bound_startup_environment_discovery(implicit_environment_selection);
         let reserved_thread_id = if start_options.config.ephemeral {
             None
         } else {
@@ -2018,7 +2021,6 @@ impl ThreadRequestProcessor {
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
                 environments: Some(environment_requests),
-                thread_extension_init,
                 client_mcp_extensions,
                 ..start_options
             })
