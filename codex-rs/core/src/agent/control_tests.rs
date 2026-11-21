@@ -2655,8 +2655,8 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     assert_eq!(
         reloaded_child.config_snapshot().await.request_country,
         match route {
-            V2ReloadRoute::Sender => germany,
-            V2ReloadRoute::NestedParent => united_states,
+            V2ReloadRoute::Sender | V2ReloadRoute::EphemeralParent => germany,
+            V2ReloadRoute::NestedParent | V2ReloadRoute::Generic => united_states,
         },
     );
     if matches!(route, V2ReloadRoute::Sender) {
@@ -7137,7 +7137,7 @@ while True:
     assert!(
         parent_mcp_tools
             .iter()
-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
+            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
     );
     parent
@@ -12349,7 +12349,7 @@ while True:
     assert!(
         parent_mcp_tools
             .iter()
-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
+            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
     );
     parent_thread
@@ -12414,7 +12414,7 @@ while True:
         child_mcp_tool_snapshot
             .tools
             .iter()
-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
+            .any(|tool| tool.server_name() == "rmcp" && tool.tool.name == "echo"),
         "goal supervisor helper should inherit the parent MCP tool snapshot"
     );
 
@@ -13115,7 +13115,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
             root_turn_id: None,
             cyber_access_program: None,
             initiating_agent_path: None,
-        }
+            inherited_client_metadata,
+        } if inherited_client_metadata.is_empty()
     ));
     let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
     persist_thread_for_tree_resume(&child_thread, "child persisted").await;
@@ -13342,7 +13343,10 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
             .contains("queued non-triggering messages")
     );
     assert_eq!(
-        original_control.runtime.mailboxes.take(child.thread_id),
+        original_control
+            .runtime
+            .mailboxes
+            .take(child.thread_id, |_| true),
         retained_messages
             .into_iter()
             .map(crate::PendingAgentMessage::from)
@@ -13352,7 +13356,7 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
         original_control
             .runtime
             .mailboxes
-            .take(child.thread_id)
+            .take(child.thread_id, |_| true)
             .is_empty()
     );
     assert!(Arc::ptr_eq(

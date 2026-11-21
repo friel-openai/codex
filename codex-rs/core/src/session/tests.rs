@@ -7605,7 +7605,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
     store.fail_next_checkpoint(session.thread_id).await;
 
     let installation = if prefix {
-        CompactedHistoryInstallation::Prefix {
+        CompactedHistoryInstallation::Prefix(PrefixCompactionInstallation {
             prefix: captured_prefix,
             prefix_context: Vec::new(),
             initial_context: Vec::new(),
@@ -7616,7 +7616,7 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation(pref
             prepared_window_advance,
             turn_context: &turn_context,
             started_item: None,
-        }
+        })
     } else {
         CompactedHistoryMetadata {
             input_goal_ids: Default::default(),
@@ -11418,8 +11418,8 @@ async fn submit_with_trace_cancelled_when_queue_full_does_not_enqueue() {
     };
     assert!(submit_settings().is_none());
     assert!(matches!(
-        rx_sub.try_recv().expect("original op").op,
-        Op::Interrupt
+        rx_sub.try_recv().expect("original op").op.as_protocol(),
+        Some(Op::Interrupt)
     ));
     assert!(
         rx_sub.try_recv().is_err(),
@@ -11430,7 +11430,10 @@ async fn submit_with_trace_cancelled_when_queue_full_does_not_enqueue() {
         .expect("accepted");
     let submitted = rx_sub.try_recv().expect("accepted settings");
     assert_eq!(submitted.id, id);
-    assert!(matches!(submitted.op, Op::ThreadSettings { .. }));
+    assert!(matches!(
+        submitted.op.as_protocol(),
+        Some(Op::ThreadSettings { .. })
+    ));
     assert!(rx_sub.try_recv().is_err());
 }
 
@@ -11547,7 +11550,7 @@ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
         .await;
     let (tx_sub, rx_sub) = async_channel::bounded(1);
     tx_sub
-        .send(Submission {
+        .send(Box::new(Submission {
             id: "settings-after-checkpoint".to_string(),
             turn_extension_init: None,
             op: Op::ThreadSettings {
@@ -11556,13 +11559,14 @@ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
                     ..Default::default()
                 },
                 reply: None,
-            },
+            }
+            .into(),
             trace: None,
             parent_turn_id: None,
             root_turn_id: None,
             residency_guard: None,
             message_delivery: None,
-        })
+        }))
         .await
         .expect("submit settings");
     let mut submissions = Box::pin(tokio::task::unconstrained(submission_loop(
@@ -16740,7 +16744,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
 }
 
 #[test_case::test_case(MultiAgentVersion::V1, "user", TurnAborted::INTERRUPTED_GUIDANCE; "v1")]
-#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE; "v2")]
+#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_NEUTRAL_GUIDANCE; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abort_review_task_emits_exited_then_aborted_and_records_history(
     version: MultiAgentVersion,

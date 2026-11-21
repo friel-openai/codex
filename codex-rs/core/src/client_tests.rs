@@ -1621,7 +1621,7 @@ fn test_response_continuation() -> ResponseContinuation {
             text: None,
             client_metadata: None,
             access_programs: None,
-            request_country: None,
+            request_country: Default::default(),
         }),
         last_response: LastResponse {
             response_id: "parent-resp".to_string(),
@@ -1952,7 +1952,7 @@ async fn stream_client_test_request(
 ) -> String {
     let mut stream = session
         .stream(
-            prompt,
+            &Arc::new(prompt.clone()),
             &test_model_info(),
             &test_session_telemetry(),
             /*effort*/ None,
@@ -2046,7 +2046,7 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
 #[test]
 fn model_reroute_reset_discards_provider_route_segment_state() {
     let client = test_model_client(SessionSource::Cli);
-    let request = ResponsesApiRequest {
+    let request = Arc::new(ResponsesApiRequest {
         model: "test-primary".to_string(),
         input: vec![
             developer_message_item("test instructions"),
@@ -2066,7 +2066,8 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
         text: None,
         client_metadata: None,
         access_programs: None,
-    };
+        request_country: Default::default(),
+    });
     let continuation = ResponseContinuation {
         request: request.clone(),
         last_response: LastResponse {
@@ -3741,7 +3742,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         request: Some(request.clone()),
     }
     .into_raw_stream()?;
-    assert_eq!(stream.routing_affinity, Some(routing_affinity));
+    assert_eq!(stream.0.routing_affinity, Some(routing_affinity));
     let mut delivered = Vec::new();
     while let Some(event) = stream.next().await {
         if let ResponseEvent::OutputItemDone(item) = event? {

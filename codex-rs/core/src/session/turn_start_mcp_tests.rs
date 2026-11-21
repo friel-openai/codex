@@ -347,6 +347,9 @@ async fn mcp_budget_stop_at_handoff(phase: McpPause) -> anyhow::Result<()> {
     let reply = response.await?;
     let (count, outcome) = match phase {
         McpPause::Start => {
+            let crate::tools::parallel::ToolCallResponse::Response(reply) = reply else {
+                panic!("aborted MCP call must return a response");
+            };
             assert_eq!(
                 reply.item,
                 ResponseInputItem::FunctionCallOutput {
