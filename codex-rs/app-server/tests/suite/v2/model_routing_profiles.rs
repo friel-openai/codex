@@ -385,6 +385,7 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
         partial_started,
         vec![ThreadItem {
             payload: ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: PARTIAL_MESSAGE_ID.to_string(),
                 text: String::new(),
                 phase: None,
@@ -401,6 +402,7 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
         partial_completed,
         vec![ThreadItem {
             payload: ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: PARTIAL_MESSAGE_ID.to_string(),
                 text: PARTIAL_TEXT.to_string(),
                 phase: None,

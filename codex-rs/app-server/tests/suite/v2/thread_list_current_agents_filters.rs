@@ -248,6 +248,8 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 originators: None,
                 cursor: None,
@@ -281,6 +283,8 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 originators: None,
                 cursor: None,
@@ -344,6 +348,8 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 cursor: None,
                 limit: Some(10),
@@ -407,6 +413,8 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
                 excluded_thread_ids: None,
                 cursor: first_page.backwards_cursor.clone(),
                 limit: Some(10),
@@ -556,6 +564,8 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
     let mut mcp = init_mcp(codex_home.path()).await?;
     let request_id = mcp
         .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+            include_attached_threads: false,
+            current_account_only: false,
             excluded_thread_ids: None,
             cursor: None,
             limit: Some(10),
@@ -585,6 +595,8 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
     let thread_id = ThreadId::new().to_string();
     let request_id = mcp
         .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+            include_attached_threads: false,
+            current_account_only: false,
             excluded_thread_ids: None,
             cursor: None,
             limit: Some(10),
