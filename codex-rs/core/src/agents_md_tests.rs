@@ -1221,7 +1221,11 @@ async fn stalled_remote_project_instructions_fail_closed_and_can_be_retried() {
     let TurnEnvironmentState::Ready(remote) = &mut environments.environments[1] else {
         panic!("expected a ready remote environment");
     };
-    remote.environment = Arc::new(Environment::create_for_tests(Some(url)).unwrap());
+    let (attachment, _guard, _) = crate::environment_selection::EnvironmentAttachment::new(
+        &remote.selection.environment_id,
+        Arc::new(Environment::create_for_tests(Some(url)).unwrap()),
+    );
+    remote.attachment = attachment;
     let manager = AgentsMdManager::new(SessionInstructions::default());
 
     let refresh = tokio::time::timeout(
