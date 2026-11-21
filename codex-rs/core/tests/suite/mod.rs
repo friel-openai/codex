@@ -106,6 +106,7 @@ mod reasoning_replay_metrics;
 // Uses the same command-approval harness as guardian_review below.
 mod builtin_model_catalog;
 mod canonical_plugin_connectors;
+mod child_delegation;
 mod critical_path_runtime;
 mod gateway_auth;
 mod guardian_connector_trust;
