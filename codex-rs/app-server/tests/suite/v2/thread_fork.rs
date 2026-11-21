@@ -3335,7 +3335,105 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                 cursor = page.next_cursor;
             }
             assert_eq!(turns, source_response.thread.turns);
-            let _: ThreadResumeResponse = mcp
+            if source == IndexedForkSource::ColdCompactedActiveTurn {
+                let mut next_cursor = None;
+                let mut next_ids = Vec::new();
+                loop {
+                    let page: ThreadTurnsListResponse = mcp
+                        .request(|request_id| ClientRequest::ThreadTurnsList {
+                            request_id,
+                            params: ThreadTurnsListParams {
+                                thread_id: forked_thread.id.clone(),
+                                cursor: next_cursor.clone(),
+                                limit: Some(1),
+                                sort_direction: Some(SortDirection::Asc),
+                                items_view: Some(TurnItemsView::NotLoaded),
+                            },
+                        })
+                        .await?;
+                    assert_eq!(
+                        page.data.len(),
+                        1,
+                        "next cursor must reach one inherited turn"
+                    );
+                    let expected = &source_response.thread.turns[next_ids.len()];
+                    assert_eq!(page.data[0].id, expected.id);
+                    assert_eq!(page.data[0].root_turn_id, expected.root_turn_id);
+                    assert_eq!(page.data[0].status, expected.status);
+                    assert_eq!(page.data[0].started_at, expected.started_at);
+                    assert_eq!(page.data[0].completed_at, expected.completed_at);
+                    assert_eq!(page.data[0].duration_ms, expected.duration_ms);
+                    next_ids.push(page.data[0].id.clone());
+                    if page.next_cursor.is_none() {
+                        break;
+                    }
+                    assert_ne!(page.next_cursor, next_cursor);
+                    next_cursor = page.next_cursor;
+                }
+                assert_eq!(
+                    next_ids,
+                    source_response
+                        .thread
+                        .turns
+                        .iter()
+                        .map(|turn| turn.id.clone())
+                        .collect::<Vec<_>>()
+                );
+                let mut cursor = None;
+                let mut ids = Vec::new();
+                loop {
+                    let page: ThreadTurnsListResponse = mcp
+                        .request(|request_id| ClientRequest::ThreadTurnsList {
+                            request_id,
+                            params: ThreadTurnsListParams {
+                                thread_id: forked_thread.id.clone(),
+                                cursor: cursor.clone(),
+                                limit: Some(1),
+                                sort_direction: Some(SortDirection::Asc),
+                                items_view: Some(TurnItemsView::NotLoaded),
+                            },
+                        })
+                        .await?;
+                    assert_eq!(
+                        page.data.len(),
+                        1,
+                        "each cursor must reach one inherited turn"
+                    );
+                    let anchor = page.backwards_cursor.clone().expect("page anchor");
+                    let anchored: ThreadTurnsListResponse = mcp
+                        .request(|request_id| ClientRequest::ThreadTurnsList {
+                            request_id,
+                            params: ThreadTurnsListParams {
+                                thread_id: forked_thread.id.clone(),
+                                cursor: Some(anchor),
+                                limit: Some(1),
+                                sort_direction: Some(SortDirection::Asc),
+                                items_view: Some(TurnItemsView::NotLoaded),
+                            },
+                        })
+                        .await?;
+                    assert_eq!(
+                        anchored.data, page.data,
+                        "backwards cursor must retain the turn"
+                    );
+                    ids.push(page.data[0].id.clone());
+                    if page.next_cursor.is_none() {
+                        break;
+                    }
+                    assert_ne!(page.next_cursor, cursor);
+                    cursor = page.next_cursor;
+                }
+                assert_eq!(
+                    ids,
+                    source_response
+                        .thread
+                        .turns
+                        .iter()
+                        .map(|turn| turn.id.clone())
+                        .collect::<Vec<_>>()
+                );
+            }
+            let resumed: ThreadResumeResponse = mcp
                 .request(|request_id| ClientRequest::ThreadResume {
                     request_id,
                     params: ThreadResumeParams {
@@ -3345,6 +3443,41 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                     },
                 })
                 .await?;
+            if source == IndexedForkSource::ColdCompactedActiveTurn {
+                let resume_cursor = resumed
+                    .turns_backwards_cursor
+                    .expect("resumed active fork must expose a turn cursor");
+                let head: ThreadTurnsListResponse = mcp
+                    .request(|request_id| ClientRequest::ThreadTurnsList {
+                        request_id,
+                        params: ThreadTurnsListParams {
+                            thread_id: forked_thread.id.clone(),
+                            cursor: None,
+                            limit: Some(1),
+                            sort_direction: Some(SortDirection::Desc),
+                            items_view: Some(TurnItemsView::NotLoaded),
+                        },
+                    })
+                    .await?;
+                assert_eq!(
+                    head.backwards_cursor.as_deref(),
+                    Some(resume_cursor.as_str())
+                );
+                let anchored: ThreadTurnsListResponse = mcp
+                    .request(|request_id| ClientRequest::ThreadTurnsList {
+                        request_id,
+                        params: ThreadTurnsListParams {
+                            thread_id: forked_thread.id.clone(),
+                            cursor: Some(resume_cursor),
+                            limit: Some(1),
+                            sort_direction: Some(SortDirection::Desc),
+                            items_view: Some(TurnItemsView::NotLoaded),
+                        },
+                    })
+                    .await?;
+                assert_eq!(anchored.data, head.data);
+                assert_eq!(anchored.next_cursor, head.next_cursor);
+            }
         }
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: forked_thread.id,

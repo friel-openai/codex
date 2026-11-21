@@ -46,6 +46,112 @@ use crate::local::test_support::test_config;
 use crate::local::thread_history::projection_state;
 use crate::local::thread_history::realtime;
 
+#[test]
+fn source_turns_preserve_inherited_abort_and_distinct_reused_turn() {
+    let parent = ThreadId::new();
+    let child = ThreadId::new();
+    let segment = RolloutLineageSegment {
+        thread_id: child,
+        rollout_id: child,
+        segment_id: None,
+        rollout_path: "child.jsonl".into(),
+        start_ordinal: 10,
+        physical_start_ordinal: 10,
+        history_page_visible: true,
+        history_page_start: None,
+        end_ordinal_exclusive: None,
+        jsonl_end_byte_offset: Some(100),
+        end_byte_offset: Some(100),
+        byte_boundary_recorded: false,
+        physical_size: Some(100),
+        filter_texts: Vec::new(),
+        goal_supervisor_provenance:
+            crate::local::goal_supervisor_history_repair::GoalSupervisorLineageProvenance::Untrusted,
+        uses_history_base: true,
+        uses_fork_boundary: false,
+    };
+    let mut parent_segment = segment.clone();
+    parent_segment.thread_id = parent;
+    parent_segment.rollout_id = parent;
+    parent_segment.start_ordinal = 1;
+    parent_segment.physical_start_ordinal = 1;
+    parent_segment.end_ordinal_exclusive = Some(10);
+    parent_segment.uses_history_base = false;
+    let segments = [parent_segment, segment.clone()];
+    let turn = |status| ThreadHistoryTurnMetadata {
+        turn_id: "shared".to_string(),
+        root_turn_id: Some("root".to_string()),
+        status,
+        error: None,
+        started_at: Some(123),
+        completed_at: None,
+        duration_ms: None,
+    };
+    let start = || SourceTurnEvent::Turn(3, parent, turn(TurnStatus::InProgress));
+    let abort = || SourceTurnEvent::Turn(11, child, turn(TurnStatus::Interrupted));
+
+    let mut inherited = vec![start(), abort()];
+    assert!(normalize_inherited_fork_interruptions(
+        &mut inherited,
+        &segments,
+        &[],
+        &[],
+    ));
+    let (turns, _) = reduce_aggregate_sources(inherited).unwrap();
+    let inherited = &turns["shared"];
+    assert_eq!(inherited.ordinal, 3);
+    assert_eq!(inherited.owner, parent);
+    assert_eq!(inherited.metadata.status, TurnStatus::Interrupted);
+    assert_eq!(inherited.metadata.started_at, Some(123));
+    assert_eq!(inherited.metadata.root_turn_id.as_deref(), Some("root"));
+
+    let mut reused = vec![
+        start(),
+        SourceTurnEvent::Turn(10, child, turn(TurnStatus::InProgress)),
+        abort(),
+    ];
+    assert!(normalize_inherited_fork_interruptions(
+        &mut reused,
+        &segments,
+        &[],
+        &[],
+    ));
+    let (turns, _) = reduce_aggregate_sources(reused).unwrap();
+    let reused = &turns["shared"];
+    assert_eq!(reused.ordinal, 10);
+    assert_eq!(reused.owner, child);
+    assert_eq!(reused.metadata.status, TurnStatus::Interrupted);
+
+    let local_item = SourceItemAnchor {
+        ordinal: 10,
+        owner: child,
+        turn_id: "shared".to_string(),
+        item_id: "item".to_string(),
+    };
+    assert!(!normalize_inherited_fork_interruptions(
+        &mut [start(), abort()],
+        &segments,
+        &[],
+        &[local_item],
+    ));
+    let mut trimmed = segment.clone();
+    trimmed.history_page_start = Some(10);
+    assert!(!normalize_inherited_fork_interruptions(
+        &mut [start(), abort()],
+        &[segments[0].clone(), trimmed],
+        &[],
+        &[],
+    ));
+    let mut same_owner = segments[0].clone();
+    same_owner.thread_id = child;
+    assert!(!normalize_inherited_fork_interruptions(
+        &mut [start(), abort()],
+        &[same_owner, segment],
+        &[],
+        &[],
+    ));
+}
+
 async fn source_item_race_fixture() -> (
     TempDir,
     LocalThreadStore,
@@ -103,6 +209,340 @@ async fn source_item_race_fixture() -> (
         root,
         item_cursor.expect("existing item cursor"),
     )
+}
+
+async fn full_turn_batch_fixture() -> (TempDir, LocalThreadStore, ThreadId, std::path::PathBuf) {
+    let (home, store, thread_id, root, _) = source_item_race_fixture().await;
+    append_timeline_record(
+        &root,
+        10,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "second".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(30),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &root,
+        11,
+        timeline_user_item(thread_id, "second", "second-item", "second"),
+    );
+    append_timeline_record(
+        &root,
+        12,
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "second".to_string(),
+            root_turn_id: None,
+            last_agent_message: None,
+            error: None,
+            started_at: Some(30),
+            completed_at: Some(40),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        })),
+    );
+    (home, store, thread_id, root)
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_matches_individual_pages_and_rejects_incomplete_selection() {
+    let (_home, store, thread_id, _root) = full_turn_batch_fixture().await;
+    let turn_ids = vec!["turn".to_string(), "second".to_string()];
+    let batch = try_source_backed_full_turn_items(&store, thread_id, &turn_ids)
+        .await
+        .unwrap()
+        .expect("complete source batch");
+    for turn in &turn_ids {
+        let page = store
+            .list_items(item_params(
+                thread_id,
+                Some(turn),
+                None,
+                100,
+                SortDirection::Asc,
+            ))
+            .await
+            .unwrap();
+        assert!(page.next_cursor.is_none());
+        assert_eq!(batch[turn], page.items);
+    }
+    assert!(
+        try_source_backed_full_turn_items(
+            &store,
+            thread_id,
+            &["turn".to_string(), "missing".to_string()],
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        try_source_backed_full_turn_items(
+            &store,
+            thread_id,
+            &["turn".to_string(), "turn".to_string()],
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_rejects_replaced_root_at_revalidation() {
+    let (_home, store, thread_id, root) = full_turn_batch_fixture().await;
+    let pause = inject_source_item_pause(thread_id);
+    let reader = store.clone();
+    let request = tokio::spawn(async move {
+        try_source_backed_full_turn_items(
+            &reader,
+            thread_id,
+            &["turn".to_string(), "second".to_string()],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("batch reached source revalidation");
+    let replacement = root.with_extension("replacement");
+    fs::write(&replacement, fs::read(&root).unwrap()).unwrap();
+    fs::rename(replacement, &root).unwrap();
+    pause.release.notify_one();
+    assert!(request.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_rejects_missing_predecessor() {
+    let (_home, store, thread_id, _root) = full_turn_batch_fixture().await;
+    let (graph, _) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .expect("predecessor source");
+    let predecessor = graph.lineage.segments()[0].rollout_path().to_path_buf();
+    fs::remove_file(predecessor).unwrap();
+    assert!(
+        try_source_backed_full_turn_items(
+            &store,
+            thread_id,
+            &["turn".to_string(), "second".to_string()],
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_falls_back_when_combined_sources_exceed_limit() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let predecessor_id = ThreadId::new();
+    let predecessor = selected_rollout_path(home.path(), thread_id, predecessor_id);
+    write_rollout(&predecessor, thread_id, None);
+    let large = "x".repeat(9 * 1024 * 1024);
+    for index in 0..4 {
+        append_timeline_record(
+            &predecessor,
+            index + 1,
+            timeline_user_item(thread_id, "older", &format!("older-{index}"), &large),
+        );
+    }
+    let cutoff = history_position(&predecessor, predecessor_id, 5);
+    let root = rollout_path(home.path(), thread_id);
+    write_rollout(&root, thread_id, Some(cutoff));
+    for index in 0..4 {
+        append_timeline_record(
+            &root,
+            index + 6,
+            timeline_user_item(thread_id, "newer", &format!("newer-{index}"), &large),
+        );
+    }
+    let ids = ["older".to_string(), "newer".to_string()];
+    assert!(
+        try_source_backed_full_turn_items(&store, thread_id, &ids)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for turn in ["older", "newer"] {
+        let page = store
+            .list_items(item_params(
+                thread_id,
+                Some(turn),
+                None,
+                100,
+                SortDirection::Asc,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            item_ids(&page),
+            (0..4)
+                .map(|index| format!("{turn}-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(page.next_cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_rejects_replaced_predecessor_at_revalidation() {
+    let (_home, store, thread_id, _root) = full_turn_batch_fixture().await;
+    let (graph, _) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .expect("predecessor source");
+    let predecessor = graph.lineage.segments()[0].rollout_path().to_path_buf();
+    let pause = inject_source_item_pause(thread_id);
+    let reader = store.clone();
+    let request = tokio::spawn(async move {
+        try_source_backed_full_turn_items(
+            &reader,
+            thread_id,
+            &["turn".to_string(), "second".to_string()],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("batch reached source revalidation");
+    let replacement = predecessor.with_extension("replacement");
+    fs::write(&replacement, fs::read(&predecessor).unwrap()).unwrap();
+    fs::rename(replacement, &predecessor).unwrap();
+    pause.release.notify_one();
+    assert!(request.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_keeps_late_append_for_the_next_snapshot() {
+    let (_home, store, thread_id, root) = full_turn_batch_fixture().await;
+    let pause = inject_source_item_pause(thread_id);
+    let reader = store.clone();
+    let request = tokio::spawn(async move {
+        try_source_backed_full_turn_items(
+            &reader,
+            thread_id,
+            &["turn".to_string(), "second".to_string()],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("batch reached source revalidation");
+    append_timeline_record(
+        &root,
+        13,
+        timeline_user_item(thread_id, "second", "late", "late"),
+    );
+    pause.release.notify_one();
+    let captured = request.await.unwrap().unwrap().expect("captured batch");
+    assert_eq!(
+        captured["second"]
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["second-item"]
+    );
+    let fresh = try_source_backed_full_turn_items(
+        &store,
+        thread_id,
+        &["turn".to_string(), "second".to_string()],
+    )
+    .await
+    .unwrap()
+    .expect("fresh batch");
+    assert_eq!(
+        fresh["second"]
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["second-item", "late"]
+    );
+}
+
+#[tokio::test]
+async fn source_full_turn_batch_respects_fork_cutoff_and_rejects_split_turn() {
+    let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let parent = ThreadId::new();
+    let parent_path = rollout_path(home.path(), parent);
+    write_rollout(&parent_path, parent, None);
+    append_timeline_record(
+        &parent_path,
+        1,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "parent-turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &parent_path,
+        2,
+        timeline_user_item(parent, "parent-turn", "inherited", "before"),
+    );
+    let cutoff = history_position(&parent_path, parent, 3);
+    append_timeline_record(
+        &parent_path,
+        3,
+        timeline_user_item(parent, "parent-turn", "after-cutoff", "after"),
+    );
+    let root = rollout_path(home.path(), child);
+    write_rollout(&root, child, Some(cutoff));
+    append_timeline_record(
+        &root,
+        4,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "child-turn".to_string(),
+            root_turn_id: None,
+            turn_attribution: None,
+            trace_id: None,
+            started_at: Some(20),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    );
+    append_timeline_record(
+        &root,
+        5,
+        timeline_user_item(child, "child-turn", "local", "local"),
+    );
+    let ids = ["parent-turn".to_string(), "child-turn".to_string()];
+    let batch = try_source_backed_full_turn_items(&store, child, &ids)
+        .await
+        .unwrap()
+        .expect("distinct owners have a complete source batch");
+    assert_eq!(
+        batch["parent-turn"]
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["inherited"]
+    );
+    assert_eq!(
+        batch["child-turn"]
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["local"]
+    );
+
+    append_timeline_record(
+        &root,
+        6,
+        timeline_user_item(child, "parent-turn", "split", "split"),
+    );
+    assert!(
+        try_source_backed_full_turn_items(&store, child, &ids)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
