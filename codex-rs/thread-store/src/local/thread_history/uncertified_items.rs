@@ -491,12 +491,36 @@ async fn extend_rotated_scan(
     walk: &mut HistoryPageWalk<'_>,
     cached: &UncertifiedItemScan,
 ) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
-    if cached.attached
-        || cached.root.thread_id() != id
-        || walk.root_rollout_id() == cached.root.rollout_id()
-    {
+    if cached.attached || cached.root.thread_id() != id {
         return Ok(None);
     }
+    let same_rollout_id = walk.root_rollout_id() == cached.root.rollout_id();
+    let mut segment_ids = HashSet::new();
+    let former_segment_id = if same_rollout_id {
+        if walk.root_path() != cached.root.rollout_path() {
+            return Ok(None);
+        }
+        let (Some(former), Some(current)) = (cached.root.segment_id, walk.current().segment_id)
+        else {
+            return Ok(None);
+        };
+        if former == current {
+            return Ok(None);
+        }
+        for segment in &cached.ancestors {
+            if let Some(segment_id) = segment.segment_id
+                && (!segment_ids.insert(segment_id) || segment_id == former)
+            {
+                return Ok(None);
+            }
+        }
+        if !segment_ids.insert(current) {
+            return Ok(None);
+        }
+        Some(former)
+    } else {
+        None
+    };
     let Some(expected_base) = cached_predecessor_position(cached) else {
         return Ok(None);
     };
@@ -508,12 +532,28 @@ async fn extend_rotated_scan(
         if segment.thread_id() != id {
             return Ok(None);
         }
-        if segment.rollout_id() != cached.root.rollout_id() {
+        let matches_former = if same_rollout_id {
+            if let Some(segment_id) = segment.segment_id {
+                if !segment_ids.insert(segment_id) {
+                    return Ok(None);
+                }
+                Some(segment_id) == former_segment_id
+            } else {
+                false
+            }
+        } else {
+            segment.rollout_id() == cached.root.rollout_id()
+        };
+        if !matches_former {
             continue;
+        }
+        if same_rollout_id && segment.rollout_id() == cached.root.rollout_id() {
+            return Ok(None);
         }
         // The former root is rescanned at the new child's exact cutoff. Its physical copy and
         // length may have changed after rotation, but its metadata and inherited cutoff must not.
         let mut normalized = segment.clone();
+        normalized.rollout_id = cached.root.rollout_id;
         normalized.rollout_path = cached.root.rollout_path.clone();
         normalized.end_ordinal_exclusive = cached.root.end_ordinal_exclusive;
         normalized.jsonl_end_byte_offset = cached.root.jsonl_end_byte_offset;
@@ -1355,6 +1395,7 @@ pub(super) async fn discover_cached(
         let meta = &head.session_meta.meta;
         if meta.id != id
             || meta.history_mode != ThreadHistoryMode::Paginated
+            || meta.segment_id != cached.root.segment_id
             || meta.attached_thread
             || meta.subagent_history_start_ordinal.is_some()
             || meta.history_base != expected_base
