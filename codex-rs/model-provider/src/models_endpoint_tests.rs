@@ -50,6 +50,29 @@ impl ModelsTransportBuilder for RecordingTransportBuilder {
 #[derive(Debug)]
 struct CaptureModelsUrl(Mutex<Option<String>>);
 
+#[test]
+fn catalog_safety_failed_guard_is_limited_to_the_first_party_provider() {
+    let default = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let endpoint = |provider| {
+        OpenAiModelsEndpoint::new(
+            provider, /*auth_manager*/ None, /*gateway_auth_manager*/ None,
+        )
+    };
+    assert!(endpoint(default.clone()).requires_first_party_catalog());
+    let mut custom = default.clone();
+    custom.base_url = Some("https://example.test/v1".to_string());
+    assert!(!endpoint(custom).requires_first_party_catalog());
+    let mut custom_codex_route = default.clone();
+    custom_codex_route.base_url = Some("https://example.test/backend-api/codex".to_string());
+    assert!(!endpoint(custom_codex_route).requires_first_party_catalog());
+    let mut explicit_catalog = default.clone();
+    explicit_catalog.model_catalog_url = Some("https://example.test/models".into());
+    assert!(!endpoint(explicit_catalog).requires_first_party_catalog());
+    let mut unauthenticated = default;
+    unauthenticated.requires_openai_auth = false;
+    assert!(!endpoint(unauthenticated).requires_first_party_catalog());
+}
+
 impl ModelsTransportBuilder for CaptureModelsUrl {
     fn build(
         &self,

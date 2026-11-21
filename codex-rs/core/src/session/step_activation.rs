@@ -21,7 +21,6 @@ use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnSettingsUpdate;
@@ -106,10 +105,10 @@ fn check_legacy_model_safety(
     admitted_config: &Config,
     live_config: &Config,
 ) -> Result<(), String> {
-    if admitted.origin == ModelOrigin::Synthetic || current.origin == ModelOrigin::Synthetic {
+    if admitted.origin.is_synthetic() || current.origin.is_synthetic() {
         return Err("the active model has only fallback metadata".to_string());
     }
-    if destination.origin == ModelOrigin::Synthetic {
+    if destination.origin.is_synthetic() {
         return Err("the destination model has only fallback metadata".to_string());
     }
     let retained_models = [admitted, current];
