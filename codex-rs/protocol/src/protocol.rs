@@ -5262,6 +5262,7 @@ mod tests {
             service_tier: None,
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: ApprovalsReviewer::User,
+            requested_approvals_reviewer: None,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: Some(ActivePermissionProfile::read_only()),
             cwd: cwd.clone(),
