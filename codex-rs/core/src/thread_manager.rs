@@ -930,6 +930,7 @@ impl ThreadManager {
                         codex_home,
                     )),
                     /*api_key_model_discovery_default*/ false,
+                    Default::default(),
                     codex_model_provider::ProviderAuthContext {
                         credentials: Arc::clone(&auth_manager),
                         runtime_auth: None,
@@ -1157,6 +1158,7 @@ impl ThreadManager {
                 .model_provider(config.model_provider.clone()),
             config.model_catalog.clone(),
             config.features.enabled(Feature::ApiKeyModelDiscovery),
+            config.custom_models.clone(),
         )
     }
 
