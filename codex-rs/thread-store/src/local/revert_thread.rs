@@ -43,29 +43,25 @@ pub(super) async fn revert(
         .ok_or(ThreadStoreError::Unsupported {
             operation: "revert_thread",
         })?;
-    // Discover without locks, then acquire every lifecycle and writer in the same order as
-    // archive/delete. A changed graph is rediscovered only after releasing all reservations.
-    let mut lock_thread_ids = vec![thread_id];
-    let (_lifecycle_guards, mut writer_reservation, lineage) = loop {
-        lock_thread_ids.sort_unstable_by_key(ThreadId::to_string);
-        lock_thread_ids.dedup();
-        let mut lifecycle_guards = Vec::with_capacity(lock_thread_ids.len());
-        for &id in &lock_thread_ids {
-            lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(id).await);
-        }
-        let reservation = store.reserve_rollout_writers(&lock_thread_ids).await?;
-        store.ensure_live_recorder_absent(thread_id).await?;
-        let lineage = store.resolve_rollout_lineage(thread_id).await?;
-        let mut discovered = lineage.segments().iter().map(|segment| segment.thread_id()).collect::<Vec<_>>();
-        discovered.push(thread_id);
-        if discovered.iter().all(|id| reservation.contains(*id)) {
-            break (lifecycle_guards, reservation, lineage);
-        }
-        drop(reservation);
-        drop(lifecycle_guards);
-        lock_thread_ids.extend(discovered);
-    };
-    let writer_lock = writer_reservation.take_writer_lock(thread_id).ok_or_else(|| ThreadStoreError::Conflict {
+    let selected = thread_rollout_resolver::resolve_current(store, thread_id).await?
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    let mut history_access = super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+        store, thread_id, &selected.path,
+    ).await?;
+    store.ensure_live_recorder_absent(thread_id).await?;
+    let lineage = store.resolve_rollout_lineage(thread_id).await?;
+    if lineage.has_exclusions() {
+        return Err(ThreadStoreError::Conflict {
+            message: "history repair cannot bind an alternate revert lineage to its selected graph".to_string(),
+        });
+    }
+    let reservation = history_access.writer_reservation().ok_or_else(|| ThreadStoreError::Conflict {
+        message: "revert history repair did not retain writer ownership".to_string(),
+    })?;
+    if lineage.segments().iter().any(|segment| !reservation.contains(segment.thread_id())) {
+        return Err(ThreadStoreError::Conflict { message: "revert lineage expanded outside history repair ownership".to_string() });
+    }
+    let writer_lock = history_access.take_writer_lock(thread_id).ok_or_else(|| ThreadStoreError::Conflict {
         message: format!("thread {thread_id} already has an active writer"),
     })?;
 
@@ -81,11 +77,12 @@ pub(super) async fn revert(
     let current_rollout = thread_rollout_resolver::resolve_current(store, thread_id)
         .await?
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-    if current_rollout.rollout_id != lineage.root_rollout_id() || current_rollout.path.as_path() != lineage.leaf_path() {
+    if current_rollout.rollout_id != selected.rollout_id || current_rollout.path != selected.path
+        || current_rollout.rollout_id != lineage.root_rollout_id() || current_rollout.path.as_path() != lineage.leaf_path() {
         return Err(ThreadStoreError::Conflict { message: format!("thread {thread_id} changed while its writers were reserved") });
     }
     let source_path = current_rollout.path;
-    let mut source_meta = codex_rollout::read_session_meta_line(source_path.as_path())
+    let mut source_meta = codex_rollout::read_session_meta_line_exact(source_path.as_path())
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!(
@@ -121,7 +118,9 @@ pub(super) async fn revert(
         .is_none()
         .then_some(current_rollout.rollout_id);
     super::thread_history_materialization::ensure_fallback_projection_compatible(store, &lineage).await?;
-    let reservation = &writer_reservation;
+    // History repair covered the selected graph, not a later independently resolved copy.
+    lineage.reads.prevent_retry();
+    let reservation = history_access.writer_reservation().expect("validated history repair ownership");
     let history_base = lineage
         .read_with_fallback(store, |mut lineage| async move {
             if lineage.segments().iter().any(|segment| !reservation.contains(segment.thread_id())) {
@@ -166,8 +165,7 @@ pub(super) async fn revert(
     // request is cancelled after the replacement file is created.
     let publication_store = store.clone();
     tokio::spawn(async move {
-        let _lifecycle_guards = _lifecycle_guards;
-        let _writer_reservation = writer_reservation;
+        let _history_access = history_access;
         let recorder = create_replacement_recorder(
             &publication_store, source_meta, rollout_id, history_base,
             forked_from_ordinal_exclusive, writer_lock,
