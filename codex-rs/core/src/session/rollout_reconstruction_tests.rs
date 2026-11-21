@@ -234,6 +234,7 @@ async fn recorded_local_input_order_preserves_checkpoint_evidence(
                 phase: None,
             },
             acceptance_order: 0,
+            retained_source: None,
         },
         &session.item_id_generator,
     ));
@@ -3233,6 +3234,8 @@ async fn completed_certified_companion_restores_its_settings(late_completion: bo
     };
     let mut compacted = checkpoint_compacted(vec![user_message("checkpoint")]);
     compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -4602,6 +4605,8 @@ async fn migration_preserves_assistant_delivery_and_source_revisions_after_rollb
     // Starting from this checkpoint checks their original revision as well as their order.
     checkpoint.retained_context = Some(captured.retained_context().clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -4896,6 +4901,8 @@ async fn assert_migration_checkpoint_reconstruction_after_rollback(
     }
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: expected_runtime,
         dynamic_tools: None,
@@ -5265,6 +5272,8 @@ async fn assert_migration_preserves_retained_eviction_before_rollback(
     });
     checkpoint.guardian_history = guardian_baseline.clone();
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -5403,6 +5412,8 @@ async fn migration_preserves_post_completion_checkpoint_reconstruction() {
     checkpoint.retained_context = Some(Default::default());
     checkpoint.window_number = Some(1);
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -5560,6 +5571,8 @@ async fn migration_preserves_worker_checkpoint_after_root_fork(
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.retained_context = Some(worker_retained);
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -5711,6 +5724,8 @@ async fn migration_preserves_opaque_checkpoint_reviewer_fallback(producer_hash: 
     let mut checkpoint = checkpoint_compacted(Vec::new());
     checkpoint.replacement_history = Some(replacement.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -5854,6 +5869,8 @@ async fn reconstruction_preserves_legacy_only_review_input_applicability() {
         baseline.clone().into(),
     ]));
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -6085,6 +6102,8 @@ async fn migration_preserves_review_eviction_under_current_model_policy(has_guar
     let mut checkpoint = checkpoint_compacted(baseline.clone());
     checkpoint.guardian_history = has_guardian_backup.then(|| guardian_baseline.clone());
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -6178,6 +6197,8 @@ async fn review_input_resolution_follows_reconstruction_checkpoint() {
     let mut selected = checkpoint_compacted(vec![user_message("A")]);
     selected.segment_state_checkpoint = None;
     selected.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -6274,6 +6295,8 @@ fn modern_state_only_checkpoint_is_invisible_without_hiding_real_compaction() {
     checkpoint.message.clear();
     checkpoint.segment_state_checkpoint = None;
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -6309,6 +6332,8 @@ fn nonempty_summary_compaction_remains_visible(modern: bool) {
     checkpoint.segment_state_checkpoint = None;
     checkpoint.compaction_response_id = None;
     checkpoint.resume_metadata = modern.then_some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,
@@ -6335,6 +6360,8 @@ fn incomplete_modern_checkpoint_without_window_remains_visible() {
     checkpoint.window_number = None;
     checkpoint.compaction_response_id = None;
     checkpoint.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        next_item_ordinal: None,
+        observation_clock_floor_ms: None,
         rejected_audio_file_ids: Default::default(),
         multi_agent_version: None,
         dynamic_tools: None,

@@ -6,7 +6,7 @@ use codex_history::ResumedHistory;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
@@ -282,10 +282,7 @@ async fn retained_membership_ignores_an_independent_legacy_registry_with_the_sam
     let child_id = control
         .spawn_agent(
             config.clone(),
-            vec![UserInput::Text {
-                text: "wait".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("wait".to_string())],
             Some(source.clone()),
         )
         .await

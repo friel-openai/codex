@@ -18,6 +18,7 @@ async fn shared_mcp_process_id(thread: &CodexThread) -> u64 {
     thread
         .call_mcp_tool(
             "retirement",
+            /*environment_id*/ None,
             "shared_counter",
             /*arguments*/ None,
             /*meta*/ None,

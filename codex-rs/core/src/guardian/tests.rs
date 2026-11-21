@@ -3810,9 +3810,13 @@ async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enable
         Arc::make_mut(&mut context.model_info).slug = "gpt-5.6-sol".to_string();
     }
     let captured_parent_model = context.model_info.slug.clone();
-    let guardian_config = guardian_review_session_config(session.as_ref(), &context)
-        .await
-        .expect("guardian config");
+    let guardian_config = guardian_review_session_config(
+        session.as_ref(),
+        &context,
+        ReviewRetrieval::ConversationHistory,
+    )
+    .await
+    .expect("guardian config");
     let (review_model, _) = resolve_review_model(session.as_ref(), &context).await;
     let expected_effort = guardian_config.spawn_config.model_reasoning_effort.clone();
 
