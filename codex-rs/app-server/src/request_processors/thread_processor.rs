@@ -935,19 +935,31 @@ impl ThreadRequestProcessor {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let mut retry = ResumeRetryState::default();
-        // Keep the resume future off the request handler's stack.
-        while Box::pin(self.thread_resume_inner(
-            &target,
-            &params,
-            app_server_client_name.clone(),
-            app_server_client_version.clone(),
-            client_mcp_extensions.clone(),
-            &mut retry,
-        ))
-        .await?
-        .is_continue()
-        {}
-        Ok(None)
+        let mut timings = crate::thread_state::ThreadResumeTimings::new(
+            !params.exclude_turns,
+            params.initial_turns_page.is_some(),
+        );
+        let result = async {
+            // Keep the resume future off the request handler's stack.
+            while Box::pin(self.thread_resume_inner(
+                &target,
+                &params,
+                app_server_client_name.clone(),
+                app_server_client_version.clone(),
+                client_mcp_extensions.clone(),
+                &mut retry,
+                &mut timings,
+            ))
+            .await?
+            .is_continue()
+            {}
+            Ok(None)
+        }
+        .await;
+        if !timings.delegated {
+            timings.report(/*response_prepared*/ false);
+        }
+        result
     }
 
     pub(crate) async fn thread_fork(
@@ -5651,6 +5663,10 @@ impl ThreadRequestProcessor {
         .await;
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resume timing must follow the request across preparation retries"
+    )]
     async fn thread_resume_inner<'a>(
         &'a self,
         target: &ThreadResumeTarget,
@@ -5659,6 +5675,7 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
         retry: &mut ResumeRetryState<'a>,
+        timings: &mut crate::thread_state::ThreadResumeTimings,
     ) -> Result<ControlFlow<()>, JSONRPCErrorError> {
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
@@ -5687,10 +5704,16 @@ impl ThreadRequestProcessor {
 
         let exclusive =
             retry.force_exclusive || matches!(target, ThreadResumeTarget::DaemonRecovery(_));
-        let mut permit = match retry.held_permit.take() {
-            Some(permit) => permit,
-            None => ResumePermit::acquire(self, params, exclusive).await?,
+        let permit_started = Instant::now();
+        let permit = match retry.held_permit.take() {
+            Some(permit) => Ok(permit),
+            None => {
+                self.acquire_thread_resume_permit(params, exclusive, Some(&mut timings.permit))
+                    .await
+            }
         };
+        timings.permit_preparation += permit_started.elapsed();
+        let mut permit = permit?;
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
                 .pending_thread_unloads
@@ -5709,6 +5732,7 @@ impl ThreadRequestProcessor {
                     app_server_client_name.clone(),
                     app_server_client_version.clone(),
                     /*cold_resume_history*/ None,
+                    timings,
                 )
                 .await?
             {
@@ -5716,9 +5740,10 @@ impl ThreadRequestProcessor {
                     // The listener may need this permit to finish the response.
                     drop(permit);
                     // A stopped listener can discard an accepted command before responding.
-                    completion
-                        .await
-                        .map_err(|_| thread_closing_for_resume(&params.thread_id))?;
+                    if completion.await.is_err() {
+                        timings.delegated = false;
+                        return Err(thread_closing_for_resume(&params.thread_id));
+                    }
                     return Ok(ControlFlow::Break(()));
                 }
                 RunningThreadResumeResult::NotRunning(stored_thread) => stored_thread,
@@ -5777,7 +5802,11 @@ impl ThreadRequestProcessor {
         let (mut thread_history, resume_source_thread, selected_home_rollout) =
             if let Some(history) = history {
                 (
-                    self.resume_thread_from_history(history.as_slice()).await?,
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.history,
+                        self.resume_thread_from_history(history.as_slice()),
+                    )
+                    .await?,
                     None,
                     false,
                 )
@@ -5785,10 +5814,13 @@ impl ThreadRequestProcessor {
                 let stored_thread = match stored_thread_from_running_probe {
                     Some(stored_thread) => *stored_thread,
                     None => {
-                        self.read_stored_thread_for_resume(
-                            &thread_id,
-                            path.as_ref(),
-                            /*include_history*/ false,
+                        crate::thread_state::ThreadResumeTimings::measure(
+                            &mut timings.lookup,
+                            self.read_stored_thread_for_resume(
+                                &thread_id,
+                                path.as_ref(),
+                                /*include_history*/ false,
+                            ),
                         )
                         .await?
                     }
@@ -5810,13 +5842,15 @@ impl ThreadRequestProcessor {
                     .and(stored_thread.rollout_path.as_ref())
                     .filter(|path| path.starts_with(self.config.codex_home.as_path()))
                     .cloned();
-                let (history, stored_thread) = self
-                    .load_resume_initial_history_from_stored_thread_with_options(
+                let (history, stored_thread) = crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.history,
+                    self.load_resume_initial_history_from_stored_thread_with_options(
                         stored_thread,
                         prepared_model_context,
                         include_turns,
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 permit.check_id(stored_thread.thread_id)?;
                 if permit.is_shared() && !resume_permit::source_can_share(&stored_thread) {
                     retry.upgrade(permit).await?;
@@ -5903,6 +5937,10 @@ impl ThreadRequestProcessor {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
+        if resume_source_thread.is_some() {
+            timings.history_mode_known = true;
+            timings.paginated = paginated_resume;
+        }
         if paginated_resume
             && include_turns
             && retry.prepared_config.is_none()
@@ -6028,14 +6066,16 @@ impl ThreadRequestProcessor {
                     app_server_client_name,
                     app_server_client_version,
                     cold_resume_history,
+                    timings,
                 )
                 .await?
             {
                 RunningThreadResumeResult::Handled(completion) => {
                     drop(permit);
-                    completion
-                        .await
-                        .map_err(|_| thread_closing_for_resume(child_thread_id))?;
+                    if completion.await.is_err() {
+                        timings.delegated = false;
+                        return Err(thread_closing_for_resume(child_thread_id));
+                    }
                     Ok(ControlFlow::Break(()))
                 }
                 RunningThreadResumeResult::NotRunning(_) => Err(invalid_request(
@@ -6177,6 +6217,7 @@ impl ThreadRequestProcessor {
                 // Config loading can call back into Desktop; release both locks during host work.
                 drop(_goal_resume_guard);
                 drop(permit);
+                let config_started = Instant::now();
                 let config = self
                     .config_manager
                     .load_for_resume(
@@ -6205,8 +6246,9 @@ impl ThreadRequestProcessor {
                         typesafe_overrides,
                         history_cwd,
                     )
-                    .await
-                    .map_err(|err| config_load_error(&err))?;
+                    .await;
+                timings.config += config_started.elapsed();
+                let config = config.map_err(|err| config_load_error(&err))?;
                 retry.prepared_config = Some(PreparedResumeConfig {
                     state: config_state,
                     config,
@@ -6259,7 +6301,10 @@ impl ThreadRequestProcessor {
             )
             .map_err(|err| invalid_request(err.to_string()))?;
         start_options.initial_history = thread_history;
-        match self.thread_manager.start_thread(start_options).await {
+        let cold_startup = Instant::now();
+        let started = self.thread_manager.start_thread(start_options).await;
+        timings.cold_startup += cold_startup.elapsed();
+        match started {
             Ok(NewThread {
                 thread_id,
                 thread: codex_thread,
@@ -6614,12 +6659,16 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         cold_resume_history: Option<&[RolloutItem]>,
+        timings: &mut crate::thread_state::ThreadResumeTimings,
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-                && get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
-                    .await?
-                    .is_some()
+                && crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.lookup,
+                    get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id),
+                )
+                .await?
+                .is_some()
             {
                 return Err(invalid_request(format!(
                     "cannot resume thread {existing_thread_id} with history while it is already running"
@@ -6627,37 +6676,55 @@ impl ThreadRequestProcessor {
             }
             None
         } else if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
-            && let Some(existing_thread) =
-                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id).await?
+            && let Some(existing_thread) = crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.lookup,
+                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id),
+            )
+            .await?
         {
-            let source_thread = self
-                .read_stored_thread_for_resume(
+            let source_thread = crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.lookup,
+                self.read_stored_thread_for_resume(
                     &params.thread_id,
                     /*path*/ None,
                     /*include_history*/ false,
-                )
-                .await?;
+                ),
+            )
+            .await?;
             Some((existing_thread_id, existing_thread, source_thread))
         } else {
-            let source_thread = self
-                .read_stored_thread_for_resume(
+            let source_thread = crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.lookup,
+                self.read_stored_thread_for_resume(
                     &params.thread_id,
                     params.path.as_ref(),
                     /*include_history*/ false,
-                )
-                .await?;
+                ),
+            )
+            .await?;
             let existing_thread_id = source_thread.thread_id;
-            match get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id)
-                .await?
+            match crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.lookup,
+                get_loaded_thread_for_persistence(&self.thread_manager, existing_thread_id),
+            )
+            .await?
             {
                 Some(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
                 None => {
+                    if !timings.first_probe_completed {
+                        timings.first_probe_completed = true;
+                    }
                     return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
                         source_thread,
                     ))));
                 }
             }
         };
+
+        if !timings.first_probe_completed {
+            timings.first_probe_completed = true;
+            timings.first_probe_loaded = running_thread.is_some();
+        }
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
             thread_resume_account::check(
@@ -6673,6 +6740,8 @@ impl ThreadRequestProcessor {
             }
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
+            timings.history_mode_known = true;
+            timings.paginated = paginated_resume;
             let existing_thread_rollout_path = existing_thread.rollout_path();
             let active_path = existing_thread_rollout_path
                 .as_ref()
@@ -6688,7 +6757,11 @@ impl ThreadRequestProcessor {
             }
             permit.check_id(existing_thread_id)?;
             let (config_snapshot, selected_service_tier) =
-                existing_thread.resume_config_snapshot().await;
+                crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.config,
+                    existing_thread.resume_config_snapshot(),
+                )
+                .await;
             if permit.is_shared()
                 && (!resume_permit::source_can_share(&source_thread)
                     || !resume_permit::source_kind_can_share(
@@ -6755,10 +6828,18 @@ impl ThreadRequestProcessor {
                 );
             }
             permit.finish_probe();
-            self.config_manager
-                .check_thread_model_provider(existing_thread.config().await.as_ref())
-                .await
-                .map_err(|err| config_load_error(&err))?;
+            let current_config = crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.config,
+                existing_thread.config(),
+            )
+            .await;
+            crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.config,
+                self.config_manager
+                    .check_thread_model_provider(current_config.as_ref()),
+            )
+            .await
+            .map_err(|err| config_load_error(&err))?;
             let redact_resume_payloads =
                 should_redact_thread_resume_payloads(app_server_client_name.as_deref());
             let include_turns = !params.exclude_turns;
@@ -6783,29 +6864,36 @@ impl ThreadRequestProcessor {
                     .as_any()
                     .downcast_ref::<codex_thread_store::LocalThreadStore>()
             {
-                if !store
-                    .has_complete_segmented_legacy_projection(existing_thread_id)
-                    .await
-                    .map_err(thread_store_resume_read_error)?
+                if !crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.page,
+                    store.has_complete_segmented_legacy_projection(existing_thread_id),
+                )
+                .await
+                .map_err(thread_store_resume_read_error)?
                 {
-                    self.thread_store
-                        .persist_thread(existing_thread_id, PersistContext::Standard)
-                        .await
-                        .map_err(thread_store_resume_read_error)?;
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.persist,
+                        self.thread_store
+                            .persist_thread(existing_thread_id, PersistContext::Standard),
+                    )
+                    .await
+                    .map_err(thread_store_resume_read_error)?;
                 }
                 Some(
-                    self.projected_legacy_thread_turns_list_response(
-                        store,
-                        existing_thread_id,
-                        /*cursor*/ None,
-                        page.limit,
-                        ProjectedLegacyThreadTurnsPageOptions {
-                            sort_direction: page.sort_direction.unwrap_or(SortDirection::Desc),
-                            items_view: page.items_view,
-                            allow_running: true,
-                        },
-                    )
-                    .await?
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.page,
+                        self.projected_legacy_thread_turns_list_response(
+                            store,
+                            existing_thread_id,
+                            /*cursor*/ None,
+                            page.limit,
+                            ProjectedLegacyThreadTurnsPageOptions {
+                                sort_direction: page.sort_direction.unwrap_or(SortDirection::Desc),
+                                items_view: page.items_view,
+                                allow_running: true,
+                            },
+                        ),
+                    ).await?
                     .map(codex_app_server_protocol::TurnsPage::from)
                     .ok_or_else(|| {
                         internal_error(format!(
@@ -6831,11 +6919,14 @@ impl ThreadRequestProcessor {
                 && let Some(rollout_path) = active_path
             {
                 Some(
-                    self.load_reference_backed_turn_window(
-                        rollout_path,
-                        /*cursor*/ None,
-                        page.limit,
-                        SortDirection::Desc,
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.page,
+                        self.load_reference_backed_turn_window(
+                            rollout_path,
+                            /*cursor*/ None,
+                            page.limit,
+                            SortDirection::Desc,
+                        ),
                     )
                     .await
                     .map_err(|error| {
@@ -6856,19 +6947,24 @@ impl ThreadRequestProcessor {
             if needs_history {
                 let source_thread_id = source_thread.thread_id.to_string();
                 let source_rollout_path = source_thread.rollout_path.clone();
-                source_thread = self
-                    .read_stored_thread_for_resume(
+                source_thread = crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.history,
+                    self.read_stored_thread_for_resume(
                         &source_thread_id,
                         source_rollout_path.as_ref(),
                         /*include_history*/ true,
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
             }
             if paginated_resume {
-                self.thread_store
-                    .persist_thread(existing_thread_id, PersistContext::Standard)
-                    .await
-                    .map_err(thread_store_resume_read_error)?;
+                crate::thread_state::ThreadResumeTimings::measure(
+                    &mut timings.persist,
+                    self.thread_store
+                        .persist_thread(existing_thread_id, PersistContext::Standard),
+                )
+                .await
+                .map_err(thread_store_resume_read_error)?;
             }
             let (history_items, history_has_older_reference) =
                 if let Some(window) = bounded_legacy_history {
@@ -6907,16 +7003,22 @@ impl ThreadRequestProcessor {
                     .thread_state(existing_thread_id)
                     .await
             };
-            self.ensure_listener_task_running(
-                existing_thread_id,
-                existing_thread.clone(),
-                thread_state.clone(),
+            crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.listener_setup,
+                self.ensure_listener_task_running(
+                    existing_thread_id,
+                    existing_thread.clone(),
+                    thread_state.clone(),
+                ),
             )
             .await?;
-            Self::set_app_server_client_info(
-                existing_thread.as_ref(),
-                app_server_client_name,
-                app_server_client_version,
+            crate::thread_state::ThreadResumeTimings::measure(
+                &mut timings.listener_setup,
+                Self::set_app_server_client_info(
+                    existing_thread.as_ref(),
+                    app_server_client_name,
+                    app_server_client_version,
+                ),
             )
             .await?;
 
@@ -6947,15 +7049,24 @@ impl ThreadRequestProcessor {
                 .pending_resume_goal_state(existing_thread.as_ref())
                 .await;
             let paginated_turns = if paginated_resume && include_turns {
-                Some(self.paginated_thread_full_turns(existing_thread_id).await?)
+                Some(
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.history,
+                        self.paginated_thread_full_turns(existing_thread_id),
+                    )
+                    .await?,
+                )
             } else {
                 None
             };
             let paginated_initial_turns_page = if paginated_resume {
                 match params.initial_turns_page.as_ref() {
                     Some(params) => Some(
-                        self.paginated_resume_initial_turns_page(existing_thread_id, params)
-                            .await?,
+                        crate::thread_state::ThreadResumeTimings::measure(
+                            &mut timings.page,
+                            self.paginated_resume_initial_turns_page(existing_thread_id, params),
+                        )
+                        .await?,
                     ),
                     None => None,
                 }
@@ -6985,9 +7096,12 @@ impl ThreadRequestProcessor {
                         ) =>
                     {
                         Some(
-                            self.paginated_resume_initial_turns_page_with_active_slot(
-                                existing_thread_id,
-                                params,
+                            crate::thread_state::ThreadResumeTimings::measure(
+                                &mut timings.page,
+                                self.paginated_resume_initial_turns_page_with_active_slot(
+                                    existing_thread_id,
+                                    params,
+                                ),
                             )
                             .await?,
                         )
@@ -7018,16 +7132,19 @@ impl ThreadRequestProcessor {
                     page.data.clear();
                     Some(page)
                 } else {
-                    self.projected_legacy_thread_turns_list_response(
-                        store,
-                        existing_thread_id,
-                        /*cursor*/ None,
-                        Some((page_size - 1) as u32),
-                        ProjectedLegacyThreadTurnsPageOptions {
-                            sort_direction: SortDirection::Desc,
-                            items_view: page_params.items_view,
-                            allow_running: true,
-                        },
+                    crate::thread_state::ThreadResumeTimings::measure(
+                        &mut timings.page,
+                        self.projected_legacy_thread_turns_list_response(
+                            store,
+                            existing_thread_id,
+                            /*cursor*/ None,
+                            Some((page_size - 1) as u32),
+                            ProjectedLegacyThreadTurnsPageOptions {
+                                sort_direction: SortDirection::Desc,
+                                items_view: page_params.items_view,
+                                allow_running: true,
+                            },
+                        ),
                     )
                     .await?
                     .map(codex_app_server_protocol::TurnsPage::from)
@@ -7038,9 +7155,12 @@ impl ThreadRequestProcessor {
             let resume_cursor_store = paginated_resume.then(|| Arc::clone(&self.thread_store));
 
             let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            let mut listener_timings = timings.clone();
+            listener_timings.queued();
             let command = crate::thread_state::ThreadListenerCommand::SendThreadResumeResponse {
                 request: Box::new(crate::thread_state::PendingThreadResumeRequest {
                     request_id: request_id.clone(),
+                    timings: listener_timings,
                     history_items,
                     cold_resume_token_usage_turn_id,
                     history_has_older_reference,
@@ -7062,6 +7182,7 @@ impl ThreadRequestProcessor {
             if listener_command_tx.send(command).is_err() {
                 return Err(thread_closing_for_resume(existing_thread_id));
             }
+            timings.delegated = true;
             return Ok(RunningThreadResumeResult::Handled(completion_rx));
         }
         Ok(RunningThreadResumeResult::NotRunning(None))
