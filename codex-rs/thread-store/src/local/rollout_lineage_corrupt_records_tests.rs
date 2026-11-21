@@ -49,6 +49,7 @@ fn message(ordinal: u64, text: &str) -> RolloutLine {
         ordinal: Some(ordinal),
         item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
             message: text.to_string(),
+            moderation: None,
             phase: None,
             memory_citation: None,
             delivery: None,
@@ -91,11 +92,17 @@ fn segment(
     RolloutLineageSegment {
         thread_id,
         rollout_id,
+        segment_id: None,
         rollout_path: path.to_path_buf(),
         start_ordinal,
+        physical_start_ordinal: start_ordinal,
+        history_page_visible: true,
+        history_page_start: None,
         end_ordinal_exclusive: end.map(|end| end.end_ordinal_exclusive),
         end_byte_offset: end.map(|end| end.end_byte_offset),
         jsonl_end_byte_offset: end.map(|end| end.end_byte_offset),
+        byte_boundary_recorded: end.is_some(),
+        physical_size: fs::metadata(path).ok().map(|metadata| metadata.len()),
         filter_texts: Vec::new(),
         goal_supervisor_provenance: Default::default(),
         uses_history_base: false,
@@ -191,6 +198,7 @@ async fn assert_native_snapshot_retains_source_and_ordinals(retry_is_complete: b
         &path,
         /*end_ordinal_exclusive*/ 4,
         bytes.len() as u64,
+        /*has_fallback*/ false,
         &reservation,
     )
     .await
@@ -224,6 +232,7 @@ async fn assert_native_snapshot_retains_source_and_ordinals(retry_is_complete: b
         &path,
         /*end_ordinal_exclusive*/ 5,
         bytes.len() as u64,
+        /*has_fallback*/ false,
         &reservation,
     )
     .await

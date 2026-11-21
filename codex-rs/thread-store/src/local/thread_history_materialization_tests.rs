@@ -349,7 +349,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
 }
 
 #[tokio::test]
-async fn paginated_live_append_materializes_turn_items_and_state() {
+async fn paginated_live_append_materializes_turn_items_and_state_original_fixture() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -496,7 +496,7 @@ WHERE thread_id = ?
 }
 
 #[tokio::test]
-async fn paginated_command_history_caps_aggregated_output() {
+async fn paginated_command_history_caps_aggregated_output_original_fixture() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -563,7 +563,7 @@ async fn paginated_command_history_caps_aggregated_output() {
 }
 
 #[tokio::test]
-async fn paginated_mcp_history_caps_large_results() {
+async fn paginated_mcp_history_caps_large_results_original_fixture() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -654,7 +654,7 @@ async fn paginated_mcp_history_caps_large_results() {
 }
 
 #[tokio::test]
-async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
+async fn paginated_realtime_items_materialize_separately_in_rollout_order_original_fixture() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -933,7 +933,7 @@ async fn imported_legacy_fork_validation_preserves_missing_and_stale_source_meta
                 Utc::now(),
                 SessionSource::Exec,
             );
-            metadata.history_mode = ThreadHistoryMode::Legacy;
+            metadata = metadata.with_history_mode(ThreadHistoryMode::Legacy);
             state_db
                 .upsert_thread(&metadata.build("test-provider"))
                 .await
@@ -1422,6 +1422,7 @@ async fn paginated_mcp_history_caps_large_results() {
     let tool_call = McpToolCallItem {
         id: "mcp-1".to_string(),
         server: "test".to_string(),
+        environment_id: None,
         tool: "large_result".to_string(),
         arguments: arguments.clone(),
         connector_id: None,
@@ -1587,6 +1588,7 @@ async fn legacy_projection_materializes_implicit_commentary_without_a_final_answ
                 /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "implicit commentary".to_string(),
+                    moderation: None,
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
                     delivery: None,
@@ -1659,6 +1661,7 @@ async fn legacy_projection_does_not_report_commentary_as_a_final_answer() {
                 /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "progress update".to_string(),
+                    moderation: None,
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
                     delivery: None,
@@ -2128,6 +2131,7 @@ async fn paginated_live_append_materializes_turn_items_and_state() {
                     "turn-1",
                     TurnItem::AgentMessage(AgentMessageItem {
                         id: "agent-1".to_string(),
+                        moderation: None,
                         content: vec![AgentMessageContent::Text {
                             text: "done".to_string(),
                         }],
@@ -2262,11 +2266,13 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:started".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:transcript:0".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::TranscriptSegment {
                         role: RealtimeTranscriptRole::Assistant,
                         text: "Here is the result.".to_string(),
@@ -2276,6 +2282,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:promoted:agent-1".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::BemItemPromoted {
                         turn_id: "turn-1".to_string(),
                         item_id: "agent-1".to_string(),
@@ -2287,6 +2294,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                     "turn-1",
                     TurnItem::AgentMessage(AgentMessageItem {
                         id: "agent-1".to_string(),
+                        moderation: None,
                         content: vec![AgentMessageContent::Text {
                             text: "Result".to_string(),
                         }],
@@ -2299,6 +2307,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:closed".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionClosed {
                         outcome: RealtimeSessionOutcome::Ended,
                     },
@@ -2442,7 +2451,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             persistence_mode: crate::ThreadPersistenceMode::Durable,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: "window-1".to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::Text("window-1".to_string()),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(home.path().to_path_buf()),
@@ -2462,6 +2471,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             items: vec![RolloutItem::RealtimeItem(RealtimeItem {
                 id: "legacy:started".to_string(),
                 realtime_session_id: "legacy".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionStarted,
             })],
         })
@@ -2509,6 +2519,7 @@ async fn paginated_projection_streams_across_multiple_byte_batches() {
             "large-turn",
             TurnItem::AgentMessage(AgentMessageItem {
                 id: format!("large-agent-{index:03}"),
+                moderation: None,
                 content: vec![AgentMessageContent::Text {
                     text: format!("{index:03}:{payload}"),
                 }],
@@ -3881,6 +3892,7 @@ fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::workspace_write(),
                 active_permission_profile: None,
                 cwd: cwd.clone(),
@@ -4475,7 +4487,7 @@ async fn history_projection_requires_visible_items_for_projected_turns() {
         Utc::now(),
         SessionSource::Cli,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
     runtime
         .upsert_thread(&metadata.build(config.default_model_provider_id.as_str()))
         .await
@@ -6179,6 +6191,7 @@ async fn paused_projection_releases_writer_and_retains_progress_when_stopped() {
             &super::ProjectionRollout {
                 path: rollout_path.clone(),
                 reads: Default::default(),
+                participating_leaf: None,
             },
             before.0 as u64,
             before.1 as u64,
@@ -6186,12 +6199,13 @@ async fn paused_projection_releases_writer_and_retains_progress_when_stopped() {
             /*subagent_history_start_ordinal*/ None,
             /*end*/ None,
             || false,
-            |projections, next_offset| {
+            |projections, next_offset, source_sha256| {
                 assert!(
                     sender
                         .try_send(super::pipeline::ProjectionMessage::Batch {
                             projections,
                             next_offset,
+                            source_sha256,
                         })
                         .is_ok(),
                     "queue the complete record"
@@ -6209,6 +6223,7 @@ async fn paused_projection_releases_writer_and_retains_progress_when_stopped() {
                 /*initial_ordinal*/ 0,
                 receiver,
                 &super::super::rollout_lineage::AncestorReads::default(),
+                /*participating_leaf*/ None,
             )
             .await
         });
@@ -6378,6 +6393,7 @@ async fn blank_and_rejected_rollout_lines_advance_projection() {
             &super::ProjectionRollout {
                 path: rollout_path.clone(),
                 reads: Default::default(),
+                participating_leaf: None,
             },
             /*start_offset*/ 0,
             /*expected_ordinal*/ 0,
@@ -6385,7 +6401,7 @@ async fn blank_and_rejected_rollout_lines_advance_projection() {
             /*subagent_history_start_ordinal*/ None,
             /*end*/ None,
             || checks.replace(checks.get() + 1) >= 6,
-            |_batch, _next_offset| Ok(()),
+            |_batch, _next_offset, _source_sha256| Ok(()),
         )
         .is_err()
     );
@@ -6713,7 +6729,7 @@ async fn index_paginated_source_metadata(store: &LocalThreadStore, thread_id: Th
         Utc::now(),
         SessionSource::Exec,
     );
-    metadata.history_mode = ThreadHistoryMode::Paginated;
+    metadata = metadata.with_history_mode(ThreadHistoryMode::Paginated);
     state_db
         .upsert_thread(&metadata.build("test-provider"))
         .await
@@ -6764,7 +6780,7 @@ async fn create_legacy_thread(store: &LocalThreadStore, thread_id: ThreadId) {
             subagent_history_start_ordinal: None,
             persistence_mode: crate::ThreadPersistenceMode::Durable,
             initial_rollout_ordinal: 0,
-            initial_window_id: "window-1".to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::Text("window-1".to_string()),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
@@ -6890,6 +6906,7 @@ fn legacy_user_message(message: &str) -> RolloutItem {
 fn legacy_agent_message(message: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
         message: message.to_string(),
+        moderation: None,
         phase: Some(MessagePhase::FinalAnswer),
         memory_citation: None,
         delivery: None,
