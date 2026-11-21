@@ -45,7 +45,7 @@ fn checkpoint_rollback_preserves_guardian_ordering_without_changing_raw_history_
         inherited.clone(),
         boundary.clone(),
     ];
-    let mut transcript = TranscriptHistory::new(0);
+    let mut transcript = TranscriptHistory::new(0, codex_guardian_context::ContextBudgeting::Fixed);
     transcript.reset(original.iter());
     let mut checkpoint: CompactedItem =
         serde_json::from_value(json!({"message": "summary"})).unwrap();

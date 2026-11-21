@@ -269,7 +269,9 @@ async fn evicted_approval_disappears_after_feedback_submission() -> Result<()> {
             category: FeedbackCategory::Bug,
             include_logs: false,
             feedback_audience: FeedbackAudience::External,
-            result: Ok("feedback-thread".to_string()),
+            result: Ok(crate::app_event::FeedbackReceipt::Uploaded {
+                thread_id: "feedback-thread".to_string(),
+            }),
         },
     )
     .await;

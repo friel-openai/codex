@@ -50,12 +50,7 @@ pub(super) struct ModelRoutingSelection {
 
 impl Session {
     async fn model_routing_now(&self) -> DateTime<Utc> {
-        match self
-            .services
-            .time_provider
-            .current_time(self.thread_id())
-            .await
-        {
+        match self.services.time_provider.current_time(self.thread_id()) {
             Ok(now) => now,
             Err(err) => {
                 warn!("failed to read model routing clock: {err}");

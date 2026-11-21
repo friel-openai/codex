@@ -5,6 +5,30 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use pretty_assertions::assert_eq;
 
+#[tokio::test]
+async fn recovery_checkpoint_carries_realtime_observation_floor() {
+    let (mut session, _) = crate::session::tests::make_session_and_context().await;
+    assert_eq!(session.observation_clock_floor_ms().await, None);
+    let mut realtime = crate::realtime_history::RealtimeHistoryState::default();
+    realtime.observation_clock.observe(12_345);
+    session.realtime_history = Some(tokio::sync::Mutex::new(realtime));
+    let floor = session.observation_clock_floor_ms().await;
+    let state = session.state.lock().await;
+    let items = session
+        .segment_state_checkpoint_from_state(&state, floor)
+        .into_items();
+    let Some(RolloutItem::Compacted(checkpoint)) = items.first() else {
+        panic!("checkpoint must begin with compaction");
+    };
+    assert_eq!(
+        checkpoint
+            .resume_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.observation_clock_floor_ms),
+        Some(12_345)
+    );
+}
+
 #[test]
 fn recovery_presentation_preserves_distinct_user_ids_and_assistant_revisions() {
     let user = ResponseItem::Message {

@@ -2559,7 +2559,7 @@ fn user_history_cell_alignment_preserves_logical_source_coordinates() {
             presentation: if spoken {
                 super::messages::UserMessagePresentation::Spoken
             } else {
-                super::messages::UserMessagePresentation::Plain
+                super::messages::UserMessagePresentation::Typed
             },
             message:
                 "  Read https://example.test/a/long/url/that/wraps/in/a/narrow/terminal\n界 final"

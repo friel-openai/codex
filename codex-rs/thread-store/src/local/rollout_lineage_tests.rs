@@ -21,6 +21,7 @@ use super::super::LocalThreadStore;
 use super::super::test_support::test_config;
 use super::LineageOffsetMode;
 use super::LineageResolutionMode;
+use super::RolloutLineage;
 use super::RolloutLineageSegment;
 use super::compressed_history_position_matches;
 use super::resolve_path;
@@ -28,6 +29,7 @@ use crate::ForkBoundary;
 use crate::LoadThreadHistoryParams;
 use crate::PrepareForkParams;
 use crate::ThreadStore;
+use crate::ThreadStoreError;
 
 #[cfg(unix)]
 #[tokio::test]
@@ -549,7 +551,12 @@ async fn compressed_position_checks_byte_and_ordinal_boundaries() {
         let reader =
             codex_rollout::open_rollout_seekable_reader_with_exact_path(&zst, || false, true)
                 .expect("open exact compressed copy");
-        compressed_history_position_matches(reader, position).expect("check position")
+        let expected =
+            compressed_history_position_matches(reader, position).expect("check position");
+        let streamed = super::validate_compressed_history_position(&zst, position, || false)
+            .expect("stream compressed position");
+        assert_eq!(streamed, expected);
+        streamed
     };
     assert!(check(good));
     assert!(!check(HistoryPosition {
@@ -585,6 +592,13 @@ async fn compressed_position_checks_byte_and_ordinal_boundaries() {
     )
     .expect("write compressed rollout");
     assert!(check(good));
+    let mut truncated = zstd::encode_all(amended.as_bytes(), 0).expect("compress amended rollout");
+    truncated.pop();
+    fs::write(&zst, truncated).expect("write truncated compressed rollout");
+    assert!(super::validate_compressed_history_position(&zst, good, || false).is_err());
+    fs::write(&zst, zstd::encode_all(amended.as_bytes(), 0).unwrap())
+        .expect("restore compressed rollout");
+    assert!(super::validate_compressed_history_position(&zst, good, || true).is_err());
 }
 
 #[tokio::test]
@@ -1424,7 +1438,7 @@ async fn assert_fork_lineage_preserves_validated_unordinaled_ancestor_cutoff(
         Utc::now(),
         SessionSource::Cli,
     );
-    parent_metadata.history_mode = ThreadHistoryMode::Paginated;
+    parent_metadata = parent_metadata.with_history_mode(ThreadHistoryMode::Paginated);
     state_db
         .upsert_thread(&parent_metadata.build(config.default_model_provider_id.as_str()))
         .await
@@ -2010,8 +2024,8 @@ async fn resolves_512_same_thread_lineage_segments() {
     .await
     .expect("ordinary same-thread rotation must not exhaust fork depth");
 
-    assert_eq!(segments.segments.len(), SEGMENT_COUNT);
-    assert!(!segments.has_attached_visibility);
+    assert_eq!(segments.0.len(), SEGMENT_COUNT);
+    assert!(!segments.1);
     assert!(active_paths.is_empty());
 
     let overflow_path = home
@@ -2077,8 +2091,8 @@ async fn resolves_512_same_thread_lineage_segments() {
     )
     .await
     .expect("same-thread lineage must remain readable beyond 512 segments");
-    assert_eq!(segments.segments.len(), SEGMENT_COUNT + 1);
-    assert!(!segments.has_attached_visibility);
+    assert_eq!(segments.0.len(), SEGMENT_COUNT + 1);
+    assert!(!segments.1);
     assert!(active_paths.is_empty());
 }
 

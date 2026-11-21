@@ -11,14 +11,20 @@ use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
 mod bulk_projection;
+mod projection_certificate;
 mod read;
 mod realtime;
 mod realtime_stream;
 mod search;
 mod segment_paging;
 mod turn_lookup;
+mod uncertified_items;
 
 pub(super) use bulk_projection::BulkProjection;
+pub(super) use projection_certificate::FileIdentity as ProjectionLeafIdentity;
+pub(super) use projection_certificate::ProjectionCertificate;
+pub(super) use projection_certificate::certificate_is_current;
+pub(super) use projection_certificate::leaf_identity as projection_leaf_identity;
 pub(super) use read::has_complete_root_projection_for_resolved;
 pub(super) use read::has_complete_segmented_legacy_projection;
 pub(super) use read::indexed_same_thread_lineage;
@@ -36,6 +42,30 @@ pub(super) use turn_lookup::find_projected_turn;
 pub(super) use turn_lookup::find_source_turn;
 pub(super) use turn_lookup::find_visible_turn;
 pub(super) use turn_lookup::first_user_preview;
+pub(super) use uncertified_items::UncertifiedItemScan;
+pub(super) use uncertified_items::try_list_uncertified_turn_items;
+
+#[cfg(test)]
+static LEAF_TRANSACTION_TIMINGS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Duration>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+fn start_leaf_transaction_timings(thread_id: ThreadId) {
+    LEAF_TRANSACTION_TIMINGS
+        .lock()
+        .unwrap()
+        .insert(thread_id.to_string(), Vec::new());
+}
+
+#[cfg(test)]
+fn take_leaf_transaction_timings(thread_id: ThreadId) -> Vec<std::time::Duration> {
+    LEAF_TRANSACTION_TIMINGS
+        .lock()
+        .unwrap()
+        .remove(&thread_id.to_string())
+        .unwrap()
+}
 
 /// A valid complete rollout line with its absolute byte span in durable JSONL.
 ///
@@ -318,6 +348,7 @@ END
             .await
             .map_err(thread_history_error)?;
     }
+    projection_certificate::install_tables_and_triggers(&mut transaction).await?;
     transaction.commit().await.map_err(thread_history_error)
 }
 
@@ -463,6 +494,7 @@ pub(super) async fn publish_staged_projection(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     staging_thread_id: ThreadId,
+    certificate: Option<&ProjectionCertificate>,
 ) -> ThreadStoreResult<()> {
     if thread_id == staging_thread_id {
         return Err(ThreadStoreError::Internal {
@@ -492,6 +524,18 @@ pub(super) async fn publish_staged_projection(
             ),
         });
     }
+    let certify = match certificate {
+        Some(certificate) => {
+            projection_certificate::coverage_is_complete(
+                &mut transaction,
+                certificate,
+                thread_id.as_str(),
+                staging_thread_id.as_str(),
+            )
+            .await?
+        }
+        None => false,
+    };
     // The checkpoint covers every timeline table, including voice-session boundaries.
     // Publish their staged rows together so complete-root reads cannot omit realtime history.
     for statement in [
@@ -518,6 +562,9 @@ pub(super) async fn publish_staged_projection(
             .execute(&mut *transaction)
             .await
             .map_err(thread_history_error)?;
+    }
+    if certify && let Some(certificate) = certificate {
+        projection_certificate::publish(&mut transaction, certificate).await?;
     }
     #[cfg(test)]
     super::projection_rebuild::crash_at_boundary(selected_thread_id, "before_projection_commit");
@@ -568,6 +615,32 @@ pub(super) async fn apply_projection(
         initial_ordinal,
         projections,
         /*legacy_backfill_complete*/ None,
+        /*participating_leaf*/ None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn apply_projection_with_leaf_proof(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    start_offset: u64,
+    next_offset: u64,
+    initial_ordinal: u64,
+    projections: Vec<RolloutProjectionStep>,
+    leaf_path: &std::path::Path,
+    leaf_identity: &ProjectionLeafIdentity,
+    source_sha256: [u8; 32],
+) -> ThreadStoreResult<()> {
+    apply_projection_inner(
+        store,
+        thread_id,
+        start_offset,
+        next_offset,
+        initial_ordinal,
+        projections,
+        /*legacy_backfill_complete*/ None,
+        Some((leaf_path, leaf_identity, source_sha256)),
     )
     .await
 }
@@ -589,10 +662,12 @@ pub(super) async fn apply_legacy_projection(
         initial_ordinal,
         projections,
         Some(complete),
+        /*participating_leaf*/ None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_projection_inner(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -601,6 +676,7 @@ async fn apply_projection_inner(
     initial_ordinal: u64,
     projections: Vec<RolloutProjectionStep>,
     legacy_backfill_complete: Option<bool>,
+    participating_leaf: Option<(&std::path::Path, &ProjectionLeafIdentity, [u8; 32])>,
 ) -> ThreadStoreResult<()> {
     let pool = store.thread_history_db().await?;
     // Write the projected rows and advance the JSONL offset and ordinal in one transaction. If
@@ -612,6 +688,8 @@ async fn apply_projection_inner(
         .await
         .map_err(thread_history_error)?;
     let mut transaction = pool.begin_immediate().await.map_err(thread_history_error)?;
+    #[cfg(test)]
+    let leaf_transaction_started = participating_leaf.is_some().then(std::time::Instant::now);
     let thread_id = thread_id.to_string();
     let projection_state = sqlx::query_as::<_, (i64, i64)>(
         r#"
@@ -636,8 +714,8 @@ WHERE thread_id = ?
         }
         None => (0, sqlite_integer(initial_ordinal, "rollout ordinal")?, true),
     };
-    let start_offset = sqlite_integer(start_offset, "rollout byte offset")?;
-    if expected_offset != start_offset
+    let start_offset_sqlite = sqlite_integer(start_offset, "rollout byte offset")?;
+    if expected_offset != start_offset_sqlite
         && !(legacy_backfill_complete.is_some()
             && expected_offset == INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET)
     {
@@ -645,6 +723,26 @@ WHERE thread_id = ?
             message: format!("thread history projection for {thread_id} is behind durable rollout"),
         });
     }
+
+    let refreshed_proof = if lineage_complete && legacy_backfill_complete.is_none() {
+        match participating_leaf {
+            Some((path, identity, source_sha256)) => projection_certificate::prepare_leaf_refresh(
+                &mut transaction,
+                &thread_id,
+                path,
+                start_offset,
+                next_offset,
+                &projections,
+                identity,
+                source_sha256,
+            )
+            .await
+            .unwrap_or(None),
+            None => None,
+        }
+    } else {
+        None
+    };
 
     for projection in projections {
         match projection {
@@ -750,7 +848,24 @@ ON CONFLICT(thread_id) DO UPDATE SET
     .execute(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
-    transaction.commit().await.map_err(thread_history_error)
+    if let Some(proof) = refreshed_proof {
+        projection_certificate::publish(&mut transaction, &proof).await?;
+    }
+    #[cfg(not(test))]
+    {
+        transaction.commit().await.map_err(thread_history_error)
+    }
+    #[cfg(test)]
+    {
+        let result = transaction.commit().await.map_err(thread_history_error);
+        if result.is_ok()
+            && let Some(started) = leaf_transaction_started
+            && let Some(timings) = LEAF_TRANSACTION_TIMINGS.lock().unwrap().get_mut(&thread_id)
+        {
+            timings.push(started.elapsed());
+        }
+        result
+    }
 }
 
 pub(super) async fn delete_thread(

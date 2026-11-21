@@ -41,7 +41,9 @@ pub(super) async fn create_thread(
     let inherited_cursor = if params.initial_window_id.allocation().is_some()
         && let (Some(parent), Some(base)) = (params.forked_from_id, params.history_base)
     {
-        let lineage = store.resolve_rollout_lineage_for_reference(parent).await?;
+        let (lineage, _reservation, _) = store
+            .resolve_rollout_lineage_for_reference(parent, None)
+            .await?;
         let prefix = super::model_context::load_for_fork(lineage, Some(base)).await?;
         codex_rollout::next_model_id_ordinals(&prefix).0
     } else {

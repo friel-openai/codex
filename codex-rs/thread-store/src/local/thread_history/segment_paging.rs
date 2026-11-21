@@ -4,8 +4,11 @@ use sqlx::FromRow;
 use sqlx::QueryBuilder;
 use sqlx::Sqlite;
 
+use super::super::rollout_lineage::HistoryPageWalk;
 use super::super::rollout_lineage::RolloutLineage;
 use super::super::rollout_lineage::RolloutLineageSegment;
+use super::super::rollout_lineage::WalkStep;
+use super::projection_certificate::certified_item_lower_bound;
 use super::read::CursorScope;
 use super::read::HistoryCursor;
 use super::read::PhysicalHistoryPosition;
@@ -23,6 +26,7 @@ use crate::ListItemsParams;
 use crate::ListItemsPosition;
 use crate::SortDirection;
 use crate::StoredTurnItemsView;
+use crate::StoredTurnStatus;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
@@ -30,6 +34,469 @@ pub(super) struct SegmentPage<T> {
     pub rows: Vec<T>,
     pub next_cursor: Option<String>,
     pub backwards_cursor: Option<String>,
+}
+
+/// A page from a native history-base walk, or the complete compatibility lineage.
+pub(super) enum LazyPage<T> {
+    Page(SegmentPage<T>, RolloutLineage),
+    Full(RolloutLineage),
+}
+
+fn certified_root_lineage(walk: &HistoryPageWalk<'_>, owner: ThreadId) -> RolloutLineage {
+    RolloutLineage::from_segments(
+        owner,
+        walk.root_rollout_id(),
+        walk.root_path().to_path_buf(),
+        vec![RolloutLineageSegment {
+            thread_id: owner,
+            rollout_id: walk.root_rollout_id(),
+            segment_id: None,
+            rollout_path: walk.root_path().to_path_buf(),
+            start_ordinal: 0,
+            physical_start_ordinal: 0,
+            history_page_visible: true,
+            history_page_start: None,
+            end_ordinal_exclusive: None,
+            jsonl_end_byte_offset: None,
+            end_byte_offset: None,
+            byte_boundary_recorded: false,
+            physical_size: None,
+            filter_texts: Vec::new(),
+            goal_supervisor_provenance: Default::default(),
+            uses_history_base: false,
+            uses_fork_boundary: false,
+        }],
+    )
+}
+
+/// Reads both resume cursors from the same certified projection snapshot.
+pub(super) async fn certified_resume_backwards_cursors(
+    store: &super::super::LocalThreadStore,
+    params: &ListItemsParams,
+) -> ThreadStoreResult<Option<(Option<String>, Option<String>)>> {
+    let walk = HistoryPageWalk::new(store, params.thread_id).await?;
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    let Some(proof) = certified_item_lower_bound(
+        &mut transaction,
+        walk.root_rollout_id(),
+        walk.root_path(),
+        "",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !proof.is_single_owner(params.thread_id) {
+        return Ok(None);
+    }
+    let lineage = certified_root_lineage(&walk, params.thread_id);
+    let turns = page_turn_rows_with_connection(
+        &mut transaction,
+        params.thread_id,
+        &lineage,
+        None,
+        1,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    )
+    .await?;
+    let items = page_item_rows_with_connection(&mut transaction, &lineage, params).await?;
+    if !proof.files_unchanged().await || !walk.selected_is_current().await? {
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
+    Ok(Some((turns.backwards_cursor, items.backwards_cursor)))
+}
+
+/// Reads a complete same-owner projection in one SQLite snapshot when certified.
+pub(super) async fn page_certified_single_owner_turn_rows(
+    store: &super::super::LocalThreadStore,
+    params: &crate::ListTurnsParams,
+) -> ThreadStoreResult<Option<LazyPage<StoredTurnRow>>> {
+    let walk = HistoryPageWalk::new(store, params.thread_id).await?;
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    let Some(proof) = certified_item_lower_bound(
+        &mut transaction,
+        walk.root_rollout_id(),
+        walk.root_path(),
+        "",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !proof.is_single_owner(params.thread_id) {
+        return Ok(None);
+    }
+    let cursor = parse_cursor(
+        params.cursor.as_deref(),
+        params.thread_id,
+        walk.root_rollout_id(),
+        CursorScope::Turns,
+    )?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| !proof.contains_unambiguous_ordinal(cursor.rollout_ordinal))
+    {
+        return Err(invalid_cursor(
+            "position outside or ambiguous in thread lineage",
+        ));
+    }
+    let lineage = certified_root_lineage(&walk, params.thread_id);
+    let page = page_turn_rows_with_connection(
+        &mut transaction,
+        params.thread_id,
+        &lineage,
+        params.cursor.as_deref(),
+        params.page_size,
+        params.sort_direction,
+        params.items_view,
+    )
+    .await?;
+    if matches!(params.items_view, StoredTurnItemsView::Summary)
+        && page.rows.iter().any(|turn| {
+            matches!(turn.status, StoredTurnStatus::Interrupted)
+                && turn.first_user_item_id.is_none()
+                && turn.final_agent_item_id.is_none()
+        })
+    {
+        return Ok(None);
+    }
+    if !proof.files_unchanged().await || !walk.selected_is_current().await? {
+        drop(transaction);
+        return Ok(Some(LazyPage::Full(walk.resolve_full().await?)));
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
+    Ok(Some(LazyPage::Page(page, lineage)))
+}
+
+pub(super) async fn page_certified_single_owner_item_rows(
+    store: &super::super::LocalThreadStore,
+    params: &ListItemsParams,
+) -> ThreadStoreResult<Option<LazyPage<StoredThreadItemRow>>> {
+    let walk = HistoryPageWalk::new(store, params.thread_id).await?;
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    let Some(proof) = certified_item_lower_bound(
+        &mut transaction,
+        walk.root_rollout_id(),
+        walk.root_path(),
+        params.turn_id.as_deref().unwrap_or(""),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !proof.is_single_owner(params.thread_id) {
+        return Ok(None);
+    }
+    let scope = match params.sort_key {
+        ItemSortKey::CreatedAtOrdinal => CursorScope::ItemsByCreatedAtOrdinal,
+        ItemSortKey::UpdatedAtOrdinal => CursorScope::ItemsByUpdatedAtOrdinal,
+    };
+    let cursor_text = match params.position.as_ref() {
+        Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
+        Some(ListItemsPosition::ItemAnchor { .. }) | None => None,
+    };
+    let cursor = parse_cursor(cursor_text, params.thread_id, walk.root_rollout_id(), scope)?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| !proof.contains_unambiguous_ordinal(cursor.rollout_ordinal))
+    {
+        return Err(invalid_cursor(
+            "position outside or ambiguous in thread lineage",
+        ));
+    }
+    let lineage = certified_root_lineage(&walk, params.thread_id);
+    let page = page_item_rows_with_connection(&mut transaction, &lineage, params).await?;
+    if !proof.files_unchanged().await || !walk.selected_is_current().await? {
+        drop(transaction);
+        return Ok(Some(LazyPage::Full(walk.resolve_full().await?)));
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
+    Ok(Some(LazyPage::Page(page, lineage)))
+}
+
+/// Pages a descending native history without opening unrelated older ancestors.
+pub(super) async fn page_lazy_turn_rows(
+    store: &super::super::LocalThreadStore,
+    requested_thread_id: ThreadId,
+    cursor_text: Option<&str>,
+    page_size: usize,
+    items_view: StoredTurnItemsView,
+    require_lookahead: bool,
+) -> ThreadStoreResult<LazyPage<StoredTurnRow>> {
+    // Resume needs only the newest backwards cursor, not a next-page cursor.
+    debug_assert!(require_lookahead || page_size == 1);
+    let mut walk = HistoryPageWalk::new(store, requested_thread_id).await?;
+    let root_rollout_id = walk.root_rollout_id();
+    let cursor = parse_cursor(
+        cursor_text,
+        requested_thread_id,
+        root_rollout_id,
+        CursorScope::Turns,
+    )?;
+    let pool = store.thread_history_db().await?;
+    let mut found_cursor = cursor.is_none();
+    let mut queried_segment = false;
+    let mut rows = Vec::new();
+    loop {
+        match walk.next_older().await? {
+            WalkStep::FullResolution => return Ok(LazyPage::Full(walk.resolve_full().await?)),
+            WalkStep::End => break,
+            WalkStep::Segment => {}
+        }
+        let segment = walk.current();
+        if !found_cursor {
+            if !segment.contains_ordinal(cursor.as_ref().expect("cursor exists").rollout_ordinal) {
+                continue;
+            }
+            found_cursor = true;
+        }
+        let Some(segment_cursor) = lazy_segment_cursor(
+            segment,
+            requested_thread_id,
+            root_rollout_id,
+            CursorScope::Turns,
+            if queried_segment { None } else { cursor_text },
+        )?
+        else {
+            continue;
+        };
+        let lineage = walk.snapshot();
+        let remaining = page_size + 1 - rows.len();
+        let page = page_turn_rows(
+            pool,
+            requested_thread_id,
+            &lineage,
+            segment_cursor.as_deref(),
+            remaining,
+            SortDirection::Desc,
+            items_view,
+        )
+        .await?;
+        queried_segment = true;
+        rows.extend(page.rows);
+        if rows.len() > page_size || (!require_lookahead && !rows.is_empty()) {
+            break;
+        }
+    }
+    if !found_cursor {
+        return Err(invalid_cursor("position outside thread lineage"));
+    }
+    if matches!(items_view, StoredTurnItemsView::Summary)
+        && !walk.complete()
+        && rows.iter().any(|turn| {
+            matches!(turn.status, StoredTurnStatus::Interrupted)
+                && turn.first_user_item_id.is_none()
+                && turn.final_agent_item_id.is_none()
+        })
+    {
+        return Ok(LazyPage::Full(walk.resolve_full().await?));
+    }
+    Ok(LazyPage::Page(
+        finish_page(
+            requested_thread_id,
+            root_rollout_id,
+            CursorScope::Turns,
+            rows,
+            page_size,
+        )?,
+        walk.into_lineage(),
+    ))
+}
+
+/// Pages creation-ordered items across native history-base segments on demand.
+pub(super) async fn page_lazy_item_rows(
+    store: &super::super::LocalThreadStore,
+    params: &ListItemsParams,
+    require_lookahead: bool,
+) -> ThreadStoreResult<LazyPage<StoredThreadItemRow>> {
+    debug_assert!(require_lookahead || params.page_size == 1);
+    let mut walk = HistoryPageWalk::new(store, params.thread_id).await?;
+    let root_rollout_id = walk.root_rollout_id();
+    let cursor_text = match params.position.as_ref() {
+        Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
+        Some(ListItemsPosition::ItemAnchor { .. }) => {
+            return Ok(LazyPage::Full(walk.resolve_full().await?));
+        }
+        None => None,
+    };
+    let cursor = parse_cursor(
+        cursor_text,
+        params.thread_id,
+        root_rollout_id,
+        CursorScope::ItemsByCreatedAtOrdinal,
+    )?;
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    let certificate = match params.turn_id.as_deref() {
+        Some(turn_id) => {
+            certified_item_lower_bound(&mut transaction, root_rollout_id, walk.root_path(), turn_id)
+                .await?
+        }
+        None => None,
+    };
+    let mut found_cursor = cursor.is_none();
+    let mut queried_segment = false;
+    let mut rows = Vec::new();
+    loop {
+        match walk.next_older().await? {
+            WalkStep::FullResolution => {
+                drop(transaction);
+                return Ok(LazyPage::Full(walk.resolve_full().await?));
+            }
+            WalkStep::End => break,
+            WalkStep::Segment => {}
+        }
+        let segment = walk.current();
+        if !found_cursor {
+            if !segment.contains_ordinal(cursor.as_ref().expect("cursor exists").rollout_ordinal) {
+                continue;
+            }
+            found_cursor = true;
+        }
+        let Some(segment_cursor) = lazy_segment_cursor(
+            segment,
+            params.thread_id,
+            root_rollout_id,
+            CursorScope::ItemsByCreatedAtOrdinal,
+            if queried_segment { None } else { cursor_text },
+        )?
+        else {
+            continue;
+        };
+        let lineage = walk.snapshot();
+        let mut segment_params = params.clone();
+        segment_params.position = segment_cursor.map(ListItemsPosition::Cursor);
+        segment_params.page_size = params.page_size + 1 - rows.len();
+        let page =
+            page_item_rows_with_connection(&mut transaction, &lineage, &segment_params).await?;
+        queried_segment = true;
+        rows.extend(page.rows);
+        if rows.len() > params.page_size || (!require_lookahead && !rows.is_empty()) {
+            break;
+        }
+        if certificate.as_ref().is_some_and(|proof| {
+            proof
+                .minimum
+                .is_none_or(|minimum| minimum >= segment.start_ordinal())
+        }) {
+            break;
+        }
+    }
+    if !found_cursor {
+        return Err(invalid_cursor("position outside thread lineage"));
+    }
+    if let Some(proof) = &certificate
+        && (!proof.files_unchanged().await || !walk.selected_is_current().await?)
+    {
+        drop(transaction);
+        return Ok(LazyPage::Full(walk.resolve_full().await?));
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
+    Ok(LazyPage::Page(
+        finish_page(
+            params.thread_id,
+            root_rollout_id,
+            CursorScope::ItemsByCreatedAtOrdinal,
+            rows,
+            params.page_size,
+        )?,
+        walk.into_lineage(),
+    ))
+}
+
+/// Uses a complete root certificate to seek an ascending turn page without older files.
+pub(super) async fn page_certified_ascending_item_rows(
+    store: &super::super::LocalThreadStore,
+    params: &ListItemsParams,
+) -> ThreadStoreResult<LazyPage<StoredThreadItemRow>> {
+    let mut walk = HistoryPageWalk::new(store, params.thread_id).await?;
+    let root_rollout_id = walk.root_rollout_id();
+    let cursor_text = match params.position.as_ref() {
+        Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
+        Some(ListItemsPosition::ItemAnchor { .. }) => {
+            return Ok(LazyPage::Full(walk.resolve_full().await?));
+        }
+        None => None,
+    };
+    let cursor = parse_cursor(
+        cursor_text,
+        params.thread_id,
+        root_rollout_id,
+        CursorScope::ItemsByCreatedAtOrdinal,
+    )?;
+    let pool = store.thread_history_db().await?;
+    let mut transaction = pool.begin().await.map_err(thread_history_error)?;
+    let Some(proof) = certified_item_lower_bound(
+        &mut transaction,
+        root_rollout_id,
+        walk.root_path(),
+        params.turn_id.as_deref().expect("turn-filtered page"),
+    )
+    .await?
+    else {
+        drop(transaction);
+        return Ok(LazyPage::Full(walk.resolve_full().await?));
+    };
+    let seek = cursor
+        .as_ref()
+        .map(|cursor| cursor.rollout_ordinal)
+        .or(proof.minimum);
+    loop {
+        match walk.next_older().await? {
+            WalkStep::FullResolution => {
+                drop(transaction);
+                return Ok(LazyPage::Full(walk.resolve_full().await?));
+            }
+            WalkStep::End => break,
+            WalkStep::Segment => {}
+        }
+        if seek.is_none_or(|ordinal| walk.current().start_ordinal() <= ordinal) {
+            break;
+        }
+    }
+    let lineage = walk.snapshot();
+    let page = page_item_rows_with_connection(&mut transaction, &lineage, params).await?;
+    if !proof.files_unchanged().await || !walk.selected_is_current().await? {
+        drop(transaction);
+        return Ok(LazyPage::Full(walk.resolve_full().await?));
+    }
+    transaction.commit().await.map_err(thread_history_error)?;
+    Ok(LazyPage::Page(page, walk.into_lineage()))
+}
+
+// The temporary lineage contains this segment and its newer shadowing segments only.
+// Positioning at its upper bound makes the existing SQL query exactly this segment.
+fn lazy_segment_cursor(
+    segment: &RolloutLineageSegment,
+    requested_thread_id: ThreadId,
+    root_rollout_id: RolloutId,
+    scope: CursorScope,
+    original: Option<&str>,
+) -> ThreadStoreResult<Option<Option<String>>> {
+    if let Some(original) = original {
+        return Ok(Some(Some(original.to_string())));
+    }
+    let Some(end) = segment.end_ordinal() else {
+        return Ok(Some(None));
+    };
+    let Some(last) = end
+        .checked_sub(1)
+        .filter(|last| *last >= segment.start_ordinal())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Some(serialize_cursor(
+        requested_thread_id,
+        root_rollout_id,
+        scope,
+        sqlite_integer(last)?,
+        /*include_anchor*/ true,
+    )?)))
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +552,28 @@ pub(super) fn validate_page_size(page_size: usize) -> ThreadStoreResult<()> {
 
 pub(super) async fn page_turn_rows(
     pool: &sqlx::SqlitePool,
+    requested_thread_id: ThreadId,
+    lineage: &RolloutLineage,
+    cursor: Option<&str>,
+    page_size: usize,
+    direction: SortDirection,
+    items_view: StoredTurnItemsView,
+) -> ThreadStoreResult<SegmentPage<StoredTurnRow>> {
+    let mut connection = pool.acquire().await.map_err(thread_history_error)?;
+    page_turn_rows_with_connection(
+        &mut connection,
+        requested_thread_id,
+        lineage,
+        cursor,
+        page_size,
+        direction,
+        items_view,
+    )
+    .await
+}
+
+async fn page_turn_rows_with_connection(
+    connection: &mut sqlx::SqliteConnection,
     requested_thread_id: ThreadId,
     lineage: &RolloutLineage,
     cursor: Option<&str>,
@@ -183,7 +672,7 @@ LEFT JOIN thread_items AS final_agent
         rows.extend(
             query
                 .build()
-                .fetch_all(pool)
+                .fetch_all(&mut *connection)
                 .await
                 .map_err(thread_history_error)?
                 .into_iter()
@@ -474,6 +963,15 @@ pub(super) async fn page_item_rows(
     lineage: &RolloutLineage,
     params: &ListItemsParams,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
+    let mut connection = pool.acquire().await.map_err(thread_history_error)?;
+    page_item_rows_with_connection(&mut connection, lineage, params).await
+}
+
+pub(super) async fn page_item_rows_with_connection(
+    connection: &mut sqlx::SqliteConnection,
+    lineage: &RolloutLineage,
+    params: &ListItemsParams,
+) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
     let anchor = item_anchor(params)?;
     let cursor = match params.position.as_ref() {
         Some(ListItemsPosition::Cursor(cursor)) => Some(cursor.as_str()),
@@ -506,7 +1004,7 @@ pub(super) async fn page_item_rows(
                 message: "update-ordinal item sorting requires an update boundary".to_string(),
             });
         };
-        return page_updated_item_rows(pool, lineage, params, cursor, update_boundary).await;
+        return page_updated_item_rows(connection, lineage, params, cursor, update_boundary).await;
     }
     let cursor = if let Some((turn_id, anchor_item_id)) = anchor {
         let mut anchor = None;
@@ -520,7 +1018,7 @@ pub(super) async fn page_item_rows(
             query.push(" AND turn_id = ").push_bind(turn_id);
             if let Some(row) = query
                 .build()
-                .fetch_optional(pool)
+                .fetch_optional(&mut *connection)
                 .await
                 .map_err(thread_history_error)?
             {
@@ -606,7 +1104,7 @@ FROM thread_items"#,
         );
         let segment_rows = query
             .build()
-            .fetch_all(pool)
+            .fetch_all(&mut *connection)
             .await
             .map_err(thread_history_error)?
             .into_iter()
@@ -631,7 +1129,7 @@ FROM thread_items"#,
 }
 
 async fn page_updated_item_rows(
-    pool: &sqlx::SqlitePool,
+    connection: &mut sqlx::SqliteConnection,
     lineage: &RolloutLineage,
     params: &ListItemsParams,
     cursor: Option<&str>,
@@ -683,7 +1181,7 @@ WHERE thread_id =
         );
         let segment_rows = query
             .build()
-            .fetch_all(pool)
+            .fetch_all(&mut *connection)
             .await
             .map_err(thread_history_error)?
             .into_iter()

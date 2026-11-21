@@ -61,6 +61,8 @@ fn idle_preserves_explicit_outcome_until_new_work() {
             status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
             sender_thread_id: ThreadId::new().to_string(),
             receiver_thread_ids: vec![id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,

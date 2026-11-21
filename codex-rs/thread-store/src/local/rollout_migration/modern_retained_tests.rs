@@ -798,7 +798,7 @@ fn fallback_transcript_rollback_keeps_pre_turn_context_and_remigrates() {
         .unwrap();
     assert_eq!(synthetic.replacement_history, Some(vec![first.clone()]));
     assert_eq!(plan.snapshots[&1].review_input_end, Some(2));
-    let mut history = TranscriptHistory::new(0);
+    let mut history = TranscriptHistory::new(0, codex_guardian_context::ContextBudgeting::Fixed);
     for input in &plan.review_inputs {
         match input {
             ReviewInputRecord::Baseline {

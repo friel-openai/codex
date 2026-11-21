@@ -23,8 +23,11 @@ use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
 
 mod ancestor_reads;
+mod history_page_walk;
 pub(super) use ancestor_reads::AncestorReads;
 pub(super) use ancestor_reads::ExcludedAncestor;
+pub(super) use history_page_walk::HistoryPageWalk;
+pub(super) use history_page_walk::WalkStep;
 
 use super::LocalThreadStore;
 use super::RolloutWriterReservation;
@@ -110,6 +113,23 @@ pub(super) struct RetrySourceStamp {
 }
 
 impl RetrySourceStamp {
+    #[cfg(unix)]
+    pub(super) fn matches_metadata(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        metadata.file_type().is_file()
+            && metadata.len() == self.len
+            && metadata
+                .modified()
+                .is_ok_and(|modified| modified == self.modified)
+            && (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ) == self.unix_identity
+    }
+
     async fn read(path: &Path) -> ThreadStoreResult<Self> {
         use sha2::Digest;
         use tokio::io::AsyncReadExt;
@@ -2510,12 +2530,7 @@ async fn trim_to_history_position(
         let path = segment.rollout_path.clone();
         let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
         let contains_prefix = tokio::task::spawn_blocking(move || {
-            let reader = codex_rollout::open_rollout_seekable_reader_with_exact_path(
-                &path,
-                || stop.is_closed(),
-                true,
-            )?;
-            compressed_history_position_matches(reader, end)
+            validate_compressed_history_position(&path, end, || stop.is_closed())
         })
         .await
         .map_err(|err| ThreadStoreError::Internal {
@@ -2541,6 +2556,39 @@ async fn trim_to_history_position(
     segment.byte_boundary_recorded = true;
     segment.jsonl_end_byte_offset = segment.end_byte_offset;
     Ok(())
+}
+
+fn validate_compressed_history_position(
+    path: &Path,
+    end: HistoryPosition,
+    is_cancelled: impl Fn() -> bool,
+) -> io::Result<bool> {
+    let file = std::fs::File::open(path)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut reader = io::BufReader::new(CancellableRolloutReader {
+        inner: decoder,
+        is_cancelled,
+    });
+    let matches = compressed_history_position_matches(&mut reader, end)?;
+    // The seekable reader previously decoded the entire file before checking the boundary.
+    // Drain the stream to retain trailing-frame validation without a decompressed temporary file.
+    io::copy(&mut reader, &mut io::sink())?;
+    Ok(matches)
+}
+
+/// Stops a streaming decode when the task waiting for its boundary is dropped.
+struct CancellableRolloutReader<R, F> {
+    inner: R,
+    is_cancelled: F,
+}
+
+impl<R: Read, F: Fn() -> bool> Read for CancellableRolloutReader<R, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if (self.is_cancelled)() {
+            return Err(io::Error::other("rollout read cancelled"));
+        }
+        self.inner.read(buffer)
+    }
 }
 
 /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
