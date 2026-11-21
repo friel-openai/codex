@@ -93,6 +93,8 @@ pub use rollout_budget::RolloutBudget;
 pub use rollout_budget::RolloutBudgetReminder;
 mod agent_communication;
 pub use agent_communication::PendingAgentMessage;
+mod independent_thread;
+pub use independent_thread::install as install_independent_thread_tools;
 mod attestation;
 mod code_mode_host;
 mod codex_delegate;
