@@ -1,0 +1,44 @@
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index e4342439441902224dfd29036c2f186c535c1fd0..7e512fb80f8fec4b741f9ee81655cca2b5476c7b 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1497,12 +1497,7 @@ impl ThreadManager {
+         else {
+             return;
+         };
+-        let store = store.clone();
+-        tokio::spawn(async move {
+-            if let Err(err) = store.migrate_rollouts_on_startup().await {
+-                warn!("failed to migrate legacy rollouts on startup: {err}");
+-            }
+-        });
++        store.start_automatic_rollout_migration();
+     }
+
+     /// Refreshes every loaded thread and marks threads that are still being created.
+diff --git a/codex-rs/core/src/thread_store_builder.rs b/codex-rs/core/src/thread_store_builder.rs
+index fb10b8bb1b5eaed655c956852a773db2811396f6..333b60cc38c0c44eefea04d475c2a94705397380 100644
+--- a/codex-rs/core/src/thread_store_builder.rs
++++ b/codex-rs/core/src/thread_store_builder.rs
+@@ -12,7 +12,6 @@ use codex_thread_store::LocalThreadStoreConfig;
+ use codex_thread_store::ThreadStore;
+ use codex_thread_store::ThreadStoreFuture;
+ use std::sync::Arc;
+-use tracing::warn;
+
+ type AdditionalCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()> + Send + Sync;
+
+@@ -79,12 +78,9 @@ impl<'config> ThreadStoreBuilder<'config> {
+                         }),
+                 );
+                 if has_state_db && background_migration_enabled {
+-                    let startup_store = Arc::clone(&store);
++                    store.start_automatic_rollout_migration();
+                     let codex_home = config.codex_home.to_path_buf();
+                     tokio::spawn(async move {
+-                        if let Err(err) = startup_store.migrate_rollouts_on_startup().await {
+-                            warn!("failed to migrate legacy rollouts on startup: {err}");
+-                        }
+                         if compression_enabled {
+                             codex_rollout::spawn_rollout_compression_worker(
+                                 codex_home,
