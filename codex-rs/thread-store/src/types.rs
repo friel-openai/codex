@@ -298,7 +298,7 @@ impl FreezeRolloutSegmentParams {
 /// Segmentation shares immutable inherited history across full-history forks and bounds the
 /// mutable live rollout after compaction. It is independent of [`ThreadHistoryMode`] and is not a
 /// legacy compatibility mechanism.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrozenRolloutSegment {
     /// Reference to the immutable source prefix.
     pub reference: RolloutReferenceItem,
@@ -381,6 +381,15 @@ pub struct RevertThreadParams {
     pub multi_agent_version: Option<MultiAgentVersion>,
 }
 
+/// Whether shared response items retain their process-local source runtime identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkModelStateOrigin {
+    /// The response Arc can identify copy-on-write state in the loaded source runtime.
+    LoadedSource,
+    /// A transferred snapshot must reconstruct its state without consulting a live source.
+    Snapshot,
+}
+
 /// Frozen source history and model context for a reference-backed fork.
 #[derive(Debug)]
 pub struct PreparedFork {
@@ -405,7 +414,13 @@ pub struct PreparedFork {
     pub response_history: Arc<Vec<RolloutItem>>,
     /// Complete source history copied when a reference cannot represent the selected boundary.
     pub copied_history: Option<Arc<Vec<RolloutItem>>>,
-    /// Whether a latest-state fork synthesizes an interruption for an open turn.
+    /// Complete projected parent turns when indexed fork preparation avoids JSONL replay.
+    pub projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
+    /// Authoritative copy-on-write model history retained without copying parent response items.
+    pub shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
+    /// Imported Arcs cannot identify the originating runtime's copy-on-write model state.
+    pub model_state_origin: ForkModelStateOrigin,
+    /// Whether a latest-state fork should synthesize an interruption for an open turn.
     pub interrupt_if_open: bool,
     /// Backend-specific history retained for this fork.
     pub history: PreparedForkHistory,
@@ -428,12 +443,7 @@ pub enum PreparedForkHistory {
         /// Selected source boundary retained for attached-child visibility.
         forked_from_ordinal_exclusive: Option<u64>,
     },
-    FrozenRollout {
-        /// Complete projected parent turns when indexed fork preparation avoids JSONL replay.
-        projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
-        /// Authoritative copy-on-write model history retained without copying parent response items.
-        shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
-    },
+    FrozenRollout,
 }
 
 /// Shared source-thread lease held while a child rollout reference is becoming durable.
@@ -471,6 +481,9 @@ impl PreparedFork {
             latest_model_context,
             response_history,
             copied_history: Some(copied_history),
+            projected_response_turns: None,
+            shared_model_response_items: None,
+            model_state_origin: ForkModelStateOrigin::LoadedSource,
             interrupt_if_open,
             preview_before_compaction: None,
             _source_reservation: Some(Box::new(source_reservation)),
@@ -484,7 +497,7 @@ impl PreparedFork {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_thread_id: ThreadId,
-        source_end_ordinal_exclusive: u64,
+        source_end_ordinal_exclusive: Option<u64>,
         history_base: Option<HistoryPosition>,
         frozen_segment: Option<FrozenRolloutSegment>,
         model_context: Arc<Vec<RolloutItem>>,
@@ -495,20 +508,20 @@ impl PreparedFork {
     ) -> Self {
         Self {
             source_thread_id,
-            source_end_ordinal_exclusive: Some(source_end_ordinal_exclusive),
+            source_end_ordinal_exclusive,
             history_base,
             frozen_segment,
             model_context,
             latest_model_context,
             response_history,
             copied_history: None,
+            projected_response_turns: None,
+            shared_model_response_items: None,
+            model_state_origin: ForkModelStateOrigin::LoadedSource,
             interrupt_if_open,
             preview_before_compaction: None,
             _source_reservation: Some(Box::new(source_reservation)),
-            history: PreparedForkHistory::FrozenRollout {
-                projected_response_turns: None,
-                shared_model_response_items: None,
-            },
+            history: PreparedForkHistory::FrozenRollout,
         }
     }
 
@@ -527,6 +540,9 @@ impl PreparedFork {
             latest_model_context: Arc::clone(&model_context),
             response_history: Arc::clone(&model_context),
             copied_history: None,
+            projected_response_turns: None,
+            shared_model_response_items: None,
+            model_state_origin: ForkModelStateOrigin::LoadedSource,
             interrupt_if_open: true,
             model_context,
             history: PreparedForkHistory::NativeReference,
@@ -549,6 +565,9 @@ impl PreparedFork {
             latest_model_context: Arc::clone(&model_context),
             response_history: Arc::clone(&model_context),
             copied_history: None,
+            projected_response_turns: None,
+            shared_model_response_items: None,
+            model_state_origin: ForkModelStateOrigin::LoadedSource,
             interrupt_if_open: true,
             model_context,
             history: PreparedForkHistory::NativeReference,
