@@ -275,6 +275,7 @@ pub(crate) mod file_audio;
 pub(crate) use file_audio::FileAudioDurations;
 
 mod approved_plan;
+mod auto_compaction_guard;
 mod code_mode_warning;
 mod compaction_replacement;
 mod config_refresh;
