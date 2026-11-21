@@ -296,6 +296,20 @@ async fn persistent_source_scan_fixture(
     std::path::PathBuf,
     Vec<std::path::PathBuf>,
 ) {
+    persistent_source_scan_fixture_with_segments(count, None, None).await
+}
+
+async fn persistent_source_scan_fixture_with_segments(
+    count: usize,
+    root_segment: Option<SegmentId>,
+    first_ancestor_segment: Option<SegmentId>,
+) -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    std::path::PathBuf,
+    Vec<std::path::PathBuf>,
+) {
     let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let inherited_owner = ThreadId::new();
     let started = |turn_id: String| {
@@ -321,6 +335,9 @@ async fn persistent_source_scan_fixture(
         let path = selected_rollout_path(home.path(), owner, rollout_id);
         let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
         write_rollout(&path, owner, base);
+        if index == 0 && first_ancestor_segment.is_some() {
+            set_source_segment_id(&path, first_ancestor_segment);
+        }
         let turn = format!("turn-{index}");
         append_timeline_record(&path, ordinal + 1, started(turn.clone()));
         append_timeline_record(
@@ -334,6 +351,9 @@ async fn persistent_source_scan_fixture(
     let root = rollout_path(home.path(), thread_id);
     let ordinal = base.map_or(0, |position| position.end_ordinal_exclusive);
     write_rollout(&root, thread_id, base);
+    if root_segment.is_some() {
+        set_source_segment_id(&root, root_segment);
+    }
     append_timeline_record(&root, ordinal + 1, started("local".to_string()));
     append_timeline_record(
         &root,
@@ -1037,6 +1057,433 @@ async fn rotated_source_index_after_restart_falls_back_to_full_scan() {
     assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
     assert!(
         scan.anchors
+            .iter()
+            .any(|anchor| anchor.item_id == "local-item")
+    );
+}
+
+fn set_source_segment_id(path: &std::path::Path, segment_id: Option<SegmentId>) {
+    let original = fs::read_to_string(path).unwrap();
+    let (head, tail) = original.split_once('\n').unwrap();
+    let mut head = codex_rollout::parse_rollout_line_bytes(head.as_bytes()).unwrap();
+    let RolloutItem::SessionMeta(meta) = &mut head.item else {
+        panic!("expected session metadata");
+    };
+    meta.meta.segment_id = segment_id;
+    fs::write(
+        path,
+        format!("{}\n{tail}", serde_json::to_string(&head).unwrap()),
+    )
+    .unwrap();
+}
+
+fn copy_same_path_rotation(
+    home: &std::path::Path,
+    root: &std::path::Path,
+    thread_id: ThreadId,
+    end_ordinal: u64,
+    next_segment_id: Option<SegmentId>,
+) -> (ThreadId, std::path::PathBuf) {
+    let predecessor_id = ThreadId::new();
+    let named = codex_rollout::history_rollout_path_with_rollout_id(root, predecessor_id).unwrap();
+    let predecessor = home
+        .join("sessions")
+        .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        .join("2026/07/16")
+        .join(named.file_name().unwrap());
+    fs::create_dir_all(predecessor.parent().unwrap()).unwrap();
+    fs::copy(root, &predecessor).unwrap();
+    let base = history_position(&predecessor, predecessor_id, end_ordinal);
+    let staged = root.with_extension("staged");
+    write_rollout(&staged, thread_id, Some(base));
+    set_source_segment_id(&staged, next_segment_id);
+    fs::rename(staged, root).unwrap();
+    (predecessor_id, predecessor)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_rotation_extends_source_index_without_archived_projection() {
+    use std::io::Read;
+
+    let original_segment = SegmentId::new();
+    let (home, store, thread_id, root, ancestors) =
+        persistent_source_scan_fixture_with_segments(8, Some(original_segment), None).await;
+    let (_, original) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    append_timeline_record(
+        &root,
+        27,
+        timeline_user_item(thread_id, "local", "old-late", "late"),
+    );
+    let (_, after_append) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&original, &after_append));
+
+    let (first_id, _) =
+        copy_same_path_rotation(home.path(), &root, thread_id, 28, Some(SegmentId::new()));
+    append_timeline_record(
+        &root,
+        29,
+        timeline_user_item(thread_id, "local", "middle", "split"),
+    );
+    let (second_id, _) =
+        copy_same_path_rotation(home.path(), &root, thread_id, 30, Some(SegmentId::new()));
+    append_timeline_record(
+        &root,
+        31,
+        timeline_user_item(thread_id, "local", "new-root", "split"),
+    );
+    for archived in [first_id, second_id] {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM thread_history_projection_state WHERE thread_id = ?",
+        )
+        .bind(archived.to_string())
+        .fetch_one(history_db(&store).await)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "no archived projection checkpoint");
+    }
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let reader = store.clone();
+        readers.push(tokio::spawn(async move {
+            uncertified_items::indexed_sources(&reader, thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+        }));
+    }
+    let mut scans = Vec::new();
+    for reader in readers {
+        scans.push(reader.await.unwrap());
+    }
+    assert!(!std::sync::Arc::ptr_eq(&original, &scans[0]));
+    assert!(
+        scans
+            .iter()
+            .all(|scan| std::sync::Arc::ptr_eq(scan, &scans[0]))
+    );
+    let mut events = [0; 1024];
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let local = store
+        .list_items(item_params(
+            thread_id,
+            Some("local"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        item_ids(&local),
+        ["new-root", "middle", "old-late", "local-item"]
+    );
+    let inherited = store
+        .list_items(item_params(
+            thread_id,
+            Some("turn-0"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&inherited), ["item-0"]);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_rotation_rebuilds_when_segment_identity_is_ambiguous() {
+    use std::io::Read;
+
+    for case in [
+        "missing-former",
+        "missing-current",
+        "same-segment",
+        "duplicate-ancestor",
+        "duplicate-new",
+    ] {
+        let former = SegmentId::new();
+        let (home, store, thread_id, root, ancestors) =
+            persistent_source_scan_fixture_with_segments(
+                4,
+                (case != "missing-former").then_some(former),
+                (case == "duplicate-ancestor").then_some(former),
+            )
+            .await;
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = match case {
+            "missing-current" => None,
+            "same-segment" => Some(former),
+            _ => Some(SegmentId::new()),
+        };
+        copy_same_path_rotation(home.path(), &root, thread_id, 15, current);
+        if case == "duplicate-new" {
+            append_timeline_record(
+                &root,
+                16,
+                timeline_user_item(thread_id, "local", "intermediate", "split"),
+            );
+            copy_same_path_rotation(home.path(), &root, thread_id, 17, current);
+        }
+        let mut watch = watch_history_file_opens(&ancestors[0]);
+        let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut events = [0; 1024];
+        assert!(watch.read(&mut events).is_ok(), "{case} must rebuild");
+        assert!(
+            scan.anchors
+                .iter()
+                .any(|anchor| anchor.item_id == "local-item")
+        );
+        assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_rotation_revalidates_replaced_or_truncated_copy() {
+    use std::io::Read;
+
+    for case in ["replacement", "truncation"] {
+        let original_segment = SegmentId::new();
+        let (home, store, thread_id, root, ancestors) =
+            persistent_source_scan_fixture_with_segments(4, Some(original_segment), None).await;
+        uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, predecessor) =
+            copy_same_path_rotation(home.path(), &root, thread_id, 15, Some(SegmentId::new()));
+        let original = fs::read_to_string(&predecessor).unwrap();
+        if case == "truncation" {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&predecessor)
+                .unwrap()
+                .set_len(u64::try_from(original.len() - 1).unwrap())
+                .unwrap();
+            assert!(
+                uncertified_items::indexed_sources(&store, thread_id)
+                    .await
+                    .is_err()
+            );
+            continue;
+        }
+        let changed = original.replace("local-item", "fresh-item");
+        assert_eq!(original.len(), changed.len());
+        let replacement = home.path().join("replacement");
+        fs::write(&replacement, changed).unwrap();
+        fs::rename(&replacement, &predecessor).unwrap();
+        let mut watch = watch_history_file_opens(&ancestors[0]);
+        let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            scan.anchors
+                .iter()
+                .any(|anchor| anchor.item_id == "fresh-item")
+        );
+        assert!(
+            !scan
+                .anchors
+                .iter()
+                .any(|anchor| anchor.item_id == "local-item")
+        );
+        let mut events = [0; 1024];
+        assert_eq!(
+            watch.read(&mut events).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let changed = fs::read_to_string(&predecessor)
+            .unwrap()
+            .replace("fresh-item", "other-item");
+        fs::write(&replacement, changed).unwrap();
+        fs::rename(&replacement, &predecessor).unwrap();
+        let (_, refreshed) = uncertified_items::indexed_sources(&store, thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            watch.read(&mut events).is_ok(),
+            "replaced indexed source requires a rebuild"
+        );
+        assert!(
+            refreshed
+                .anchors
+                .iter()
+                .any(|anchor| anchor.item_id == "other-item")
+        );
+        assert!(
+            !refreshed
+                .anchors
+                .iter()
+                .any(|anchor| anchor.item_id == "fresh-item")
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_rotation_respects_both_cutoff_coordinates() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) =
+        persistent_source_scan_fixture_with_segments(4, Some(SegmentId::new()), None).await;
+    uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    append_timeline_record(
+        &root,
+        15,
+        timeline_user_item(thread_id, "local", "excluded", "outside cutoff"),
+    );
+    copy_same_path_rotation(home.path(), &root, thread_id, 15, Some(SegmentId::new()));
+    append_timeline_record(
+        &root,
+        16,
+        timeline_user_item(thread_id, "local", "new-root", "new"),
+    );
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !scan
+            .anchors
+            .iter()
+            .any(|anchor| anchor.item_id == "excluded")
+    );
+    assert!(
+        scan.anchors
+            .iter()
+            .any(|anchor| anchor.item_id == "local-item")
+    );
+    let mut events = [0; 1024];
+    assert_eq!(
+        watch.read(&mut events).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let page = store
+        .list_items(item_params(
+            thread_id,
+            Some("local"),
+            None,
+            100,
+            SortDirection::Desc,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(item_ids(&page), ["new-root", "local-item"]);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_rotation_rebuilds_when_former_root_cutoff_changes() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) =
+        persistent_source_scan_fixture_with_segments(4, Some(SegmentId::new()), None).await;
+    uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let original = fs::read_to_string(&root).unwrap();
+    let (head, tail) = original.split_once('\n').unwrap();
+    let mut head = codex_rollout::parse_rollout_line_bytes(head.as_bytes()).unwrap();
+    let last = &ancestors[3];
+    let cutoff = history_position(last, codex_rollout::rollout_id_from_path(last).unwrap(), 11);
+    let RolloutItem::SessionMeta(meta) = &mut head.item else {
+        panic!("expected session metadata");
+    };
+    meta.meta.history_base = Some(cutoff);
+    fs::write(
+        &root,
+        format!("{}\n{tail}", serde_json::to_string(&head).unwrap()),
+    )
+    .unwrap();
+    copy_same_path_rotation(home.path(), &root, thread_id, 15, Some(SegmentId::new()));
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let (_, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut events = [0; 1024];
+    assert!(
+        watch.read(&mut events).is_ok(),
+        "changed inherited cutoff requires a rebuild"
+    );
+    assert!(!scan.anchors.iter().any(|anchor| anchor.item_id == "item-3"));
+    assert!(scan.anchors.iter().any(|anchor| anchor.item_id == "item-0"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn same_path_root_rewrite_does_not_masquerade_as_rotation() {
+    use std::io::Read;
+
+    let (home, store, thread_id, root, ancestors) =
+        persistent_source_scan_fixture_with_segments(4, Some(SegmentId::new()), None).await;
+    let (_, original) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let meta = codex_rollout::read_session_meta_line_exact(&root)
+        .await
+        .unwrap();
+    let staged = root.with_extension("staged");
+    write_rollout(&staged, thread_id, meta.meta.history_base);
+    set_source_segment_id(&staged, Some(SegmentId::new()));
+    append_timeline_record(
+        &staged,
+        13,
+        timeline_user_item(thread_id, "local", "rewritten", "new"),
+    );
+    fs::rename(staged, &root).unwrap();
+    let mut watch = watch_history_file_opens(&ancestors[0]);
+    let (graph, scan) = uncertified_items::indexed_sources(&store, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&original, &scan));
+    let mut events = [0; 1024];
+    assert!(
+        watch.read(&mut events).is_ok(),
+        "rewrite requires a full scan"
+    );
+    let root_scan = uncertified_items::scan_root_index(&graph, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        root_scan
+            .anchors
+            .iter()
+            .any(|anchor| anchor.item_id == "rewritten")
+    );
+    assert!(
+        !root_scan
+            .anchors
             .iter()
             .any(|anchor| anchor.item_id == "local-item")
     );
