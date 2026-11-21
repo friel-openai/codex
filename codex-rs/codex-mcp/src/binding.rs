@@ -34,7 +34,7 @@ use crate::binding_clients::McpBindingClients;
 use crate::binding_clients::McpResourceListing;
 use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::connection_manager::McpConnectionSet;
-use crate::rmcp_client::ManagedClient;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 
@@ -107,7 +107,7 @@ impl McpBinding {
             clients: Arc::clone(&self.clients),
             config: Arc::clone(&self.config),
             plugins_available: self.plugins_available,
-            tools,
+            tools: tools.into(),
             calls: self.calls.clone(),
         }
     }
@@ -205,7 +205,7 @@ impl fmt::Debug for McpBinding {
 #[derive(Clone)]
 pub struct PreparedMcpCall {
     connections: Arc<McpConnectionSet>,
-    client: Arc<ManagedClient>,
+    client: McpPooledBindingClient,
     config: Arc<McpConfig>,
     catalog_snapshot: Arc<ToolCatalogSnapshot>,
     tool_info: PreparedToolInfo,
@@ -271,7 +271,7 @@ impl PreparedMcpCall {
     )]
     pub(crate) fn new(
         connections: Arc<McpConnectionSet>,
-        client: Arc<ManagedClient>,
+        client: McpPooledBindingClient,
         config: Arc<McpConfig>,
         catalog_snapshot: Arc<ToolCatalogSnapshot>,
         tool_info: impl Into<PreparedToolInfo>,
@@ -299,8 +299,10 @@ impl PreparedMcpCall {
 
     /// Whether the server connection that issued the step's tools still owns this call.
     pub fn uses_connection_from(&self, binding: &McpBinding) -> bool {
-        self.connections
-            .shares_server_connection(&binding.connections, self.server_key())
+        binding
+            .clients
+            .client(self.server_key())
+            .is_some_and(|client| self.client.same_physical_connection(&client))
     }
 
     /// Identifies the exact server and environment captured for this call.
@@ -400,6 +402,11 @@ impl PreparedMcpCall {
             .map(std::num::NonZeroUsize::get)
     }
 
+    #[cfg(test)]
+    pub(crate) fn captured_tool_timeout(&self) -> Option<std::time::Duration> {
+        self.client.tool_timeout()
+    }
+
     pub fn plugin_id(&self) -> Option<&str> {
         self.plugin_id.as_deref()
     }
@@ -443,21 +450,29 @@ impl PreparedMcpCall {
     pub async fn call_with_admission<F, Fut>(
         &self,
         requested_timeout: Option<Duration>,
-        admit: impl Fn() -> Result<()> + Send + Sync,
+        admit: impl Fn() -> Result<()> + Send + Sync + 'static,
         prepare: F,
     ) -> Result<CallToolResult>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Option<JsonValue>, Option<JsonValue>)>>,
     {
-        let effective_timeout = match (self.client.tool_timeout, requested_timeout) {
+        let effective_timeout = match (self.client.tool_timeout(), requested_timeout) {
             (Some(server_timeout), Some(requested_timeout)) => {
                 Some(server_timeout.min(requested_timeout))
             }
             (server_timeout, requested_timeout) => server_timeout.or(requested_timeout),
         };
-        let server_name = self.server_name();
+        let server_name = self.server_name().to_string();
+        let server_name_for_call = server_name.clone();
         let tool_name = self.tool_info().tool.name.to_string();
+        let tool_name_for_call = tool_name.clone();
+        // Catalog refresh holds attribution before publishing its new snapshot. Taking the
+        // catalog read lock first could deadlock a call against another session's refresh.
+        let (active_route, wire) = self
+            .client
+            .with_active_shared_lease(self.client.acquire_wire_route())
+            .await??;
         let operation =
             self.client
                 .tool_catalog
@@ -502,28 +517,33 @@ impl PreparedMcpCall {
                         meta,
                     );
                     self.client
-                        .call_tool(
-                            tool_name.clone(),
-                            arguments,
-                            |capabilities| {
-                                let meta = policy_meta(capabilities)?;
-                                admit()?;
-                                Ok(meta)
-                            },
-                            remaining_timeout,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("tool call failed for `{server_name}/{tool_name}`")
+                        .run_wire_with_route(active_route, wire, move |client, lease| async move {
+                            client
+                                .call_tool(
+                                    tool_name_for_call.clone(),
+                                    arguments,
+                                    |capabilities| {
+                                        let meta = policy_meta(capabilities)?;
+                                        admit()?;
+                                        Ok(meta)
+                                    },
+                                    remaining_timeout,
+                                    lease,
+                                )
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "tool call failed for `{server_name_for_call}/{tool_name_for_call}`"
+                                    )
+                                })
                         })
+                        .await
                 });
-        self.client
-            .with_active_shared_lease(operation)
-            .await?
+        let result = self.client.with_active_shared_lease(operation).await?
             .ok_or_else(|| anyhow::anyhow!(
                 "tool call rejected because the catalog changed after `{server_name}/{tool_name}` was prepared"
-            ))?
-            .map(call_tool_result_from_rmcp)
+            ))??;
+        Ok(call_tool_result_from_rmcp(result))
     }
 }
 
