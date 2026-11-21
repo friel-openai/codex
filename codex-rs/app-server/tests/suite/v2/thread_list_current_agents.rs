@@ -272,6 +272,7 @@ async fn list_threads_for_relation_with_archived(
         params: codex_app_server_protocol::ThreadListParams {
             include_attached_threads: false,
             current_account_only: false,
+            included_thread_ids: None,
             excluded_thread_ids: None,
             cursor,
             limit: Some(limit),

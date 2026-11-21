@@ -446,7 +446,6 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
             TurnItem::AgentMessage(AgentMessageItem {
                 moderation: None,
                 id: format!("agent-{index}"),
-                moderation: None,
                 questions: None,
                 content: vec![AgentMessageContent::Text {
                     text: format!("recent answer {index}"),
@@ -566,7 +565,6 @@ async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart(
                     cursor: None,
                     limit: Some(10),
                     sort_direction: Some(SortDirection::Asc),
-                    defer_output: None,
                 },
             })
             .await?;
