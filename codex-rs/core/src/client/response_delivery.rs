@@ -25,6 +25,8 @@ pub(super) struct ResponseDelivery {
         Arc<crate::session::session::Session>,
         Arc<crate::session::turn_context::TurnContext>,
     )>,
+    #[cfg(test)]
+    reject_completion_for_test: bool,
 }
 
 impl ResponseDelivery {
@@ -40,6 +42,16 @@ impl ResponseDelivery {
             held: Vec::new(),
             settlement_started: Default::default(),
             settlement,
+            #[cfg(test)]
+            reject_completion_for_test: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn rejecting_for_test() -> Self {
+        Self {
+            reject_completion_for_test: true,
+            ..Self::default()
         }
     }
 
@@ -60,15 +72,25 @@ impl ResponseDelivery {
         })
     }
 
-    /// Return false when the turn has stopped receiving this attempt's output.
-    pub(super) async fn send_or_hold(
+    /// Publish completion state only after hooks and settlement accept the response.
+    pub(super) async fn send_or_hold<F: FnOnce()>(
         &mut self,
         event: Result<ResponseEvent>,
         tx: &mpsc::Sender<SamplingEvent>,
+        publish_completion: Option<F>,
     ) -> bool {
+        #[cfg(test)]
+        let completed = matches!(&event, Ok(ResponseEvent::Completed { .. }));
+        #[cfg(test)]
+        if completed && self.reject_completion_for_test {
+            return tx
+                .send(Err(CodexErr::Stream("test settlement rejection".into())).into())
+                .await
+                .is_ok();
+        }
         let passthrough = self.attempt.is_none() && self.settlement.is_none();
         if passthrough {
-            return tx.send(event.into()).await.is_ok();
+            return send_terminal(event.into(), tx, publish_completion).await;
         }
         let report = match &event {
             Ok(ResponseEvent::Completed {
@@ -107,17 +129,18 @@ impl ResponseDelivery {
                 ..Default::default()
             },
         };
-        let released = self.release(terminal, tx).await;
+        let released = self.release(terminal, tx, publish_completion).await;
         match released {
             Ok(delivered) => delivered,
             Err(error) => tx.send(Err(error).into()).await.is_ok(),
         }
     }
 
-    async fn release(
+    async fn release<F: FnOnce()>(
         &mut self,
         mut terminal: SamplingEvent,
         tx: &mpsc::Sender<SamplingEvent>,
+        publish_completion: Option<F>,
     ) -> Result<bool> {
         if self.settlement.is_some()
             && matches!(terminal.event, Ok(ResponseEvent::Completed { .. }))
@@ -152,7 +175,7 @@ impl ResponseDelivery {
                 }
             }
         }
-        Ok(tx.send(terminal).await.is_ok())
+        Ok(send_terminal(terminal, tx, publish_completion).await)
     }
 
     pub(super) async fn finish_eof(&mut self, tx: &mpsc::Sender<SamplingEvent>) {
@@ -171,4 +194,25 @@ impl ResponseDelivery {
             }
         }
     }
+}
+
+async fn send_terminal<F: FnOnce()>(
+    terminal: SamplingEvent,
+    tx: &mpsc::Sender<SamplingEvent>,
+    publish_completion: Option<F>,
+) -> bool {
+    let Ok(permit) = tx.reserve().await else {
+        return false;
+    };
+    if tx.is_closed() {
+        return false;
+    }
+    if matches!(&terminal.event, Ok(ResponseEvent::Completed { .. }))
+        && let Some(publish) = publish_completion
+    {
+        // There is no await between publication and exposing the terminal event.
+        publish();
+    }
+    permit.send(terminal);
+    true
 }
