@@ -70,6 +70,7 @@ fn legacy_meta_line(thread_id: ThreadId) -> RolloutLine {
 fn agent_line(message: &str, ordinal: u64) -> RolloutLine {
     line(
         RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+            moderation: None,
             message: message.to_string(),
             phase: None,
             memory_citation: None,

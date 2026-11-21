@@ -518,6 +518,7 @@ async fn filesystem_listing_omits_stale_singleton_from_unselected_collection() {
             cwd_filters: None,
             default_provider: TEST_PROVIDER,
             layout: ThreadListLayout::Flat,
+            include_attached_threads: false,
         },
         Some(runtime.as_ref()),
         Some(true),
@@ -2667,6 +2668,7 @@ async fn assert_filesystem_listing_pages(
             cwd_filters,
             default_provider,
             layout,
+            include_attached_threads: false,
         };
         let first = get_threads_in_root(
             root.to_path_buf(),

@@ -73,6 +73,7 @@ fn message_line(ordinal: u64) -> RolloutLine {
         timestamp: "2026-07-13T00:00:01Z".to_string(),
         ordinal: Some(ordinal),
         item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+            moderation: None,
             message: format!("message-{ordinal}"),
             phase: None,
             memory_citation: None,
