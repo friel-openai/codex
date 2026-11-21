@@ -25,6 +25,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::RawFileSystemSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_protocol::protocol::RolloutReferenceItem;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,6 +43,10 @@ pub(super) enum RolloutItemWire<'a> {
     },
     DynamicToolsUpdated {
         payload: DynamicToolsUpdatedPayload<'a>,
+    },
+    #[serde(alias = "fork_reference")]
+    RolloutReference {
+        payload: Cow<'a, RolloutReferenceItem>,
     },
     ResponseItem {
         payload: ItemPayload<'a, ResponseItem>,
@@ -189,6 +194,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                     tools: Cow::Borrowed(tools),
                 },
             },
+            RolloutItem::RolloutReference(payload) => Self::RolloutReference {
+                payload: Cow::Borrowed(payload),
+            },
             RolloutItem::ResponseItem(envelope) => Self::ResponseItem {
                 payload: (&envelope.item).into(),
                 metadata: envelope.metadata.as_ref().map(Cow::Borrowed),
@@ -290,6 +298,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                 thread_id: payload.thread_id,
                 tools: payload.tools.into_owned(),
             },
+            RolloutItemWire::RolloutReference { payload } => {
+                Self::RolloutReference(payload.into_owned())
+            }
             RolloutItemWire::ResponseItem { payload, metadata } => {
                 if let (
                     ResponseItem::Message {
