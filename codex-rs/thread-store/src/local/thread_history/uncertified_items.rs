@@ -21,6 +21,8 @@ use serde::Deserialize;
 use serde::de::MapAccess;
 use serde::de::Visitor;
 use serde_json::value::RawValue;
+use sha2::Digest;
+use sha2::Sha256;
 
 use super::super::LocalThreadStore;
 use super::super::rollout_lineage::HistoryPageWalk;
@@ -29,12 +31,15 @@ use super::super::rollout_lineage::RolloutLineageSegment;
 use super::super::rollout_lineage::WalkStep;
 use super::super::rollout_lineage::read_rollout_head;
 use super::projection_certificate::FileIdentity;
+use super::projection_certificate::file_identity;
 use super::projection_certificate::leaf_identity;
 use super::read::CursorScope;
 use super::read::parse_cursor;
 use super::read::stored_thread_item_row;
 use super::segment_paging::page_item_rows_with_connection;
 use super::thread_history_error;
+use super::uncertified_root_head::has_canonical_compacted_header;
+use super::uncertified_root_head::read_cached_compacted_head;
 use crate::ItemPage;
 use crate::ItemSortKey;
 use crate::ListItemsParams;
@@ -43,6 +48,8 @@ use crate::StoredThreadItem;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+mod persistent_scan;
+
 const MAX_CACHED_THREADS: usize = 8;
 const MAX_ANCESTOR_TURNS: usize = 200_000;
 const MAX_ANCESTOR_TURN_BYTES: usize = 8 * 1024 * 1024;
@@ -50,6 +57,39 @@ const MAX_ANCHOR_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ROOT_ITEMS: usize = 20_000;
 const MAX_SUMMARY_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const SCAN_CONCURRENCY: usize = 8;
+
+#[cfg(test)]
+static INDEX_PAUSES: std::sync::LazyLock<std::sync::Mutex<HashMap<ThreadId, Arc<IndexPause>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// A one-shot barrier before completing validation of a cached ancestor index.
+#[cfg(test)]
+pub(super) struct IndexPause {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) fn inject_index_pause(thread_id: ThreadId) -> Arc<IndexPause> {
+    let pause = Arc::new(IndexPause {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    INDEX_PAUSES
+        .lock()
+        .unwrap()
+        .insert(thread_id, pause.clone());
+    pause
+}
+
+#[cfg(test)]
+async fn pause_index_validation(thread_id: ThreadId) {
+    let pause = INDEX_PAUSES.lock().unwrap().remove(&thread_id);
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
 
 /// Whether two item snapshots are equivalent, contradict, or differ in an unknown representation.
 pub(super) enum ItemComparison {
@@ -79,6 +119,36 @@ impl<'de> Deserialize<'de> for UniqueFields {
             }
         }
         deserializer.deserialize_map(FieldsVisitor)
+    }
+}
+
+/// A rollout envelope with the same duplicate-field checks as `Record`.
+struct UniqueRolloutValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for UniqueRolloutValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RolloutVisitor;
+        impl<'de> Visitor<'de> for RolloutVisitor {
+            type Value = UniqueRolloutValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a rollout record object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut fields = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if matches!(key.as_str(), "timestamp" | "ordinal" | "type" | "payload")
+                        && fields.contains_key(&key)
+                    {
+                        return Err(serde::de::Error::custom("duplicate rollout field"));
+                    }
+                    fields.insert(key, value);
+                }
+                Ok(UniqueRolloutValue(serde_json::Value::Object(fields)))
+            }
+        }
+        deserializer.deserialize_map(RolloutVisitor)
     }
 }
 
@@ -163,19 +233,44 @@ fn assert_request_future_is_send(store: &LocalThreadStore, params: &ListItemsPar
 }
 
 /// A complete set of turn IDs in the selected immutable predecessor prefixes.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(in crate::local) struct UncertifiedItemScan {
+    #[serde(default)]
+    pub(super) attached: bool,
     root: RolloutLineageSegment,
     ancestors: Vec<RolloutLineageSegment>,
     identities: Vec<FileIdentity>,
+    #[serde(skip, default)]
+    path_snapshot: tokio::sync::Mutex<Option<Arc<codex_rollout::RolloutPathSnapshot>>>,
+    #[serde(skip)]
     turn_ids: HashSet<String>,
+    #[serde(skip)]
     pub(super) turn_segments: HashMap<String, Vec<usize>>,
+    #[serde(with = "persistent_scan::turn_events")]
     pub(super) turn_events: Vec<SourceTurnEvent>,
     pub(super) anchors: Vec<SourceItemAnchor>,
 }
 
 pub(super) struct DiscoveredLineage {
+    attached: bool,
     pub(super) lineage: RolloutLineage,
     pub(super) identities: Vec<FileIdentity>,
+}
+
+/// The exact plain root prefix consumed by a source-backed page.
+#[derive(Clone)]
+pub(super) struct RootSnapshot {
+    identity: FileIdentity,
+    digest: [u8; 32],
+    file: Arc<std::fs::File>,
+}
+
+/// Conditions for reading one captured prefix from the selected root file.
+#[derive(Clone)]
+struct RootReadGuard {
+    identity: FileIdentity,
+    require_exact_identity: bool,
+    expected_digest: Option<[u8; 32]>,
 }
 
 fn supported_owner_order(graph: &DiscoveredLineage) -> bool {
@@ -197,9 +292,13 @@ pub(super) async fn indexed_sources(
     id: ThreadId,
 ) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
     let mut walk = HistoryPageWalk::new(store, id).await?;
-    if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) || walk.complete() {
+    if !matches!(walk.next_older_deferred().await?, WalkStep::Segment) {
+        return indexed_attached_sources(store, id).await;
+    }
+    if walk.complete() {
         return Ok(None);
     }
+    let root_rollout_id = walk.root_rollout_id();
     let slot = {
         let mut scans = store.uncertified_item_scans.lock().await;
         if !scans.contains_key(&id) && scans.len() >= MAX_CACHED_THREADS {
@@ -219,6 +318,9 @@ pub(super) async fn indexed_sources(
             .clone()
     };
     let mut cached = slot.lock().await;
+    if cached.is_none() {
+        *cached = persistent_scan::load(store, id, root_rollout_id).await;
+    }
     if let Some(scan) = cached.as_ref()
         && let Some(graph) = discover_cached(store, id, scan).await?
     {
@@ -238,6 +340,8 @@ pub(super) async fn indexed_sources(
         });
     };
     let scan = Arc::new(scan);
+    // The predecessor index remains reusable if only the mutable root changes.
+    *cached = Some(scan.clone());
     let Some(current) = discover_cached(store, id, &scan).await? else {
         return Err(ThreadStoreError::Conflict {
             message: "rotated history sources changed while indexing".to_string(),
@@ -246,7 +350,74 @@ pub(super) async fn indexed_sources(
     if !supported_owner_order(&current) {
         return Ok(None);
     }
+    drop(cached);
+    persistent_scan::save(store, id, root_rollout_id, scan.clone()).await;
+    Ok(Some((current, scan)))
+}
+
+async fn indexed_attached_sources(
+    store: &LocalThreadStore,
+    id: ThreadId,
+) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
+    let Some(graph) = discover_attached(store, id).await? else {
+        return Ok(None);
+    };
+    let slot = {
+        let mut scans = store.uncertified_item_scans.lock().await;
+        if !scans.contains_key(&id) && scans.len() >= MAX_CACHED_THREADS {
+            let idle = scans
+                .iter()
+                .find_map(|(id, scan)| (Arc::strong_count(scan) == 1).then_some(*id));
+            if let Some(id) = idle {
+                scans.remove(&id);
+            } else {
+                drop(scans);
+                return index_attached_uncached(store, id, graph).await;
+            }
+        }
+        scans
+            .entry(id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+            .clone()
+    };
+    let mut cached = slot.lock().await;
+    if let Some(scan) = cached.as_ref()
+        && scan.attached
+        && let Some(current) = discover_cached(store, id, scan).await?
+    {
+        return Ok(Some((current, scan.clone())));
+    }
+    let Some(scan) = scan_ancestors(&graph).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not verify attached history sources".to_string(),
+        });
+    };
+    let scan = Arc::new(scan);
+    let Some(current) = discover_cached(store, id, &scan).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "attached history sources changed while indexing".to_string(),
+        });
+    };
     *cached = Some(scan.clone());
+    Ok(Some((current, scan)))
+}
+
+async fn index_attached_uncached(
+    store: &LocalThreadStore,
+    id: ThreadId,
+    graph: DiscoveredLineage,
+) -> ThreadStoreResult<Option<(DiscoveredLineage, Arc<UncertifiedItemScan>)>> {
+    let Some(scan) = scan_ancestors(&graph).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "could not verify attached history sources".to_string(),
+        });
+    };
+    let scan = Arc::new(scan);
+    let Some(current) = discover_cached(store, id, &scan).await? else {
+        return Err(ThreadStoreError::Conflict {
+            message: "attached history sources changed while indexing".to_string(),
+        });
+    };
     Ok(Some((current, scan)))
 }
 
@@ -273,6 +444,7 @@ async fn index_uncached_sources(
     if !supported_owner_order(&current) {
         return Ok(None);
     }
+    persistent_scan::save(store, id, current.lineage.root_rollout_id(), scan.clone()).await;
     Ok(Some((current, scan)))
 }
 
@@ -282,13 +454,101 @@ pub(super) async fn sources_still_current(
     id: ThreadId,
     graph: &DiscoveredLineage,
     scan: &UncertifiedItemScan,
+    root_snapshot: Option<&RootSnapshot>,
 ) -> ThreadStoreResult<bool> {
-    Ok(discover_cached(store, id, scan)
-        .await?
-        .is_some_and(|current| {
-            current.lineage.segments() == graph.lineage.segments()
-                && current.identities == graph.identities
-        }))
+    let Some(current) = discover_cached(store, id, scan).await? else {
+        return Ok(false);
+    };
+    if current.lineage.segments() == graph.lineage.segments()
+        && current.identities == graph.identities
+    {
+        return Ok(true);
+    }
+    let Some(snapshot) = root_snapshot else {
+        return Ok(false);
+    };
+    let Some((root, ancestors)) = graph.lineage.segments().split_last() else {
+        return Ok(false);
+    };
+    let Some((current_root, current_ancestors)) = current.lineage.segments().split_last() else {
+        return Ok(false);
+    };
+    let Some((identity, ancestor_identities)) = graph.identities.split_last() else {
+        return Ok(false);
+    };
+    let Some((current_identity, current_ancestor_identities)) = current.identities.split_last()
+    else {
+        return Ok(false);
+    };
+    let mut normalized_root = current_root.clone();
+    normalized_root.physical_size = root.physical_size;
+    normalized_root.end_byte_offset = root.end_byte_offset;
+    normalized_root.jsonl_end_byte_offset = root.jsonl_end_byte_offset;
+    if ancestors != current_ancestors
+        || ancestor_identities != current_ancestor_identities
+        || normalized_root != *root
+        || snapshot.identity != *identity
+        || !identity.same_file_with_at_least(current_identity)
+        || current_identity.size() <= identity.size()
+    {
+        return Ok(false);
+    }
+    let path = root.rollout_path().to_path_buf();
+    let snapshot = snapshot.clone();
+    let expected = current_identity.clone();
+    tokio::task::spawn_blocking(move || verify_root_prefix(&path, &snapshot, &expected))
+        .await
+        .map_err(thread_history_error)
+}
+
+/// Verifies the consumed prefix without accepting a concurrent rewrite or replacement.
+fn verify_root_prefix(
+    path: &std::path::Path,
+    snapshot: &RootSnapshot,
+    current: &FileIdentity,
+) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let matches_current = || {
+        file.metadata()
+            .ok()
+            .and_then(|meta| file_identity(&meta))
+            .as_ref()
+            == Some(current)
+            && snapshot
+                .file
+                .metadata()
+                .ok()
+                .and_then(|meta| file_identity(&meta))
+                .as_ref()
+                == Some(current)
+            && std::fs::symlink_metadata(path)
+                .ok()
+                .and_then(|meta| file_identity(&meta))
+                .as_ref()
+                == Some(current)
+    };
+    if !matches_current() {
+        return false;
+    }
+    let mut reader = (&file).take(snapshot.identity.size());
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut read = 0_u64;
+    loop {
+        let Ok(count) = reader.read(&mut buffer) else {
+            return false;
+        };
+        if count == 0 {
+            break;
+        }
+        read += count as u64;
+        digest.update(&buffer[..count]);
+    }
+    read == snapshot.identity.size()
+        && <[u8; 32]>::from(digest.finalize()) == snapshot.digest
+        && matches_current()
 }
 
 /// Reads the mutable root once for turn metadata, item anchors, and requested snapshots.
@@ -304,8 +564,25 @@ pub(super) async fn scan_root_index(
         .clone();
     let cancelled = ScanCancellation::default();
     let stop = cancelled.0.clone();
+    let identity = graph.identities.last().expect("root has an identity");
+    let guard = (root.rollout_path().extension().and_then(|s| s.to_str()) != Some("zst")
+        && root.end_ordinal().is_none()
+        && root.physical_size == Some(identity.size()))
+    .then(|| RootReadGuard {
+        identity: identity.clone(),
+        require_exact_identity: true,
+        expected_digest: None,
+    });
     match tokio::task::spawn_blocking(move || {
-        scan_source(&root, Some(""), true, turns.as_ref(), true, &stop)
+        scan_source(
+            &root,
+            Some(""),
+            true,
+            turns.as_ref(),
+            true,
+            &stop,
+            guard.as_ref(),
+        )
     })
     .await
     .map_err(thread_history_error)?
@@ -325,6 +602,7 @@ pub(super) async fn scan_selected_items(
     graph: &DiscoveredLineage,
     scan: &UncertifiedItemScan,
     turns: HashSet<String>,
+    root_snapshot: Option<&RootSnapshot>,
 ) -> ThreadStoreResult<Option<Vec<SourceTurnEvent>>> {
     let mut indexes = HashSet::new();
     for turn in &turns {
@@ -336,16 +614,31 @@ pub(super) async fn scan_selected_items(
     let cancelled = ScanCancellation::default();
     let stop = cancelled.0.clone();
     let turns = Arc::new(turns);
+    let root_index = graph.lineage.segments().len() - 1;
+    let root_guard = root_snapshot.map(|snapshot| RootReadGuard {
+        identity: snapshot.identity.clone(),
+        require_exact_identity: false,
+        expected_digest: Some(snapshot.digest),
+    });
     let mut jobs = futures::stream::iter(indexes)
         .map(|index| {
             let segment = graph.lineage.segments()[index].clone();
             let turns = turns.clone();
             let stop = stop.clone();
+            let guard = (index == root_index).then(|| root_guard.clone()).flatten();
             async move {
                 (
                     index,
                     tokio::task::spawn_blocking(move || {
-                        scan_source(&segment, Some(""), false, Some(&turns), false, &stop)
+                        scan_source(
+                            &segment,
+                            Some(""),
+                            false,
+                            Some(&turns),
+                            false,
+                            &stop,
+                            guard.as_ref(),
+                        )
                     })
                     .await,
                 )
@@ -578,7 +871,7 @@ async fn scan_root(
 ) -> ThreadStoreResult<Option<SourceScan>> {
     let stop = cancelled.0.clone();
     Ok(tokio::task::spawn_blocking(move || {
-        scan_source(&root, Some(&turn), false, None, false, &stop)
+        scan_source(&root, Some(&turn), false, None, false, &stop, None)
     })
     .await
     .map_err(thread_history_error)?
@@ -605,6 +898,52 @@ pub(super) async fn discover(
         return Ok(None);
     }
     Ok(Some(DiscoveredLineage {
+        attached: false,
+        lineage,
+        identities,
+    }))
+}
+
+async fn discover_attached(
+    store: &LocalThreadStore,
+    id: ThreadId,
+) -> ThreadStoreResult<Option<DiscoveredLineage>> {
+    let Some(selected) =
+        super::super::thread_rollout_resolver::resolve_current_including_archived(store, id)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let meta = codex_rollout::read_session_meta_line_exact(&selected.path)
+        .await
+        .map_err(thread_history_error)?;
+    if !meta.meta.attached_thread {
+        return Ok(None);
+    }
+    let lineage = store.resolve_rollout_lineage_for_history_page(id).await?;
+    if lineage.root_rollout_id() != selected.rollout_id
+        || lineage.leaf_path() != selected.path.as_path()
+        || lineage.segments().is_empty()
+        || lineage
+            .segments()
+            .iter()
+            .any(|segment| segment.thread_id() != id || segment.filters_items())
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: "unsupported attached history lineage".to_string(),
+        });
+    }
+    let mut identities = Vec::with_capacity(lineage.segments().len());
+    for segment in lineage.segments() {
+        let Some(identity) = leaf_identity(segment.rollout_path()).await else {
+            return Err(ThreadStoreError::Conflict {
+                message: "attached history source is unavailable".to_string(),
+            });
+        };
+        identities.push(identity);
+    }
+    Ok(Some(DiscoveredLineage {
+        attached: true,
         lineage,
         identities,
     }))
@@ -616,20 +955,31 @@ pub(super) async fn discover_cached(
     id: ThreadId,
     cached: &UncertifiedItemScan,
 ) -> ThreadStoreResult<Option<DiscoveredLineage>> {
+    if cached.attached {
+        let Some(current) = discover_attached(store, id).await? else {
+            return Ok(None);
+        };
+        let Some((root, ancestors)) = current.lineage.segments().split_last() else {
+            return Ok(None);
+        };
+        let mut normalized = root.clone();
+        normalized.physical_size = cached.root.physical_size;
+        normalized.end_byte_offset = cached.root.end_byte_offset;
+        normalized.jsonl_end_byte_offset = cached.root.jsonl_end_byte_offset;
+        if normalized != cached.root
+            || ancestors != cached.ancestors
+            || current.identities[..current.identities.len() - 1] != cached.identities
+        {
+            return Ok(None);
+        }
+        return Ok(Some(current));
+    }
     let walk = HistoryPageWalk::new(store, id).await?;
     if walk.root_rollout_id() != cached.root.rollout_id()
         || walk.root_path() != cached.root.rollout_path()
-        || !walk.selected_is_current().await?
     {
         return Ok(None);
     }
-    let Some(identity) = leaf_identity(walk.root_path()).await else {
-        return Ok(None);
-    };
-    let Ok(head) = read_rollout_head(walk.root_path()).await else {
-        return Ok(None);
-    };
-    let meta = &head.session_meta.meta;
     let expected_base = match cached.ancestors.last() {
         Some(segment) => {
             let Some((ordinal, offset)) =
@@ -645,61 +995,128 @@ pub(super) async fn discover_cached(
         }
         None => None,
     };
-    if meta.id != id
-        || meta.history_mode != ThreadHistoryMode::Paginated
-        || meta.attached_thread
-        || meta.subagent_history_start_ordinal.is_some()
-        || meta.history_base != expected_base
-        || head.leading_reference.is_some()
-        || head.first_local_ordinal != cached.root.start_ordinal()
-        || leaf_identity(walk.root_path()).await.as_ref() != Some(&identity)
+    let path_snapshot = {
+        let mut snapshot = cached.path_snapshot.lock().await;
+        if let Some(current) = snapshot.as_ref()
+            && current.is_current().await
+        {
+            Some(current.clone())
+        } else {
+            let ids = cached
+                .ancestors
+                .iter()
+                .map(RolloutLineageSegment::rollout_id)
+                .collect();
+            let Ok(current) =
+                codex_rollout::snapshot_rollout_paths_by_rollout_id(&store.config.codex_home, &ids)
+                    .await
+            else {
+                return Ok(None);
+            };
+            *snapshot = current.map(Arc::new);
+            snapshot.clone()
+        }
+    };
+    if let Some(snapshot) = &path_snapshot {
+        if cached.ancestors.iter().any(|segment| {
+            snapshot
+                .get(&segment.rollout_id())
+                .is_none_or(|path| path != segment.rollout_path())
+        }) {
+            return Ok(None);
+        }
+    } else {
+        // Fall back when directory identities cannot establish a stable snapshot.
+        let Ok(paths) =
+            codex_rollout::index_rollout_paths_by_rollout_id(&store.config.codex_home).await
+        else {
+            return Ok(None);
+        };
+        if cached.ancestors.iter().any(|segment| {
+            paths
+                .get(&segment.rollout_id())
+                .is_none_or(|path| path != segment.rollout_path())
+        }) {
+            return Ok(None);
+        }
+    }
+    if !source_identities_unchanged(&cached.ancestors, &cached.identities).await
+        || !walk.selected_is_current().await?
     {
         return Ok(None);
     }
-    let Ok(paths) =
-        codex_rollout::index_rollout_paths_by_rollout_id(&store.config.codex_home).await
-    else {
-        return Ok(None);
-    };
-    if cached.ancestors.iter().any(|segment| {
-        paths
-            .get(&segment.rollout_id())
-            .is_none_or(|path| path != segment.rollout_path())
-    }) {
-        return Ok(None);
+    #[cfg(test)]
+    pause_index_validation(id).await;
+    // Capture the mutable root after the potentially slow predecessor checks.
+    for _ in 0..4 {
+        let Some(identity) = leaf_identity(walk.root_path()).await else {
+            return Ok(None);
+        };
+        let head = if let Some(head) =
+            read_cached_compacted_head(walk.root_path(), cached.root.physical_size).await?
+        {
+            head
+        } else {
+            let Ok(head) = read_rollout_head(walk.root_path()).await else {
+                return Ok(None);
+            };
+            head
+        };
+        if leaf_identity(walk.root_path()).await.as_ref() != Some(&identity) {
+            continue;
+        }
+        let meta = &head.session_meta.meta;
+        if meta.id != id
+            || meta.history_mode != ThreadHistoryMode::Paginated
+            || meta.attached_thread
+            || meta.subagent_history_start_ordinal.is_some()
+            || meta.history_base != expected_base
+            || head.leading_reference.is_some()
+            || head.first_local_ordinal != cached.root.start_ordinal()
+        {
+            return Ok(None);
+        }
+        if let Some(snapshot) = &path_snapshot
+            && !snapshot.is_current().await
+        {
+            return Ok(None);
+        }
+        let mut root = cached.root.clone();
+        root.physical_size = Some(identity.size());
+        root.end_byte_offset = Some(identity.size());
+        root.jsonl_end_byte_offset = Some(identity.size());
+        let mut segments = cached.ancestors.clone();
+        segments.push(root);
+        let mut identities = cached.identities.clone();
+        identities.push(identity);
+        return Ok(Some(DiscoveredLineage {
+            attached: false,
+            lineage: RolloutLineage::from_segments(
+                id,
+                walk.root_rollout_id(),
+                walk.root_path().to_path_buf(),
+                segments,
+            ),
+            identities,
+        }));
     }
-    let Ok(metadata) = tokio::fs::metadata(walk.root_path()).await else {
-        return Ok(None);
-    };
-    let mut root = cached.root.clone();
-    root.physical_size = Some(metadata.len());
-    root.end_byte_offset = Some(metadata.len());
-    root.jsonl_end_byte_offset = Some(metadata.len());
-    let mut segments = cached.ancestors.clone();
-    segments.push(root);
-    let mut identities = cached.identities.clone();
-    identities.push(identity);
-    let graph = DiscoveredLineage {
-        lineage: RolloutLineage::from_segments(
-            id,
-            walk.root_rollout_id(),
-            walk.root_path().to_path_buf(),
-            segments,
-        ),
-        identities,
-    };
-    if !identities_unchanged(&graph).await {
-        return Ok(None);
-    }
-    Ok(Some(graph))
+    Ok(None)
 }
 
 async fn identities_unchanged(graph: &DiscoveredLineage) -> bool {
-    let sources = graph
-        .lineage
-        .segments()
+    source_identities_unchanged(graph.lineage.segments(), &graph.identities).await
+}
+
+async fn source_identities_unchanged(
+    segments: &[RolloutLineageSegment],
+    identities: &[FileIdentity],
+) -> bool {
+    if segments.len() != identities.len() {
+        return false;
+    }
+    let sources = segments
         .iter()
-        .zip(&graph.identities)
+        .zip(identities)
         .map(|(segment, identity)| (segment.rollout_path().to_path_buf(), identity.clone()))
         .collect::<Vec<_>>();
     futures::stream::iter(sources)
@@ -713,17 +1130,10 @@ async fn identities_unchanged(graph: &DiscoveredLineage) -> bool {
 
 async fn ancestor_identities_unchanged(graph: &DiscoveredLineage) -> bool {
     let count = graph.lineage.segments().len().saturating_sub(1);
-    let sources = graph.lineage.segments()[..count]
-        .iter()
-        .zip(&graph.identities[..count])
-        .map(|(segment, identity)| (segment.rollout_path().to_path_buf(), identity.clone()))
-        .collect::<Vec<_>>();
-    futures::stream::iter(sources)
-    .map(|(path, expected)| async move {
-        leaf_identity(&path).await.as_ref() == Some(&expected)
-    })
-    .buffer_unordered(16)
-    .all(|same| async move { same })
+    source_identities_unchanged(
+        &graph.lineage.segments()[..count],
+        &graph.identities[..count],
+    )
     .await
 }
 
@@ -743,7 +1153,7 @@ pub(super) async fn scan_ancestors(
                 (
                     index,
                     tokio::task::spawn_blocking(move || {
-                        scan_source(&segment, None, true, None, true, &stop)
+                        scan_source(&segment, None, true, None, true, &stop, None)
                     })
                     .await,
                 )
@@ -799,9 +1209,11 @@ pub(super) async fn scan_ancestors(
         anchors.extend(scan.anchors);
     }
     Ok(Some(UncertifiedItemScan {
+        attached: graph.attached,
         root,
         ancestors: segments[..segments.len() - 1].to_vec(),
         identities: graph.identities[..graph.identities.len() - 1].to_vec(),
+        path_snapshot: tokio::sync::Mutex::new(None),
         turn_ids,
         turn_segments,
         turn_events,
@@ -860,7 +1272,7 @@ struct ItemIdentity<'a> {
 }
 
 /// The original creation position of an item in a selected physical source.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct SourceItemAnchor {
     pub(super) ordinal: u64,
     pub(super) owner: ThreadId,
@@ -896,6 +1308,7 @@ pub(super) struct SourceScan {
     summary_bytes: usize,
     pub(super) anchors: Vec<SourceItemAnchor>,
     anchor_bytes: usize,
+    pub(super) root_snapshot: Option<RootSnapshot>,
 }
 
 fn check_summary_source_size(bytes: usize) -> io::Result<()> {
@@ -916,9 +1329,30 @@ fn scan_source(
     summary_turns: Option<&HashSet<String>>,
     collect_anchors: bool,
     stop: &Arc<AtomicBool>,
+    root_guard: Option<&RootReadGuard>,
 ) -> io::Result<Option<SourceScan>> {
     let path = segment.rollout_path();
     let file = std::fs::File::open(path)?;
+    let root_file = if let Some(guard) = root_guard {
+        let Some(opened) = file_identity(&file.metadata()?) else {
+            return Ok(None);
+        };
+        let Some(selected) = file_identity(&std::fs::symlink_metadata(path)?) else {
+            return Ok(None);
+        };
+        let valid = if guard.require_exact_identity {
+            opened == guard.identity && selected == guard.identity
+        } else {
+            guard.identity.same_file_with_at_least(&opened)
+                && guard.identity.same_file_with_at_least(&selected)
+        };
+        if !valid {
+            return Ok(None);
+        }
+        Some(file.try_clone()?)
+    } else {
+        None
+    };
     let source: Box<dyn Read> = if path.extension().and_then(|s| s.to_str()) == Some("zst") {
         Box::new(zstd::stream::read::Decoder::new(file)?)
     } else {
@@ -935,19 +1369,32 @@ fn scan_source(
     let mut bytes = Vec::new();
     let mut offset = 0_u64;
     let mut previous = None;
+    let mut record_index = 0_usize;
     let mut result = SourceScan::default();
     let mut items: HashMap<String, (i64, StoredThreadItem)> = HashMap::new();
+    let mut root_digest = root_guard.map(|_| Sha256::new());
     loop {
+        if root_guard.is_some_and(|guard| offset == guard.identity.size()) {
+            break;
+        }
         bytes.clear();
+        let remaining = root_guard
+            .map(|guard| guard.identity.size().saturating_sub(offset))
+            .unwrap_or(u64::MAX);
         let count = reader
             .by_ref()
-            .take(16 * 1024 * 1024 + 1)
+            .take(remaining.min(16 * 1024 * 1024 + 1))
             .read_until(b'\n', &mut bytes)?;
         if count == 0 {
-            if boundary.is_some_and(|(_, end)| end != offset) {
+            if boundary.is_some_and(|(_, end)| end != offset)
+                || root_guard.is_some_and(|guard| guard.identity.size() != offset)
+            {
                 return Ok(None);
             }
             break;
+        }
+        if let Some(digest) = &mut root_digest {
+            digest.update(&bytes);
         }
         let next = offset
             .checked_add(count as u64)
@@ -955,25 +1402,61 @@ fn scan_source(
         if bytes.last() != Some(&b'\n') || bytes.len() > 16 * 1024 * 1024 {
             return Ok(None);
         }
-        let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
-            return Ok(None);
+        let (ordinal, record) = if record_index == 1 && has_canonical_compacted_header(&bytes) {
+            let Ok(UniqueRolloutValue(value)) =
+                serde_json::from_slice::<UniqueRolloutValue>(&bytes)
+            else {
+                return Ok(None);
+            };
+            let Ok(Some(codex_rollout::RolloutLine {
+                ordinal: Some(ordinal),
+                item: codex_rollout::RolloutItem::Compacted(_),
+                ..
+            })) = codex_rollout::RolloutRecorder::parse_rollout_line_value(value)
+            else {
+                return Ok(None);
+            };
+            (ordinal, None)
+        } else {
+            let Ok(record) = serde_json::from_slice::<Record<'_>>(&bytes) else {
+                return Ok(None);
+            };
+            if record_index == 1 && record.kind == "compacted" {
+                match codex_rollout::RolloutRecorder::parse_rollout_line_bytes(&bytes) {
+                    Ok(Some(codex_rollout::RolloutLine {
+                        item: codex_rollout::RolloutItem::Compacted(_),
+                        ..
+                    })) => {}
+                    _ => return Ok(None),
+                }
+            }
+            (record.ordinal, Some(record))
         };
+        record_index += 1;
         if let Some((end_ordinal, end_offset)) = boundary {
             if offset == end_offset {
-                if record.ordinal < end_ordinal {
+                if ordinal < end_ordinal {
                     return Ok(None);
                 }
                 io::copy(&mut reader, &mut io::sink())?;
                 break;
             }
-            if offset > end_offset || next > end_offset || record.ordinal >= end_ordinal {
+            if offset > end_offset || next > end_offset || ordinal >= end_ordinal {
                 return Ok(None);
             }
         }
-        if previous.is_some_and(|value: u64| value.checked_add(1) != Some(record.ordinal)) {
+        if previous.is_some_and(|value: u64| value.checked_add(1) != Some(ordinal)) {
             return Ok(None);
         }
-        previous = Some(record.ordinal);
+        previous = Some(ordinal);
+        if ordinal < segment.start_ordinal() && segment.history_page_start.is_some() {
+            offset = next;
+            continue;
+        }
+        let Some(record) = record else {
+            offset = next;
+            continue;
+        };
         if record.kind == "rollout_reference" || record.kind == "fork_reference" {
             return Ok(None);
         }
@@ -1130,6 +1613,28 @@ fn scan_source(
         }
         offset = next;
     }
+    if let (Some(guard), Some(file), Some(digest)) = (root_guard, root_file, root_digest) {
+        let Some(opened) = file_identity(&file.metadata()?) else {
+            return Ok(None);
+        };
+        let Some(selected) = file_identity(&std::fs::symlink_metadata(path)?) else {
+            return Ok(None);
+        };
+        let digest: [u8; 32] = digest.finalize().into();
+        if !guard.identity.same_file_with_at_least(&opened)
+            || !guard.identity.same_file_with_at_least(&selected)
+            || guard
+                .expected_digest
+                .is_some_and(|expected| expected != digest)
+        {
+            return Ok(None);
+        }
+        result.root_snapshot = Some(RootSnapshot {
+            identity: guard.identity.clone(),
+            digest,
+            file: Arc::new(file),
+        });
+    }
     result.items = items.into_values().collect();
     result.items.sort_by_key(|item| item.0);
     Ok(Some(result))
@@ -1139,8 +1644,17 @@ fn scan_source(
 mod tests {
     use super::ItemComparison;
     use super::MAX_SUMMARY_SOURCE_BYTES;
+    use super::UniqueRolloutValue;
     use super::check_summary_source_size;
     use super::compare_item_json;
+    use super::has_canonical_compacted_header;
+
+    #[test]
+    fn compacted_envelope_rejects_duplicate_known_fields() {
+        let bytes = br#"{"timestamp":"2026-07-16T00:00:00Z","ordinal":1,"type":"compacted","payload":{"message":"x"},"ordinal":2}"#;
+        assert!(has_canonical_compacted_header(bytes));
+        assert!(serde_json::from_slice::<UniqueRolloutValue>(bytes).is_err());
+    }
 
     #[test]
     fn item_comparison_accepts_only_known_missing_null_defaults() {
