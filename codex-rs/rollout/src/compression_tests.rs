@@ -90,6 +90,106 @@ async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn selected_rollout_remains_visible_during_materialization() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(20);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(&path, thread_id, "compressed before resume")?;
+    compress_now(&path)?;
+    let compressed = compressed_rollout_path(&path);
+    assert!(!path.exists());
+    assert!(compressed.exists());
+
+    let (started, resume) = path_metadata::pause_after_plain_miss(&path);
+    let lookup_path = path.clone();
+    let lookup = std::thread::spawn(move || existing_rollout_with_metadata_sync(&lookup_path));
+    started.recv_timeout(Duration::from_secs(5))?;
+
+    assert_eq!(materialize_rollout_for_append_blocking(&compressed)?, path);
+    assert!(path.exists());
+    assert!(!compressed.exists());
+    resume.send(())?;
+    let selected = lookup.join().expect("lookup thread panicked");
+    assert_eq!(selected.map(|(path, _)| path), Some(path));
+    Ok(())
+}
+
+#[test]
+fn selected_rollout_prefers_plain_and_requires_a_regular_file() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let path = home.path().join("rollout-test.jsonl");
+    let compressed = compressed_rollout_path(&path);
+    let selected = || existing_rollout_with_metadata_sync(&path).map(|(path, _)| path);
+    assert_eq!(selected(), None);
+    fs::write(&compressed, b"compressed")?;
+    assert_eq!(selected(), Some(compressed.clone()));
+    fs::write(&path, b"plain")?;
+    assert_eq!(selected(), Some(path.clone()));
+    fs::remove_file(&path)?;
+    fs::remove_file(&compressed)?;
+    fs::create_dir(&path)?;
+    assert_eq!(selected(), None);
+    fs::write(&compressed, b"compressed")?;
+    assert_eq!(selected(), Some(compressed));
+    Ok(())
+}
+
+#[test]
+fn selected_rollout_does_not_reselect_a_nonregular_plain_path() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let path = home.path().join("rollout-test.jsonl");
+    fs::create_dir(&path)?;
+    let (started, resume) = path_metadata::pause_after_plain_miss(&path);
+    let lookup_path = path.clone();
+    let lookup = std::thread::spawn(move || existing_rollout_with_metadata_sync(&lookup_path));
+    started.recv_timeout(Duration::from_secs(5))?;
+    fs::remove_dir(&path)?;
+    fs::write(&path, b"replacement")?;
+    resume.send(())?;
+    assert!(lookup.join().expect("lookup thread panicked").is_none());
+    Ok(())
+}
+
+#[test]
+fn selected_rollout_does_not_retry_a_plain_stat_error() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let parent = home.path().join("blocked");
+    fs::write(&parent, b"not a directory")?;
+    let path = parent.join("rollout-test.jsonl");
+    assert_eq!(
+        fs::metadata(&path).expect_err("parent is a file").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+    let (started, resume) = path_metadata::pause_after_plain_miss(&path);
+    let lookup_path = path.clone();
+    let lookup = std::thread::spawn(move || existing_rollout_with_metadata_sync(&lookup_path));
+    started.recv_timeout(Duration::from_secs(5))?;
+    fs::remove_file(&parent)?;
+    fs::create_dir(&parent)?;
+    fs::write(&path, b"replacement")?;
+    resume.send(())?;
+    assert!(lookup.join().expect("lookup thread panicked").is_none());
+    Ok(())
+}
+
+#[test]
+fn selected_rollout_missing_after_compressed_file_deleted() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let path = home.path().join("rollout-test.jsonl");
+    let compressed = compressed_rollout_path(&path);
+    fs::write(&compressed, b"compressed")?;
+    let (started, resume) = path_metadata::pause_after_plain_miss(&path);
+    let lookup_path = path.clone();
+    let lookup = std::thread::spawn(move || existing_rollout_with_metadata_sync(&lookup_path));
+    started.recv_timeout(Duration::from_secs(5))?;
+    fs::remove_file(&compressed)?;
+    resume.send(())?;
+    assert!(lookup.join().expect("lookup thread panicked").is_none());
+    Ok(())
+}
+
 #[tokio::test]
 async fn full_history_load_preserves_records_and_errors_across_representations()
 -> anyhow::Result<()> {
