@@ -4097,6 +4097,25 @@ async fn certified_split_fixture(
     ThreadId,
     std::path::PathBuf,
 ) {
+    certified_split_fixture_with_extra(
+        include_grandparent_checkpoint,
+        include_parent_in_staging,
+        false,
+    )
+    .await
+}
+
+async fn certified_split_fixture_with_extra(
+    include_grandparent_checkpoint: bool,
+    include_parent_in_staging: bool,
+    include_extra_in_staging: bool,
+) -> (
+    TempDir,
+    LocalThreadStore,
+    ThreadId,
+    ThreadId,
+    std::path::PathBuf,
+) {
     let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let grandparent = ThreadId::new();
     let grandparent_path = rollout_path(home.path(), grandparent);
@@ -4122,6 +4141,9 @@ async fn certified_split_fixture(
     insert_item(db, child_id, "split", "child-item", 9).await;
     if include_parent_in_staging {
         insert_item(db, staging, "split", "parent-item", 5).await;
+    }
+    if include_extra_in_staging {
+        insert_item(db, staging, "split", "extra-item", 6).await;
     }
     insert_item(db, staging, "split", "child-item", 9).await;
     for (id, path) in [
@@ -4155,6 +4177,19 @@ async fn certified_split_fixture(
         .await
         .unwrap();
     (home, store, child_id, parent, grandparent_path)
+}
+
+#[tokio::test]
+async fn certified_multi_owner_item_page_rejects_unmatched_root_row() {
+    let (_home, store, child_id, _parent, _grandparent) =
+        certified_split_fixture_with_extra(true, true, true).await;
+    let params = item_params(child_id, Some("split"), None, 10, SortDirection::Desc);
+    assert!(
+        super::super::segment_paging::page_certified_item_rows(&store, &params)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[cfg(unix)]

@@ -652,6 +652,21 @@ impl CertifiedItemBound {
             .count()
             == 1
     }
+
+    /// Identifies the one certified physical source containing a creation ordinal.
+    pub(super) fn source_for_ordinal(
+        &self,
+        ordinal: u64,
+    ) -> Option<(codex_protocol::ThreadId, RolloutId)> {
+        let mut matches = self.certificate.sources.iter().filter(|source| {
+            ordinal >= source.start_ordinal && source.end_ordinal.is_none_or(|end| ordinal < end)
+        });
+        let source = matches.next()?;
+        matches
+            .next()
+            .is_none()
+            .then_some((source.owner_id, source.rollout_id))
+    }
 }
 
 async fn proof_storage_is_valid(
@@ -789,12 +804,53 @@ pub(in crate::local) async fn certificate_is_current_for_single_owner(
 
 #[cfg(test)]
 mod tests {
+    use super::CertifiedItemBound;
+    use super::CertifiedSource;
+    use super::FileIdentity;
+    use super::ProjectionCertificate;
     use super::strict_source_records;
     use codex_protocol::protocol::RolloutReferenceItem;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
     use codex_rollout::RolloutItem;
     use codex_rollout::RolloutLine;
+
+    #[test]
+    fn source_ordinal_requires_one_certified_range() {
+        let first = codex_protocol::ThreadId::new();
+        let second = codex_protocol::ThreadId::new();
+        let identity = FileIdentity {
+            device: 1,
+            inode: 1,
+            size: 1,
+            mtime: 0,
+            mtime_nsec: 0,
+            ctime: 0,
+            ctime_nsec: 0,
+        };
+        let source = |owner_id, start_ordinal, end_ordinal| CertifiedSource {
+            owner_id,
+            rollout_id: owner_id,
+            path: std::path::PathBuf::from("source"),
+            start_ordinal,
+            end_ordinal,
+            end_byte_offset: None,
+            identity: identity.clone(),
+        };
+        let proof = CertifiedItemBound {
+            certificate: ProjectionCertificate {
+                version: 1,
+                root_rollout_id: second,
+                root_path: std::path::PathBuf::from("root"),
+                sources: vec![source(first, 0, Some(5)), source(second, 4, None)],
+                root_sha256: None,
+            },
+            minimum: None,
+        };
+        assert_eq!(proof.source_for_ordinal(3), Some((first, first)));
+        assert_eq!(proof.source_for_ordinal(4), None);
+        assert_eq!(proof.source_for_ordinal(5), Some((second, second)));
+    }
 
     #[tokio::test]
     async fn reference_and_subagent_history_do_not_get_coverage_certificates() {

@@ -172,7 +172,8 @@ pub(super) async fn page_certified_single_owner_turn_rows(
     Ok(Some(LazyPage::Page(page, lineage)))
 }
 
-pub(super) async fn page_certified_single_owner_item_rows(
+/// Pages a root projection whose certificate authenticates all contributing sources.
+pub(super) async fn page_certified_item_rows(
     store: &super::super::LocalThreadStore,
     params: &ListItemsParams,
 ) -> ThreadStoreResult<Option<LazyPage<StoredThreadItemRow>>> {
@@ -189,7 +190,19 @@ pub(super) async fn page_certified_single_owner_item_rows(
     else {
         return Ok(None);
     };
-    if !proof.is_single_owner(params.thread_id) {
+    let single_owner = proof.is_single_owner(params.thread_id);
+    // Cross-owner cursors cannot use item anchors or update ordering without retaining the
+    // physical source of each item. Creation ordinals must identify exactly one source range.
+    if !single_owner
+        && (params.sort_key != ItemSortKey::CreatedAtOrdinal
+            || params.after_updated_at_ordinal.is_some()
+            || params.before_updated_at_ordinal.is_some()
+            || params.item_ids.is_some()
+            || matches!(
+                params.position.as_ref(),
+                Some(ListItemsPosition::ItemAnchor { .. })
+            ))
+    {
         return Ok(None);
     }
     let scope = match params.sort_key {
@@ -211,6 +224,46 @@ pub(super) async fn page_certified_single_owner_item_rows(
     }
     let lineage = certified_root_lineage(&walk, params.thread_id);
     let page = page_item_rows_with_connection(&mut transaction, &lineage, params).await?;
+    if !single_owner {
+        for row in &page.rows {
+            let Some((owner, source_id)) = u64::try_from(row.position.rollout_ordinal)
+                .ok()
+                .and_then(|ordinal| proof.source_for_ordinal(ordinal))
+            else {
+                return Ok(None);
+            };
+            if owner != params.thread_id {
+                let item = &row.item;
+                let Ok(item_json) = std::str::from_utf8(&item.item_json) else {
+                    return Ok(None);
+                };
+                let Ok(updated_at_ordinal) = i64::try_from(item.updated_at_ordinal) else {
+                    return Ok(None);
+                };
+                let matches_source: i64 = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM thread_items WHERE thread_id = ? \
+                     AND turn_id = ? AND item_id = ? AND rollout_ordinal = ? \
+                     AND updated_at_ordinal = ? AND created_at_ms = ? \
+                     AND started_at_ms IS ? AND completed_at_ms IS ? AND item_json = ?)",
+                )
+                .bind(source_id.to_string())
+                .bind(&item.turn_id)
+                .bind(&item.item_id)
+                .bind(row.position.rollout_ordinal)
+                .bind(updated_at_ordinal)
+                .bind(item.created_at_ms)
+                .bind(item.started_at_ms)
+                .bind(item.completed_at_ms)
+                .bind(item_json)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(thread_history_error)?;
+                if matches_source == 0 {
+                    return Ok(None);
+                }
+            }
+        }
+    }
     if !proof.files_unchanged().await || !walk.selected_is_current().await? {
         drop(transaction);
         return Ok(Some(LazyPage::Full(walk.resolve_full().await?)));
