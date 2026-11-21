@@ -3,6 +3,7 @@
 use codex_utils_path as path_utils;
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -2026,10 +2027,23 @@ async fn visit_rollout_filenames<T>(
     root: &Path,
     excluded_path: Option<&Path>,
     matches: impl Fn(&RolloutFileName) -> bool,
+    visitor: impl FnMut(RolloutFileName, PathBuf) -> ControlFlow<T>,
+) -> io::Result<Option<T>> {
+    visit_rollout_filenames_recording(root, excluded_path, matches, visitor, None).await
+}
+
+async fn visit_rollout_filenames_recording<T>(
+    root: &Path,
+    excluded_path: Option<&Path>,
+    matches: impl Fn(&RolloutFileName) -> bool,
     mut visitor: impl FnMut(RolloutFileName, PathBuf) -> ControlFlow<T>,
+    mut directories: Option<&mut DirectorySnapshot>,
 ) -> io::Result<Option<T>> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if let Some(snapshot) = directories.as_deref_mut() {
+            snapshot.record(&dir).await;
+        }
         let mut read_dir = match tokio::fs::read_dir(dir.as_path()).await {
             Ok(read_dir) => read_dir,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
@@ -2087,6 +2101,99 @@ async fn visit_rollout_filenames<T>(
         }
     }
     Ok(None)
+}
+
+/// Directory identities that make a filename index reusable without reading each directory again.
+struct DirectorySnapshot {
+    directories: Vec<(PathBuf, DirectoryState)>,
+    valid: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum DirectoryState {
+    Missing,
+    Present(DirectoryIdentity),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+#[cfg(unix)]
+fn directory_identity(metadata: &std::fs::Metadata) -> Option<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.is_dir().then_some(DirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(not(unix))]
+fn directory_identity(_metadata: &std::fs::Metadata) -> Option<DirectoryIdentity> {
+    None
+}
+
+async fn directory_state(path: &Path) -> Option<DirectoryState> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => directory_identity(&metadata).map(DirectoryState::Present),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(DirectoryState::Missing),
+        Err(_) => None,
+    }
+}
+
+impl DirectorySnapshot {
+    async fn record(&mut self, path: &Path) {
+        if let Some(state) = directory_state(path).await {
+            self.directories.push((path.to_path_buf(), state));
+        } else {
+            self.valid = false;
+        }
+    }
+
+    async fn is_current(&self) -> bool {
+        use futures::StreamExt;
+
+        let directories = self.directories.clone();
+        self.valid
+            && futures::stream::iter(directories)
+                .map(|(path, expected)| async move {
+                    directory_state(&path).await.as_ref() == Some(&expected)
+                })
+                .buffer_unordered(16)
+                .all(|same| async move { same })
+                .await
+    }
+}
+
+/// Selected rollout paths and the directories whose entries determined their selection.
+pub struct RolloutPathSnapshot {
+    paths: HashMap<RolloutId, PathBuf>,
+    directories: DirectorySnapshot,
+}
+
+impl RolloutPathSnapshot {
+    /// Returns the path selected for an ID when the snapshot was captured.
+    pub fn get(&self, rollout_id: &RolloutId) -> Option<&PathBuf> {
+        self.paths.get(rollout_id)
+    }
+
+    /// Rejects directory replacement, entry changes, and newly created storage roots.
+    pub async fn is_current(&self) -> bool {
+        self.directories.is_current().await
+    }
 }
 
 /// Returns every canonical active or archived rollout file owned by `thread_id`.
@@ -2163,6 +2270,45 @@ pub async fn index_rollout_paths_by_rollout_id(
         .await?;
     }
     Ok(paths)
+}
+
+/// Captures the filename selection for `rollout_ids` and its directory identities.
+///
+/// A directory identity is captured before its entries are read and checked again after the
+/// traversal. A caller must recheck the snapshot before relying on the selected paths. Symlinked
+/// directories and platforms without stable directory identities return `None`.
+pub async fn snapshot_rollout_paths_by_rollout_id(
+    codex_home: &Path,
+    rollout_ids: &HashSet<RolloutId>,
+) -> io::Result<Option<RolloutPathSnapshot>> {
+    let mut paths = HashMap::new();
+    let mut directories = DirectorySnapshot {
+        directories: Vec::new(),
+        valid: true,
+    };
+    for subdir in [SESSIONS_SUBDIR, ARCHIVED_SESSIONS_SUBDIR] {
+        visit_rollout_filenames_recording::<()>(
+            codex_home.join(subdir).as_path(),
+            /*excluded_path*/ None,
+            |file_name| rollout_ids.contains(&file_name.rollout_id()),
+            |file_name, path| {
+                paths.entry(file_name.rollout_id()).or_insert(path);
+                ControlFlow::Continue(())
+            },
+            Some(&mut directories),
+        )
+        .await?;
+    }
+    if !directories.valid {
+        return Ok(None);
+    }
+    if !directories.is_current().await {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "rollout directories changed while indexing",
+        ));
+    }
+    Ok(Some(RolloutPathSnapshot { paths, directories }))
 }
 
 /// Locate the newest rollout file owned by a thread ID.
