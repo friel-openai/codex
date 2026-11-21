@@ -17,6 +17,7 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::call_trace;
 use crate::tools::handlers::is_set_workspace_cwd_tool;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use codex_memories_read::citations::parse_memory_citation;
 use codex_memories_read::citations::thread_ids_from_memory_citation;
@@ -224,7 +225,7 @@ async fn record_stage1_output_usage_for_memory_citation(
 }
 
 pub(crate) type InFlightFuture<'f> =
-    Pin<Box<dyn Future<Output = Result<ResponseItemEnvelope>> + Send + 'f>>;
+    Pin<Box<dyn Future<Output = Result<ToolCallResponse>> + Send + 'f>>;
 
 /// Text the harness actually accepted, together with the phase of that message.
 #[derive(Clone, Debug)]
@@ -396,7 +397,9 @@ pub(crate) async fn handle_output_item_done(
                         Box::pin(async move {
                             if cancellation_token.is_cancelled() {
                                 let output = ToolCallRuntime::aborted_before_dispatch(&call);
-                                return Ok(output.into_response(/*file_backed_tool_audio*/ false));
+                                return Ok(ToolCallResponse::Response(
+                                    output.into_response(/*file_backed_tool_audio*/ false),
+                                ));
                             }
                             runtime.handle_tool_call(call, cancellation_token).await
                         })
@@ -405,9 +408,9 @@ pub(crate) async fn handle_output_item_done(
                     }
                 } else {
                     let output = ToolCallRuntime::aborted_before_dispatch(&call);
-                    Box::pin(std::future::ready(Ok(
-                        output.into_response(/*file_backed_tool_audio*/ false)
-                    )))
+                    Box::pin(std::future::ready(Ok(ToolCallResponse::Response(
+                        output.into_response(/*file_backed_tool_audio*/ false),
+                    ))))
                 }
             };
             // Steer acceptance appends input under this lock. A buffered request
